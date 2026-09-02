@@ -1806,6 +1806,28 @@ test_exception_unaligned_sets_ifa_isr = require_registers(
     {"ip": 0x5a20, "r14": 0xff9, "r15": IA64_ISR_R},
 )
 
+# SDM Vol. 2 Table 8-1 specifies no CR.IFA write when PSR.ic is clear.
+test_exception_unaligned_ic0_preserves_ifa = require_registers(
+    "exception_unaligned_ic0_preserves_ifa",
+    [
+        (0x10, *movl_mlx(19, 0x1122334455667788)),
+        (0x20, 0x00, mov_m_gr_cr(19, 20), adds(3, 0xff9, 0), nop_i()),
+        (0x30, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (IA64_UNALIGNED_VECTOR, 0x00, mov_m_cr_gr(14, 20),
+         nop_i(), nop_i()),
+        (IA64_UNALIGNED_VECTOR + 0x10, 0x00, mov_m_cr_gr(15, 17),
+         nop_i(), nop_i()),
+        (IA64_UNALIGNED_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_UNALIGNED_VECTOR + 0x20,
+                 IA64_UNALIGNED_VECTOR + 0x20)),
+    ],
+    {
+        "ip": IA64_UNALIGNED_VECTOR + 0x20,
+        "r14": 0x1122334455667788,
+        "r15": IA64_ISR_R | IA64_ISR_NI,
+    },
+)
+
 test_exception_unaligned_slot1_uses_psr_ri = require_registers(
     "exception_unaligned_slot1_uses_psr_ri",
     [
@@ -4743,6 +4765,7 @@ CASE_NAMES = (
     'exception_reserved_template',
     'exception_syscall_break',
     'exception_unaligned',
+    'exception_unaligned_ic0_preserves_ifa',
     'exception_unaligned_sets_ifa_isr',
     'exception_unaligned_slot1_uses_psr_ri',
     'unaligned_ac_clear_no_page_cross_loads',

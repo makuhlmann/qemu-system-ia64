@@ -992,6 +992,7 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
 
     env->exception_state.exception = IA64_EXCP_NONE;
     env->exception_state.fault_ip = 0;
+    env->exception_state.fault_addr = 0;
     env->exception_state.fault_imm = 0;
     env->exception_state.fault_slot = 0;
     env->instruction_group_start = true;

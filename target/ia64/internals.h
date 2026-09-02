@@ -9,8 +9,14 @@
 #define TARGET_IA64_INTERNALS_H
 
 typedef struct IA64ExceptionState {
-    /* Architected/restart-visible exception state. */
+    /* Restart-visible exception and interruption-delivery state. */
     uint64_t fault_ip;
+    /*
+     * Faulting data address kept apart from architected CR.IFA, which is
+     * only written for a collected interruption (PSR.ic = 1, SDM Vol. 2
+     * Table 8-1).
+     */
+    uint64_t fault_addr;
     uint64_t fault_imm;
     uint64_t fault_tmpl;
     uint32_t exception;

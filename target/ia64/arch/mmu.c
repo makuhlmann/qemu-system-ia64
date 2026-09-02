@@ -1346,6 +1346,7 @@ static void ia64_raise_data_reference_exception_at(CPUIA64State *env,
 {
     CPUState *cs = env_cpu(env);
 
+    env->exception_state.fault_addr = va;
     if (env->psr & IA64_PSR_IC) {
         env->cr_ifa = va;
         if (ia64_exception_initializes_iha(excp)) {

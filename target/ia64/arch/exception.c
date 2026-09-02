@@ -134,7 +134,7 @@ G_NORETURN void ia64_raise_unaligned(CPUIA64State *env, uint64_t addr,
         (IA64_ISR_R | IA64_ISR_W),
         fault_info & ~3ULL, fault_info & 3);
 
-    env->cr_ifa = addr;
+    env->exception_state.fault_addr = addr;
     env->cr_isr = isr_access;
     if (ia64_current_code_tlb_ed(env)) {
         env->cr_isr |= IA64_ISR_ED;
@@ -147,7 +147,9 @@ G_NORETURN void ia64_raise_nat_consumption(CPUIA64State *env,
                                            uint64_t isr_access,
                                   uint64_t fault_info)
 {
-    env->cr_ifa = 0;
+    if (env->psr & IA64_PSR_IC) {
+        env->cr_ifa = 0;
+    }
     env->cr_isr = IA64_ISR_CODE_REG_NAT | isr_access;
     ia64_raise_exception(env, IA64_EXCP_NAT_CONSUMPTION,
                            fault_info & ~3ULL, 0, fault_info & 3);
@@ -193,8 +195,8 @@ G_NORETURN void ia64_cpu_do_unaligned_access(CPUState *cs, vaddr addr,
     }
     cpu_restore_state(cs, retaddr);
     env->exception_state.fault_ip = env->ip;
+    env->exception_state.fault_addr = addr;
     env->exception_state.fault_imm = 0;
-    env->cr_ifa = addr;
     env->cr_isr = access_type == MMU_DATA_STORE ? IA64_ISR_W : IA64_ISR_R;
     if (ia64_current_code_tlb_ed(env)) {
         env->cr_isr |= IA64_ISR_ED;
@@ -526,6 +528,10 @@ void ia64_cpu_do_interrupt(CPUState *cs)
                           ia64_pa_canonicalize(&cpu->env, cpu->env.ip);
             fault_addr = cpu->env.ip;
         }
+        break;
+    case IA64_EXCP_UNALIGNED:
+        /* CR.IFA is only written for a collected interruption. */
+        fault_addr = cpu->env.exception_state.fault_addr;
         break;
     case IA64_EXCP_EXTINT:
         break;

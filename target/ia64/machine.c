@@ -159,6 +159,11 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
     uint32_t active_alat = 0;
     unsigned int i;
 
+    if (version_id < 3) {
+        /* Versions 1-2 used CR.IFA itself as the delivery operand. */
+        env->exception_state.fault_addr = env->cr_ifa;
+    }
+
     if (env->mmu.tlb_data_count > IA64_TLB_MAX ||
         env->mmu.tlb_inst_count > IA64_TLB_MAX ||
         env->rse.rse_bol >= IA64_STACKED_GR_COUNT) {
@@ -204,7 +209,7 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .pre_save = ia64_cpu_pre_save,
     .post_load = ia64_cpu_post_load,
@@ -224,6 +229,7 @@ const VMStateDescription vmstate_ia64_cpu = {
 
         /* Restart-visible exception state. */
         VMSTATE_UINT64(env.exception_state.fault_ip, IA64CPU),
+        VMSTATE_UINT64_V(env.exception_state.fault_addr, IA64CPU, 3),
         VMSTATE_UINT64(env.exception_state.fault_imm, IA64CPU),
         VMSTATE_UINT64(env.exception_state.fault_tmpl, IA64CPU),
         VMSTATE_UINT32(env.exception_state.exception, IA64CPU),

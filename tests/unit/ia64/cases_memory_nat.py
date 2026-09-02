@@ -26,6 +26,7 @@ from .encoding import (
     IA64_ISR_ED,
     IA64_ISR_EI_SHIFT,
     IA64_ISR_NA,
+    IA64_ISR_NI,
     IA64_ISR_R,
     IA64_ISR_SP,
     IA64_ISR_W,
@@ -1110,6 +1111,12 @@ test_nat_consumption_sets_ifa_isr = require_registers(
         # fc/lfetch/probe/tpa/tak (SDM Vol.2 rev 1.1 Table 5-1).
         "r15": IA64_ISR_CODE_REG_NAT | IA64_ISR_R},
     entry=0x10)
+
+test_nat_consumption_ic0_preserves_ifa = register_nat_consumption_test(
+    "nat_consumption_ic0_preserves_ifa",
+    (0x00, mov_m_gr_ar(16, 65), nop_i(), nop_i()),
+    IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT), enable_ic=False,
+    initial_ifa=0x1122334455667788)
 
 test_nat_store_data_consumption_is_access = require_registers(
     "nat_store_data_consumption_is_access", [
@@ -2902,6 +2909,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'mov_psr_nat_source_consumes',
     'mov_rr_nat_index_consumes',
     'mov_um_nat_source_consumes',
+    'nat_consumption_ic0_preserves_ifa',
     'nat_consumption_sets_ifa_isr',
     'nat_store_data_consumption_is_access',
     'normal_load_clears_stale_nat',

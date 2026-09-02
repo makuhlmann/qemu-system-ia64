@@ -301,7 +301,7 @@ ADV_UC_LOAD_DATA = bundle_words(0x00, 0x1122334455667788, 0, 0)[0]
 ADV_UC_LOAD_BUNDLE = (ADV_UC_LOAD_PA, 0x00, 0x1122334455667788, 0, 0)
 
 def register_nat_consumption_test(name, fault_bundle, expected_isr=0,
-                                  enable_ic=True):
+                                  enable_ic=True, initial_ifa=None):
     bundles = [
         (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
          nop_i()),
@@ -309,14 +309,20 @@ def register_nat_consumption_test(name, fault_bundle, expected_isr=0,
          nop_i()),
     ]
     fault_ip = 0x30
+    if initial_ifa is not None:
+        bundles.extend([
+            (fault_ip, *movl_mlx(19, initial_ifa)),
+            (fault_ip + 0x10, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        ])
+        fault_ip += 0x20
     if enable_ic:
         bundles.extend([
-            (0x30, 0x00, ssm(1 << 13), nop_i(),
+            (fault_ip, 0x00, ssm(1 << 13), nop_i(),
              nop_i()),
-            (0x40, 0x00, srlz_d(), nop_i(),
+            (fault_ip + 0x10, 0x00, srlz_d(), nop_i(),
              nop_i()),
         ])
-        fault_ip = 0x50
+        fault_ip += 0x20
     bundles.extend([
         (fault_ip, *fault_bundle),
         (0x5600, 0x00, mov_m_cr_gr(14, 20), nop_i(),
@@ -328,10 +334,14 @@ def register_nat_consumption_test(name, fault_bundle, expected_isr=0,
         (0x200, 0x00, 0, 0,
          0),
     ])
+    # SDM Vol. 2 Table 8-1: CR.IFA is written only when PSR.ic is set.
+    expected_ifa = (
+        initial_ifa if initial_ifa is not None and not enable_ic else 0
+    )
     return require_registers(name, bundles, {
         "ip": 0x5620,
         "exception": IA64_EXCP_NONE,
-        "r14": 0,
+        "r14": expected_ifa,
         "r15": IA64_ISR_CODE_REG_NAT | expected_isr,
     }, entry=0x10)
 
