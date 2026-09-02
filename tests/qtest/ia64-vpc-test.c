@@ -2490,6 +2490,37 @@ static unsigned count_unattached_children(QTestState *qts,
     return count;
 }
 
+/*
+ * PS/2 follows the platform.  The 460GX workstations carry a Super-I/O
+ * keyboard controller and used it, so 460gx keeps PS/2 and adds no USB HID.
+ * The zx1 generation dropped PS/2, so zx1 has no i8042 and gets the USB
+ * keyboard and tablet instead; the firmware is told which it has.
+ */
+static void test_default_input_per_machine(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+
+    g_assert_cmpuint(count_unattached_children(qts, "i8042"), ==, 1);
+    g_assert_cmpuint(count_unattached_children(qts, "usb-kbd"), ==, 0);
+    g_assert_cmpuint(count_unattached_children(qts, "usb-tablet"), ==, 0);
+    g_assert_cmpuint(read_handoff_i8042(qts), ==, 1);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmpuint(count_unattached_children(qts, "i8042"), ==, 0);
+    g_assert_cmpuint(count_unattached_children(qts, "usb-kbd"), ==, 1);
+    g_assert_cmpuint(count_unattached_children(qts, "usb-tablet"), ==, 1);
+    g_assert_cmpuint(read_handoff_i8042(qts), ==, 0);
+    qtest_quit(qts);
+
+    /* Either default can still be overridden. */
+    qts = qtest_init("-machine zx1,i8042=on -m 256M -S");
+    g_assert_cmpuint(count_unattached_children(qts, "i8042"), ==, 1);
+    g_assert_cmpuint(count_unattached_children(qts, "usb-kbd"), ==, 0);
+    g_assert_cmpuint(read_handoff_i8042(qts), ==, 1);
+    qtest_quit(qts);
+}
+
 static void test_default_usb_input(void)
 {
     QTestState *qts = qtest_init("-machine 460gx,i8042=off "
@@ -4139,6 +4170,8 @@ int main(int argc, char **argv)
     }
     qtest_add_func("/ia64-vpc/smp/reject-full-alat",
                    test_smp_rejects_full_alat);
+    qtest_add_func("/ia64-vpc/input/default-per-machine",
+                   test_default_input_per_machine);
     qtest_add_func("/ia64-vpc/input/default-usb",
                    test_default_usb_input);
     qtest_add_func("/ia64-vpc/rtc/aligned-read", test_rtc_aligned_read);

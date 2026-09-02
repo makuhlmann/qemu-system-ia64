@@ -5253,7 +5253,15 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     s->fw_map_quirk_disable = IA64_VPC_FW_QUIRK_DEFAULT_DISABLE;
 
 #ifdef CONFIG_IA64_VPC_PS2
-    s->i8042_enabled = true;
+    /*
+     * The i2000 and the other 460GX workstations carry a Super-I/O PS/2
+     * controller, and PS/2 was the input of choice on them, so 460gx keeps
+     * it.  The zx1 generation dropped PS/2 entirely: an rx2600 or zx6000
+     * has USB keyboard and mouse only, so that machine defaults to the USB
+     * HID devices instead (see ia64_vpc_init_usb).  Either default can be
+     * overridden with i8042=on|off.
+     */
+    s->i8042_enabled = !ia64_vpc_chipset_is_zx1(s);
 #endif
     s->fw_relocate = true;
 #ifdef CONFIG_IA64_VPC_STORAGE
