@@ -4791,6 +4791,17 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     ia64_vpc_map_lsapic(s);
 
     iosapic = qdev_new(TYPE_IA64_IOSAPIC);
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        /*
+         * On the i2000 the interrupt controller is the 460GX Programmable
+         * Interrupt Device: 64 inputs reporting IOSAPIC version 2.1.  Its
+         * width is what lets each PCI root own its own block of four INTx
+         * lines (16, 20, 24, 28) rather than sharing one block.
+         */
+        qdev_prop_set_uint32(iosapic, "num-pins", IA64_IOSAPIC_460GX_PINS);
+        qdev_prop_set_uint32(iosapic, "version",
+                             IA64_IOSAPIC_460GX_VERSION);
+    }
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(iosapic), errp)) {
         return false;
     }

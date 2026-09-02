@@ -6,6 +6,8 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/core/qdev-properties.h"
+#include "qapi/error.h"
 #include "hw/ia64/ia64_iosapic.h"
 #include "cpu.h"
 #include "migration/vmstate.h"
@@ -35,9 +37,11 @@
 struct IA64IOSapicState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;
-    uint64_t rte[IA64_IOSAPIC_NUM_PINS];
-    uint8_t  irq_level[IA64_IOSAPIC_NUM_PINS];
+    uint64_t rte[IA64_IOSAPIC_MAX_PINS];
+    uint8_t  irq_level[IA64_IOSAPIC_MAX_PINS];
     uint32_t reg_select;
+    uint32_t num_pins;
+    uint32_t version;
 };
 
 static void iosapic_update(IA64IOSapicState *s, int pin)
@@ -146,7 +150,7 @@ static void iosapic_eoi(IA64IOSapicState *s, uint8_t vector)
      * Stopping at the first match strands the other entries with Remote IRR
      * set, which silences those pins permanently.
      */
-    for (pin = 0; pin < IA64_IOSAPIC_NUM_PINS; pin++) {
+    for (pin = 0; pin < IA64_IOSAPIC_MAX_PINS; pin++) {
         if ((s->rte[pin] & RTE_VECTOR_MASK) != vector ||
             !(s->rte[pin] & RTE_TRIGGER_LEVEL)) {
             continue;
@@ -163,7 +167,7 @@ static void iosapic_irq_handler(void *opaque, int pin, int level)
 {
     IA64IOSapicState *s = opaque;
 
-    if (pin < 0 || pin >= IA64_IOSAPIC_NUM_PINS) {
+    if (pin < 0 || pin >= (int)s->num_pins) {
         return;
     }
 
@@ -197,9 +201,9 @@ static uint64_t iosapic_read(void *opaque, hwaddr addr, unsigned size)
         if (index == IOSAPIC_REG_ID) {
             result = 0;
         } else if (index == IOSAPIC_REG_VER) {
-            result = ((IA64_IOSAPIC_NUM_PINS - 1) << 16) | 0x11;
+            result = ((s->num_pins - 1) << 16) | s->version;
         } else if (index >= IOSAPIC_RTE_BASE &&
-                   index < IOSAPIC_RTE_BASE + IA64_IOSAPIC_NUM_PINS * 2) {
+                   index < IOSAPIC_RTE_BASE + s->num_pins * 2) {
             int pin = (index - IOSAPIC_RTE_BASE) / 2;
             if ((index - IOSAPIC_RTE_BASE) & 1) {
                 result = (uint32_t)(s->rte[pin] >> 32);
@@ -230,7 +234,7 @@ static void iosapic_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
         if (index == IOSAPIC_REG_ID) {
             break;
         } else if (index >= IOSAPIC_RTE_BASE &&
-                   index < IOSAPIC_RTE_BASE + IA64_IOSAPIC_NUM_PINS * 2) {
+                   index < IOSAPIC_RTE_BASE + s->num_pins * 2) {
             int pin = (index - IOSAPIC_RTE_BASE) / 2;
             iosapic_rte_write(s, pin, (uint32_t)val,
                               (index - IOSAPIC_RTE_BASE) & 1);
@@ -254,11 +258,23 @@ static const MemoryRegionOps iosapic_ops = {
     },
 };
 
+static const Property iosapic_properties[] = {
+    DEFINE_PROP_UINT32("num-pins", IA64IOSapicState, num_pins,
+                       IA64_IOSAPIC_NUM_PINS),
+    DEFINE_PROP_UINT32("version", IA64IOSapicState, version,
+                       IA64_IOSAPIC_VERSION),
+};
+
 static void iosapic_realize(DeviceState *dev, Error **errp)
 {
     IA64IOSapicState *s = IA64_IOSAPIC(dev);
 
-    qdev_init_gpio_in(dev, iosapic_irq_handler, IA64_IOSAPIC_NUM_PINS);
+    if (s->num_pins == 0 || s->num_pins > IA64_IOSAPIC_MAX_PINS) {
+        error_setg(errp, "num-pins must be between 1 and %d",
+                   IA64_IOSAPIC_MAX_PINS);
+        return;
+    }
+    qdev_init_gpio_in(dev, iosapic_irq_handler, s->num_pins);
     memory_region_init_io(&s->mmio, OBJECT(dev), &iosapic_ops, s,
                           "iosapic", 0x2000);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->mmio);
@@ -271,7 +287,7 @@ static void iosapic_reset(DeviceState *dev)
 
     memset(s->rte, 0, sizeof(s->rte));
     memset(s->irq_level, 0, sizeof(s->irq_level));
-    for (i = 0; i < IA64_IOSAPIC_NUM_PINS; i++) {
+    for (i = 0; i < IA64_IOSAPIC_MAX_PINS; i++) {
         s->rte[i] = RTE_MASKED;
     }
     s->reg_select = 0;
@@ -288,7 +304,7 @@ static int iosapic_post_load(void *opaque, int version_id)
      * asserted level input, however, must be re-evaluated if it did not
      * already have Remote IRR set.
      */
-    for (pin = 0; pin < IA64_IOSAPIC_NUM_PINS; pin++) {
+    for (pin = 0; pin < s->num_pins; pin++) {
         if (s->rte[pin] & RTE_TRIGGER_LEVEL) {
             iosapic_update(s, pin);
         }
@@ -298,14 +314,14 @@ static int iosapic_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ia64_iosapic = {
     .name = "ia64-iosapic",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .post_load = iosapic_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT64_ARRAY(rte, IA64IOSapicState,
-                             IA64_IOSAPIC_NUM_PINS),
+                             IA64_IOSAPIC_MAX_PINS),
         VMSTATE_UINT8_ARRAY(irq_level, IA64IOSapicState,
-                            IA64_IOSAPIC_NUM_PINS),
+                            IA64_IOSAPIC_MAX_PINS),
         VMSTATE_UINT32(reg_select, IA64IOSapicState),
         VMSTATE_END_OF_LIST()
     }
@@ -318,6 +334,7 @@ static void iosapic_class_init(ObjectClass *klass, const void *data)
     dc->realize = iosapic_realize;
     device_class_set_legacy_reset(dc, iosapic_reset);
     dc->vmsd = &vmstate_ia64_iosapic;
+    device_class_set_props(dc, iosapic_properties);
 }
 
 static const TypeInfo iosapic_info = {

@@ -1709,6 +1709,29 @@ static uint32_t realfw_cfg_readl(QTestState *qts, uint8_t dev, uint8_t fn,
                        ia64_sparse_io_offset(IA64_REALFW_CFC));
 }
 
+/*
+ * The interrupt controller follows the platform.  On the i2000 it is the
+ * 460GX Programmable Interrupt Device: 64 inputs reporting IOSAPIC version
+ * 2.1, which is what gives each PCI root its own block of four INTx lines.
+ * zx1 keeps the narrower controller it had.
+ */
+static void test_iosapic_version_per_machine(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    uint32_t version;
+
+    version = iosapic_read(qts, 1);
+    g_assert_cmphex(version & 0xff, ==, 0x21);
+    g_assert_cmpuint((version >> 16) & 0xff, ==, 63);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    version = iosapic_read(qts, 1);
+    g_assert_cmphex(version & 0xff, ==, 0x11);
+    g_assert_cmpuint((version >> 16) & 0xff, ==, 23);
+    qtest_quit(qts);
+}
+
 static void test_realfw_chipset_identity(void)
 {
     g_autofree char *tmpdir = NULL;
@@ -4233,6 +4256,8 @@ int main(int argc, char **argv)
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
                    test_eepro100_eeprom_map);
+    qtest_add_func("/ia64-vpc/iosapic/version-per-machine",
+                   test_iosapic_version_per_machine);
     qtest_add_func("/ia64-vpc/realfw/chipset-identity",
                    test_realfw_chipset_identity);
     qtest_add_func("/ia64-vpc/scsi/isp12160-mailbox",
