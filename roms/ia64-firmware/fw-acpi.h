@@ -240,7 +240,7 @@ typedef struct {
  */
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[837];
+    UINT8 Aml[1182];
 } __attribute__((packed)) ACPI_DSDT;
 
 typedef struct {
@@ -667,7 +667,7 @@ FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 100, acpi_xsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 68, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
-FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 873, acpi_dsdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 1218, acpi_dsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 542, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);

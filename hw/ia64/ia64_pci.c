@@ -27,6 +27,14 @@ struct IA64PCIState {
     MemoryRegion pci_config;
     AddressSpace pci_io_as;
     qemu_irq irq[IA64_PCI_INTX_LINES];
+
+    /*
+     * The HP zx1 Mercury second root bus, or NULL.  When set, the ECAM config
+     * handler dispatches config cycles for IA64_MERCURY_BUS to it, so a guest
+     * (and firmware SAL) reach devices behind the Mercury host bridge through
+     * this one segment-0 ECAM window.
+     */
+    PCIBus *mercury_bus;
 };
 
 static hwaddr ia64_pci_sparse_io_port(hwaddr encoded)
@@ -162,9 +170,20 @@ static PCIDevice *ia64_pci_config_device(IA64PCIState *s, hwaddr addr,
     uint8_t bus = extract64(addr, 20, 8);
     uint8_t slot = extract64(addr, 15, 5);
     uint8_t func = extract64(addr, 12, 3);
+    PCIBus *target = phb->bus;
+
+    /*
+     * Route config cycles for the Mercury bus number to the second root bus.
+     * Its bus_num override reports IA64_MERCURY_BUS, so pci_find_device() below
+     * resolves devices on it.  This is the faithful analog of the real zx1 mio
+     * forwarding a rope's config cycles to the Mercury (LBA) it hosts.
+     */
+    if (s->mercury_bus != NULL && bus == IA64_MERCURY_BUS) {
+        target = s->mercury_bus;
+    }
 
     *reg = addr & 0xfff;
-    return pci_find_device(phb->bus, bus, PCI_DEVFN(slot, func));
+    return pci_find_device(target, bus, PCI_DEVFN(slot, func));
 }
 
 static uint64_t ia64_pci_config_read(void *opaque, hwaddr addr, unsigned size)
@@ -298,6 +317,21 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
                                         &s->pci_io_sparse, 1);
     memory_region_add_subregion(get_system_memory(), IA64_PCI_CONFIG_BASE,
                                 &s->pci_config);
+}
+
+MemoryRegion *ia64_pci_host_mmio(DeviceState *pci_host)
+{
+    return &IA64_PCI_HOST_BRIDGE(pci_host)->pci_mmio;
+}
+
+MemoryRegion *ia64_pci_host_io(DeviceState *pci_host)
+{
+    return &IA64_PCI_HOST_BRIDGE(pci_host)->pci_io;
+}
+
+void ia64_pci_host_set_mercury_bus(DeviceState *pci_host, PCIBus *bus)
+{
+    IA64_PCI_HOST_BRIDGE(pci_host)->mercury_bus = bus;
 }
 
 static void ia64_pci_class_init(ObjectClass *klass, const void *data)

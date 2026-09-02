@@ -297,6 +297,20 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_LBA_VENDOR_ID            IA64_U64(0x000000000000103c) /* HP */
 #define IA64_LBA_DEVICE_ID            IA64_U64(0x000000000000122e) /* zx1 LBA */
 #define IA64_LBA_AGP_CAP_OFFSET       IA64_U64(0x0000000000000060)
+/*
+ * The HP zx1 Mercury (LBA/ioa) presents its own PCI root bus so the AGP graphics
+ * adapter sits behind it, exactly as on real zx1 hardware: the ACPI HWP0003 node
+ * carries _CID PNP0A03, Windows pci.sys owns it as a PCI root bridge (per
+ * HpAgp.inf), and the graphics is enumerated on its child bus while hpagp filters
+ * it.  The child bus number must be reachable through the single segment-0 ECAM
+ * window: a config address carries the bus in bits [27:20] and the config
+ * aperture is IA64_PCI_CONFIG_SIZE (64 MiB), so only buses 0..63 are decodable --
+ * IA64_MERCURY_BUS must stay <= 0x3f (checked in hw/ia64/ia64_mercury.c).  PCI0
+ * keeps bus 0; the graphics lands at slot 0 of the Mercury bus.  Only the zx1
+ * chipset profile creates it; keep in lockstep with LBA0 in dsdt-pci-root-zx1.asl.
+ */
+#define IA64_MERCURY_BUS              0x10
+#define IA64_MERCURY_VGA_SLOT        0x00
 /* 16 MiB PAL/SAL firmware address space below 4 GiB. */
 #define IA64_FW_ADDRESS_SPACE_BASE    IA64_U64(0x00000000ff000000)
 #define IA64_FW_ADDRESS_SPACE_SIZE    IA64_U64(0x0000000001000000)

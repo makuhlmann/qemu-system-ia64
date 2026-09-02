@@ -7,5 +7,6 @@ ia64_ss.add(when: 'CONFIG_IA64_VPC', if_true: files(
   'ia64_agp.c',
   'ia64_sba.c',
   'ia64_lba.c',
+  'ia64_mercury.c',
 ))
 hw_arch += {'ia64': ia64_ss}

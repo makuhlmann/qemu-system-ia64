@@ -348,6 +348,11 @@ static void ia64_sba_realize(PCIDevice *dev, Error **errp)
     pci_setup_iommu(pci_get_bus(dev), &ia64_sba_iommu_ops, s);
 }
 
+void ia64_sba_attach_bus(IA64SBAState *s, PCIBus *bus)
+{
+    pci_setup_iommu(bus, &ia64_sba_iommu_ops, s);
+}
+
 static void ia64_sba_reset(DeviceState *dev)
 {
     IA64SBAState *s = IA64_SBA(dev);

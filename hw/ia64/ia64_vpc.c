@@ -56,6 +56,8 @@
 #include "hw/ia64/ia64_agp.h"
 #include "hw/ia64/ia64_sba.h"
 #include "hw/ia64/ia64_lba.h"
+#include "hw/ia64/ia64_mercury.h"
+#include "hw/core/or-irq.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "system/rtc.h"
@@ -516,6 +518,8 @@ struct IA64VpcMachineState {
     PCIDevice *agp_dev;
     PCIDevice *sba_dev;
     DeviceState *lba_dev;
+    DeviceState *mercury_host;      /* zx1: the Mercury (LBA) PCI host bridge */
+    PCIBus *mercury_bus;            /* zx1: the Mercury second root bus         */
     PCIDevice *ahci_dev;
     PCIDevice *ide_dev;
     PCIDevice *ohci_dev;
@@ -4697,6 +4701,26 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         if (!qdev_realize_and_unref(s->lba_dev, NULL, errp)) {
             return false;
         }
+        /*
+         * The Mercury (LBA/ioa) PCI host bridge: a second PCI root bus sharing
+         * the primary host bridge's identity-mapped MMIO/I/O windows, which will
+         * carry the AGP graphics adapter -- exactly as real zx1 puts the AGP
+         * master behind Mercury.  The primary host's ECAM config handler
+         * dispatches config cycles for IA64_MERCURY_BUS here, and the SBA extends
+         * its shared DMA translation over this bus too, so a master here reaches
+         * RAM above 4 GiB through the same IOPDIR/GART.  Attach the SBA before any
+         * device is realized on the bus.
+         */
+        s->mercury_host = ia64_mercury_host_create(OBJECT(s),
+                                  ia64_pci_host_mmio(pci_host),
+                                  ia64_pci_host_io(pci_host),
+                                  IA64_MERCURY_BUS, errp);
+        if (s->mercury_host == NULL) {
+            return false;
+        }
+        s->mercury_bus = ia64_mercury_host_bus(s->mercury_host);
+        ia64_pci_host_set_mercury_bus(pci_host, s->mercury_bus);
+        ia64_sba_attach_bus(IA64_SBA(s->sba_dev), s->mercury_bus);
     } else {
         s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
         object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
@@ -4739,11 +4763,29 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
                                     &s->debug_uart_legacy_io);
     }
 
-    /* Leave ISA/SCI lines in the legacy range and route PCI INTx above 15. */
+    /*
+     * Leave ISA/SCI lines in the legacy range and route PCI INTx above 15.
+     * On zx1 the graphics master lives on the Mercury second root bus, which
+     * uses the same (slot+pin)%4 swizzle and the same four GSIs (16..19) as
+     * PCI0.  Both host bridges drive their own GPIO-out line per INTx, so OR
+     * each PCI0 line with the matching Mercury line into the shared IOSAPIC
+     * input (level-triggered, wire-OR -- exactly how the two roots share the
+     * platform's four PCI interrupt lines).
+     */
     for (i = 0; i < IA64_PCI_INTX_LINES; i++) {
-        qdev_connect_gpio_out(pci_host, i,
-                              qdev_get_gpio_in(iosapic,
-                                               IA64_PCI_INTX_GSI_BASE + i));
+        qemu_irq gsi = qdev_get_gpio_in(iosapic, IA64_PCI_INTX_GSI_BASE + i);
+
+        if (ia64_vpc_chipset_is_zx1(s)) {
+            DeviceState *org = qdev_new(TYPE_OR_IRQ);
+
+            object_property_set_int(OBJECT(org), "num-lines", 2, &error_abort);
+            qdev_realize_and_unref(org, NULL, &error_abort);
+            qdev_connect_gpio_out(org, 0, gsi);
+            qdev_connect_gpio_out(pci_host, i, qdev_get_gpio_in(org, 0));
+            qdev_connect_gpio_out(s->mercury_host, i, qdev_get_gpio_in(org, 1));
+        } else {
+            qdev_connect_gpio_out(pci_host, i, gsi);
+        }
     }
 
     /*
@@ -4883,14 +4925,30 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         qdev_prop_register_global(&ati_agp);
     }
 
+    /*
+     * On zx1 the AGP graphics master sits behind the Mercury PCI host bridge,
+     * on its own root bus at slot IA64_MERCURY_VGA_SLOT -- exactly as real zx1
+     * puts the AGP adapter behind Mercury.  On 460gx it stays on PCI0 at the
+     * GXB-AGP slot.  The built-in device layout (SBA/LSI/AHCI/USB/NIC) is
+     * unchanged: those remain on PCI0.
+     */
+    {
+    PCIBus *vga_bus = pci_bus;
+    unsigned int vga_slot = IA64_VPC_VGA_SLOT;
+
+    if (ia64_vpc_chipset_is_zx1(s)) {
+        vga_bus = s->mercury_bus;
+        vga_slot = IA64_MERCURY_VGA_SLOT;
+    }
+
     if (g_strcmp0(s->vga_model, "mach64") == 0) {
         /*
          * The Mach64 3D Rage (DEV_4754): a PCI 2D adapter with no AGP, chosen
          * with -machine ia64-vpc,vga=mach64.  Create it explicitly at the VGA
          * slot rather than through pci_vga_init()/-vga.
          */
-        s->vga_dev = pci_new(PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), "mach64-vga");
-        if (!pci_realize_and_unref(s->vga_dev, pci_bus, errp)) {
+        s->vga_dev = pci_new(PCI_DEVFN(vga_slot, 0), "mach64-vga");
+        if (!pci_realize_and_unref(s->vga_dev, vga_bus, errp)) {
             return false;
         }
     } else if (g_strcmp0(s->vga_model, "nv15gl") == 0) {
@@ -4900,23 +4958,25 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
          * chosen with -machine ia64-vpc,vga=nv15gl.  Created explicitly at the
          * AGP/VGA slot; ia64_vpc_configure_vga() maps its BARs (NVIDIA layout).
          */
-        s->vga_dev = pci_new(PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), "nv15gl-vga");
-        if (!pci_realize_and_unref(s->vga_dev, pci_bus, errp)) {
+        s->vga_dev = pci_new(PCI_DEVFN(vga_slot, 0), "nv15gl-vga");
+        if (!pci_realize_and_unref(s->vga_dev, vga_bus, errp)) {
             return false;
         }
     } else {
-        s->vga_dev = pci_vga_init(pci_bus);
+        s->vga_dev = pci_vga_init(vga_bus);
     }
     /*
      * The GART scoping above assumes the graphics device is the AGP master at
-     * IA64_VPC_VGA_SLOT.  pci_vga_init() auto-assigns the lowest free slot,
-     * which is 5 given the built-in layout; fail loudly if that ever drifts.
+     * the expected slot.  pci_vga_init() auto-assigns the lowest free slot,
+     * which is IA64_MERCURY_VGA_SLOT on the (empty) Mercury bus and
+     * IA64_VPC_VGA_SLOT on PCI0; fail loudly if that ever drifts.
      */
     if (s->vga_dev != NULL &&
-        s->vga_dev->devfn != PCI_DEVFN(IA64_VPC_VGA_SLOT, 0)) {
+        s->vga_dev->devfn != PCI_DEVFN(vga_slot, 0)) {
         error_setg(errp, "graphics device landed at devfn %#x, expected %#x",
-                   s->vga_dev->devfn, PCI_DEVFN(IA64_VPC_VGA_SLOT, 0));
+                   s->vga_dev->devfn, PCI_DEVFN(vga_slot, 0));
         return false;
+    }
     }
 #endif
     if (!ia64_vpc_enable_vga_legacy_switch(s->vga_dev, errp)) {

@@ -777,6 +777,39 @@ static void test_sba_ioc_identity(void)
 }
 
 /*
+ * The HP zx1 Mercury (LBA) presents a second PCI root bus.  It is reached
+ * through the single segment-0 ECAM window by bus-number dispatch in
+ * ia64_pci.c: a config cycle whose bus field equals IA64_MERCURY_BUS is routed
+ * to the Mercury root bus instead of PCI0.  With no device on it (before the
+ * graphics is moved there) a config read is open-bus all-ones; the machine must
+ * boot with the second root present and the config handler must not fault.
+ * (The ECAM aperture is IA64_PCI_CONFIG_SIZE = 64 MiB, decoding buses 0..63
+ * only, so IA64_MERCURY_BUS must stay <= 0x3f -- enforced at compile time by a
+ * QEMU_BUILD_BUG_ON in hw/ia64/ia64_mercury.c.)
+ */
+static void test_mercury_config_dispatch(void)
+{
+    const uint64_t ecam = IA64_PCI_CONFIG_BASE;
+    const uint64_t merc = ecam + ((uint64_t)IA64_MERCURY_BUS << 20);
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+
+    /* The SBA (PCI0 slot 31) reads its HP vendor id -- PCI0 still enumerates. */
+    g_assert_cmphex(qtest_readl(qts, ecam + (31ULL << 15)) & 0xffff, ==, 0x103c);
+    /*
+     * The default AGP graphics master (ATI, vendor 0x1002) lives at slot 0 of
+     * the Mercury bus: dispatch routes the config cycle to the second root bus
+     * where the device actually is (not to PCI0).
+     */
+    g_assert_cmphex(qtest_readl(qts, merc +
+                    ((uint64_t)IA64_MERCURY_VGA_SLOT << 15)) & 0xffff, ==, 0x1002);
+    /* PCI0 slot 5 (the old graphics slot) is now empty on zx1. */
+    g_assert_cmphex(qtest_readl(qts, ecam + (5ULL << 15)), ==, 0xffffffffu);
+    /* An empty slot on the Mercury bus decodes (dispatch installed) as open bus. */
+    g_assert_cmphex(qtest_readl(qts, merc + (1ULL << 15)), ==, 0xffffffffu);
+    qtest_quit(qts);
+}
+
+/*
  * Real 460GX layout: low DRAM is a single contiguous run from 0 up to the PCI
  * aperture (0xEE000000, ~3.72 GiB); only RAM displaced by that top-of-memory
  * gap spills above 4 GiB.  There is no sub-4 GiB DRAM island and no hole at
@@ -3476,6 +3509,8 @@ int main(int argc, char **argv)
                    test_firmware_handoff_zx1);
     qtest_add_func("/ia64-vpc/lba/agp-capability", test_lba_agp_capability);
     qtest_add_func("/ia64-vpc/sba/ioc-identity", test_sba_ioc_identity);
+    qtest_add_func("/ia64-vpc/mercury/config-dispatch",
+                   test_mercury_config_dispatch);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);
     qtest_add_func("/ia64-vpc/ahci/off-default", test_ahci_off_default);
     qtest_add_func("/ia64-vpc/ahci/on", test_ahci_on);

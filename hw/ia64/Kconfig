@@ -5,6 +5,7 @@ config IA64_VPC
     select SERIAL_MM
     select PCI
     select HP_SBA_IOMMU
+    select OR_IRQ
     select ISA_BUS
     select PFLASH_CFI01
     select MC146818RTC

@@ -80,20 +80,33 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 Name (_CCA, One)
                 Name (_CRS, ResourceTemplate ()
                 {
+                    // PCI0 owns buses 0x00..0x0F; the Mercury root (LBA0) owns
+                    // bus 0x10, so PCI0 no longer claims the whole 0..0xFF range.
                     WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
-                        PosDecode, 0, 0, 0x00FF, 0, 0x0100)
+                        PosDecode, 0, 0, 0x000F, 0, 0x0010)
+                    // I/O with two holes, both behind the Mercury root: the
+                    // legacy VGA ports 0x3B0..0x3DF (the graphics adapter is the
+                    // VGA owner, so its root must decode the legacy VGA I/O as
+                    // well as the 0xA0000 aperture -- splitting them across roots
+                    // makes the VGA arbiter fail the device with Code 10) and the
+                    // graphics I/O BAR at 0xC300..0xC3FF.  PCI0 must not claim
+                    // either.
                     QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                        EntireRange, 0, 0, 0x0000FFFF, 0xFFFFC000000,
-                        0x00010000, , , , TypeTranslation, SparseTranslation)
-                    DWordMemory (ResourceProducer, PosDecode, MinFixed,
-                        MaxFixed, Cacheable, ReadWrite,
-                        0, 0x000A0000, 0x000BFFFF, 0, 0x00020000)
-                    DWordMemory (ResourceProducer, PosDecode, MinFixed,
-                        MaxFixed, Cacheable, ReadWrite,
-                        0, 0x000C0000, 0x000DFFFF, 0, 0x00020000)
+                        EntireRange, 0, 0, 0x000003AF, 0xFFFFC000000,
+                        0x000003B0, , , , TypeTranslation, SparseTranslation)
+                    QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                        EntireRange, 0, 0x000003E0, 0x0000C2FF, 0xFFFFC000000,
+                        0x0000BF20, , , , TypeTranslation, SparseTranslation)
+                    QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                        EntireRange, 0, 0x0000C400, 0x0000FFFF, 0xFFFFC000000,
+                        0x00003C00, , , , TypeTranslation, SparseTranslation)
+                    // Low MMIO: PCI0 device BARs (LSI/AHCI/USB/NIC) at 0xEE0xxxxx.
+                    // The VGA legacy (0xA0000) / option-ROM (0xC0000) apertures
+                    // and the high MMIO (0xF0000000+) belong to the Mercury root
+                    // now that the graphics adapter moved there.
                     QWordMemory (ResourceProducer, PosDecode, MinFixed,
                         MaxFixed, NonCacheable, ReadWrite,
-                        0, 0xEE000000, 0xFDFFFFFF, 0, 0x10000000)
+                        0, 0xEE000000, 0xEFFFFFFF, 0, 0x02000000)
                 })
                 Name (_PRT, Package ()
                 {
@@ -137,13 +150,66 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
             // vendor-defined resource as the IOC (guid_id=0x02, GUID
             // 69e9adf9-...); keep base/length in lockstep with IA64_LBA_CSR_BASE
             // / IA64_LBA_CSR_SIZE and the ia64-zx1-lba device.
+            // The Mercury (LBA/ioa) is a real PCI root bridge: it presents its
+            // own PCI bus (0x10) with the AGP graphics adapter on it, exactly as
+            // real zx1 puts the AGP master behind Mercury.  It carries _HID
+            // HWP0003 (so the HP AgpMercury "hpagp" driver binds it) AND _CID
+            // PNP0A03 (so Windows pci.sys owns it as a PCI root bridge and
+            // enumerates the graphics on its child bus -- HpAgp.inf installs
+            // pci.sys as the associated service on *HWP0003 and hpagp as a
+            // filter).  It stays nested in SBA0 so Linux sba_iommu/hp-agp find
+            // the enclosing HWP0001 IOC by walking up the ACPI parent chain.
             Device (LBA0)
             {
                 Name (_HID, EisaId ("HWP0003"))
+                Name (_CID, "PNP0A03")
+                Name (_SEG, Zero)
+                Name (_BBN, 0x10)
                 Name (_UID, One)
                 Name (_CCA, One)
                 Name (_CRS, ResourceTemplate ()
                 {
+                    // Mercury owns exactly bus 0x10 (IA64_MERCURY_BUS).
+                    WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
+                        PosDecode, 0, 0x0010, 0x0010, 0, 0x0001)
+                    // Legacy VGA I/O ports (0x3B0..0x3DF): the graphics adapter
+                    // is the VGA owner, so its root decodes the legacy VGA I/O
+                    // (the VGA arbiter designates the root that decodes both the
+                    // VGA legacy I/O and the 0xA0000 aperture as the VGA owner).
+                    QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                        EntireRange, 0, 0x000003B0, 0x000003DF, 0xFFFFC000000,
+                        0x00000030, , , , TypeTranslation, SparseTranslation)
+                    // The graphics I/O BAR (the 0xC300..0xC3FF hole punched out
+                    // of PCI0's I/O above).
+                    QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                        EntireRange, 0, 0x0000C300, 0x0000C3FF, 0xFFFFC000000,
+                        0x00000100, , , , TypeTranslation, SparseTranslation)
+                    // Legacy VGA aperture + option-ROM/VBIOS window: real zx1
+                    // forwards VGA (and its VBE extension) cycles to the AGP rope.
+                    DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                        Cacheable, ReadWrite,
+                        0, 0x000A0000, 0x000BFFFF, 0, 0x00020000)
+                    DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                        Cacheable, ReadWrite,
+                        0, 0x000C0000, 0x000DFFFF, 0, 0x00020000)
+                    // The graphics framebuffer/MMIO/ROM live in the high MMIO
+                    // aperture (FB 0xF0000000, MMIO 0xF5000000, ROM 0xF6000000).
+                    QWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                        NonCacheable, ReadWrite,
+                        0, 0xF0000000, 0xFDFFFFFF, 0, 0x0E000000)
+                    // The Mercury CSR register block -- the "Mercury MMIO base"
+                    // the HP AgpMercury miniport scans _CRS for (it aborts with
+                    // "Mercury MMIO base not found in _CRS!" otherwise).  It is
+                    // consumed by this bridge, not forwarded to children, so it
+                    // is a ResourceConsumer descriptor.  Keep in lockstep with
+                    // IA64_LBA_CSR_BASE / IA64_LBA_CSR_SIZE.
+                    DWordMemory (ResourceConsumer, PosDecode, MinFixed, MaxFixed,
+                        NonCacheable, ReadWrite,
+                        0, 0xFED10000, 0xFED10FFF, 0, 0x00001000,
+                        , , , AddressRangeMemory, TypeStatic)
+                    // HP CCSR vendor descriptor (guid_id 0x02, GUID 69e9adf9-...)
+                    // giving the same base -- Linux hp-agp reads the LBA base
+                    // from here.  Keep in lockstep with IA64_LBA_CSR_BASE.
                     VendorLong ()
                     {
                         0x02,                                           // guid_id
@@ -152,7 +218,15 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                         0x00, 0x00, 0xD1, 0xFE, 0x00, 0x00, 0x00, 0x00, // base 0xFED10000
                         0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // length 0x1000
                     }
-                    Memory32Fixed (ReadWrite, 0xFED10000, 0x00001000)
+                })
+                // Graphics is device 0 on the Mercury bus; INTx uses the same
+                // (slot+pin)%4 swizzle and GSIs 16..19 as PCI0.
+                Name (_PRT, Package ()
+                {
+                    Package () { 0x0000FFFF, 0, 0x00, 16 },
+                    Package () { 0x0000FFFF, 1, 0x00, 17 },
+                    Package () { 0x0000FFFF, 2, 0x00, 18 },
+                    Package () { 0x0000FFFF, 3, 0x00, 19 }
                 })
             }
         }

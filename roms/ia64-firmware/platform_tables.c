@@ -564,11 +564,27 @@ static void efi_init_sal_system_table(void)
 
 }
 
+/*
+ * Where the primary VGA adapter lives.  On zx1 the AGP graphics sits behind the
+ * Mercury (LBA) PCI host bridge, on its own root bus (IA64_MERCURY_BUS) at slot
+ * IA64_MERCURY_VGA_SLOT; on 460gx it is on PCI0 at the GXB-AGP slot 5.  The
+ * PCDP/HCDP VGA console descriptor and the id probe use these.
+ */
+static UINT8 fw_vga_pci_bus(void)
+{
+    return fw_platform_is_zx1() ? (UINT8)IA64_MERCURY_BUS : 0;
+}
+
+static UINT8 fw_vga_pci_device(void)
+{
+    return fw_platform_is_zx1() ? (UINT8)IA64_MERCURY_VGA_SLOT : 5;
+}
+
 static void efi_init_acpi_tables(void)
 {
     UINTN i;
     BOOLEAN vga_primary = fw_handoff_vga_console_primary();
-    UINT32 vga_id = (UINT32)pci_config_read_value(0, 0, 5, 0, 0, 4);
+    UINT32 vga_id = (UINT32)pci_config_read_value(0, fw_vga_pci_bus(), fw_vga_pci_device(), 0, 0, 4);
     UINT64 debug_port_base = fw_handoff_debug_port_base();
     BOOLEAN debug_port_present = debug_port_base != 0;
     BOOLEAN is_460gx = fw_platform_is_460gx();
@@ -895,8 +911,8 @@ static void efi_init_acpi_tables(void)
     mHcdp.Device[0].Pci.Reserved = 0;
     mHcdp.Device[0].Pci.Length = sizeof(mHcdp.Device[0].Pci);
     mHcdp.Device[0].Pci.Segment = 0;
-    mHcdp.Device[0].Pci.Bus = 0;
-    mHcdp.Device[0].Pci.Device = 5;
+    mHcdp.Device[0].Pci.Bus = fw_vga_pci_bus();
+    mHcdp.Device[0].Pci.Device = fw_vga_pci_device();
     mHcdp.Device[0].Pci.Function = 0;
     mHcdp.Device[0].Pci.DeviceId = (UINT16)(vga_id >> 16);
     mHcdp.Device[0].Pci.VendorId = (UINT16)vga_id;
@@ -1064,7 +1080,7 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x02, 0x00,
     };
-    UINT32 vga_id = (UINT32)pci_config_read_value(0, 0, 5, 0, 0, 4);
+    UINT32 vga_id = (UINT32)pci_config_read_value(0, fw_vga_pci_bus(), fw_vga_pci_device(), 0, 0, 4);
     UINT8 hcdp_uart_flags =
         HCDP_UART_FLAG_ACTIVE_LOW | HCDP_UART_FLAG_INTERRUPT |
         (fw_handoff_vga_console_primary() ?
@@ -1297,7 +1313,8 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiMcfg->Allocation[0].BaseAddress != PCI_CONFIG_ECAM_BASE ||
         mAcpiMcfg->Allocation[0].PciSegmentGroup != 0 ||
         mAcpiMcfg->Allocation[0].StartBusNumber != 0 ||
-        mAcpiMcfg->Allocation[0].EndBusNumber != 255 ||
+        mAcpiMcfg->Allocation[0].EndBusNumber !=
+            (UINT8)(PCI_CONFIG_ECAM_SIZE / 0x100000U - 1U) ||
         mAcpiMcfg->Allocation[0].Reserved != 0) {
         return 0;
     }
@@ -1341,8 +1358,8 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiHcdp->Device[0].Pci.Length !=
             sizeof(mAcpiHcdp->Device[0].Pci) ||
         mAcpiHcdp->Device[0].Pci.Segment != 0 ||
-        mAcpiHcdp->Device[0].Pci.Bus != 0 ||
-        mAcpiHcdp->Device[0].Pci.Device != 5 ||
+        mAcpiHcdp->Device[0].Pci.Bus != fw_vga_pci_bus() ||
+        mAcpiHcdp->Device[0].Pci.Device != fw_vga_pci_device() ||
         mAcpiHcdp->Device[0].Pci.Function != 0 ||
         mAcpiHcdp->Device[0].Pci.DeviceId != (UINT16)(vga_id >> 16) ||
         mAcpiHcdp->Device[0].Pci.VendorId != (UINT16)vga_id) {

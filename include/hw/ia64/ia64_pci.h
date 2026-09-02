@@ -5,6 +5,7 @@
 #ifndef HW_IA64_PCI_H
 #define HW_IA64_PCI_H
 
+#include "qemu/typedefs.h"
 #include "hw/ia64/ia64_vpc_abi.h"
 
 #define TYPE_IA64_PCI_HOST_BRIDGE "ia64-pcihost"
@@ -19,5 +20,21 @@
 #define IA64_PCI_INTX_LINES    4
 
 int ia64_pci_route_intx_gsi(uint8_t devfn, int irq_num);
+
+/*
+ * The shared identity-mapped MMIO/I/O windows of the primary host bridge.  The
+ * zx1 Mercury host bridge (hw/ia64/ia64_mercury.c) registers its second root bus
+ * against these same regions so device BARs on the Mercury bus land in the same
+ * fixed aperture the machine already programs -- see ia64_mercury.c.
+ */
+MemoryRegion *ia64_pci_host_mmio(DeviceState *pci_host);
+MemoryRegion *ia64_pci_host_io(DeviceState *pci_host);
+
+/*
+ * Register the Mercury second root bus with the primary host bridge so its ECAM
+ * config handler dispatches config cycles for IA64_MERCURY_BUS to that bus (the
+ * faithful analog of zx1 SAL rope-routing).  NULL until the zx1 machine wires it.
+ */
+void ia64_pci_host_set_mercury_bus(DeviceState *pci_host, PCIBus *bus);
 
 #endif

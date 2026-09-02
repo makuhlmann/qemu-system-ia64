@@ -30,4 +30,13 @@ struct IA64SBAState {
     uint64_t csr_base;             /* fixed chipset MMIO base (IA64_SBA_CSR_BASE) */
 };
 
+/*
+ * Route DMA from masters on @bus through the SBA's single shared translated
+ * address space too (the IOC translates every master on the platform, not just
+ * those on its own PCI bus).  Used by the zx1 machine to bring the Mercury
+ * second root bus under the same IOPDIR/GART.  Call before any device is
+ * realized on @bus.
+ */
+void ia64_sba_attach_bus(IA64SBAState *s, PCIBus *bus);
+
 #endif /* HW_IA64_SBA_H */

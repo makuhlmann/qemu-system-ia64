@@ -1,11 +1,14 @@
 /*
  * QTest smoke test for the NVIDIA Quadro2 Pro (NV15GL) on the ia64-vpc machine.
  *
- * The card is opt-in (-machine ia64-vpc,vga=nv15gl); the machine maps its BARs
- * at fixed windows (ia64_vpc_map_vga_fixed_windows()), so the register aperture
- * and framebuffer are reachable without firmware.  This locks in the device's
- * PCI identity / BAR geometry contract and a couple of live-aperture reads, so
- * a future refactor cannot silently change them.
+ * The card is opt-in (vga=nv15gl); the machine maps its BARs at fixed windows
+ * (ia64_vpc_map_vga_fixed_windows()), so the register aperture and framebuffer
+ * are reachable without firmware.  This locks in the device's PCI identity / BAR
+ * geometry contract and a couple of live-aperture reads, so a future refactor
+ * cannot silently change them.  It runs on the 460gx machine, which keeps the
+ * graphics adapter on PCI0 at IA64_VPC_VGA_SLOT; the zx1 machine instead places
+ * it behind the Mercury host bridge on a second root bus (see ia64_mercury.c),
+ * which this device-model test does not need to exercise.
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -39,7 +42,7 @@
 
 static QTestState *nv15_start(void)
 {
-    return qtest_init("-machine ia64-vpc,vga=nv15gl -m 256M -S");
+    return qtest_init("-machine 460gx,vga=nv15gl -m 256M -S");
 }
 
 /* The device realizes and the machine reaches the qtest stub. */

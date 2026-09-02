@@ -1973,8 +1973,9 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
     UINTN resource_length;
     UINTN offset = 0;
     BOOLEAN bus = 0;
-    BOOLEAN io = 0;
-    BOOLEAN legacy_memory = 0;
+    BOOLEAN io_a = 0;   /* 0x0000..0x03AF (below the VGA legacy hole)        */
+    BOOLEAN io_b = 0;   /* 0x03E0..0xC2FF (between the VGA and graphics holes) */
+    BOOLEAN io_c = 0;   /* 0xC400..0xFFFF (above the graphics I/O hole)       */
     BOOLEAN memory = 0;
     BOOLEAN uart_window = 0;
     BOOLEAN end_tag = 0;
@@ -2012,42 +2013,62 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
             if (descriptor[0] == 0x88U && length == 13U &&
                 descriptor[3] == 2U && get_u16(descriptor + 6U) == 0 &&
                 get_u16(descriptor + 8U) == 0 &&
-                get_u16(descriptor + 10U) == 255U &&
+                get_u16(descriptor + 10U) == 0x000fU &&
                 get_u16(descriptor + 12U) == 0 &&
-                get_u16(descriptor + 14U) == 256U) {
+                get_u16(descriptor + 14U) == 0x0010U) {
+                /*
+                 * PCI0 now owns only buses 0x00..0x0F; the AGP graphics adapter
+                 * sits behind the Mercury (LBA0/HWP0003) PCI root bridge on bus
+                 * 0x10, so PCI0 no longer claims the whole 0..0xFF range (that
+                 * would collide with the second root).
+                 */
                 bus = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 1U && descriptor[5] == 0x33U &&
                        get_u64(descriptor + 6U) == 0 &&
                        get_u64(descriptor + 14U) == 0 &&
+                       get_u64(descriptor + 22U) == 0x000003afU &&
+                       get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
+                       get_u64(descriptor + 38U) == 0x000003b0U) {
+                /*
+                 * Architectural I/O with a sparse translation (_TTP|_TRS, type
+                 * flags 0x33; _TRA = the memory-mapped port window base), split
+                 * around two holes both behind the Mercury root: the legacy VGA
+                 * ports 0x3B0..0x3DF (the graphics is the VGA owner) and the
+                 * graphics I/O BAR 0xC300..0xC3FF.  The sparse-translation
+                 * shaping (48321d4) that keeps Windows' PnP I/O arbiter from
+                 * rebalancing a BAR past the decodable range is preserved.
+                 */
+                io_a = 1;
+            } else if (descriptor[0] == 0x8aU && length == 43U &&
+                       descriptor[3] == 1U && descriptor[5] == 0x33U &&
+                       get_u64(descriptor + 6U) == 0 &&
+                       get_u64(descriptor + 14U) == 0x000003e0U &&
+                       get_u64(descriptor + 22U) == 0x0000c2ffU &&
+                       get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
+                       get_u64(descriptor + 38U) == 0x0000bf20U) {
+                io_b = 1;
+            } else if (descriptor[0] == 0x8aU && length == 43U &&
+                       descriptor[3] == 1U && descriptor[5] == 0x33U &&
+                       get_u64(descriptor + 6U) == 0 &&
+                       get_u64(descriptor + 14U) == 0x0000c400U &&
                        get_u64(descriptor + 22U) == 0xffffU &&
                        get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
-                       get_u64(descriptor + 38U) == 0x10000U) {
-                /*
-                 * Architectural 64 KB I/O window with a sparse translation
-                 * (_TTP|_TRS, type flags 0x33; _TRA = the memory-mapped port
-                 * window base).  The producer window shrank from 16 MB and
-                 * gained the sparse translation in 48321d4 so Windows' PnP I/O
-                 * arbiter can no longer rebalance the display adapter's I/O BAR
-                 * past the decodable range.
-                 */
-                io = 1;
-            } else if (descriptor[0] == 0x87U && length == 23U &&
-                       descriptor[3] == 0U &&
-                       get_u32(descriptor + 6U) == 0 &&
-                       get_u32(descriptor + 10U) == 0x000a0000U &&
-                       get_u32(descriptor + 14U) == 0x000bffffU &&
-                       get_u32(descriptor + 18U) == 0 &&
-                       get_u32(descriptor + 22U) == 0x00020000U) {
-                legacy_memory = 1;
+                       get_u64(descriptor + 38U) == 0x00003c00U) {
+                io_c = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 0U &&
                        get_u64(descriptor + 6U) == 0 &&
                        get_u64(descriptor + 14U) == TEST_PCI_MMIO_BASE &&
-                       get_u64(descriptor + 22U) ==
-                           TEST_PCI_MMIO_BASE + TEST_PCI_MMIO_SIZE - 1U &&
+                       get_u64(descriptor + 22U) == 0xefffffffU &&
                        get_u64(descriptor + 30U) == 0 &&
-                       get_u64(descriptor + 38U) == TEST_PCI_MMIO_SIZE) {
+                       get_u64(descriptor + 38U) == 0x02000000U) {
+                /*
+                 * PCI0's low MMIO producer window (0xEE000000..0xEFFFFFFF): the
+                 * built-in device BARs (LSI/AHCI/USB/NIC) live here.  The legacy
+                 * VGA (0xA0000) / option-ROM (0xC0000) apertures and the high
+                 * MMIO (0xF0000000+) belong to the Mercury root now.
+                 */
                 memory = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 0U && descriptor[4] == 0x0cU &&
@@ -2076,7 +2097,7 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
      * arbitration (dropped in 5a58a91).  UAR0 describes its own registers in
      * the SSDT instead, so a reappearing DSDT window is a regression.
      */
-    return bus && io && legacy_memory && memory && !uart_window && end_tag;
+    return bus && io_a && io_b && io_c && memory && !uart_window && end_tag;
 }
 
 static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
@@ -2487,7 +2508,12 @@ static BOOLEAN test_acpi_console_tables(const TEST_TABLE_CONTEXT *Context)
         hcdp[88U] != 0x0aU || (hcdp[89U] & (UINT8)~1U) != 0 ||
         get_u16(hcdp + 90U) != 41U || get_u16(hcdp + 92U) != 0 ||
         hcdp[94U] != 1U || get_u16(hcdp + 96U) != 34U ||
-        hcdp[99U] != 0 || hcdp[100U] != 5U || hcdp[101U] != 0) {
+        hcdp[99U] != 0x10U || hcdp[100U] != 0 || hcdp[101U] != 0) {
+        /*
+         * The VGA console device now lives behind the Mercury root: PCI
+         * bus 0x10 (IA64_MERCURY_BUS), device 0 (IA64_MERCURY_VGA_SLOT),
+         * function 0 -- the firmware fills this from fw_vga_pci_bus()/device().
+         */
         return 0;
     }
     if (Context->Dbgp != NULL) {
