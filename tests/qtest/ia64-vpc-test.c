@@ -819,6 +819,66 @@ static void test_sba_ioc_identity(void)
  * only, so IA64_MERCURY_BUS must stay <= 0x3f -- enforced at compile time by a
  * QEMU_BUILD_BUG_ON in hw/ia64/ia64_mercury.c.)
  */
+/*
+ * eepro100 CSR windows.  The dword at the Flash CSR spans Flash control
+ * (bits 15:0) and EEPROM control (bits 31:16), and the MDI CSR reaches PHY
+ * registers 0 to 31, not just 0 to 6.  The NIC is added on a free slot of
+ * the root bus that "-device" defaults to and given a BAR by hand, because
+ * the machine only assigns BARs to the devices it creates itself.
+ */
+#define IA64_E100_SLOT          8U
+#define IA64_E100_CSR_BASE      0x00000000f6000000ULL
+#define IA64_E100_SCB_FLASH     12U
+#define IA64_E100_SCB_EEPROM    14U
+#define IA64_E100_SCB_CTRL_MDI  16U
+#define IA64_E100_EEPROM_CS     0x02U
+#define IA64_E100_MDI_READY     (1U << 28)
+#define IA64_E100_MDI_OP_READ   (2U << 26)
+#define IA64_E100_MDI_PHY_1     (1U << 21)
+
+static void test_eepro100_csr_windows(void)
+{
+    const uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                         ((uint64_t)IA64_MERCURY_BUS << 20) +
+                         ((uint64_t)IA64_E100_SLOT << 15);
+    QTestState *qts = qtest_init("-machine ia64-vpc -m 256M -S "
+                                 "-device i82559c,bus=mercury,addr=8,"
+                                 "romfile=");
+    uint32_t mdi;
+
+    g_assert_cmphex(qtest_readl(qts, cfg), ==, 0x12298086);
+    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_0, IA64_E100_CSR_BASE);
+    qtest_writew(qts, cfg + PCI_COMMAND,
+                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+
+    qtest_writew(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_EEPROM,
+                 IA64_E100_EEPROM_CS);
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_CSR_BASE +
+                                IA64_E100_SCB_EEPROM) &
+                    IA64_E100_EEPROM_CS, ==, IA64_E100_EEPROM_CS);
+    g_assert_cmphex(qtest_readl(qts, IA64_E100_CSR_BASE +
+                                IA64_E100_SCB_FLASH) >> 16, ==,
+                    qtest_readw(qts, IA64_E100_CSR_BASE +
+                                IA64_E100_SCB_EEPROM));
+    g_assert_cmphex(qtest_readl(qts, IA64_E100_CSR_BASE +
+                                IA64_E100_SCB_FLASH) & 0xffff, ==, 0);
+
+    /* A dword write takes EEPROM control from the same half. */
+    qtest_writel(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_FLASH, 0);
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_CSR_BASE +
+                                IA64_E100_SCB_EEPROM) &
+                    IA64_E100_EEPROM_CS, ==, 0);
+
+    /* PHY register 18 holds a non-zero reset default. */
+    qtest_writel(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_CTRL_MDI,
+                 IA64_E100_MDI_OP_READ | IA64_E100_MDI_PHY_1 | (18U << 16));
+    mdi = qtest_readl(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_CTRL_MDI);
+    g_assert_cmphex(mdi & IA64_E100_MDI_READY, ==, IA64_E100_MDI_READY);
+    g_assert_cmphex(mdi & 0xffff, ==, 0x0001);
+
+    qtest_quit(qts);
+}
+
 static void test_mercury_config_dispatch(void)
 {
     const uint64_t ecam = IA64_PCI_CONFIG_BASE;
@@ -3632,6 +3692,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
                    test_mach64_2d_solid_fill);
     qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
+    qtest_add_func("/ia64-vpc/eepro100/csr-windows",
+                   test_eepro100_csr_windows);
 
     return g_test_run();
 }

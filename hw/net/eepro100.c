@@ -1190,10 +1190,6 @@ static void eepro100_write_mdi(EEPRO100State *s)
         /* Unsupported opcode. */
         logout("opcode must be 1 or 2 but is %u\n", opcode);
         data = 0;
-    } else if (reg > 6) {
-        /* Unsupported register. */
-        logout("register must be 0...6 but is %u\n", reg);
-        data = 0;
     } else {
         TRACE(MDI, logout("val=0x%08x (int=%u, %s, phy=%u, %s, data=0x%04x\n",
                           val, raiseint, mdi_op_name[opcode], phy,
@@ -1421,7 +1417,8 @@ static uint32_t eepro100_read4(EEPRO100State * s, uint32_t addr)
         TRACE(OTHER, logout("addr=%s val=0x%08x\n", regname(addr), val));
         break;
     case SCBflash:
-        val = eepro100_read_eeprom(s);
+        /* EEPROM control occupies bits 16:19 of this combined CSR. */
+        val = (uint32_t)eepro100_read_eeprom(s) << 16;
         TRACE(OTHER, logout("addr=%s val=0x%08x\n", regname(addr), val));
         break;
     case SCBCtrlMDI:
