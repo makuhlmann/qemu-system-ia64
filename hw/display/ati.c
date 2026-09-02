@@ -1042,6 +1042,14 @@ static void ati_pll_write(ATIVGAState *s, uint32_t data)
     }
 }
 
+static uint32_t ati_mm_aper_offset(const ATIVGAState *s, hwaddr addr)
+{
+    uint32_t offset = (s->regs.mm_index & ~BIT(31)) + addr - MM_DATA;
+
+    /* MM_APER (bit 31) selects Linear Aperture 0; physical VRAM aliases. */
+    return offset & (s->vga.vram_size - 1);
+}
+
 static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
 {
     ATIVGAState *s = opaque;
@@ -1088,10 +1096,9 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
     case MM_DATA ... MM_DATA + 3:
         /* indexed access to regs or memory */
         if (s->regs.mm_index & BIT(31)) {
-            uint32_t idx = s->regs.mm_index & ~BIT(31);
-            if (idx <= s->vga.vram_size - size) {
-                val = ldn_le_p(s->vga.vram_ptr + idx, size);
-            }
+            uint32_t idx = ati_mm_aper_offset(s, addr);
+
+            val = ldn_le_p(s->vga.vram_ptr + idx, size);
         } else if (s->regs.mm_index > MM_DATA + 3) {
             val = ati_mm_read(s, s->regs.mm_index + addr - MM_DATA, size);
         } else {
@@ -1488,10 +1495,9 @@ static void ati_mm_write(void *opaque, hwaddr addr,
     case MM_DATA ... MM_DATA + 3:
         /* indexed access to regs or memory */
         if (s->regs.mm_index & BIT(31)) {
-            uint32_t idx = s->regs.mm_index & ~BIT(31);
-            if (idx <= s->vga.vram_size - size) {
-                stn_le_p(s->vga.vram_ptr + idx, size, data);
-            }
+            uint32_t idx = ati_mm_aper_offset(s, addr);
+
+            stn_le_p(s->vga.vram_ptr + idx, size, data);
         } else if (s->regs.mm_index > MM_DATA + 3) {
             ati_mm_write(s, s->regs.mm_index + addr - MM_DATA, data, size);
         } else {

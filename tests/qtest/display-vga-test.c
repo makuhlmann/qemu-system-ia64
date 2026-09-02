@@ -27,6 +27,9 @@
 #define IA64_ATI_FB_BASE       0x00000000f0000000ULL
 #define IA64_ATI_MMIO_BASE     0x00000000f5000000ULL
 #define IA64_VGA_LEGACY_BASE   0x00000000000a0000ULL
+#define ATI_MM_INDEX           0x0000
+#define ATI_MM_DATA            0x0004
+#define ATI_VRAM_SIZE          (16U * 1024U * 1024U)
 #define ATI_CRTC_GEN_CNTL      0x0050
 #define ATI_CRTC_H_TOTAL_DISP  0x0200
 #define ATI_CRTC_V_TOTAL_DISP  0x0208
@@ -450,6 +453,51 @@ static void ati_reverse_overlap_blit(void)
     qtest_quit(qts);
 }
 
+/*
+ * MM_APER (MM_INDEX bit 31) turns MM_DATA into a window on Linear Aperture
+ * 0.  The offset is a VRAM byte offset that includes the sub-dword part of
+ * the MM_DATA address, and it aliases within physical VRAM.
+ */
+static void ati_mm_aper(void)
+{
+    QTestState *qts;
+
+    qts = qtest_init("-machine ia64-vpc -m 256M -S");
+
+    qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_MM_INDEX, 0x80000004);
+    qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_MM_DATA, 0x11223344);
+    g_assert_cmphex(qtest_readl(qts, IA64_ATI_FB_BASE + 4), ==, 0x11223344);
+    g_assert_cmphex(qtest_readl(qts, IA64_ATI_MMIO_BASE + ATI_MM_DATA), ==,
+                    0x11223344);
+
+    /* An offset past the end of VRAM wraps instead of reading as zero. */
+    qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_MM_INDEX, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, IA64_ATI_MMIO_BASE + ATI_MM_INDEX), ==,
+                    0xfffffffc);
+    qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_MM_DATA, 0xaabbccdd);
+    g_assert_cmphex(qtest_readl(qts, IA64_ATI_FB_BASE + ATI_VRAM_SIZE - 4),
+                    ==, 0xaabbccdd);
+    qtest_writel(qts, IA64_ATI_FB_BASE + ATI_VRAM_SIZE - 4, 0x55667788);
+    g_assert_cmphex(qtest_readl(qts, IA64_ATI_MMIO_BASE + ATI_MM_DATA), ==,
+                    0x55667788);
+
+    /* Sub-dword accesses address bytes within the selected offset. */
+    qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_MM_INDEX, 0x81000007);
+    g_assert_cmphex(qtest_readl(qts, IA64_ATI_MMIO_BASE + ATI_MM_INDEX), ==,
+                    0x81000004);
+    g_assert_cmphex(qtest_readl(qts, IA64_ATI_MMIO_BASE + ATI_MM_DATA), ==,
+                    0x11223344);
+    qtest_writeb(qts, IA64_ATI_MMIO_BASE + ATI_MM_DATA + 1, 0x5a);
+    qtest_writew(qts, IA64_ATI_MMIO_BASE + ATI_MM_DATA + 2, 0xc3d4);
+    g_assert_cmphex(qtest_readb(qts, IA64_ATI_MMIO_BASE + ATI_MM_DATA + 1),
+                    ==, 0x5a);
+    g_assert_cmphex(qtest_readw(qts, IA64_ATI_MMIO_BASE + ATI_MM_DATA + 2),
+                    ==, 0xc3d4);
+    g_assert_cmphex(qtest_readl(qts, IA64_ATI_FB_BASE + 4), ==, 0xc3d45a44);
+
+    qtest_quit(qts);
+}
+
 static void ati_stride(void)
 {
     const unsigned width = 640;
@@ -555,6 +603,7 @@ int main(int argc, char **argv)
     }
     if (g_str_equal(qtest_get_arch(), "ia64") &&
         qtest_has_device("ati-vga")) {
+        qtest_add_func("/display/pci/ati-mm-aper", ati_mm_aper);
         qtest_add_func("/display/pci/ati-stride", ati_stride);
         qtest_add_func("/display/pci/ati-blit-visible-intersection",
                        ati_blit_visible_intersection);
