@@ -21,7 +21,14 @@
 
 bool ia64_exec_is_parallel(CPUIA64State *env)
 {
-    return tcg_cflags_has(env_cpu(env), CF_PARALLEL);
+    CPUState *cs = env_cpu(env);
+
+    /*
+     * The per-CPU cflags keep CF_PARALLEL during the exclusive retry that
+     * follows cpu_loop_exit_atomic(); a helper that re-entered the parallel
+     * path there would exit-atomic again and never make progress.
+     */
+    return tcg_cflags_has(cs, CF_PARALLEL) && !cpu_in_exclusive_context(cs);
 }
 
 int ia64_exec_mmu_index(CPUIA64State *env, bool ifetch)
