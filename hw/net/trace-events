@@ -443,6 +443,12 @@ i82596_receive_iov(size_t size, int iovcnt) "RX IOV: %zu bytes in %d vectors"
 i82596_ca_init(uint32_t scb, uint8_t mode, uint32_t base) "CA: Init - SCB=0x%08x mode=%d base=0x%08x"
 i82596_ioport_write(uint32_t addr, uint32_t val) "IO write addr=0x%08x val=0x%08x"
 
+# eepro100.c
+eepro100_io_read(uint32_t addr, unsigned size, uint64_t value) "addr=0x%02x size=%u value=0x%" PRIx64
+eepro100_io_write(uint32_t addr, unsigned size, uint64_t value) "addr=0x%02x size=%u value=0x%" PRIx64
+eepro100_cu_cb_dma(int64_t vtime_ns, uint32_t cb_addr, uint16_t cb_status, uint16_t cb_command, uint32_t cb_link, uint16_t completion_status, uint32_t read_result, uint32_t write_result, uint16_t readback, uint32_t readback_result) "vtime=%" PRId64 " CB @0x%08x: status=0x%04x command=0x%04x link=0x%08x completion=0x%04x DMA read=0x%x write=0x%x readback=0x%04x readback-read=0x%x"
+eepro100_scb_intmask(int64_t vtime_ns, uint8_t value, uint8_t scb_status, uint8_t causes, bool intx_before, bool intx_after) "vtime=%" PRId64 " value=0x%02x SCB status=0x%02x causes=0x%02x INTx %d->%d"
+
 # imx_fec.c
 imx_phy_read_num(int phy, int configured) "read request from unconfigured phy %d (configured %d)"
 imx_phy_write_num(int phy, int configured) "write request to unconfigured phy %d (configured %d)"

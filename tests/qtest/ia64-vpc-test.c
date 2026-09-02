@@ -152,10 +152,10 @@ static const ExpectedPCIDevice expected_e1000 = {
  * The default adapter is the 100 Mbit PRO/100 (i82557b, DEV_1229), the
  * device Windows IA-64 actually ships an inbox driver for (NET557.IN_).
  * Unlike the e1000 it exposes three BARs: a 4 KiB prefetchable CSR memory
- * BAR, a 64-byte I/O BAR, and a 128 KiB flash memory BAR.  The machine's
- * generic per-BAR NIC allocator hands each one a naturally aligned slice of
- * the per-index memory / I/O window, so the flash BAR lands at the next
- * 128 KiB boundary above the CSR BAR.
+ * BAR, a 32-byte I/O BAR, and the 1 MiB Flash aperture this controller
+ * generation decodes.  The machine's generic per-BAR NIC allocator hands
+ * each one a naturally aligned slice of the per-index memory / I/O window,
+ * so the Flash BAR lands at the next 1 MiB boundary above the CSR BAR.
  */
 static const ExpectedPCIDevice expected_i82557b = {
     .slot = IA64_E1000_SLOT,
@@ -167,7 +167,7 @@ static const ExpectedPCIDevice expected_i82557b = {
     .bars = {
         [0] = IA64_E1000_MMIO_BASE | PCI_BASE_ADDRESS_MEM_PREFETCH,
         [1] = IA64_E1000_IO_BASE | PCI_BASE_ADDRESS_SPACE_IO,
-        [2] = IA64_E1000_MMIO_BASE + 0x20000,
+        [2] = (IA64_E1000_MMIO_BASE + 0x100000) & ~0xfffffULL,
     },
 };
 
@@ -1085,6 +1085,104 @@ static void test_ohci_reset_suspended_port(void)
 #define IA64_E100_MDI_READY     (1U << 28)
 #define IA64_E100_MDI_OP_READ   (2U << 26)
 #define IA64_E100_MDI_PHY_1     (1U << 21)
+
+#define IA64_E100_FLASH_BASE    0x00000000f6100000ULL
+#define IA64_E100_SCB_POINTER   4U
+#define IA64_E100_EEPROM_SK     0x01U
+#define IA64_E100_EEPROM_DI     0x04U
+#define IA64_E100_EEPROM_DO     0x08U
+
+static void e100_eeprom_clock(QTestState *qts, uint16_t control)
+{
+    qtest_writew(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_EEPROM, control);
+    qtest_writew(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_EEPROM,
+                 control | IA64_E100_EEPROM_SK);
+}
+
+/* 93C46 read: start bit, opcode 10, six address bits, sixteen data bits. */
+static uint16_t e100_eeprom_read_word(QTestState *qts, uint8_t address)
+{
+    static const uint8_t opcode[] = { 1, 1, 0 };
+    uint16_t value = 0;
+    unsigned int i;
+    int bit;
+
+    qtest_writew(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_EEPROM,
+                 IA64_E100_EEPROM_CS);
+    for (i = 0; i < ARRAY_SIZE(opcode); i++) {
+        e100_eeprom_clock(qts, IA64_E100_EEPROM_CS |
+                          (opcode[i] ? IA64_E100_EEPROM_DI : 0));
+    }
+    for (bit = 5; bit >= 0; bit--) {
+        e100_eeprom_clock(qts, IA64_E100_EEPROM_CS |
+                          ((address >> bit) & 1 ? IA64_E100_EEPROM_DI : 0));
+    }
+    for (i = 0; i < 16; i++) {
+        e100_eeprom_clock(qts, IA64_E100_EEPROM_CS);
+        value = (value << 1) |
+                ((qtest_readw(qts, IA64_E100_CSR_BASE +
+                              IA64_E100_SCB_EEPROM) &
+                  IA64_E100_EEPROM_DO) ? 1 : 0);
+    }
+    qtest_writew(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_EEPROM, 0);
+    return value;
+}
+
+static void test_eepro100_eeprom_map(void)
+{
+    const uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                         ((uint64_t)IA64_MERCURY_BUS << 20) +
+                         ((uint64_t)IA64_E100_SLOT << 15);
+    QTestState *qts = qtest_init("-machine ia64-vpc -m 256M -S "
+                                 "-device i82559c,bus=mercury,addr=8,"
+                                 "romfile=,mac=52:54:00:12:34:56");
+    uint32_t checksum;
+    unsigned int i;
+
+    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_0, IA64_E100_CSR_BASE);
+    qtest_writew(qts, cfg + PCI_COMMAND,
+                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+
+    /* The MAC occupies words 0 to 2 as little-endian pairs. */
+    g_assert_cmphex(e100_eeprom_read_word(qts, 0), ==, 0x5452);
+    g_assert_cmphex(e100_eeprom_read_word(qts, 1), ==, 0x1200);
+    g_assert_cmphex(e100_eeprom_read_word(qts, 2), ==, 0x5634);
+
+    /* The 82559-family map: compatibility, controller type and PHY id. */
+    g_assert_cmphex(e100_eeprom_read_word(qts, 0x03), ==, 0x0203);
+    g_assert_cmphex(e100_eeprom_read_word(qts, 0x05), ==, 0x0201);
+    g_assert_cmphex(e100_eeprom_read_word(qts, 0x06), ==, 0x4701);
+
+    /*
+     * Word 0x0a carries the id flags; boot-disable is set because this
+     * adapter was given no option ROM.
+     */
+    g_assert_cmphex(e100_eeprom_read_word(qts, 0x0a), ==, 0x4880);
+
+    /* Words 0 to 62 plus the stored checksum come to 0xbaba. */
+    checksum = 0;
+    for (i = 0; i < 64; i++) {
+        checksum += e100_eeprom_read_word(qts, i);
+    }
+    g_assert_cmphex(checksum & 0xffff, ==, 0xbaba);
+
+    /*
+     * The Flash aperture is a separate BAR that contains no Flash storage:
+     * it reads zero and does not alias the CSR window.
+     */
+    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_2, IA64_E100_FLASH_BASE);
+    qtest_writel(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_POINTER,
+                 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, IA64_E100_CSR_BASE +
+                                IA64_E100_SCB_POINTER), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, IA64_E100_FLASH_BASE +
+                                IA64_E100_SCB_POINTER), ==, 0);
+    qtest_writel(qts, IA64_E100_FLASH_BASE + IA64_E100_SCB_POINTER,
+                 UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, IA64_E100_CSR_BASE +
+                                IA64_E100_SCB_POINTER), ==, 0x12345678);
+    qtest_quit(qts);
+}
 
 static void test_eepro100_csr_windows(void)
 {
@@ -3944,6 +4042,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
     qtest_add_func("/ia64-vpc/eepro100/csr-windows",
                    test_eepro100_csr_windows);
+    qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
+                   test_eepro100_eeprom_map);
     qtest_add_func("/ia64-vpc/audio/cs4281-codec",
                    test_cs4281_codec_access);
     qtest_add_func("/ia64-vpc/ohci/port-resume", test_ohci_port_resume);

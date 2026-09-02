@@ -21,25 +21,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
- * Tested features (i82559):
- *      PXE boot (i386 guest, i386 / mips / mipsel / ppc host) ok
- *      Linux networking (i386) ok
- *
- * Untested:
- *      Windows networking
- *
- * References:
- *
- * Intel 8255x 10/100 Mbps Ethernet Controller Family
- * Open Source Software Developer Manual
- *
- * TODO:
- *      * PHY emulation should be separated from nic emulation.
- *        Most nic emulations could share the same phy code.
- *      * i82550 is untested. It is programmed like the i82559.
- *      * i82562 is untested. It is programmed like the i82559.
- *      * Power management (i82558 and later) is not implemented.
- *      * Wake-on-LAN is not implemented.
+ * Power management and Wake-on-LAN are not implemented.
  */
 
 #include "qemu/osdep.h"
@@ -53,9 +35,13 @@
 #include "system/system.h"
 #include "system/dma.h"
 #include "system/reset.h"
+#include "system/runstate.h"
 #include "qemu/bitops.h"
+#include "qemu/main-loop.h"
 #include "qemu/module.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
+#include "trace.h"
 
 /* QEMU sends frames smaller than 60 bytes to ethernet nics.
  * Such frames are rejected by real nics and their emulations.
@@ -109,8 +95,7 @@
 #define EEPROM_SIZE     64
 
 #define PCI_MEM_SIZE            (4 * KiB)
-#define PCI_IO_SIZE             64
-#define PCI_FLASH_SIZE          (128 * KiB)
+#define PCI_IO_MAX_SIZE         64
 
 #define BITS(n, m) (((0xffffffffU << (31 - n)) >> (31 - n + m)) << m)
 
@@ -118,11 +103,13 @@
 #define  CU_NOP         0x0000  /* No operation. */
 #define  CU_START       0x0010  /* CU start. */
 #define  CU_RESUME      0x0020  /* CU resume. */
+#define  CU_HP_START    0x0030  /* CU high-priority queue start. */
 #define  CU_STATSADDR   0x0040  /* Load dump counters address. */
 #define  CU_SHOWSTATS   0x0050  /* Dump statistical counters. */
 #define  CU_CMD_BASE    0x0060  /* Load CU base address. */
 #define  CU_DUMPSTATS   0x0070  /* Dump and reset statistical counters. */
 #define  CU_SRESUME     0x00a0  /* CU static resume. */
+#define  CU_HP_RESUME   0x00b0  /* CU high-priority queue resume. */
 
 #define  RU_NOP         0x0000
 #define  RX_START       0x0001
@@ -134,6 +121,12 @@
 #define DRVR_INT        0x0200  /* Driver generated interrupt. */
 
 typedef struct {
+    uint32_t io_size;
+    uint32_t flash_size;
+    bool mem_prefetch;
+} E100PCIBarInfo;
+
+typedef struct {
     const char *name;
     const char *desc;
     uint16_t device_id;
@@ -142,8 +135,11 @@ typedef struct {
     uint16_t subsystem_id;
 
     uint32_t device;
+    const E100PCIBarInfo *bar;
     uint8_t stats_size;
     bool has_extended_tcb_support;
+    bool has_priority_queues;
+    bool has_static_resume;
     bool power_management;
 } E100PCIDeviceInfo;
 
@@ -164,6 +160,7 @@ typedef enum {
     SCBpmdr = 27,               /* Power Management Driver. */
     SCBgctrl = 28,              /* General Control. */
     SCBgstat = 29,              /* General Status. */
+    SCBeepromSemaphore = 30,
 } E100RegisterOffset;
 
 /* A speedo3 transmit buffer descriptor with two buffers... */
@@ -231,6 +228,24 @@ typedef enum {
 } cu_state_t;
 
 typedef enum {
+    cu_queue_idle = 0,
+    cu_queue_suspended = 1,
+    cu_queue_active = 2,
+} cu_queue_state_t;
+
+typedef enum {
+    cu_queue_lp = 0,
+    cu_queue_hp = 1,
+} cu_queue_t;
+
+typedef struct {
+    uint32_t next_offset;
+    uint32_t last_offset;
+    uint8_t state;
+    bool last_valid;
+} E100CUContext;
+
+typedef enum {
     ru_idle = 0,
     ru_suspended = 1,
     ru_no_resources = 2,
@@ -245,6 +260,8 @@ typedef struct {
     MemoryRegion io_bar;
     MemoryRegion flash_bar;
     NICState *nic;
+    QEMUBH *cu_bh;
+    VMChangeStateEntry *cu_vmstate;
     NICConf conf;
     uint8_t scb_stat;           /* SCB stat/ack byte */
     uint8_t int_stat;           /* PCI interrupt status */
@@ -252,9 +269,10 @@ typedef struct {
     uint16_t mdimem[32];
     eeprom_t *eeprom;
     uint32_t device;            /* device variant */
-    /* (cu_base + cu_offset) address the next command block in the command block list. */
+    /* CU base plus a queue's next offset addresses its next command block. */
     uint32_t cu_base;           /* CU base address */
-    uint32_t cu_offset;         /* CU address offset */
+    E100CUContext cu_lp;
+    E100CUContext cu_hp;
     /* (ru_base + ru_offset) address the RFD in the Receive Frame Area. */
     uint32_t ru_base;           /* RU base address */
     uint32_t ru_offset;         /* RU address offset */
@@ -263,7 +281,7 @@ typedef struct {
     /* Temporary status information (no need to save these values),
      * used while processing CU commands. */
     eepro100_tx_t tx;           /* transmit buffer descriptor */
-    uint32_t cb_address;        /* = cu_base + cu_offset */
+    uint32_t cb_address;        /* CU base plus active queue offset */
 
     /* Statistical counters. Also used for wake-up packet (i82559). */
     eepro100_stats_t statistics;
@@ -278,17 +296,23 @@ typedef struct {
     /* vmstate for each particular nic */
     VMStateDescription *vmstate;
 
-    /* Quasi static device properties (no need to save them). */
+    /* Derived state and device properties (not migrated directly). */
     uint16_t stats_size;
     bool has_extended_tcb_support;
+    uint8_t pci_revision_override;
+    uint16_t pci_subsystem_vendor_override;
+    uint16_t pci_subsystem_override;
+    uint16_t eeprom_compatibility;
 } EEPRO100State;
 
 /* Word indices in EEPROM. */
 typedef enum {
-    EEPROM_CNFG_MDIX  = 0x03,
-    EEPROM_ID         = 0x05,
-    EEPROM_PHY_ID     = 0x06,
-    EEPROM_VENDOR_ID  = 0x0c,
+    EEPROM_COMPATIBILITY       = 0x03,
+    EEPROM_CONTROLLER         = 0x05,
+    EEPROM_PHY_ID             = 0x06,
+    EEPROM_82559_ID           = 0x0a,
+    EEPROM_SUBSYSTEM_ID       = 0x0b,
+    EEPROM_SUBSYSTEM_VENDOR_ID = 0x0c,
     EEPROM_CONFIG_ASF = 0x0d,
     EEPROM_DEVICE_ID  = 0x23,
     EEPROM_SMBUS_ADDR = 0x90,
@@ -301,7 +325,7 @@ typedef enum {
     EEPROM_ID_WMR = BIT(2),     /* ??? */
     EEPROM_ID_WOL = BIT(5),     /* Wake on LAN */
     EEPROM_ID_DPD = BIT(6),     /* Deep Power Down */
-    EEPROM_ID_ALT = BIT(7),     /* */
+    EEPROM_ID_PM = BIT(7),      /* Power management, always set on 82559 */
     /* BITS(10, 8) device revision */
     EEPROM_ID_BD = BIT(11),     /* boot disable */
     EEPROM_ID_ID = BIT(13),     /* id bit */
@@ -320,6 +344,10 @@ static const uint16_t eepro100_mdi_default[] = {
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
 };
 
+#define E100_MII_BMSR                    1U
+#define E100_MII_BMSR_LINK_STATUS        0x0004U
+#define E100_MII_BMSR_AUTONEG_COMPLETE   0x0020U
+
 /* Readonly mask for MDI (PHY) registers */
 static const uint16_t eepro100_mdi_mask[] = {
     0x0000, 0xffff, 0xffff, 0xffff, 0xc01f, 0xffff, 0xffff, 0x0000,
@@ -329,6 +357,19 @@ static const uint16_t eepro100_mdi_mask[] = {
 };
 
 static E100PCIDeviceInfo *eepro100_get_class(EEPRO100State *s);
+
+static void eepro100_update_link_status(EEPRO100State *s, bool link_down)
+{
+    if (link_down) {
+        s->mdimem[E100_MII_BMSR] &=
+            ~(E100_MII_BMSR_LINK_STATUS |
+              E100_MII_BMSR_AUTONEG_COMPLETE);
+    } else {
+        s->mdimem[E100_MII_BMSR] |=
+            E100_MII_BMSR_LINK_STATUS |
+            E100_MII_BMSR_AUTONEG_COMPLETE;
+    }
+}
 
 /* Read a 16 bit control/status (CSR) register. */
 static uint16_t e100_read_reg2(EEPRO100State *s, E100RegisterOffset addr)
@@ -468,6 +509,36 @@ static void eepro100_swi_interrupt(EEPRO100State * s)
     eepro100_interrupt(s, 0x04);
 }
 
+static void eepro100_update_stats_size(EEPRO100State *s)
+{
+    E100PCIDeviceInfo *info = eepro100_get_class(s);
+
+    if (info->stats_size == 0) {
+        /* The i82557 has only the original statistical counters. */
+        s->stats_size = 64;
+    } else if (info->stats_size == 80) {
+        if ((s->configuration[6] & (BIT(2) | BIT(5))) ==
+            (BIT(2) | BIT(5))) {
+            /* TCO statistical counters. */
+            s->stats_size = 80;
+        } else if (s->configuration[6] & BIT(5)) {
+            /* No extended statistical counters, i82557 compatible. */
+            s->stats_size = 64;
+        } else {
+            /* i82558 compatible. */
+            s->stats_size = 76;
+        }
+    } else if (s->configuration[6] & BIT(5)) {
+        /* No extended statistical counters. */
+        s->stats_size = 64;
+    } else {
+        s->stats_size = info->stats_size;
+    }
+
+    assert(s->stats_size > 0 &&
+           s->stats_size <= sizeof(s->statistics));
+}
+
 #if 0
 static void eepro100_fcp_interrupt(EEPRO100State * s)
 {
@@ -498,7 +569,6 @@ static void e100_pci_reset(EEPRO100State *s, Error **errp)
     /* Maximum Latency */
     pci_set_byte(pci_conf + PCI_MAX_LAT, 0x18);
 
-    s->stats_size = info->stats_size;
     s->has_extended_tcb_support = info->has_extended_tcb_support;
 
     switch (device) {
@@ -526,27 +596,7 @@ static void e100_pci_reset(EEPRO100State *s, Error **errp)
     /* Standard statistical counters. */
     s->configuration[6] |= BIT(5);
 
-    if (s->stats_size == 80) {
-        /* TODO: check TCO Statistical Counters bit. Documentation not clear. */
-        if (s->configuration[6] & BIT(2)) {
-            /* TCO statistical counters. */
-            assert(s->configuration[6] & BIT(5));
-        } else {
-            if (s->configuration[6] & BIT(5)) {
-                /* No extended statistical counters, i82557 compatible. */
-                s->stats_size = 64;
-            } else {
-                /* i82558 compatible. */
-                s->stats_size = 76;
-            }
-        }
-    } else {
-        if (s->configuration[6] & BIT(5)) {
-            /* No extended statistical counters. */
-            s->stats_size = 64;
-        }
-    }
-    assert(s->stats_size > 0 && s->stats_size <= sizeof(s->statistics));
+    eepro100_update_stats_size(s);
 
     if (info->power_management) {
         /* Power Management Capabilities */
@@ -582,18 +632,49 @@ static void e100_pci_reset(EEPRO100State *s, Error **errp)
 #endif /* EEPROM_SIZE > 0 */
 }
 
+static void eepro100_cu_reset_contexts(EEPRO100State *s)
+{
+    memset(&s->cu_lp, 0, sizeof(s->cu_lp));
+    memset(&s->cu_hp, 0, sizeof(s->cu_hp));
+}
+
 static void nic_selective_reset(EEPRO100State * s)
 {
     size_t i;
+
+    if (s->cu_bh) {
+        qemu_bh_cancel(s->cu_bh);
+    }
     uint16_t *eeprom_contents = eeprom93xx_data(s->eeprom);
 #if 0
     eeprom93xx_reset(s->eeprom);
 #endif
-    memcpy(eeprom_contents, s->conf.macaddr.a, 6);
-    eeprom_contents[EEPROM_ID] = EEPROM_ID_VALID;
-    if (s->device == i82557B || s->device == i82557C)
-        eeprom_contents[5] = 0x0100;
-    eeprom_contents[EEPROM_PHY_ID] = 1;
+    /* The serial EEPROM stores the MAC as little-endian words. */
+    for (i = 0; i < 3; i++) {
+        eeprom_contents[i] = s->conf.macaddr.a[2 * i] |
+                             s->conf.macaddr.a[2 * i + 1] << 8;
+    }
+    if (s->device == i82550 || s->device == i82551 ||
+        s->device == i82559A || s->device == i82559B ||
+        s->device == i82559C || s->device == i82559ER) {
+        /* The 82550/82551 use the 82559-compatible EEPROM map. */
+        eeprom_contents[EEPROM_COMPATIBILITY] = s->eeprom_compatibility;
+        eeprom_contents[EEPROM_CONTROLLER] = 0x0201; /* 82559, RJ-45 */
+        eeprom_contents[EEPROM_PHY_ID] = 0x4701;     /* internal PHY */
+        eeprom_contents[EEPROM_82559_ID] =
+            EEPROM_ID_VALID | EEPROM_ID_PM |
+            ((!s->dev.romfile || !s->dev.romfile[0]) ? EEPROM_ID_BD : 0);
+        eeprom_contents[EEPROM_SUBSYSTEM_ID] =
+            pci_get_word(s->dev.config + PCI_SUBSYSTEM_ID);
+        eeprom_contents[EEPROM_SUBSYSTEM_VENDOR_ID] =
+            pci_get_word(s->dev.config + PCI_SUBSYSTEM_VENDOR_ID);
+    } else {
+        eeprom_contents[EEPROM_CONTROLLER] = EEPROM_ID_VALID;
+        if (s->device == i82557B || s->device == i82557C) {
+            eeprom_contents[EEPROM_CONTROLLER] = 0x0100;
+        }
+        eeprom_contents[EEPROM_PHY_ID] = 1;
+    }
     uint16_t sum = 0;
     for (i = 0; i < EEPROM_SIZE - 1; i++) {
         sum += eeprom_contents[i];
@@ -602,23 +683,30 @@ static void nic_selective_reset(EEPRO100State * s)
     TRACE(EEPROM, logout("checksum=0x%04x\n", eeprom_contents[EEPROM_SIZE - 1]));
 
     memset(s->mem, 0, sizeof(s->mem));
+    eepro100_cu_reset_contexts(s);
     e100_write_reg4(s, SCBCtrlMDI, BIT(21));
 
     assert(sizeof(s->mdimem) == sizeof(eepro100_mdi_default));
     memcpy(&s->mdimem[0], &eepro100_mdi_default[0], sizeof(s->mdimem));
+    if (s->nic != NULL) {
+        eepro100_update_link_status(s, qemu_get_queue(s->nic)->link_down);
+    }
 }
 
 static void nic_reset(void *opaque)
 {
     EEPRO100State *s = opaque;
     TRACE(OTHER, logout("%p\n", s));
+    disable_interrupt(s);
+    s->scb_stat = 0;
     /* TODO: Clearing of hash register for selective reset, too? */
     memset(&s->mult[0], 0, sizeof(s->mult));
     nic_selective_reset(s);
+    s->cu_base = 0;
 }
 
 #if defined(DEBUG_EEPRO100)
-static const char * const e100_reg[PCI_IO_SIZE / 4] = {
+static const char * const e100_reg[PCI_IO_MAX_SIZE / 4] = {
     "Command/Status",
     "General Pointer",
     "Port",
@@ -632,7 +720,7 @@ static const char * const e100_reg[PCI_IO_SIZE / 4] = {
 static char *regname(uint32_t addr)
 {
     static char buf[32];
-    if (addr < PCI_IO_SIZE) {
+    if (addr < PCI_IO_MAX_SIZE) {
         const char *r = e100_reg[addr / 4];
         if (r != 0) {
             snprintf(buf, sizeof(buf), "%s+%u", r, addr % 4);
@@ -688,6 +776,63 @@ static void set_cu_state(EEPRO100State * s, cu_state_t state)
     s->mem[SCBStatus] = (s->mem[SCBStatus] & ~BITS(7, 6)) + (state << 6);
 }
 
+static E100CUContext *eepro100_cu_context(EEPRO100State *s,
+                                         cu_queue_t queue)
+{
+    return queue == cu_queue_lp ? &s->cu_lp : &s->cu_hp;
+}
+
+static E100CUContext *eepro100_cu_other_context(EEPRO100State *s,
+                                               cu_queue_t queue)
+{
+    return queue == cu_queue_lp ? &s->cu_hp : &s->cu_lp;
+}
+
+static bool eepro100_cu_any_active(EEPRO100State *s)
+{
+    return s->cu_lp.state == cu_queue_active ||
+           s->cu_hp.state == cu_queue_active;
+}
+
+static bool eepro100_cu_all_idle(EEPRO100State *s)
+{
+    return s->cu_lp.state == cu_queue_idle &&
+           s->cu_hp.state == cu_queue_idle;
+}
+
+static void eepro100_cu_consume_legacy_alias(EEPRO100State *s,
+                                             cu_queue_t queue)
+{
+    E100CUContext *context = eepro100_cu_context(s, queue);
+    E100CUContext *other = eepro100_cu_other_context(s, queue);
+
+    /* Legacy streams alias one saved offset to both queue contexts. */
+    if (context->state == cu_queue_suspended &&
+        other->state == cu_queue_suspended &&
+        !context->last_valid && !other->last_valid &&
+        context->next_offset == other->next_offset) {
+        memset(other, 0, sizeof(*other));
+    }
+}
+
+static void eepro100_cu_sync_status(EEPRO100State *s)
+{
+    bool lp_active = s->cu_lp.state == cu_queue_active;
+    bool hp_active = s->cu_hp.state == cu_queue_active;
+
+    assert(!(lp_active && hp_active));
+    if (lp_active) {
+        set_cu_state(s, cu_lpq_active);
+    } else if (hp_active) {
+        set_cu_state(s, cu_hqp_active);
+    } else if (s->cu_lp.state == cu_queue_suspended ||
+               s->cu_hp.state == cu_queue_suspended) {
+        set_cu_state(s, cu_suspended);
+    } else {
+        set_cu_state(s, cu_idle);
+    }
+}
+
 static ru_state_t get_ru_state(EEPRO100State * s)
 {
     return ((s->mem[SCBStatus] & BITS(5, 2)) >> 2);
@@ -725,14 +870,18 @@ static void dump_statistics(EEPRO100State * s)
 #endif
 }
 
-static void read_cb(EEPRO100State *s)
+static MemTxResult read_cb(EEPRO100State *s)
 {
-    pci_dma_read(&s->dev, s->cb_address, &s->tx, sizeof(s->tx));
+    MemTxResult result;
+
+    result = pci_dma_read(&s->dev, s->cb_address, &s->tx, sizeof(s->tx));
     s->tx.status = le16_to_cpu(s->tx.status);
     s->tx.command = le16_to_cpu(s->tx.command);
     s->tx.link = le32_to_cpu(s->tx.link);
     s->tx.tbd_array_addr = le32_to_cpu(s->tx.tbd_array_addr);
     s->tx.tcb_bytes = le16_to_cpu(s->tx.tcb_bytes);
+
+    return result;
 }
 
 static void tx_command(EEPRO100State *s)
@@ -837,21 +986,43 @@ static void set_multicast_list(EEPRO100State *s)
     }
 }
 
-static void action_command(EEPRO100State *s)
+static bool action_command(EEPRO100State *s, cu_queue_t queue)
 {
     const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
+    E100CUContext *context = eepro100_cu_context(s, queue);
     /* The loop below won't stop if it gets special handcrafted data.
        Therefore we limit the number of iterations. */
     unsigned max_loop_count = 16;
 
     for (;;) {
+        MemTxResult read_result;
+        uint32_t current_offset;
         bool bit_el;
         bool bit_s;
         bool bit_i;
         bool bit_nc;
+        uint16_t cb_status;
+        uint16_t cb_command;
+        uint32_t cb_link;
         uint16_t ok_status = STATUS_OK;
-        s->cb_address = s->cu_base + s->cu_offset;
-        read_cb(s);
+
+        if (max_loop_count-- == 0) {
+            /* Continue the command list in the next BH invocation. */
+            return true;
+        }
+
+        current_offset = context->next_offset;
+        s->cb_address = s->cu_base + current_offset;
+        read_result = read_cb(s);
+        if (read_result != MEMTX_OK) {
+            logout("failed to read CU command block at 0x%08x\n",
+                   s->cb_address);
+            /* Retain the active queue state after a DMA read failure. */
+            return true;
+        }
+        cb_status = s->tx.status;
+        cb_command = s->tx.command;
+        cb_link = s->tx.link;
         bit_el = ((s->tx.command & COMMAND_EL) != 0);
         bit_s = ((s->tx.command & COMMAND_S) != 0);
         bit_i = ((s->tx.command & COMMAND_I) != 0);
@@ -860,13 +1031,9 @@ static void action_command(EEPRO100State *s)
         bool bit_sf = ((s->tx.command & COMMAND_SF) != 0);
 #endif
 
-        if (max_loop_count-- == 0) {
-            /* Prevent an endless loop. */
-            logout("loop in %s:%u\n", __FILE__, __LINE__);
-            break;
-        }
-
-        s->cu_offset = s->tx.link;
+        context->last_offset = current_offset;
+        context->next_offset = cb_link;
+        context->last_valid = true;
         TRACE(OTHER,
               logout("val=(cu start), status=0x%04x, command=0x%04x, link=0x%08x\n",
                      s->tx.status, s->tx.command, s->tx.link));
@@ -881,6 +1048,7 @@ static void action_command(EEPRO100State *s)
         case CmdConfigure:
             pci_dma_read(&s->dev, s->cb_address + 8,
                          &s->configuration[0], sizeof(s->configuration));
+            eepro100_update_stats_size(s);
             TRACE(OTHER, logout("configuration: %s\n",
                                 nic_dump(&s->configuration[0], 16)));
             TRACE(OTHER, logout("configuration: %s\n",
@@ -917,20 +1085,40 @@ static void action_command(EEPRO100State *s)
             break;
         }
         /* Write new status. */
-        stw_le_pci_dma(&s->dev, s->cb_address,
-                       s->tx.status | ok_status | STATUS_C, attrs);
+        {
+            uint16_t completion_status =
+                s->tx.status | ok_status | STATUS_C;
+            MemTxResult write_result;
+
+            write_result = stw_le_pci_dma(&s->dev, s->cb_address,
+                                          completion_status, attrs);
+            if (trace_event_get_state_backends(TRACE_EEPRO100_CU_CB_DMA)) {
+                uint16_t readback = 0;
+                MemTxResult readback_result;
+
+                readback_result = lduw_le_pci_dma(&s->dev, s->cb_address,
+                                                  &readback, attrs);
+                trace_eepro100_cu_cb_dma(
+                    qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                    s->cb_address, cb_status, cb_command, cb_link,
+                    completion_status, read_result, write_result, readback,
+                    readback_result);
+            }
+        }
         if (bit_i) {
             /* CU completed action. */
             eepro100_cx_interrupt(s);
         }
         if (bit_el) {
             /* CU becomes idle. Terminate command loop. */
-            set_cu_state(s, cu_idle);
+            context->state = cu_queue_idle;
+            eepro100_cu_sync_status(s);
             eepro100_cna_interrupt(s);
             break;
         } else if (bit_s) {
             /* CU becomes suspended. Terminate command loop. */
-            set_cu_state(s, cu_suspended);
+            context->state = cu_queue_suspended;
+            eepro100_cu_sync_status(s);
             eepro100_cna_interrupt(s);
             break;
         } else {
@@ -938,44 +1126,149 @@ static void action_command(EEPRO100State *s)
             TRACE(OTHER, logout("CU list with at least one more entry\n"));
         }
     }
-    TRACE(OTHER, logout("CU list empty\n"));
-    /* List is empty. Now CU is idle or suspended. */
+    TRACE(OTHER, logout("CU command processing stopped\n"));
+    return false;
+}
+
+static void eepro100_cu_bh(void *opaque)
+{
+    EEPRO100State *s = opaque;
+    bool more = false;
+
+    if (!runstate_is_running()) {
+        return;
+    }
+    if (s->cu_lp.state == cu_queue_active) {
+        more = action_command(s, cu_queue_lp);
+    } else if (s->cu_hp.state == cu_queue_active) {
+        more = action_command(s, cu_queue_hp);
+    }
+    if (more) {
+        /* Leave a circular CBL active for the next BH invocation. */
+        qemu_bh_schedule_idle(s->cu_bh);
+    }
+}
+
+static void eepro100_vm_state_change(void *opaque, bool running,
+                                     RunState state)
+{
+    EEPRO100State *s = opaque;
+
+    if (!running) {
+        qemu_bh_cancel(s->cu_bh);
+    } else if (eepro100_cu_any_active(s)) {
+        qemu_bh_schedule(s->cu_bh);
+    }
+}
+
+static void eepro100_cu_start(EEPRO100State *s, cu_queue_t queue)
+{
+    E100CUContext *context = eepro100_cu_context(s, queue);
+
+    eepro100_cu_consume_legacy_alias(s, queue);
+    if (eepro100_cu_any_active(s)) {
+        /* CU Start while either queue is active is prohibited. */
+        logout("CU start while a queue is active\n");
+        return;
+    }
+
+    context->next_offset = e100_read_reg4(s, SCBPointer);
+    context->last_offset = 0;
+    context->last_valid = false;
+    context->state = cu_queue_active;
+    eepro100_cu_sync_status(s);
+    if (action_command(s, queue)) {
+        qemu_bh_schedule(s->cu_bh);
+    }
+}
+
+static bool eepro100_cu_resume_allowed(EEPRO100State *s,
+                                       E100CUContext *context)
+{
+    const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
+    uint32_t command_address;
+    uint16_t command;
+    MemTxResult result;
+
+    if (!context->last_valid) {
+        /* Legacy migration streams did not preserve the previous CB. */
+        return true;
+    }
+
+    command_address = s->cu_base + context->last_offset +
+                      offsetof(eepro100_tx_t, command);
+    result = lduw_le_pci_dma(&s->dev, command_address, &command, attrs);
+    if (result != MEMTX_OK) {
+        logout("failed to re-read the previous CU command\n");
+        return false;
+    }
+
+    /* Resume re-reads only S; the next offset remains the saved link. */
+    return !(command & COMMAND_S);
+}
+
+static void eepro100_cu_resume(EEPRO100State *s, cu_queue_t queue)
+{
+    E100CUContext *context = eepro100_cu_context(s, queue);
+    E100CUContext *other = eepro100_cu_other_context(s, queue);
+
+    if (context->state == cu_queue_idle) {
+        return;
+    }
+    eepro100_cu_consume_legacy_alias(s, queue);
+    if (other->state == cu_queue_active) {
+        logout("CU resume while the other queue is active\n");
+        return;
+    }
+    if (!eepro100_cu_resume_allowed(s, context)) {
+        context->state = cu_queue_suspended;
+        eepro100_cu_sync_status(s);
+        return;
+    }
+
+    context->state = cu_queue_active;
+    eepro100_cu_sync_status(s);
+    if (action_command(s, queue)) {
+        qemu_bh_schedule(s->cu_bh);
+    }
+}
+
+static void eepro100_cu_static_resume(EEPRO100State *s)
+{
+    /* The model accepts Static Resume only for a suspended LP queue. */
+    if (s->cu_lp.state == cu_queue_suspended) {
+        eepro100_cu_resume(s, cu_queue_lp);
+    }
 }
 
 static void eepro100_cu_command(EEPRO100State * s, uint8_t val)
 {
     const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
-    cu_state_t cu_state;
+    E100PCIDeviceInfo *info = eepro100_get_class(s);
+
     switch (val) {
     case CU_NOP:
         /* No operation. */
         break;
     case CU_START:
-        cu_state = get_cu_state(s);
-        if (cu_state != cu_idle && cu_state != cu_suspended) {
-            /* Intel documentation says that CU must be idle or suspended
-             * for the CU start command. */
-            logout("unexpected CU state is %u\n", cu_state);
+        eepro100_cu_start(s, cu_queue_lp);
+        break;
+    case CU_HP_START:
+        if (!info->has_priority_queues) {
+            logout("CU HPQ start is not supported by this controller\n");
+            break;
         }
-        set_cu_state(s, cu_active);
-        s->cu_offset = e100_read_reg4(s, SCBPointer);
-        action_command(s);
+        eepro100_cu_start(s, cu_queue_hp);
         break;
     case CU_RESUME:
-        if (get_cu_state(s) != cu_suspended) {
-            logout("bad CU resume from CU state %u\n", get_cu_state(s));
-            /* Workaround for bad Linux eepro100 driver which resumes
-             * from idle state. */
-#if 0
-            missing("cu resume");
-#endif
-            set_cu_state(s, cu_suspended);
+        eepro100_cu_resume(s, cu_queue_lp);
+        break;
+    case CU_HP_RESUME:
+        if (!info->has_priority_queues) {
+            logout("CU HPQ resume is not supported by this controller\n");
+            break;
         }
-        if (get_cu_state(s) == cu_suspended) {
-            TRACE(OTHER, logout("CU resuming\n"));
-            set_cu_state(s, cu_active);
-            action_command(s);
-        }
+        eepro100_cu_resume(s, cu_queue_hp);
         break;
     case CU_STATSADDR:
         /* Load dump counters address. */
@@ -984,9 +1277,6 @@ static void eepro100_cu_command(EEPRO100State * s, uint8_t val)
         if (s->statsaddr & 3) {
             /* Memory must be Dword aligned. */
             logout("unaligned dump counters address\n");
-            /* Handling of misaligned addresses is undefined.
-             * Here we align the address by ignoring the lower bits. */
-            /* TODO: Test unaligned dump counter address on real hardware. */
             s->statsaddr &= ~3;
         }
         break;
@@ -999,7 +1289,12 @@ static void eepro100_cu_command(EEPRO100State * s, uint8_t val)
     case CU_CMD_BASE:
         /* Load CU base. */
         TRACE(OTHER, logout("val=0x%02x (CU base address)\n", val));
-        s->cu_base = e100_read_reg4(s, SCBPointer);
+        if (eepro100_cu_all_idle(s)) {
+            s->cu_base = e100_read_reg4(s, SCBPointer);
+            eepro100_cu_reset_contexts(s);
+        } else {
+            logout("load CU base while a queue is not idle\n");
+        }
         break;
     case CU_DUMPSTATS:
         /* Dump and reset statistical counters. */
@@ -1010,7 +1305,11 @@ static void eepro100_cu_command(EEPRO100State * s, uint8_t val)
         break;
     case CU_SRESUME:
         /* CU static resume. */
-        missing("CU static resume");
+        if (!info->has_static_resume) {
+            logout("CU static resume is not supported by this controller\n");
+            break;
+        }
+        eepro100_cu_static_resume(s);
         break;
     default:
         missing("Undefined CU command");
@@ -1067,7 +1366,7 @@ static void eepro100_ru_command(EEPRO100State * s, uint8_t val)
 
 static void eepro100_write_command(EEPRO100State * s, uint8_t val)
 {
-    eepro100_ru_command(s, val & 0x0f);
+    eepro100_ru_command(s, val & 0x07);
     eepro100_cu_command(s, val & 0xf0);
     if ((val) == 0) {
         TRACE(OTHER, logout("val=0x%02x\n", val));
@@ -1235,7 +1534,8 @@ static void eepro100_write_mdi(EEPRO100State *s)
                 }
                 break;
             case 1:            /* Status Register */
-                s->mdimem[reg] |= 0x0020;
+                eepro100_update_link_status(
+                    s, qemu_get_queue(s->nic)->link_down);
                 break;
             case 2:            /* PHY Identification Register (Word 1) */
             case 3:            /* PHY Identification Register (Word 2) */
@@ -1296,10 +1596,14 @@ static void eepro100_write_port(EEPRO100State *s)
     case PORT_SELFTEST:
         TRACE(OTHER, logout("selftest address=0x%08x\n", address));
         eepro100_selftest_t data;
+        /* Self-test performs a selective reset before the test. */
+        nic_selective_reset(s);
         pci_dma_read(&s->dev, address, (uint8_t *) &data, sizeof(data));
         data.st_sign = 0xffffffff;
         data.st_result = 0;
         pci_dma_write(&s->dev, address, (uint8_t *) &data, sizeof(data));
+        /* It finishes with a software reset, which also clears CU base. */
+        nic_reset(s);
         break;
     case PORT_SELECTIVE_RESET:
         TRACE(OTHER, logout("selective reset, selftest address=0x%08x\n", address));
@@ -1391,6 +1695,9 @@ static uint16_t eepro100_read2(EEPRO100State * s, uint32_t addr)
         val = (uint16_t)(eepro100_read_mdi(s) >> (8 * (addr & 3)));
         TRACE(OTHER, logout("addr=%s val=0x%04x\n", regname(addr), val));
         break;
+    case SCBeepromSemaphore:
+        TRACE(OTHER, logout("addr=%s val=0x%04x\n", regname(addr), val));
+        break;
     default:
         logout("addr=%s val=0x%04x\n", regname(addr), val);
         missing("unknown word read");
@@ -1450,13 +1757,19 @@ static void eepro100_write1(EEPRO100State * s, uint32_t addr, uint8_t val)
         TRACE(OTHER, logout("addr=%s val=0x%02x\n", regname(addr), val));
         eepro100_write_command(s, val);
         break;
-    case SCBIntmask:
+    case SCBIntmask: {
+        bool intx_before = s->int_stat;
+
         TRACE(OTHER, logout("addr=%s val=0x%02x\n", regname(addr), val));
         if (val & BIT(1)) {
             eepro100_swi_interrupt(s);
         }
         eepro100_interrupt(s, 0);
+        trace_eepro100_scb_intmask(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
+                                  val, s->mem[SCBStatus], s->scb_stat,
+                                  intx_before, s->int_stat);
         break;
+    }
     case SCBPointer:
     case SCBPointer + 1:
     case SCBPointer + 2:
@@ -1537,6 +1850,9 @@ static void eepro100_write2(EEPRO100State * s, uint32_t addr, uint16_t val)
         TRACE(OTHER, logout("addr=%s val=0x%04x\n", regname(addr), val));
         eepro100_write_mdi(s);
         break;
+    case SCBeepromSemaphore:
+        TRACE(OTHER, logout("addr=%s val=0x%04x\n", regname(addr), val));
+        break;
     default:
         logout("addr=%s val=0x%04x\n", regname(addr), val);
         missing("unknown word write");
@@ -1576,13 +1892,22 @@ static uint64_t eepro100_read(void *opaque, hwaddr addr,
                               unsigned size)
 {
     EEPRO100State *s = opaque;
+    uint64_t value;
 
     switch (size) {
-    case 1: return eepro100_read1(s, addr);
-    case 2: return eepro100_read2(s, addr);
-    case 4: return eepro100_read4(s, addr);
+    case 1:
+        value = eepro100_read1(s, addr);
+        break;
+    case 2:
+        value = eepro100_read2(s, addr);
+        break;
+    case 4:
+        value = eepro100_read4(s, addr);
+        break;
     default: abort();
     }
+    trace_eepro100_io_read(addr, size, value);
+    return value;
 }
 
 static void eepro100_write(void *opaque, hwaddr addr,
@@ -1590,6 +1915,7 @@ static void eepro100_write(void *opaque, hwaddr addr,
 {
     EEPRO100State *s = opaque;
 
+    trace_eepro100_io_write(addr, size, data);
     switch (size) {
     case 1:
         eepro100_write1(s, addr, data);
@@ -1608,6 +1934,27 @@ static void eepro100_write(void *opaque, hwaddr addr,
 static const MemoryRegionOps eepro100_ops = {
     .read = eepro100_read,
     .write = eepro100_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static uint64_t eepro100_flash_read(void *opaque, hwaddr addr,
+                                    unsigned size)
+{
+    return 0;
+}
+
+static void eepro100_flash_write(void *opaque, hwaddr addr,
+                                 uint64_t data, unsigned size)
+{
+}
+
+static const MemoryRegionOps eepro100_flash_ops = {
+    .read = eepro100_flash_read,
+    .write = eepro100_flash_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+    .impl.min_access_size = 1,
+    .impl.max_access_size = 4,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
@@ -1766,9 +2113,75 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
     return size;
 }
 
+static void nic_link_status_changed(NetClientState *nc)
+{
+    EEPRO100State *s = qemu_get_nic_opaque(nc);
+
+    eepro100_update_link_status(s, nc->link_down);
+}
+
+static int eepro100_post_load(void *opaque, int version_id)
+{
+    EEPRO100State *s = opaque;
+    E100PCIDeviceInfo *info = eepro100_get_class(s);
+
+    if (version_id < 4) {
+        cu_state_t legacy_state = get_cu_state(s);
+
+        /* Older versions used one next offset and no queue-local state. */
+        s->cu_hp.next_offset = s->cu_lp.next_offset;
+        s->cu_lp.last_offset = 0;
+        s->cu_hp.last_offset = 0;
+        s->cu_lp.last_valid = false;
+        s->cu_hp.last_valid = false;
+        switch (legacy_state) {
+        case cu_idle:
+            s->cu_lp.state = cu_queue_idle;
+            s->cu_hp.state = cu_queue_idle;
+            break;
+        case cu_suspended:
+            /* The old stream cannot identify which queue was suspended. */
+            s->cu_lp.state = cu_queue_suspended;
+            s->cu_hp.state = info->has_priority_queues ?
+                             cu_queue_suspended : cu_queue_idle;
+            break;
+        case cu_lpq_active:
+            s->cu_lp.state = cu_queue_active;
+            s->cu_hp.state = cu_queue_idle;
+            break;
+        case cu_hqp_active:
+            if (info->has_priority_queues) {
+                s->cu_lp.state = cu_queue_idle;
+                s->cu_hp.state = cu_queue_active;
+            } else {
+                /* Version < 4 streams can encode HPQ-active i82557 state. */
+                s->cu_lp.state = cu_queue_active;
+                s->cu_hp.state = cu_queue_idle;
+            }
+            break;
+        default:
+            g_assert_not_reached();
+        }
+    } else if (s->cu_lp.state > cu_queue_active ||
+               s->cu_hp.state > cu_queue_active ||
+               (s->cu_lp.state == cu_queue_active &&
+                s->cu_hp.state == cu_queue_active) ||
+               (!info->has_priority_queues &&
+                s->cu_hp.state != cu_queue_idle)) {
+        return -EINVAL;
+    }
+    eepro100_cu_sync_status(s);
+    eepro100_update_stats_size(s);
+    if (eepro100_cu_any_active(s)) {
+        qemu_bh_schedule(s->cu_bh);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_eepro100 = {
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 2,
+    .post_load = eepro100_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(dev, EEPRO100State),
         VMSTATE_UNUSED(32),
@@ -1782,10 +2195,16 @@ static const VMStateDescription vmstate_eepro100 = {
         VMSTATE_UNUSED(19*4),
         VMSTATE_UINT16_ARRAY(mdimem, EEPRO100State, 32),
         /* The eeprom should be saved and restored by its own routines. */
-        VMSTATE_UINT32(device, EEPRO100State),
-        /* TODO check device. */
+        VMSTATE_UINT32_EQUAL(device, EEPRO100State),
         VMSTATE_UINT32(cu_base, EEPRO100State),
-        VMSTATE_UINT32(cu_offset, EEPRO100State),
+        VMSTATE_UINT32(cu_lp.next_offset, EEPRO100State),
+        VMSTATE_UINT32_V(cu_hp.next_offset, EEPRO100State, 4),
+        VMSTATE_UINT32_V(cu_lp.last_offset, EEPRO100State, 4),
+        VMSTATE_UINT32_V(cu_hp.last_offset, EEPRO100State, 4),
+        VMSTATE_UINT8_V(cu_lp.state, EEPRO100State, 4),
+        VMSTATE_UINT8_V(cu_hp.state, EEPRO100State, 4),
+        VMSTATE_BOOL_V(cu_lp.last_valid, EEPRO100State, 4),
+        VMSTATE_BOOL_V(cu_hp.last_valid, EEPRO100State, 4),
         VMSTATE_UINT32(ru_base, EEPRO100State),
         VMSTATE_UINT32(ru_offset, EEPRO100State),
         VMSTATE_UINT32(statsaddr, EEPRO100State),
@@ -1821,8 +2240,12 @@ static void pci_nic_uninit(PCIDevice *pci_dev)
 {
     EEPRO100State *s = DO_UPCAST(EEPRO100State, dev, pci_dev);
 
+    qemu_unregister_reset(nic_reset, s);
+    disable_interrupt(s);
     vmstate_unregister(VMSTATE_IF(&pci_dev->qdev), s->vmstate, s);
     g_free(s->vmstate);
+    qemu_del_vm_change_state_handler(s->cu_vmstate);
+    qemu_bh_delete(s->cu_bh);
     eeprom93xx_free(&pci_dev->qdev, s->eeprom);
     qemu_del_nic(s->nic);
 }
@@ -1831,6 +2254,7 @@ static NetClientInfo net_eepro100_info = {
     .type = NET_CLIENT_DRIVER_NIC,
     .size = sizeof(NICState),
     .receive = nic_receive,
+    .link_status_changed = nic_link_status_changed,
 };
 
 static void e100_nic_realize(PCIDevice *pci_dev, Error **errp)
@@ -1842,6 +2266,20 @@ static void e100_nic_realize(PCIDevice *pci_dev, Error **errp)
     TRACE(OTHER, logout("\n"));
 
     s->device = info->device;
+
+    /* Apply machine-specific PCI identity overrides. */
+    if (s->pci_revision_override != UINT8_MAX) {
+        pci_config_set_revision(pci_dev->config,
+                                s->pci_revision_override);
+    }
+    if (s->pci_subsystem_vendor_override != UINT16_MAX) {
+        pci_set_word(pci_dev->config + PCI_SUBSYSTEM_VENDOR_ID,
+                     s->pci_subsystem_vendor_override);
+    }
+    if (s->pci_subsystem_override != UINT16_MAX) {
+        pci_set_word(pci_dev->config + PCI_SUBSYSTEM_ID,
+                     s->pci_subsystem_override);
+    }
 
     e100_pci_reset(s, &local_err);
     if (local_err) {
@@ -1856,14 +2294,20 @@ static void e100_nic_realize(PCIDevice *pci_dev, Error **errp)
     /* Handler for memory-mapped I/O */
     memory_region_init_io(&s->mmio_bar, OBJECT(s), &eepro100_ops, s,
                           "eepro100-mmio", PCI_MEM_SIZE);
-    pci_register_bar(&s->dev, 0, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->mmio_bar);
+    pci_register_bar(&s->dev, 0,
+                     info->bar->mem_prefetch ?
+                     PCI_BASE_ADDRESS_MEM_PREFETCH : 0,
+                     &s->mmio_bar);
     memory_region_init_io(&s->io_bar, OBJECT(s), &eepro100_ops, s,
-                          "eepro100-io", PCI_IO_SIZE);
+                          "eepro100-io", info->bar->io_size);
     pci_register_bar(&s->dev, 1, PCI_BASE_ADDRESS_SPACE_IO, &s->io_bar);
-    /* FIXME: flash aliases to mmio?! */
-    memory_region_init_io(&s->flash_bar, OBJECT(s), &eepro100_ops, s,
-                          "eepro100-flash", PCI_FLASH_SIZE);
-    pci_register_bar(&s->dev, 2, 0, &s->flash_bar);
+    if (info->bar->flash_size) {
+        /* Flash storage is not implemented. */
+        memory_region_init_io(&s->flash_bar, OBJECT(s),
+                              &eepro100_flash_ops, s, "eepro100-flash",
+                              info->bar->flash_size);
+        pci_register_bar(&s->dev, 2, 0, &s->flash_bar);
+    }
 
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
     logout("macaddr: %s\n", nic_dump(&s->conf.macaddr.a[0], 6));
@@ -1874,6 +2318,11 @@ static void e100_nic_realize(PCIDevice *pci_dev, Error **errp)
                           object_get_typename(OBJECT(pci_dev)),
                           pci_dev->qdev.id,
                           &pci_dev->qdev.mem_reentrancy_guard, s);
+    s->cu_bh = qemu_bh_new_guarded(eepro100_cu_bh, s,
+                                   &DEVICE(pci_dev)->mem_reentrancy_guard);
+    s->cu_vmstate = qdev_add_vm_change_state_handler(
+        DEVICE(pci_dev), eepro100_vm_state_change, NULL, s);
+    eepro100_update_link_status(s, qemu_get_queue(s->nic)->link_down);
 
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
     TRACE(OTHER, logout("%s\n", qemu_get_queue(s->nic)->info_str));
@@ -1893,19 +2342,47 @@ static void eepro100_instance_init(Object *obj)
                                   DEVICE(s));
 }
 
+static const E100PCIBarInfo e100_bar_prefetch_32_1m = {
+    .io_size = 32,
+    .flash_size = 1 * MiB,
+    .mem_prefetch = true,
+};
+
+static const E100PCIBarInfo e100_bar_nonprefetch_64_1m = {
+    .io_size = 64,
+    .flash_size = 1 * MiB,
+};
+
+static const E100PCIBarInfo e100_bar_nonprefetch_64_128k = {
+    .io_size = 64,
+    .flash_size = 128 * KiB,
+};
+
+static const E100PCIBarInfo e100_bar_prefetch_64_128k = {
+    .io_size = 64,
+    .flash_size = 128 * KiB,
+    .mem_prefetch = true,
+};
+
+static const E100PCIBarInfo e100_bar_nonprefetch_64 = {
+    .io_size = 64,
+};
+
 static E100PCIDeviceInfo e100_devices[] = {
     {
         .name = "i82550",
         .desc = "Intel i82550 Ethernet",
         .device = i82550,
-        /* TODO: check device id. */
-        .device_id = PCI_DEVICE_ID_INTEL_82551IT,
+        .device_id = PCI_DEVICE_ID_INTEL_82557,
         /* Revision ID: 0x0c, 0x0d, 0x0e. */
         .revision = 0x0e,
+        .bar = &e100_bar_nonprefetch_64_128k,
         /* TODO: check size of statistical counters. */
         .stats_size = 80,
         /* TODO: check extended tcb support. */
         .has_extended_tcb_support = true,
+        .has_priority_queues = true,
+        .has_static_resume = true,
         .power_management = true,
     },{
         .name = "i82551",
@@ -1914,9 +2391,12 @@ static E100PCIDeviceInfo e100_devices[] = {
         .device_id = PCI_DEVICE_ID_INTEL_82551IT,
         /* Revision ID: 0x0f, 0x10. */
         .revision = 0x0f,
+        .bar = &e100_bar_nonprefetch_64_128k,
         /* TODO: check size of statistical counters. */
         .stats_size = 80,
         .has_extended_tcb_support = true,
+        .has_priority_queues = true,
+        .has_static_resume = true,
         .power_management = true,
     },{
         .name = "i82557a",
@@ -1924,6 +2404,7 @@ static E100PCIDeviceInfo e100_devices[] = {
         .device = i82557A,
         .device_id = PCI_DEVICE_ID_INTEL_82557,
         .revision = 0x01,
+        .bar = &e100_bar_prefetch_32_1m,
         .power_management = false,
     },{
         .name = "i82557b",
@@ -1931,6 +2412,7 @@ static E100PCIDeviceInfo e100_devices[] = {
         .device = i82557B,
         .device_id = PCI_DEVICE_ID_INTEL_82557,
         .revision = 0x02,
+        .bar = &e100_bar_prefetch_32_1m,
         .power_management = false,
     },{
         .name = "i82557c",
@@ -1938,6 +2420,7 @@ static E100PCIDeviceInfo e100_devices[] = {
         .device = i82557C,
         .device_id = PCI_DEVICE_ID_INTEL_82557,
         .revision = 0x03,
+        .bar = &e100_bar_prefetch_32_1m,
         .power_management = false,
     },{
         .name = "i82558a",
@@ -1945,8 +2428,11 @@ static E100PCIDeviceInfo e100_devices[] = {
         .device = i82558A,
         .device_id = PCI_DEVICE_ID_INTEL_82557,
         .revision = 0x04,
+        .bar = &e100_bar_prefetch_32_1m,
         .stats_size = 76,
         .has_extended_tcb_support = true,
+        .has_priority_queues = true,
+        .has_static_resume = true,
         .power_management = true,
     },{
         .name = "i82558b",
@@ -1954,8 +2440,11 @@ static E100PCIDeviceInfo e100_devices[] = {
         .device = i82558B,
         .device_id = PCI_DEVICE_ID_INTEL_82557,
         .revision = 0x05,
+        .bar = &e100_bar_prefetch_32_1m,
         .stats_size = 76,
         .has_extended_tcb_support = true,
+        .has_priority_queues = true,
+        .has_static_resume = true,
         .power_management = true,
     },{
         .name = "i82559a",
@@ -1963,8 +2452,11 @@ static E100PCIDeviceInfo e100_devices[] = {
         .device = i82559A,
         .device_id = PCI_DEVICE_ID_INTEL_82557,
         .revision = 0x06,
+        .bar = &e100_bar_nonprefetch_64_1m,
         .stats_size = 80,
         .has_extended_tcb_support = true,
+        .has_priority_queues = true,
+        .has_static_resume = true,
         .power_management = true,
     },{
         .name = "i82559b",
@@ -1972,25 +2464,27 @@ static E100PCIDeviceInfo e100_devices[] = {
         .device = i82559B,
         .device_id = PCI_DEVICE_ID_INTEL_82557,
         .revision = 0x07,
+        .bar = &e100_bar_nonprefetch_64_1m,
         .stats_size = 80,
         .has_extended_tcb_support = true,
+        .has_priority_queues = true,
+        .has_static_resume = true,
         .power_management = true,
     },{
         .name = "i82559c",
         .desc = "Intel i82559C Ethernet",
         .device = i82559C,
         .device_id = PCI_DEVICE_ID_INTEL_82557,
-#if 0
         .revision = 0x08,
-#endif
-        /* TODO: Windows wants revision id 0x0c. */
-        .revision = 0x0c,
+        .bar = &e100_bar_nonprefetch_64_128k,
 #if EEPROM_SIZE > 0
         .subsystem_vendor_id = PCI_VENDOR_ID_INTEL,
         .subsystem_id = 0x0040,
 #endif
         .stats_size = 80,
         .has_extended_tcb_support = true,
+        .has_priority_queues = true,
+        .has_static_resume = true,
         .power_management = true,
     },{
         .name = "i82559er",
@@ -1998,8 +2492,11 @@ static E100PCIDeviceInfo e100_devices[] = {
         .device = i82559ER,
         .device_id = PCI_DEVICE_ID_INTEL_82551IT,
         .revision = 0x09,
+        .bar = &e100_bar_prefetch_64_128k,
         .stats_size = 80,
         .has_extended_tcb_support = true,
+        .has_priority_queues = true,
+        .has_static_resume = true,
         .power_management = true,
     },{
         .name = "i82562",
@@ -2009,8 +2506,11 @@ static E100PCIDeviceInfo e100_devices[] = {
         .device_id = PCI_DEVICE_ID_INTEL_82551IT,
         /* TODO: wrong revision id. */
         .revision = 0x0e,
+        .bar = &e100_bar_nonprefetch_64,
         .stats_size = 80,
         .has_extended_tcb_support = true,
+        .has_priority_queues = true,
+        .has_static_resume = true,
         .power_management = true,
     },{
         /* Toshiba Tecra 8200. */
@@ -2019,8 +2519,11 @@ static E100PCIDeviceInfo e100_devices[] = {
         .device = i82801,
         .device_id = 0x2449,
         .revision = 0x03,
+        .bar = &e100_bar_nonprefetch_64,
         .stats_size = 80,
         .has_extended_tcb_support = true,
+        .has_priority_queues = true,
+        .has_static_resume = true,
         .power_management = true,
     }
 };
@@ -2055,6 +2558,14 @@ static E100PCIDeviceInfo *eepro100_get_class(EEPRO100State *s)
 
 static const Property e100_properties[] = {
     DEFINE_NIC_PROPERTIES(EEPRO100State, conf),
+    DEFINE_PROP_UINT8("x-pci-revision", EEPRO100State,
+                      pci_revision_override, UINT8_MAX),
+    DEFINE_PROP_UINT16("x-pci-subsystem-vendor-id", EEPRO100State,
+                       pci_subsystem_vendor_override, UINT16_MAX),
+    DEFINE_PROP_UINT16("x-pci-subsystem-id", EEPRO100State,
+                       pci_subsystem_override, UINT16_MAX),
+    DEFINE_PROP_UINT16("x-eeprom-compatibility", EEPRO100State,
+                       eeprom_compatibility, 0x0203),
 };
 
 static void eepro100_class_init(ObjectClass *klass, const void *data)
