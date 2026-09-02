@@ -39,6 +39,10 @@
 #include "hw/ide/pci.h"
 #include "hw/input/i8042.h"
 #include "hw/acpi/acpi.h"
+#ifdef CONFIG_IA64_VPC_STORAGE
+#include "hw/scsi/isp12160.h"
+#include "hw/scsi/scsi.h"
+#endif
 #ifdef CONFIG_IA64_VPC_AUDIO
 #include "hw/audio/cs4281.h"
 #endif
@@ -166,6 +170,8 @@
  * includes each adapter's Flash aperture) and below the graphics
  * framebuffer at IA64_PCI_MMIO_BASE + 0x02000000.
  */
+#define IA64_ISP12160_IO_BASE    0x0000c500U
+#define IA64_ISP12160_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01820000ULL)
 #define IA64_CS4281_BA0_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01800000ULL)
 #define IA64_CS4281_BA1_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01810000ULL)
 /*
@@ -489,6 +495,7 @@ struct IA64VpcMachineState {
     bool i8042_enabled;
     bool ahci_enabled;
     bool audio_enabled;
+    bool isp_enabled;
     bool fw_relocate;
     uint64_t fw_map_quirk_disable;
     bool ide_enabled;
@@ -534,6 +541,7 @@ struct IA64VpcMachineState {
     PCIBus *mercury_bus;            /* zx1: the Mercury second root bus         */
     PCIDevice *ahci_dev;
     PCIDevice *audio_dev;
+    PCIDevice *isp_dev;
     PCIDevice *ide_dev;
     PCIDevice *ohci_dev;
     PCIDevice *uhci_dev;
@@ -2137,6 +2145,31 @@ static void ia64_vpc_set_audio(Object *obj, bool value, Error **errp)
     s->audio_enabled = value;
 }
 
+static bool ia64_vpc_get_isp(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->isp_enabled;
+}
+
+static void ia64_vpc_set_isp(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+#ifndef CONFIG_IA64_VPC_STORAGE
+    if (value) {
+        error_setg(errp, "SCSI support is not present in this build");
+        return;
+    }
+#else
+    (void)errp;
+#endif
+
+    s->isp_enabled = value;
+}
+
 static bool ia64_vpc_get_ide(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -2903,6 +2936,22 @@ static void ia64_vpc_configure_audio(PCIDevice *pci_dev)
                              PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER, 2);
 }
 
+static void ia64_vpc_configure_isp(PCIDevice *pci_dev)
+{
+    if (pci_dev == NULL) {
+        return;
+    }
+
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
+                             IA64_ISP12160_IO_BASE |
+                             PCI_BASE_ADDRESS_SPACE_IO, 4);
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
+                             IA64_ISP12160_MMIO_PCI_BASE, 4);
+    pci_default_write_config(pci_dev, PCI_COMMAND,
+                             PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
+                             PCI_COMMAND_MASTER, 2);
+}
+
 static void ia64_vpc_configure_ohci(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
@@ -3279,6 +3328,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
 {
     ia64_vpc_configure_ahci(s->ahci_dev);
     ia64_vpc_configure_audio(s->audio_dev);
+    ia64_vpc_configure_isp(s->isp_dev);
     ia64_vpc_configure_ohci(s->ohci_dev);
     ia64_vpc_configure_uhci(s->uhci_dev);
     ia64_vpc_configure_lsi(s->lsi_dev);
@@ -3290,6 +3340,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     }
     ia64_vpc_configure_pci_irq(s->ahci_dev);
     ia64_vpc_configure_pci_irq(s->audio_dev);
+    ia64_vpc_configure_pci_irq(s->isp_dev);
     ia64_vpc_configure_pci_irq(s->ide_dev);
     ia64_vpc_configure_pci_irq(s->ohci_dev);
     ia64_vpc_configure_pci_irq(s->uhci_dev);
@@ -5053,6 +5104,22 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
 
     /*
+     * The i2000's SCSI host bus adapter is a QLogic 12160, for which both
+     * XP and Server 2003 ship an in-box driver (ql12160.sys, matched on
+     * PCI\VEN_1077&DEV_1216&SUBSYS_00071077).  Off by default for the same
+     * reason as audio, and created before it so the ordering is fixed.
+     */
+#ifdef CONFIG_IA64_VPC_STORAGE
+    if (s->isp_enabled) {
+        s->isp_dev = pci_create_simple(pci_bus, -1, TYPE_ISP12160_SCSI);
+        ia64_vpc_configure_isp(s->isp_dev);
+        scsi_bus_legacy_handle_cmdline(
+            SCSI_BUS(qdev_get_child_bus(DEVICE(s->isp_dev),
+                                        "isp12160-scsi.0")));
+    }
+#endif
+
+    /*
      * The real i2000 carries a CS4281 codec on its I/O board, so audio=on
      * models a device the platform actually had.  It is off by default:
      * adding a PCI function changes what an installed guest enumerates, and
@@ -5140,6 +5207,7 @@ static void ia64_vpc_machine_instance_init(Object *obj)
      */
     s->ahci_enabled = false;
     s->audio_enabled = false;
+    s->isp_enabled = false;
     s->ide_enabled = false;
     s->firmware_ide_dma = true;
 #endif
@@ -5242,6 +5310,11 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_set_i8042);
     object_class_property_set_description(oc, "i8042",
         "Set on/off to enable/disable the i8042 PS/2 controller");
+    object_class_property_add_bool(oc, "isp",
+                                   ia64_vpc_get_isp,
+                                   ia64_vpc_set_isp);
+    object_class_property_set_description(oc, "isp",
+        "Add the QLogic ISP12160 SCSI controller (default off)");
     object_class_property_add_bool(oc, "audio",
                                    ia64_vpc_get_audio,
                                    ia64_vpc_set_audio);

@@ -820,6 +820,68 @@ static void test_sba_ioc_identity(void)
  * QEMU_BUILD_BUG_ON in hw/ia64/ia64_mercury.c.)
  */
 /*
+ * QLogic ISP12160.  Both XP and Server 2003 match their in-box ql12160.sys
+ * on PCI\VEN_1077&DEV_1216&SUBSYS_00071077, so the identity has to be
+ * exact.  The mailbox handshake is the first thing that driver does.
+ */
+#define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x01820000ULL)
+#define IA64_ISP_SLOT           7U
+#define IA64_ISP_REG_ISTATUS    0x0aU
+#define IA64_ISP_REG_SEMAPHORE  0x0cU
+#define IA64_ISP_REG_MAILBOX0   0x70U
+#define IA64_ISP_REG_HOST_CMD   0xc0U
+#define IA64_ISP_HC_SET_HOST_INT   0x5000U
+#define IA64_ISP_HC_CLEAR_RISC_INT 0x7000U
+#define IA64_ISP_ISTATUS_RISC_INT  0x0004U
+#define IA64_ISP_SEMAPHORE_LOCK    0x0001U
+#define IA64_ISP_MBC_NO_OP         0x0000U
+#define IA64_ISP_MBS_COMMAND_COMPLETE 0x4000U
+
+static void test_isp12160_mailbox(void)
+{
+    const uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                         ((uint64_t)IA64_ISP_SLOT << 15);
+    QTestState *qts = qtest_init("-machine 460gx,isp=on -cpu merced "
+                                 "-m 256M -S");
+    unsigned int i;
+
+    g_assert_cmphex(qtest_readl(qts, cfg), ==, 0x12161077);
+    g_assert_cmphex(qtest_readl(qts, cfg + PCI_SUBSYSTEM_VENDOR_ID), ==,
+                    0x00071077);
+
+    /* A NOP through the mailbox completes and raises the RISC interrupt. */
+    qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_MAILBOX0,
+                 IA64_ISP_MBC_NO_OP);
+    qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_HOST_CMD,
+                 IA64_ISP_HC_SET_HOST_INT);
+    for (i = 0; i < 1000; i++) {
+        if (qtest_readw(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_SEMAPHORE) &
+            IA64_ISP_SEMAPHORE_LOCK) {
+            break;
+        }
+    }
+    g_assert_cmphex(qtest_readw(qts, IA64_ISP_MMIO_BASE +
+                                IA64_ISP_REG_SEMAPHORE) &
+                    IA64_ISP_SEMAPHORE_LOCK, ==, IA64_ISP_SEMAPHORE_LOCK);
+    g_assert_cmphex(qtest_readw(qts, IA64_ISP_MMIO_BASE +
+                                IA64_ISP_REG_MAILBOX0), ==,
+                    IA64_ISP_MBS_COMMAND_COMPLETE);
+    g_assert_cmphex(qtest_readw(qts, IA64_ISP_MMIO_BASE +
+                                IA64_ISP_REG_ISTATUS) &
+                    IA64_ISP_ISTATUS_RISC_INT, ==,
+                    IA64_ISP_ISTATUS_RISC_INT);
+
+    /* Releasing the semaphore and acknowledging clears the interrupt. */
+    qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_SEMAPHORE, 0);
+    qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_HOST_CMD,
+                 IA64_ISP_HC_CLEAR_RISC_INT);
+    g_assert_cmphex(qtest_readw(qts, IA64_ISP_MMIO_BASE +
+                                IA64_ISP_REG_ISTATUS) &
+                    IA64_ISP_ISTATUS_RISC_INT, ==, 0);
+    qtest_quit(qts);
+}
+
+/*
  * CS4281 audio.  The real i2000 I/O board carries this codec, so the
  * machine can add it with audio=on.  Walk the bring-up a driver performs:
  * release the sound-power reset, start the clock, wait for the AC '97 link
@@ -4044,6 +4106,8 @@ int main(int argc, char **argv)
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
                    test_eepro100_eeprom_map);
+    qtest_add_func("/ia64-vpc/scsi/isp12160-mailbox",
+                   test_isp12160_mailbox);
     qtest_add_func("/ia64-vpc/audio/cs4281-codec",
                    test_cs4281_codec_access);
     qtest_add_func("/ia64-vpc/ohci/port-resume", test_ohci_port_resume);

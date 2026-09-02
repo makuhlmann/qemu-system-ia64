@@ -1,3 +1,11 @@
+# isp12160.c
+isp12160_mailbox(void *dev, uint16_t mb0, uint16_t mb1, uint16_t mb2, uint16_t mb3, uint16_t mb4, uint16_t mb5, uint16_t mb6, uint16_t mb7, uint16_t status) "dev %p command 0x%04x words [%04x %04x %04x %04x %04x %04x %04x] status 0x%04x"
+isp12160_queue_index(void *dev, unsigned int queue, uint16_t value, bool accepted, uint16_t producer, uint16_t consumer) "dev %p queue %u value %u accepted %d producer %u consumer %u"
+isp12160_iocb_request(void *dev, uint16_t consumer, uint16_t producer, uint8_t type, uint8_t count, uint32_t handle) "dev %p consumer %u producer %u type 0x%02x count %u handle 0x%08x"
+isp12160_iocb_command(void *dev, uint32_t handle, uint8_t channel, uint8_t target, uint8_t lun, uint8_t opcode, uint16_t control, uint16_t segments, uint64_t transfer) "dev %p handle 0x%08x channel %u target %u lun %u opcode 0x%02x control 0x%04x segments %u transfer %" PRIu64
+isp12160_iocb_rejected(void *dev, uint32_t handle, const char *reason) "dev %p handle 0x%08x reason %s"
+isp12160_iocb_status(void *dev, uint32_t handle, uint16_t completion, uint16_t state, uint32_t residual) "dev %p handle 0x%08x completion 0x%04x state 0x%04x residual %u"
+
 # See docs/devel/tracing.rst for syntax documentation.
 
 # scsi-bus.c

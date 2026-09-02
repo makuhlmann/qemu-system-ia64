@@ -49,6 +49,7 @@ config IA64_VPC_STORAGE
     select AHCI_ICH9
     select IDE_CMD646
     select LSI_SCSI_PCI
+    select ISP12160
 
 config IA64_VPC_USB
     bool

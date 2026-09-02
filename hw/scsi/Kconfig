@@ -18,6 +18,11 @@ config MPTSAS_SCSI_PCI
     depends on PCI
     select SCSI
 
+config ISP12160
+    bool
+    depends on PCI
+    select SCSI
+
 config MEGASAS_SCSI_PCI
     bool
     default y if PCI_DEVICES
