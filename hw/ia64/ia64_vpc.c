@@ -4293,6 +4293,36 @@ static const MemoryRegionOps ia64_realfw_cfg_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+/*
+ * Seed one 460GX chipset function's PCI header.  Subsystem ids repeat the
+ * vendor and device id, as the real parts report, and DEVSEL timing is
+ * medium.  The rest of the function's config space stays read/write
+ * scratch.
+ */
+static void ia64_vpc_init_realfw_chipset_identity(IA64VpcMachineState *s,
+                                                  uint8_t dev, uint8_t fn,
+                                                  uint16_t device_id,
+                                                  uint8_t revision,
+                                                  uint16_t class_id,
+                                                  bool multifunction)
+{
+    uint8_t *cfg = ia64_realfw_chipset_cfg(s, 0, dev, fn);
+
+    if (cfg == NULL) {
+        return;
+    }
+    stw_le_p(cfg + PCI_VENDOR_ID, PCI_VENDOR_ID_INTEL);
+    stw_le_p(cfg + PCI_DEVICE_ID, device_id);
+    stw_le_p(cfg + PCI_STATUS, PCI_STATUS_DEVSEL_MEDIUM);
+    cfg[PCI_REVISION_ID] = revision;
+    stw_le_p(cfg + PCI_CLASS_DEVICE, class_id);
+    stw_le_p(cfg + PCI_SUBSYSTEM_VENDOR_ID, PCI_VENDOR_ID_INTEL);
+    stw_le_p(cfg + PCI_SUBSYSTEM_ID, device_id);
+    if (multifunction) {
+        cfg[PCI_HEADER_TYPE] = PCI_HEADER_TYPE_MULTI_FUNCTION;
+    }
+}
+
 static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s)
 {
     uint8_t *mac_a;
@@ -4303,6 +4333,35 @@ static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s)
         memset(s->realfw_chipset_cfg, 0, IA64_REALFW_CFG_SIZE);
     }
     s->realfw_config_address = 0;
+    /*
+     * The chipset's own functions carry their real identities.  Without
+     * them a firmware config read of the SAC, SDC or expander returns a
+     * zero vendor id, which is neither "present" nor the architected
+     * "absent" 0xffff.  Device ids, revisions and classes per the 460GX
+     * SSDM Table 2-1 and upstream's intel_460gx_chipset.c (fda8a29);
+     * expander device numbers per plans/sdv-i2000-firmware-reference.md,
+     * which places expander port n at bus CBN device 10h + n.
+     */
+    ia64_vpc_init_realfw_chipset_identity(s, 0x00, 0, 0x84e0, 0x03,
+                                          PCI_CLASS_BRIDGE_HOST, true);
+    ia64_vpc_init_realfw_chipset_identity(s, 0x01, 0, 0x84e0, 0x03,
+                                          PCI_CLASS_BRIDGE_HOST, false);
+    ia64_vpc_init_realfw_chipset_identity(s, 0x04, 0, 0x84e1, 0x03,
+                                          PCI_CLASS_BRIDGE_HOST, false);
+    /*
+     * Expander port 0 is the PXB, which hosts the compatibility bus.  Its
+     * function 0 is the downstream SAC; function 1 is the bridge itself.
+     * Function 0 register 40h is also where the firmware programs CBN
+     * (observed; see ia64_realfw_chipset_cfg), so only the header is
+     * seeded here.
+     */
+    ia64_vpc_init_realfw_chipset_identity(s, IA64_REALFW_CBN_DEV, 0,
+                                          0x84e0, 0x03,
+                                          PCI_CLASS_BRIDGE_HOST, true);
+    ia64_vpc_init_realfw_chipset_identity(s, IA64_REALFW_CBN_DEV, 1,
+                                          0x84cb, 0x05,
+                                          PCI_CLASS_BRIDGE_HOST, false);
+
     /*
      * Memory Card A (dev 05h fn 0) claims presence with the MAC identity
      * (8086:84E3, rev B-1 = 03h; pci.ids, flagged unverified in

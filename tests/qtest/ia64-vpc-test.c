@@ -637,6 +637,15 @@ static void test_acpi_reset_register(void)
     qtest_quit(qts);
 }
 
+static uint64_t read_handoff_i8042(QTestState *qts)
+{
+    IA64VpcHandoff handoff;
+
+    qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
+    g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
+    return le64_to_cpu(handoff.I8042Enabled);
+}
+
 static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
                                     uint64_t cpus, uint64_t nvram,
                                     uint64_t sockets, uint64_t cores,
@@ -1680,6 +1689,91 @@ static void test_nvram_commit_and_restart(void)
  * image; qtest never runs the CPU, so mapping and content are the contract
  * under test.
  */
+/*
+ * In realfw mode the 460GX chipset answers CF8/CFC configuration cycles for
+ * its own functions on bus CBN.  Each one must report its real identity:
+ * a zero vendor id is neither "present" nor the architected "absent"
+ * 0xffff, so firmware probing the chipset cannot tell what it found.
+ */
+#define IA64_REALFW_CF8         0x0cf8U
+#define IA64_REALFW_CFC         0x0cfcU
+
+static uint32_t realfw_cfg_readl(QTestState *qts, uint8_t dev, uint8_t fn,
+                                 uint8_t reg)
+{
+    qtest_writel(qts, IA64_LEGACY_IO_BASE +
+                 ia64_sparse_io_offset(IA64_REALFW_CF8),
+                 0x80000000U | ((uint32_t)dev << 11) |
+                 ((uint32_t)fn << 8) | reg);
+    return qtest_readl(qts, IA64_LEGACY_IO_BASE +
+                       ia64_sparse_io_offset(IA64_REALFW_CFC));
+}
+
+static void test_realfw_chipset_identity(void)
+{
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *path = NULL;
+    g_autofree char *quoted_path = NULL;
+    g_autofree uint8_t *image = NULL;
+    const uint64_t image_size = 0x20000;
+    const uint64_t base = 0x100000000ULL - image_size;
+    const uint64_t fit_addr = base + 0x10000;
+    const uint64_t sale_addr = base + 0x8000;
+    g_autoptr(GError) error = NULL;
+    QTestState *qts;
+
+    tmpdir = g_dir_make_tmp("ia64-vpc-realfw-XXXXXX", &error);
+    g_assert_no_error(error);
+    path = g_build_filename(tmpdir, "flash.bin", NULL);
+    quoted_path = g_shell_quote(path);
+    image = g_malloc0(image_size);
+    memset(image, 0xff, image_size);
+    memcpy(image + (fit_addr - base), "_FIT_   ", 8);
+    stq_le_p(image + (fit_addr - base) + 8, 0x0100000000000010ULL);
+    stq_le_p(image + image_size - 32, (1ULL << 63) | fit_addr);
+    stq_le_p(image + image_size - 24, (1ULL << 63) | sale_addr);
+    g_assert_true(g_file_set_contents(path, (char *)image, image_size,
+                                      &error));
+
+    qts = qtest_initf("-machine 460gx,realfw=%s -m 256M -S", quoted_path);
+
+    /* SAC at device 00h and 01h, SDC at 04h, Memory Card A at 05h. */
+    g_assert_cmphex(realfw_cfg_readl(qts, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0x84e08086);
+    g_assert_cmphex(realfw_cfg_readl(qts, 0x01, 0, PCI_VENDOR_ID), ==,
+                    0x84e08086);
+    g_assert_cmphex(realfw_cfg_readl(qts, 0x04, 0, PCI_VENDOR_ID), ==,
+                    0x84e18086);
+    g_assert_cmphex(realfw_cfg_readl(qts, 0x05, 0, PCI_VENDOR_ID), ==,
+                    0x84e38086);
+
+    /* Expander port 0: downstream SAC at function 0, the PXB at function 1. */
+    g_assert_cmphex(realfw_cfg_readl(qts, 0x10, 0, PCI_VENDOR_ID), ==,
+                    0x84e08086);
+    g_assert_cmphex(realfw_cfg_readl(qts, 0x10, 1, PCI_VENDOR_ID), ==,
+                    0x84cb8086);
+
+    /* Class code and revision travel in the same dword. */
+    g_assert_cmphex(realfw_cfg_readl(qts, 0x00, 0, PCI_REVISION_ID), ==,
+                    0x06000003);
+    g_assert_cmphex(realfw_cfg_readl(qts, 0x10, 1, PCI_REVISION_ID), ==,
+                    0x06000005);
+
+    /* Multifunction devices say so; single-function ones do not. */
+    g_assert_cmphex(realfw_cfg_readl(qts, 0x00, 0, PCI_CACHE_LINE_SIZE) &
+                    0x00800000, ==, 0x00800000);
+    g_assert_cmphex(realfw_cfg_readl(qts, 0x04, 0, PCI_CACHE_LINE_SIZE) &
+                    0x00800000, ==, 0);
+
+    /* The IFB the firmware scans bus 0 for is still where it was. */
+    g_assert_cmphex(realfw_cfg_readl(qts, 0x1e, 0, PCI_VENDOR_ID), ==,
+                    0x76008086);
+
+    qtest_quit(qts);
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
 static void test_realfw_flash_window(void)
 {
     g_autofree char *tmpdir = NULL;
@@ -4106,6 +4200,8 @@ int main(int argc, char **argv)
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
                    test_eepro100_eeprom_map);
+    qtest_add_func("/ia64-vpc/realfw/chipset-identity",
+                   test_realfw_chipset_identity);
     qtest_add_func("/ia64-vpc/scsi/isp12160-mailbox",
                    test_isp12160_mailbox);
     qtest_add_func("/ia64-vpc/audio/cs4281-codec",
