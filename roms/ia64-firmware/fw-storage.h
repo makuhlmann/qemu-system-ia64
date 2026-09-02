@@ -131,6 +131,8 @@ typedef struct {
     UINT8  present;      /* 1=channel I/O bases configured */
 } IDE_CONFIG;
 #define PCI_CLASS_REVISION_OFFSET     0x08U
+/* Programming interface; for IDE, bits 0 and 2 select native-mode channels. */
+#define PCI_CFG_CLASS_PROG_OFFSET     0x09U
 #define PCI_CFG_COMMAND_OFFSET        0x04U
 #define PCI_CFG_COMMAND_IO_SPACE      0x0001U
 #define PCI_CFG_COMMAND_MEMORY_SPACE  0x0002U

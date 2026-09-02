@@ -256,6 +256,17 @@ static BOOLEAN ide_find_pci_controller(PCI_DEVICE_LOCATION *Location)
     return 0;
 }
 
+/*
+ * The fixed ports an IDE channel decodes in compatibility mode, in I/O BAR
+ * form so they flow through the same address decoding as a programmed BAR.
+ */
+static const UINT32 ide_legacy_data_bar[IDE_CHANNEL_COUNT] = {
+    0x000001F1U, 0x00000171U,
+};
+static const UINT32 ide_legacy_ctrl_bar[IDE_CHANNEL_COUNT] = {
+    0x000003F5U, 0x00000375U,
+};
+
 static BOOLEAN ide_configure_channels_from_pci(void)
 {
     static const UINT8 bar_offset[5] = {
@@ -264,6 +275,7 @@ static BOOLEAN ide_configure_channels_from_pci(void)
     };
     PCI_DEVICE_LOCATION location;
     UINT32 bar[5];
+    UINT8 prog_if;
     UINT64 base;
     UINT64 bmdma_base = 0;
     UINT16 command;
@@ -281,10 +293,28 @@ static BOOLEAN ide_configure_channels_from_pci(void)
         return 0;
     }
 
+    /*
+     * Bits 0 and 2 of the programming interface say whether the primary and
+     * secondary channels are in native mode.  A channel in compatibility mode
+     * -- which is how the 82468GX I/O and Firmware Bridge's IDE function
+     * ships -- decodes the fixed legacy ports and ignores its BARs entirely,
+     * so it must be addressed there and not through BAR values that read back
+     * as zero.
+     */
+    prog_if = (UINT8)pci_config_read_value(0, location.Bus, location.Device,
+                                           location.Function,
+                                           PCI_CFG_CLASS_PROG_OFFSET, 1);
+
     for (i = 0; i < 5; i++) {
         bar[i] = (UINT32)pci_config_read_value(0, location.Bus, location.Device,
                                                location.Function,
                                                bar_offset[i], 4);
+    }
+    for (ch = 0; ch < IDE_CHANNEL_COUNT; ch++) {
+        if (!(prog_if & (1U << (ch * 2)))) {
+            bar[ch * 2] = ide_legacy_data_bar[ch];
+            bar[ch * 2 + 1] = ide_legacy_ctrl_bar[ch];
+        }
     }
 
     /*
@@ -300,7 +330,21 @@ static BOOLEAN ide_configure_channels_from_pci(void)
         bar[2] = PCI_IDE_DATA1_BAR;
         bar[3] = PCI_IDE_CTRL1_BAR;
         bar[4] = PCI_IDE_BMDMA_BAR;
+        /*
+         * Only a native-mode primary can reach this, but its secondary may
+         * still be in compatibility mode, so put that channel's fixed ports
+         * back after the blanket assignment above.
+         */
+        for (ch = 0; ch < IDE_CHANNEL_COUNT; ch++) {
+            if (!(prog_if & (1U << (ch * 2)))) {
+                bar[ch * 2] = ide_legacy_data_bar[ch];
+                bar[ch * 2 + 1] = ide_legacy_ctrl_bar[ch];
+            }
+        }
         for (i = 0; i < 5; i++) {
+            if (i < 4 && !(prog_if & (1U << ((i / 2) * 2)))) {
+                continue;   /* compatibility-mode channel: BARs are ignored */
+            }
             pci_config_write_value(0, location.Bus, location.Device,
                                    location.Function, bar_offset[i], 4, bar[i]);
         }

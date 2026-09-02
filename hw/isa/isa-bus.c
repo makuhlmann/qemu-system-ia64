@@ -29,6 +29,17 @@ static ISABus *isabus;
 
 static char *isabus_get_fw_dev_path(DeviceState *dev);
 
+static ISABus *isa_bus_create(DeviceState *owner,
+                              MemoryRegion *address_space,
+                              MemoryRegion *address_space_io)
+{
+    ISABus *bus = ISA_BUS(qbus_new(TYPE_ISA_BUS, owner, NULL));
+
+    bus->address_space = address_space;
+    bus->address_space_io = address_space_io;
+    return bus;
+}
+
 static void isa_bus_class_init(ObjectClass *klass, const void *data)
 {
     BusClass *k = BUS_CLASS(klass);
@@ -63,15 +74,24 @@ ISABus *isa_bus_new(DeviceState *dev, MemoryRegion* address_space,
         dev = bridge;
     }
 
-    isabus = ISA_BUS(qbus_new(TYPE_ISA_BUS, dev, NULL));
-    isabus->address_space = address_space;
-    isabus->address_space_io = address_space_io;
+    isabus = isa_bus_create(dev, address_space, address_space_io);
 
     if (bridge) {
         sysbus_realize_and_unref(SYS_BUS_DEVICE(bridge), &error_fatal);
     }
 
     return isabus;
+}
+
+ISABus *isa_bus_new_non_default(DeviceState *owner,
+                                MemoryRegion *address_space,
+                                MemoryRegion *address_space_io)
+{
+    assert(owner);
+    assert(address_space);
+    assert(address_space_io);
+
+    return isa_bus_create(owner, address_space, address_space_io);
 }
 
 void isa_bus_register_input_irqs(ISABus *bus, qemu_irq *irqs_in)
@@ -94,8 +114,9 @@ qemu_irq isa_bus_get_irq(ISABus *bus, unsigned irqnum)
  */
 qemu_irq isa_get_irq(ISADevice *dev, unsigned isairq)
 {
-    assert(!dev || ISA_BUS(qdev_get_parent_bus(DEVICE(dev))) == isabus);
-    return isa_bus_get_irq(isabus, isairq);
+    ISABus *bus = dev ? isa_bus_from_device(dev) : isabus;
+
+    return isa_bus_get_irq(bus, isairq);
 }
 
 void isa_connect_gpio_out(ISADevice *isadev, int gpioirq, unsigned isairq)
@@ -136,9 +157,11 @@ int isa_register_portio_list(ISADevice *dev,
                              const MemoryRegionPortio *pio_start,
                              void *opaque, const char *name)
 {
+    ISABus *bus = dev ? isa_bus_from_device(dev) : isabus;
+
     assert(piolist && !piolist->owner);
 
-    if (!isabus) {
+    if (!bus) {
         return -ENODEV;
     }
 
@@ -148,7 +171,7 @@ int isa_register_portio_list(ISADevice *dev,
     isa_init_ioport(dev, start);
 
     portio_list_init(piolist, OBJECT(dev), pio_start, opaque, name);
-    portio_list_add(piolist, isa_address_space_io(dev), start);
+    portio_list_add(piolist, bus->address_space_io, start);
 
     return 0;
 }

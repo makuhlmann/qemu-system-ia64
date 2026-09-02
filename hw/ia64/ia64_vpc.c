@@ -38,6 +38,7 @@
 #include "hw/ide/ide-dev.h"
 #include "hw/ide/pci.h"
 #include "hw/input/i8042.h"
+#include "hw/southbridge/intel_82468gx.h"
 #include "hw/acpi/acpi.h"
 #ifdef CONFIG_IA64_VPC_STORAGE
 #include "hw/scsi/isp12160.h"
@@ -189,6 +190,12 @@
  * (IA64_E1000_IO_BASE plus MAX_NICS * IA64_NIC_IO_STRIDE), which a second
  * adapter would otherwise overlap.
  */
+/*
+ * The south bridge's SMBus host controller.  The real SDV firmware programs
+ * this BAR to 0xFFF0 and drives the board's sensor chips through it
+ * (plans/phase5 SESSION 8), so use the same base here.
+ */
+#define IA64_IFB_SMBUS_IO_BASE   0x0000fff0U
 #define IA64_ISP12160_IO_BASE    0x0000cc00U
 #define IA64_ISP12160_MMIO_PCI_BASE (IA64_WXB1_MMIO_PCI_BASE + 0x00000000ULL)
 #define IA64_CS4281_BA0_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01800000ULL)
@@ -573,6 +580,7 @@ struct IA64VpcMachineState {
     PCIDevice *ide_dev;
     PCIDevice *ohci_dev;
     PCIDevice *uhci_dev;
+    Intel82468GXIFBState *ifb;
     PCIDevice *lsi_dev;
     PCIDevice *vga_dev;
     PCIDevice *nic_devs[MAX_NICS];
@@ -2655,15 +2663,22 @@ static const VMStateDescription vmstate_ia64_vpc = {
 static uint64_t ia64_vpc_lsapic_read(void *opaque, hwaddr addr,
                                        unsigned size)
 {
-    (void)opaque;
+    IA64VpcMachineState *s = opaque;
 
     if (addr == IA64_PIB_INTA_OFFSET && size == 1) {
         /*
          * Interrupt-acknowledge byte.  When an ExtINT is delivered (IVR reads
          * 0) firmware reads this location to run the INTA cycle against the
-         * external 8259 PIC and obtain the real 8-bit vector.  The PIC exists
-         * only in realfw mode; without it the cycle reads back 0.
+         * external 8259 PIC and obtain the real 8-bit vector.  The PIC is the
+         * pair inside the south bridge where the platform has one; failing
+         * that, the machine-wide legacy PIC.  With neither, the cycle reads
+         * back 0.
          */
+        if (s != NULL && s->ifb != NULL) {
+            int vector = intel_82468gx_ifb_pic_read_irq(s->ifb);
+
+            return vector < 0 ? 0 : (uint64_t)vector;
+        }
         if (isa_pic != NULL) {
             return pic_read_irq(isa_pic);
         }
@@ -3030,6 +3045,18 @@ static void ia64_vpc_configure_uhci(PCIDevice *pci_dev)
                              PCI_COMMAND_IO | PCI_COMMAND_MASTER, 2);
 }
 
+static void ia64_vpc_configure_ifb_smbus(PCIDevice *pci_dev)
+{
+    if (pci_dev == NULL) {
+        return;
+    }
+
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_4,
+                             IA64_IFB_SMBUS_IO_BASE |
+                             PCI_BASE_ADDRESS_SPACE_IO, 4);
+    pci_default_write_config(pci_dev, PCI_COMMAND, PCI_COMMAND_IO, 2);
+}
+
 static void ia64_vpc_configure_lsi(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
@@ -3385,6 +3412,8 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_isp(s->isp_dev);
     ia64_vpc_configure_ohci(s->ohci_dev);
     ia64_vpc_configure_uhci(s->uhci_dev);
+    ia64_vpc_configure_ifb_smbus(
+        intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
     ia64_vpc_configure_lsi(s->lsi_dev);
     ia64_vpc_configure_vga(s->vga_dev,
                            s->realfw_path != NULL ? IA64_VGA_IO_BASE_REALFW
@@ -3401,6 +3430,10 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_pci_irq(s->ide_dev);
     ia64_vpc_configure_pci_irq(s->ohci_dev);
     ia64_vpc_configure_pci_irq(s->uhci_dev);
+    ia64_vpc_configure_pci_irq(
+        intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_IDE_FUNCTION));
+    ia64_vpc_configure_pci_irq(
+        intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
     ia64_vpc_configure_pci_irq_on_root(
         s->lsi_dev,
         ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
@@ -3589,6 +3622,23 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
     s->ohci_dev = pci_create_simple(pci_bus, -1, "pci-ohci");
     ia64_vpc_configure_ohci(s->ohci_dev);
 
+    /*
+     * The UHCI controller is function 2 of the south bridge on 460gx, so it
+     * already exists by the time this runs; zx1 still gets a discrete one.
+     */
+    if (s->ifb != NULL) {
+        s->uhci_dev = intel_82468gx_ifb_function(s->ifb,
+                                                 IA64_460GX_IFB_USB_FUNCTION);
+        if (s->uhci_dev == NULL) {
+            error_setg(errp, "%s did not create its USB function",
+                       TYPE_INTEL_82468GX_IFB);
+            return false;
+        }
+    } else {
+        s->uhci_dev = pci_create_simple(pci_bus, -1, TYPE_PIIX3_USB_UHCI);
+    }
+    ia64_vpc_configure_uhci(s->uhci_dev);
+
     add_default_input = defaults_enabled() && !s->i8042_enabled;
     if (add_default_input) {
         /*
@@ -3596,19 +3646,18 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
          * become QEMU's active input handler, which would otherwise hide
          * firmware-visible PS/2 input before a guest USB stack exists.  Use
          * an absolute pointer so graphical front ends do not require a
-         * relative-pointer grab.
+         * relative-pointer grab.  Name the OHCI's bus rather than resolving
+         * the only USB bus in the machine: with the south bridge's UHCI
+         * present there is more than one.
          */
-        usb_bus = USB_BUS(object_resolve_type_unambiguous(TYPE_USB_BUS,
-                                                          errp));
+        usb_bus = USB_BUS(QLIST_FIRST(&DEVICE(s->ohci_dev)->child_bus));
         if (usb_bus == NULL) {
+            error_setg(errp, "the OHCI controller has no USB bus");
             return false;
         }
         usb_create_simple(usb_bus, "usb-kbd");
         usb_create_simple(usb_bus, "usb-tablet");
     }
-
-    s->uhci_dev = pci_create_simple(pci_bus, -1, TYPE_PIIX3_USB_UHCI);
-    ia64_vpc_configure_uhci(s->uhci_dev);
     return true;
 }
 #endif
@@ -4553,6 +4602,11 @@ static void ia64_vpc_realfw_extint(void *opaque, int n, int level)
  * realfw mode and wire PIT OUT0 straight into 8259 IR0, independent of the
  * IOSAPIC-backed ISA IRQ inputs the rest of the machine uses.
  */
+/*
+ * realfw mode models the chipset itself, south bridge included, so it carries
+ * its own PIC rather than the one inside the modelled 82468GX (which that mode
+ * does not create -- see the south-bridge comment in ia64_vpc_build).
+ */
 static void ia64_vpc_init_realfw_pic(IA64VpcMachineState *s, ISABus *isa_bus)
 {
     qemu_irq *pic_irqs;
@@ -5133,14 +5187,66 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
 #endif
 
-    isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, errp);
-    if (isa_bus == NULL) {
-        return false;
+    /*
+     * The i2000's south bridge is the Intel 82468GX I/O and Firmware Bridge
+     * at 00:03, a four-function device: LPC/ISA, IDE, UHCI and SMBus.  Its
+     * function 0 owns the ISA bus and the 8259 pair, so on 460gx the legacy
+     * devices below hang off the bridge that carries them on the board
+     * rather than off a bus with no parent.  Each of the sixteen ISA
+     * interrupt inputs drives both that PIC and the matching Programmable
+     * Interrupt Device input, which is how they reach the guest: an IA-64
+     * guest runs the SAPIC, and the PIC is there for the real SDV firmware
+     * (and for the PC/AT-compatible flag our MADT already sets).
+     *
+     * zx1 is a different platform with a different south bridge, so it keeps
+     * the parentless ISA bus until it gets one of its own.
+     *
+     * realfw mode keeps it too: that path replaces the whole chipset with the
+     * shadow config space in ia64_vpc_init_realfw_chipset_cfg(), which models
+     * an IFB of its own (at device 1Eh, where the SDV firmware's bus scan
+     * happens to find it).  Two models of one chip on one bus is incoherent,
+     * and converging them means re-validating the real firmware's POST, so
+     * that belongs to plans/phase5-real-firmware-boot.md rather than here.
+     */
+    if (!ia64_vpc_chipset_is_zx1(s) && s->realfw_path == NULL) {
+        s->ifb = intel_82468gx_ifb_create(
+            pci_bus, PCI_DEVFN(IA64_460GX_IFB_SLOT,
+                               IA64_460GX_IFB_LPC_FUNCTION), errp);
+        if (s->ifb == NULL) {
+            return false;
+        }
+        for (i = 0; i < INTEL_82468GX_IFB_FUNCTIONS; i++) {
+            PCIDevice *fn = intel_82468gx_ifb_function(s->ifb, i);
+
+            if (fn == NULL) {
+                error_setg(errp, "%s did not create function %d",
+                           TYPE_INTEL_82468GX_IFB, i);
+                return false;
+            }
+            /*
+             * A chipset part carries no subsystem identity, so leave those
+             * registers at zero rather than at the PCI bus default.
+             */
+            pci_set_word(fn->config + PCI_SUBSYSTEM_VENDOR_ID, 0);
+            pci_set_word(fn->config + PCI_SUBSYSTEM_ID, 0);
+        }
+        isa_bus = intel_82468gx_ifb_isa_bus(s->ifb);
+        for (i = 0; i < ISA_NUM_IRQS; i++) {
+            s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
+            qdev_connect_gpio_out_named(DEVICE(s->ifb),
+                                        INTEL_82468GX_IFB_GPIO_ISA_IRQ, i,
+                                        s->isa_irqs[i]);
+        }
+    } else {
+        isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, errp);
+        if (isa_bus == NULL) {
+            return false;
+        }
+        for (i = 0; i < ISA_NUM_IRQS; i++) {
+            s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
+        }
+        isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
     }
-    for (i = 0; i < ISA_NUM_IRQS; i++) {
-        s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
-    }
-    isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
     if (s->realfw_path != NULL) {
         ia64_vpc_init_realfw_pic(s, isa_bus);
     }

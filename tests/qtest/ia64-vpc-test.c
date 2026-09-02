@@ -1867,6 +1867,37 @@ static void check_root_window_containment(const char *args)
     qtest_quit(qts);
 }
 
+/*
+ * The south bridge carries an 8259 pair, as the real 82468GX does, and the
+ * processor reaches it through the interrupt-acknowledge byte in the
+ * Processor Interrupt Block.  An IA-64 guest runs the SAPIC and never uses
+ * it, but the real SDV firmware does, and the MADT already claims a
+ * PC/AT-compatible interrupt space.  With the pair initialized and no
+ * interrupt pending, the INTA cycle returns the master's spurious vector.
+ *
+ * The pair belongs to the bridge, not to the machine: it must answer without
+ * realfw mode, and zx1 -- which models no south bridge yet -- must not
+ * answer at all.
+ */
+static void test_460gx_south_bridge_pic(void)
+{
+    const uint64_t pic_cmd = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x20);
+    const uint64_t pic_data = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x21);
+    const uint64_t inta = 0xfefe0000ULL;
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+
+    qtest_writeb(qts, pic_cmd, 0x11);   /* ICW1: cascade, ICW4 to follow */
+    qtest_writeb(qts, pic_data, 0x08);  /* ICW2: interrupt vector base 8 */
+    qtest_writeb(qts, pic_data, 0x04);  /* ICW3: slave cascaded on IR2 */
+    qtest_writeb(qts, pic_data, 0x01);  /* ICW4: 8086 mode */
+    g_assert_cmphex(qtest_readb(qts, inta), ==, 0x0f);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(qtest_readb(qts, inta), ==, 0x00);
+    qtest_quit(qts);
+}
+
 static void test_460gx_root_window_containment(void)
 {
     /*
@@ -2117,9 +2148,9 @@ static void test_ahci_off(void)
     QTestState *qts = ia64_vpc_start("-machine ahci=off");
     QGenericPCIBus gbus;
     /*
-     * Bus 0 after the i2000 relocation: USB at 2 and 3 and the 82559 at 5.
-     * Graphics went to the GXB root and the SCSI HBA to WXB0; device 4 is
-     * the audio slot, filled only with audio=on.
+     * Bus 0 after the i2000 relocation: the OHCI at 2, the south bridge at 3
+     * and the 82559 at 5.  Graphics went to the GXB root and the SCSI HBA to
+     * WXB0; device 4 is the audio slot, filled only with audio=on.
      */
     static const unsigned int kept_slots[] = { 2, 3, 5 };
     unsigned i;
@@ -2176,13 +2207,28 @@ static void test_pci_default_layout(void)
             .command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
             .irq_line = 18, .irq_pin = 1,
             .bars = { [0] = 0xee010000 },
-        }, {
-            .slot = 3, .vendor = 0x8086, .device = 0x7020,
-            .command = PCI_COMMAND_IO | PCI_COMMAND_MASTER,
-            .irq_line = 18, .irq_pin = 4,
-            .bars = { [4] = 0x0000c121 },
         },
         expected_i82557b,
+    };
+    /*
+     * The south bridge is the 82468GX I/O and Firmware Bridge at 00:03: a
+     * four-function device carrying the LPC/ISA bridge, the IDE controller,
+     * the UHCI host controller and the SMBus controller.  Chipset parts have
+     * no subsystem identity.  The UHCI keeps the I/O base and interrupt the
+     * discrete PIIX3 function had, so nothing else in the map moves.
+     */
+    static const struct {
+        unsigned int function;
+        uint16_t device;
+        uint16_t class_id;
+        uint32_t bar4;
+        uint8_t irq_line;
+        uint8_t irq_pin;
+    } ifb_functions[] = {
+        { 0, 0x7600, PCI_CLASS_BRIDGE_ISA, 0, 0, 0 },
+        { 1, 0x7601, PCI_CLASS_STORAGE_IDE, 0x00000001, 0, 0 },
+        { 2, 0x7602, PCI_CLASS_SERIAL_USB, 0x0000c121, 18, 4 },
+        { 3, 0x7603, PCI_CLASS_SERIAL_SMBUS, 0x0000fff1, 16, 2 },
     };
     /*
      * The SCSI HBA is at 01:00.0 on the first WXB root -- the seat the board
@@ -2244,6 +2290,30 @@ static void test_pci_default_layout(void)
         g_assert_cmphex(qtest_readl(qts, cfg + wxb0_scsi[i].reg), ==,
                         wxb0_scsi[i].value);
     }
+    for (i = 0; i < G_N_ELEMENTS(ifb_functions); i++) {
+        QPCIDevice *fn = qpci_device_find(
+            &gbus.bus, QPCI_DEVFN(IA64_460GX_IFB_SLOT,
+                                  ifb_functions[i].function));
+
+        g_assert_nonnull(fn);
+        g_assert_cmphex(qpci_config_readw(fn, PCI_VENDOR_ID), ==,
+                        PCI_VENDOR_ID_INTEL);
+        g_assert_cmphex(qpci_config_readw(fn, PCI_DEVICE_ID), ==,
+                        ifb_functions[i].device);
+        g_assert_cmphex(qpci_config_readw(fn, PCI_CLASS_DEVICE), ==,
+                        ifb_functions[i].class_id);
+        g_assert_cmphex(qpci_config_readw(fn, PCI_SUBSYSTEM_VENDOR_ID),
+                        ==, 0);
+        g_assert_cmphex(qpci_config_readw(fn, PCI_SUBSYSTEM_ID), ==, 0);
+        g_assert_cmphex(qpci_config_readl(fn, PCI_BASE_ADDRESS_4), ==,
+                        ifb_functions[i].bar4);
+        g_assert_cmpuint(qpci_config_readb(fn, PCI_INTERRUPT_PIN), ==,
+                         ifb_functions[i].irq_pin);
+        g_assert_cmpuint(qpci_config_readb(fn, PCI_INTERRUPT_LINE), ==,
+                         ifb_functions[i].irq_line);
+        g_free(fn);
+    }
+
     {
         QGenericPCIBus wxb0;
         QPCIDevice *lsi;
@@ -4478,6 +4548,8 @@ int main(int argc, char **argv)
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
                    test_eepro100_eeprom_map);
+    qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-pic",
+                   test_460gx_south_bridge_pic);
     qtest_add_func("/ia64-vpc/pci/460gx-root-window-containment",
                    test_460gx_root_window_containment);
     qtest_add_func("/ia64-vpc/pci/460gx-expander-roots",

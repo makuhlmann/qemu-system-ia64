@@ -68,6 +68,12 @@ struct PICCommonState {
     uint32_t elcr_addr;
     MemoryRegion base_io;
     MemoryRegion elcr_io;
+    /*
+     * The slave this master cascades to.  Construction topology, set by
+     * i8259_init_pair() and not migrated: a machine may hold more than one
+     * master/slave pair, so the association cannot be a global.
+     */
+    PICCommonState *cascade_slave;
 };
 
 void pic_reset_common(PICCommonState *s);

@@ -41,6 +41,7 @@
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qom/object.h"
+#include "hw/southbridge/intel_82468gx.h"
 #include "hcd-uhci.h"
 
 #define FRAME_TIMER_FREQ 1000
@@ -314,8 +315,19 @@ static void uhci_reset(DeviceState *dev)
 
     pci_conf = s->dev.config;
 
-    pci_conf[0x6a] = 0x01; /* usb clock */
+    pci_conf[0x6a] =
+        pci_get_word(pci_conf + PCI_DEVICE_ID) ==
+        INTEL_82468GX_IFB_USB_DEVICE_ID ? 0x00 : 0x01;
     pci_conf[0x6b] = 0x00;
+    if (pci_get_word(pci_conf + PCI_DEVICE_ID) ==
+        INTEL_82468GX_IFB_USB_DEVICE_ID) {
+        pci_set_word(pci_conf + PCI_COMMAND, 0);
+        pci_set_word(pci_conf + PCI_STATUS, 0x0280);
+        pci_conf[PCI_LATENCY_TIMER] = 0;
+        pci_conf[USB_SBRN] = USB_RELEASE_1;
+        pci_set_word(pci_conf + 0xc0, 0x2000);
+        pci_conf[0xc4] = 0;
+    }
     s->cmd = 0;
     s->status = UHCI_STS_HCHALTED;
     s->status2 = 0;
@@ -1233,6 +1245,32 @@ void usb_uhci_common_realize(PCIDevice *dev, Error **errp)
     pci_register_bar(&s->dev, 4, PCI_BASE_ADDRESS_SPACE_IO, &s->io_bar);
 }
 
+static void ifb_uhci_realize(PCIDevice *dev, Error **errp)
+{
+    uint32_t bar_wmask;
+
+    usb_uhci_common_realize(dev, errp);
+    if (errp && *errp) {
+        return;
+    }
+
+    bar_wmask = pci_get_long(dev->wmask + PCI_BASE_ADDRESS_4);
+    memset(dev->wmask, 0, pci_config_size(dev));
+    memset(dev->w1cmask, 0, pci_config_size(dev));
+    pci_set_word(dev->wmask + PCI_COMMAND, BIT(2) | BIT(0));
+    pci_set_word(dev->w1cmask + PCI_STATUS,
+                 BIT(13) | BIT(12) | BIT(11));
+    dev->wmask[PCI_LATENCY_TIMER] = 0xf0;
+    pci_set_long(dev->wmask + PCI_BASE_ADDRESS_4, bar_wmask);
+    dev->wmask[PCI_INTERRUPT_LINE] = 0xff;
+    dev->wmask[0x6a] = BIT(1);
+    dev->wmask[0x6b] = 0;
+    pci_set_word(dev->wmask + 0xc0, 0x20bf);
+    pci_set_word(dev->w1cmask + 0xc0, 0x8f00);
+    dev->wmask[0xc4] = 0x03;
+    uhci_reset(DEVICE(dev));
+}
+
 static void usb_uhci_exit(PCIDevice *dev)
 {
     UHCIState *s = UHCI(dev);
@@ -1372,6 +1410,15 @@ static UHCIInfo uhci_info[] = {
         .revision  = 0x03,
         .irq_pin   = 2,
         .unplug    = false,
+    },{
+        .name      = TYPE_INTEL_82468GX_IFB_USB,
+        .vendor_id = INTEL_82468GX_IFB_VENDOR_ID,
+        .device_id = INTEL_82468GX_IFB_USB_DEVICE_ID,
+        .revision  = 0x00,
+        .irq_pin   = 3,
+        .realize   = ifb_uhci_realize,
+        .unplug    = true,
+        .notuser   = true,
     }
 };
 

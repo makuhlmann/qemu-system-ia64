@@ -608,6 +608,13 @@ static UINT32 mHighMonotonicCount;
 
 typedef struct _EFI_PCI_IO_PROTOCOL EFI_PCI_IO_PROTOCOL;
 
+/*
+ * USB host controller identities: the discrete PIIX3 function zx1 carries,
+ * and function 2 of the i2000's 82468GX I/O and Firmware Bridge.
+ */
+#define FW_PCI_PIIX3_UHCI_ID 0x70208086U
+#define FW_PCI_IFB_UHCI_ID   0x76028086U
+
 typedef struct FW_PCI_IO_DEVICE {
     EFI_HANDLE *Handle;
     EFI_PCI_IO_PROTOCOL *Protocol;
@@ -660,7 +667,7 @@ static EFI_HANDLE mTcgHandle;
 EFI_HANDLE mStorageDriverHandle;
 static EFI_HANDLE mArchitecturalHandle;
 #define FW_PCI_IO_DEVICE_COUNT 6U
-static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT];
+static FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT];
 EFI_LOADED_IMAGE_PROTOCOL mLoadedImageProto;
 static IA64_FPSWA_INTERFACE mFpswaProto;
 static EFI_LOADED_IMAGE_PROTOCOL mFpswaLoadedImageProto;
@@ -9336,7 +9343,7 @@ static EFI_PCI_IO_PROTOCOL mPciUhciIoProto;
 static EFI_PCI_IO_PROTOCOL mPciLsiIoProto;
 static EFI_PCI_IO_PROTOCOL mPciVgaIoProto;
 
-static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
+static FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     {
         &mPciIdeHandle, &mPciIdeIoProto, &mPciIdeDevicePath,
         0, 0, 0, FW_PCI_IDE_ATTRIBUTES, PCI_IDE_CMD646_ID,
@@ -9354,7 +9361,7 @@ static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     },
     {
         &mPciUhciHandle, &mPciUhciIoProto, &mPciUhciDevicePath,
-        0, 3, 0, FW_PCI_UHCI_ATTRIBUTES, 0x70208086U,
+        0, 3, 0, FW_PCI_UHCI_ATTRIBUTES, FW_PCI_PIIX3_UHCI_ID,
         4, 0x0000c121U, 0x20, "UHCI", 1,
     },
     {
@@ -13927,9 +13934,35 @@ static void fw_retarget_vga_device_paths(void)
     mConsoleOutputDevicePath.Graphics.Pci.Device = device;
 }
 
+/*
+ * The USB host controller is function 2 of the 82468GX I/O and Firmware
+ * Bridge on the i2000, not a discrete PIIX3 function 0.  Retarget its fixed
+ * PCI-I/O table entry and device path, which the static initializers give the
+ * zx1 layout.  Same timing rule as fw_retarget_vga_device_paths().
+ */
+static void fw_retarget_uhci_device_path(void)
+{
+    UINTN i;
+
+    if (fw_platform_is_zx1()) {
+        return;
+    }
+    for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
+        if (mPciIoDevices[i].Protocol != &mPciUhciIoProto) {
+            continue;
+        }
+        mPciIoDevices[i].Device = IA64_460GX_IFB_SLOT;
+        mPciIoDevices[i].Function = IA64_460GX_IFB_USB_FUNCTION;
+        mPciIoDevices[i].ExpectedId = FW_PCI_IFB_UHCI_ID;
+    }
+    mPciUhciDevicePath.Pci.Device = IA64_460GX_IFB_SLOT;
+    mPciUhciDevicePath.Pci.Function = IA64_460GX_IFB_USB_FUNCTION;
+}
+
 static void fw_phase_efi_core_init(void)
 {
     fw_retarget_vga_device_paths();
+    fw_retarget_uhci_device_path();
     efi_init_boot_services();
     efi_init_runtime_services();
     uart_puts("UEFI Time Services:   ");

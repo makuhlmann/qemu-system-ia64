@@ -345,6 +345,18 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  */
 #define IA64_460GX_WXB0_SCSI_SLOT     0x00
 #define IA64_460GX_WXB1_ISP_SLOT      0x00
+/*
+ * The Intel 82468GX I/O and Firmware Bridge, the platform south bridge: a
+ * four-function device carrying the LPC/ISA bridge, the IDE controller, the
+ * UHCI host controller and the SMBus controller.  Device 3 is where the real
+ * SDV firmware expects it -- it pokes the south bridge's config register
+ * 0xd0 at 00:03.0 for its CPU-frequency mailbox (plans/phase5 SESSION 17).
+ */
+#define IA64_460GX_IFB_SLOT           0x03
+#define IA64_460GX_IFB_LPC_FUNCTION   0
+#define IA64_460GX_IFB_IDE_FUNCTION   1
+#define IA64_460GX_IFB_USB_FUNCTION   2
+#define IA64_460GX_IFB_SMBUS_FUNCTION 3
 /* The Cirrus Logic CS4281 on the i2000's I/O board. */
 #define IA64_460GX_AUDIO_SLOT         0x04
 #define IA64_MERCURY_VGA_SLOT        0x00

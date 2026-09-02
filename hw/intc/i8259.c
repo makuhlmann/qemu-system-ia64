@@ -53,7 +53,6 @@ struct PICClass {
 static int64_t irq_time[16];
 #endif
 PICCommonState *isa_pic;
-static PICCommonState *slave_pic;
 
 /* return the highest priority found in mask (highest = smallest
    number). Return 8 if no irq */
@@ -179,14 +178,17 @@ int pic_read_irq(PICCommonState *s)
         int irq2;
 
         if (irq == 2) {
-            irq2 = pic_get_irq(slave_pic);
+            PICCommonState *slave = s->cascade_slave;
+
+            assert(slave);
+            irq2 = pic_get_irq(slave);
             if (irq2 >= 0) {
-                pic_intack(slave_pic, irq2);
+                pic_intack(slave, irq2);
             } else {
                 /* spurious IRQ on slave controller */
                 irq2 = 7;
             }
-            intno = slave_pic->irq_base + irq2;
+            intno = slave->irq_base + irq2;
             pic_intack(s, irq);
             irq = irq2 + 8;
         } else {
@@ -401,11 +403,14 @@ static void pic_realize(DeviceState *dev, Error **errp)
     pc->parent_realize(dev, errp);
 }
 
-qemu_irq *i8259_init(ISABus *bus, qemu_irq parent_irq_in)
+qemu_irq *i8259_init_pair(ISABus *bus, qemu_irq parent_irq_in,
+                          PICCommonState **master_pic)
 {
     qemu_irq *irq_set;
     DeviceState *dev;
     ISADevice *isadev;
+    PICCommonState *master;
+    PICCommonState *slave;
     int i;
 
     irq_set = g_new0(qemu_irq, ISA_NUM_IRQS);
@@ -418,7 +423,10 @@ qemu_irq *i8259_init(ISABus *bus, qemu_irq parent_irq_in)
         irq_set[i] = qdev_get_gpio_in(dev, i);
     }
 
-    isa_pic = PIC_COMMON(dev);
+    master = PIC_COMMON(dev);
+    if (master_pic) {
+        *master_pic = master;
+    }
 
     isadev = i8259_init_chip(TYPE_I8259, bus, false);
     dev = DEVICE(isadev);
@@ -428,9 +436,15 @@ qemu_irq *i8259_init(ISABus *bus, qemu_irq parent_irq_in)
         irq_set[i + 8] = qdev_get_gpio_in(dev, i);
     }
 
-    slave_pic = PIC_COMMON(dev);
+    slave = PIC_COMMON(dev);
+    master->cascade_slave = slave;
 
     return irq_set;
+}
+
+qemu_irq *i8259_init(ISABus *bus, qemu_irq parent_irq_in)
+{
+    return i8259_init_pair(bus, parent_irq_in, &isa_pic);
 }
 
 static void i8259_class_init(ObjectClass *klass, const void *data)

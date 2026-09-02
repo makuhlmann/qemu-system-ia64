@@ -7,6 +7,7 @@ config IA64_VPC
     select HP_SBA_IOMMU
     select OR_IRQ
     select ISA_BUS
+    select INTEL_82468GX_IFB
     select PFLASH_CFI01
     select MC146818RTC
     select I8259
