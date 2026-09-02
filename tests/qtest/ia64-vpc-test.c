@@ -116,8 +116,13 @@ typedef struct TestInt10Registers {
 
 #define IA64_E1000_MMIO_BASE         0x00000000ee040000ULL
 #define IA64_E1000_IO_BASE           0x0000c400U
-#define IA64_E1000_SLOT              6U
-#define IA64_E1000_GSI               18U
+/*
+ * The i2000 carries its Ethernet at 00:05.0, the slot the graphics adapter
+ * vacated when it moved to the GXB root.  INTA on slot 5 swizzles to
+ * IA64_PCI_INTX_GSI_BASE + (5 + 0) % 4 = 17.
+ */
+#define IA64_E1000_SLOT              5U
+#define IA64_E1000_GSI               17U
 #define IA64_E1000_TX_DESC_ADDR      0x00120000U
 #define IA64_E1000_TX_BUFFER_ADDR    0x00121000U
 #define IA64_E1000_RX_DESC_ADDR      0x00122000U
@@ -834,7 +839,8 @@ static void test_sba_ioc_identity(void)
  * exact.  The mailbox handshake is the first thing that driver does.
  */
 #define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x01820000ULL)
-#define IA64_ISP_SLOT           7U
+/* The QLogic HBA is at 01:00.0, on the first WXB expander root. */
+#define IA64_ISP_SLOT           IA64_460GX_WXB0_ISP_SLOT
 #define IA64_ISP_REG_ISTATUS    0x0aU
 #define IA64_ISP_REG_SEMAPHORE  0x0cU
 #define IA64_ISP_REG_MAILBOX0   0x70U
@@ -849,6 +855,7 @@ static void test_sba_ioc_identity(void)
 static void test_isp12160_mailbox(void)
 {
     const uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                         ((uint64_t)IA64_460GX_WXB0_BUS << 20) +
                          ((uint64_t)IA64_ISP_SLOT << 15);
     QTestState *qts = qtest_init("-machine 460gx,isp=on -cpu merced "
                                  "-m 256M -S");
@@ -1930,11 +1937,23 @@ static void test_realfw_flash_window(void)
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
-static void ia64_qpci_init(QGenericPCIBus *gbus, QTestState *qts)
+/*
+ * The generic host helper addresses one bus: it builds config addresses as
+ * ecam_alloc_ptr + (devfn << 12) + offset.  Offsetting the base by the bus
+ * number therefore points the whole QPCIBus at that bus, which is how the
+ * tests reach devices behind the 460GX expander roots.
+ */
+static void ia64_qpci_init_on_bus(QGenericPCIBus *gbus, QTestState *qts,
+                                  unsigned int bus)
 {
     qpci_init_generic(gbus, qts, NULL, false);
-    gbus->ecam_alloc_ptr = IA64_PCI_CONFIG_BASE;
+    gbus->ecam_alloc_ptr = IA64_PCI_CONFIG_BASE + ((uint64_t)bus << 20);
     gbus->gpex_pio_base = IA64_LEGACY_IO_BASE;
+}
+
+static void ia64_qpci_init(QGenericPCIBus *gbus, QTestState *qts)
+{
+    ia64_qpci_init_on_bus(gbus, qts, 0);
 }
 
 static void assert_pci_device(QPCIBus *bus, const ExpectedPCIDevice *expected)
@@ -1970,7 +1989,11 @@ static void test_ahci_off(void)
 {
     QTestState *qts = ia64_vpc_start("-machine ahci=off");
     QGenericPCIBus gbus;
-    static const unsigned int kept_slots[] = { 2, 3, 4, 5, 6 };
+    /*
+     * Bus 0 after the i2000 relocation: USB at 2 and 3, the SCSI HBA at 4 and
+     * the 82559 at 5.  Graphics moved to the GXB root, so slot 6 is free.
+     */
+    static const unsigned int kept_slots[] = { 2, 3, 4, 5 };
     unsigned i;
 
     ia64_qpci_init(&gbus, qts);
@@ -2040,16 +2063,23 @@ static void test_pci_default_layout(void)
                 [1] = 0xee030000,
                 [2] = 0xee032000,
             },
-        }, {
-            .slot = 5, .vendor = 0x1002, .device = 0x5046,
-            .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY,
-            .irq_line = 17, .irq_pin = 1,
-            .bars = {
-                [0] = 0xf0000008,
-                [1] = 0x0000c301,
-                [2] = 0xf5000000,
-            },
         },
+        expected_i82557b,
+    };
+    /*
+     * The graphics adapter is no longer on bus 0: it sits at 03:00.0 behind
+     * the GXB expander, with the same fixed BARs and INTA on the GXB root's
+     * own interrupt block (16 + 3 * 4 + (0 + 0) % 4 = 28).
+     */
+    static const struct {
+        uint32_t reg;
+        uint32_t value;
+    } gxb_vga[] = {
+        { PCI_VENDOR_ID, 0x50461002 },
+        { PCI_BASE_ADDRESS_0, 0xf0000008 },
+        { PCI_BASE_ADDRESS_1, 0x0000c301 },
+        { PCI_BASE_ADDRESS_2, 0xf5000000 },
+        { PCI_INTERRUPT_LINE, 0x0000011c },
     };
     QTestState *qts = ia64_vpc_start(NULL);
     QGenericPCIBus gbus;
@@ -2063,8 +2093,16 @@ static void test_pci_default_layout(void)
         g_assert_null(empty);
     }
     g_assert_null(qpci_device_find(&gbus.bus, QPCI_DEVFN(1, 0)));
+    g_assert_null(qpci_device_find(&gbus.bus, QPCI_DEVFN(6, 0)));
     for (i = 0; i < ARRAY_SIZE(devices); i++) {
         assert_pci_device(&gbus.bus, &devices[i]);
+    }
+    for (i = 0; i < ARRAY_SIZE(gxb_vga); i++) {
+        uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                       ((uint64_t)IA64_460GX_GXB_BUS << 20);
+
+        g_assert_cmphex(qtest_readl(qts, cfg + gxb_vga[i].reg), ==,
+                        gxb_vga[i].value);
     }
     {
         QPCIDevice *lsi = qpci_device_find(&gbus.bus, QPCI_DEVFN(4, 0));
@@ -2960,7 +2998,8 @@ static void test_savevm_restores_platform_state(void)
  * fills at every supported depth (including the 24bpp path that used to abort
  * on 3-byte pixel accesses).
  */
-#define ATI_SLOT                5
+/* The graphics adapter is at 03:00.0, behind the GXB expander root. */
+#define ATI_SLOT                IA64_460GX_GXB_VGA_SLOT
 
 /* Register offsets (RAGE 128 PRO RRG / hw/display/ati_regs.h). */
 #define ATI_MM_INDEX            0x0000
@@ -2999,7 +3038,7 @@ typedef struct {
 static void ati_dev_open(ATITestDev *a, const char *extra)
 {
     a->qts = extra ? ia64_vpc_start(extra) : ia64_vpc_start(NULL);
-    ia64_qpci_init(&a->gbus, a->qts);
+    ia64_qpci_init_on_bus(&a->gbus, a->qts, IA64_460GX_GXB_BUS);
     a->dev = qpci_device_find(&a->gbus.bus, QPCI_DEVFN(ATI_SLOT, 0));
     g_assert_nonnull(a->dev);
     g_assert_cmphex(qpci_config_readw(a->dev, PCI_VENDOR_ID), ==, 0x1002);
@@ -3925,7 +3964,8 @@ static void mach64_dev_open_id(Mach64TestDev *a, const char *extra,
                                uint16_t dev_id)
 {
     a->qts = ia64_vpc_start(extra ?: "-machine vga=mach64");
-    ia64_qpci_init(&a->gbus, a->qts);
+    /* Every graphics adapter sits on the GXB root, whatever the model. */
+    ia64_qpci_init_on_bus(&a->gbus, a->qts, IA64_460GX_GXB_BUS);
     a->dev = qpci_device_find(&a->gbus.bus, QPCI_DEVFN(ATI_SLOT, 0));
     g_assert_nonnull(a->dev);
     g_assert_cmphex(qpci_config_readw(a->dev, PCI_VENDOR_ID), ==, 0x1002);

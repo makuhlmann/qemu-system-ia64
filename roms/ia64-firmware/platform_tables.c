@@ -565,19 +565,23 @@ static void efi_init_sal_system_table(void)
 }
 
 /*
- * Where the primary VGA adapter lives.  On zx1 the AGP graphics sits behind the
- * Mercury (LBA) PCI host bridge, on its own root bus (IA64_MERCURY_BUS) at slot
- * IA64_MERCURY_VGA_SLOT; on 460gx it is on PCI0 at the GXB-AGP slot 5.  The
- * PCDP/HCDP VGA console descriptor and the id probe use these.
+ * Where the primary VGA adapter lives.  Neither machine puts it on the first
+ * root: on zx1 the AGP graphics sits behind the Mercury (LBA) bridge on
+ * IA64_MERCURY_BUS at slot IA64_MERCURY_VGA_SLOT, and on the i2000 it sits
+ * behind the GXB expander on IA64_460GX_GXB_BUS at device
+ * IA64_460GX_GXB_VGA_SLOT.  The PCDP/HCDP VGA console descriptor and the id
+ * probe use these.
  */
 static UINT8 fw_vga_pci_bus(void)
 {
-    return fw_platform_is_zx1() ? (UINT8)IA64_MERCURY_BUS : 0;
+    return fw_platform_is_zx1() ? (UINT8)IA64_MERCURY_BUS :
+                                  (UINT8)IA64_460GX_GXB_BUS;
 }
 
 static UINT8 fw_vga_pci_device(void)
 {
-    return fw_platform_is_zx1() ? (UINT8)IA64_MERCURY_VGA_SLOT : 5;
+    return fw_platform_is_zx1() ? (UINT8)IA64_MERCURY_VGA_SLOT :
+                                  (UINT8)IA64_460GX_GXB_VGA_SLOT;
 }
 
 static void efi_init_acpi_tables(void)

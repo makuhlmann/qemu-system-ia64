@@ -75,33 +75,29 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 // Windows' acpi.sys builds its bridge translator windows and
                 // the HAL port-range handles ((RangeId << 16) | port) from
                 // exactly these fields; Linux fills io_space[] from them.
+                // Two holes, both behind the GXB root: the legacy VGA ports
+                // 0x3B0..0x3DF and the graphics I/O BAR at 0xC300..0xC3FF.
+                // The VGA arbiter designates the root that decodes both the
+                // legacy VGA I/O and the 0xA0000 aperture as the VGA owner,
+                // so those must not be split across roots -- splitting them
+                // fails the adapter with Code 10.
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                    EntireRange, 0, 0, 0x0000FFFF, 0xFFFFC000000,
-                    0x00010000, , , , TypeTranslation, SparseTranslation)
-                // The legacy VGA aperture is decoded to the PCI bus and must
-                // be declared, or the root bridge claims no producer window
-                // covering the range its VGA child reports in _CRS/BARs.
-                // This is the conventional descriptor upstream QEMU emits for
-                // the same hole on i440fx/q35.
-                DWordMemory (ResourceProducer, PosDecode, MinFixed,
-                    MaxFixed, Cacheable, ReadWrite,
-                    0, 0x000A0000, 0x000BFFFF, 0, 0x00020000)
-                // The option-ROM segment must be a producer window too.
-                // Windows' pci.sys validates every HalTranslateBusAddress
-                // against the complement of the root bridge windows
-                // (busdrv/pci/hookhal.c PciTranslateBusAddress: an address
-                // intersecting an Owner==NULL arbiter range "is not on our
-                // bus"), and the inbox ATI miniport's VGA-enabled path maps
-                // its video BIOS at 0xC0000 through exactly that call.
-                // Without this window the translation is refused,
-                // VideoPortGetDeviceBase returns NULL (ati2mpaa event
-                // 0xC1010002 UniqueId 25) and the adapter stops with Code 10.
-                DWordMemory (ResourceProducer, PosDecode, MinFixed,
-                    MaxFixed, Cacheable, ReadWrite,
-                    0, 0x000C0000, 0x000DFFFF, 0, 0x00020000)
+                    EntireRange, 0, 0, 0x000003AF, 0xFFFFC000000,
+                    0x000003B0, , , , TypeTranslation, SparseTranslation)
+                QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                    EntireRange, 0, 0x000003E0, 0x0000C2FF, 0xFFFFC000000,
+                    0x0000BF20, , , , TypeTranslation, SparseTranslation)
+                QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                    EntireRange, 0, 0x0000C400, 0x0000FFFF, 0xFFFFC000000,
+                    0x00003C00, , , , TypeTranslation, SparseTranslation)
+                // The legacy VGA and option-ROM apertures moved to the GXB
+                // root with the graphics adapter (see GXB0 below).
+                // PCI0 device BARs live at 0xEE000000..0xEFFFFFFF; the
+                // graphics framebuffer, MMIO and ROM live above that and
+                // belong to the GXB root now.
                 QWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, NonCacheable, ReadWrite,
-                    0, 0xEE000000, 0xFDFFFFFF, 0, 0x10000000)
+                    0, 0xEE000000, 0xEFFFFFFF, 0, 0x02000000)
             })
             Name (_PRT, Package ()
             {
@@ -252,6 +248,29 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
             {
                 WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
                     PosDecode, 0, 0x0003, 0x0003, 0, 0x0001)
+                // The graphics adapter is the VGA owner, so the GXB root
+                // decodes the legacy VGA I/O and the 0xA0000 aperture
+                // together, plus the graphics I/O BAR hole punched out of
+                // PCI0 above.
+                QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                    EntireRange, 0, 0x000003B0, 0x000003DF, 0xFFFFC000000,
+                    0x00000030, , , , TypeTranslation, SparseTranslation)
+                QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                    EntireRange, 0, 0x0000C300, 0x0000C3FF, 0xFFFFC000000,
+                    0x00000100, , , , TypeTranslation, SparseTranslation)
+                DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                    Cacheable, ReadWrite,
+                    0, 0x000A0000, 0x000BFFFF, 0, 0x00020000)
+                // The option-ROM segment must be a producer window too: the
+                // inbox ATI miniport maps its video BIOS at 0xC0000 through
+                // HalTranslateBusAddress, which pci.sys validates against the
+                // root bridge windows.
+                DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                    Cacheable, ReadWrite,
+                    0, 0x000C0000, 0x000DFFFF, 0, 0x00020000)
+                QWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                    NonCacheable, ReadWrite,
+                    0, 0xF0000000, 0xFDFFFFFF, 0, 0x0E000000)
             })
             Name (_PRT, Package ()
             {

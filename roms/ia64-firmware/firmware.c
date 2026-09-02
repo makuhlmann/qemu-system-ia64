@@ -325,7 +325,7 @@ struct _EFI_UGA_DRAW_PROTOCOL {
 
 /* SAL + ACPI table scaffolds live in fw-acpi.h. */
 
-FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE == 2095u, dsdt_generated_aml_size);
+FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE == 2326u, dsdt_generated_aml_size);
 FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_AML_SIZE == 496u,
                  ssdt_generated_aml_size);
 /* The nested zx1-profile DSDT/SSDT; the larger sets ACPI_DSDT/SSDT Aml[]. */
@@ -9364,7 +9364,8 @@ static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     },
     {
         &mGraphicsHandle, &mPciVgaIoProto, &mGraphicsDevicePath,
-        0, 5, 0, FW_PCI_VGA_ATTRIBUTES, PCI_VGA_ATI_ID,
+        IA64_460GX_GXB_BUS, IA64_460GX_GXB_VGA_SLOT, 0,
+        FW_PCI_VGA_ATTRIBUTES, PCI_VGA_ATI_ID,
         0, PCI_VGA_FB_BAR | 0x8U, PCI_VGA_ATI_FB_SIZE, "VGA", 0,
     },
 };
@@ -13898,23 +13899,31 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 }
 
 /*
- * On zx1 the AGP graphics adapter lives behind the Mercury (LBA) PCI root
- * bridge, not on PCI0: retarget the EFI console/graphics device paths from
- * PCI0 (ACPI _UID 0) device 5 to the Mercury root (ACPI _UID 1) at
- * IA64_MERCURY_VGA_SLOT.  Both roots advertise PNP0A03 (0x0A0341D0), so only
- * the _UID and PCI device number change.  Run once, after the chipset profile
- * is known (fw_phase_platform_init) and before the paths are installed as the
- * GOP handle's device path / ConOut variables (fw_phase_efi_core_init).
+ * Neither machine puts its graphics adapter on the first PCI root.  On zx1
+ * the AGP adapter lives behind the Mercury (LBA) bridge at ACPI _UID 1; on
+ * the i2000 it lives behind the GXB expander, the AGP root, at _UID 3 device
+ * 0.  Retarget the EFI console/graphics device paths accordingly.  Every root
+ * advertises PNP0A03 (0x0A0341D0), so only the _UID and the PCI device number
+ * change.  Run once, after the chipset profile is known
+ * (fw_phase_platform_init) and before the paths are installed as the GOP
+ * handle's device path / ConOut variables (fw_phase_efi_core_init).
  */
 static void fw_retarget_vga_device_paths(void)
 {
-    if (!fw_platform_is_zx1()) {
-        return;
+    UINT32 uid;
+    UINT8 device;
+
+    if (fw_platform_is_zx1()) {
+        uid = 1;
+        device = IA64_MERCURY_VGA_SLOT;
+    } else {
+        uid = IA64_460GX_GXB_BUS;
+        device = IA64_460GX_GXB_VGA_SLOT;
     }
-    mGraphicsDevicePath.Acpi.Uid = 1;
-    mGraphicsDevicePath.Pci.Device = IA64_MERCURY_VGA_SLOT;
-    mConsoleOutputDevicePath.Graphics.Acpi.Uid = 1;
-    mConsoleOutputDevicePath.Graphics.Pci.Device = IA64_MERCURY_VGA_SLOT;
+    mGraphicsDevicePath.Acpi.Uid = uid;
+    mGraphicsDevicePath.Pci.Device = device;
+    mConsoleOutputDevicePath.Graphics.Acpi.Uid = uid;
+    mConsoleOutputDevicePath.Graphics.Pci.Device = device;
 }
 
 static void fw_phase_efi_core_init(void)

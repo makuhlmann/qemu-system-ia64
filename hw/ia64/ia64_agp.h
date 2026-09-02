@@ -45,4 +45,6 @@ struct IA64AGPState {
     bool gart_enabled;
 };
 
+void ia64_agp_attach_bus(IA64AGPState *s, PCIBus *bus);
+
 #endif /* HW_IA64_AGP_H */

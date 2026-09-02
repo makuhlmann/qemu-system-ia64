@@ -330,6 +330,14 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_460GX_WXB0_BUS           0x01
 #define IA64_460GX_WXB1_BUS           0x02
 #define IA64_460GX_GXB_BUS            0x03
+/* Stable indices into the machine's expander arrays, not creation order. */
+#define IA64_460GX_ROOT_WXB0          0
+#define IA64_460GX_ROOT_WXB1          1
+#define IA64_460GX_ROOT_GXB           2
+/* The AGP graphics adapter sits at device 0 of the GXB root bus. */
+#define IA64_460GX_GXB_VGA_SLOT       0x00
+/* The QLogic ISP12160 sits at device 0 of the first WXB expander bus. */
+#define IA64_460GX_WXB0_ISP_SLOT      0x00
 #define IA64_MERCURY_VGA_SLOT        0x00
 /* 16 MiB PAL/SAL firmware address space below 4 GiB. */
 #define IA64_FW_ADDRESS_SPACE_BASE    IA64_U64(0x00000000ff000000)

@@ -5,10 +5,11 @@
  * (ia64_vpc_map_vga_fixed_windows()), so the register aperture and framebuffer
  * are reachable without firmware.  This locks in the device's PCI identity / BAR
  * geometry contract and a couple of live-aperture reads, so a future refactor
- * cannot silently change them.  It runs on the 460gx machine, which keeps the
- * graphics adapter on PCI0 at IA64_VPC_VGA_SLOT; the zx1 machine instead places
- * it behind the Mercury host bridge on a second root bus (see ia64_mercury.c),
- * which this device-model test does not need to exercise.
+ * cannot silently change them.  It runs on the 460gx machine, which places the
+ * graphics adapter at device IA64_460GX_GXB_VGA_SLOT of the GXB expander root
+ * (bus IA64_460GX_GXB_BUS), as the i2000 does; the zx1 machine instead places
+ * it behind the Mercury host bridge (see ia64_mercury.c), which this
+ * device-model test does not need to exercise.
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -30,7 +31,7 @@
 #define IA64_NV15_FB_BASE     (IA64_PCI_MMIO_BASE + 0x02000000ULL)
 #define IA64_NV15_MMIO_BASE   (IA64_PCI_MMIO_BASE + 0x0A000000ULL)
 #define IA64_NV15_ROM_BASE    (IA64_PCI_MMIO_BASE + 0x0B000000ULL)
-#define IA64_VPC_VGA_SLOT     5
+
 
 #define NV15_VENDOR_ID        0x10deU
 #define NV15_DEVICE_ID        0x0153U   /* Quadro2 Pro */
@@ -61,10 +62,15 @@ static void nv15_pci_contract(void)
     QPCIDevice *dev;
 
     qpci_init_generic(&gbus, qts, NULL, false);
-    gbus.ecam_alloc_ptr = IA64_PCI_CONFIG_BASE;
+    /*
+     * Offsetting the ECAM base by the bus number points this one-bus helper
+     * at the GXB root, where the adapter lives.
+     */
+    gbus.ecam_alloc_ptr = IA64_PCI_CONFIG_BASE +
+                          ((uint64_t)IA64_460GX_GXB_BUS << 20);
     gbus.gpex_pio_base = IA64_PCI_IO_BASE;
 
-    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(IA64_VPC_VGA_SLOT, 0));
+    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(IA64_460GX_GXB_VGA_SLOT, 0));
     g_assert_nonnull(dev);
     g_assert_cmphex(qpci_config_readw(dev, PCI_VENDOR_ID), ==, NV15_VENDOR_ID);
     g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, NV15_DEVICE_ID);

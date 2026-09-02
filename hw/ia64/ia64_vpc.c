@@ -262,7 +262,13 @@
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
 /* Graphics (Rage 128) lands here: slots 0-4 are reserved/built-in, VGA next. */
 #define IA64_VPC_VGA_SLOT           5
+/*
+ * The i2000 carries its 82559 Ethernet at 00:05.0, the slot the graphics
+ * adapter used to occupy before it moved to the GXB root.  zx1 keeps the
+ * adapter where it was.
+ */
 #define IA64_VPC_NIC_SLOT           6
+#define IA64_460GX_NIC_SLOT         5
 
 #define IA64_SAPIC_DELIVERY_INT     0
 #define IA64_SAPIC_DELIVERY_NMI     4
@@ -2895,7 +2901,16 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
                               sizeof(handoff));
 }
 
-static void ia64_vpc_configure_pci_irq(PCIDevice *pci_dev)
+/*
+ * Program a device's interrupt line from the interrupt block its root owns.
+ * Devices on bus 0, and everything on zx1 (where both roots wire-OR into one
+ * block of four), use IA64_PCI_INTX_GSI_BASE.  Each 460GX expander root has
+ * its own block, so a device behind one must report a line from that block --
+ * the line has to agree with the root's ACPI _PRT and with the input the
+ * expander's GPIO actually drives.
+ */
+static void ia64_vpc_configure_pci_irq_on_root(PCIDevice *pci_dev,
+                                               unsigned int gsi_base)
 {
     uint8_t pin;
 
@@ -2905,10 +2920,27 @@ static void ia64_vpc_configure_pci_irq(PCIDevice *pci_dev)
 
     pin = pci_dev->config[PCI_INTERRUPT_PIN];
     if (pin >= 1 && pin <= PCI_NUM_PINS) {
-        pci_default_write_config(pci_dev, PCI_INTERRUPT_LINE,
-                                 ia64_pci_route_intx_gsi(pci_dev->devfn,
-                                                         pin - 1), 1);
+        unsigned int line = gsi_base +
+            (ia64_pci_route_intx_gsi(pci_dev->devfn, pin - 1) -
+             IA64_PCI_INTX_GSI_BASE);
+
+        pci_default_write_config(pci_dev, PCI_INTERRUPT_LINE, line, 1);
     }
+}
+
+static void ia64_vpc_configure_pci_irq(PCIDevice *pci_dev)
+{
+    ia64_vpc_configure_pci_irq_on_root(pci_dev, IA64_PCI_INTX_GSI_BASE);
+}
+
+/* The interrupt block owned by the root that carries bus @bus. */
+static unsigned int ia64_vpc_root_gsi_base(const IA64VpcMachineState *s,
+                                           uint8_t bus)
+{
+    if (ia64_vpc_chipset_is_zx1(s)) {
+        return IA64_PCI_INTX_GSI_BASE;
+    }
+    return IA64_PCI_INTX_GSI_BASE + bus * IA64_PCI_INTX_LINES;
 }
 
 static void ia64_vpc_configure_ahci(PCIDevice *pci_dev)
@@ -3344,12 +3376,18 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     }
     ia64_vpc_configure_pci_irq(s->ahci_dev);
     ia64_vpc_configure_pci_irq(s->audio_dev);
-    ia64_vpc_configure_pci_irq(s->isp_dev);
+    ia64_vpc_configure_pci_irq_on_root(
+        s->isp_dev,
+        ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
+                               IA64_460GX_WXB0_BUS));
     ia64_vpc_configure_pci_irq(s->ide_dev);
     ia64_vpc_configure_pci_irq(s->ohci_dev);
     ia64_vpc_configure_pci_irq(s->uhci_dev);
     ia64_vpc_configure_pci_irq(s->lsi_dev);
-    ia64_vpc_configure_pci_irq(s->vga_dev);
+    ia64_vpc_configure_pci_irq_on_root(
+        s->vga_dev,
+        ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
+                               IA64_460GX_GXB_BUS));
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_pci_irq(s->nic_devs[i]);
     }
@@ -3381,17 +3419,21 @@ static void ia64_vpc_init_network(IA64VpcMachineState *s, PCIBus *pci_bus)
 {
     MachineState *machine = MACHINE(s);
     MachineClass *mc = MACHINE_GET_CLASS(machine);
+    g_autofree char *slot_arg = NULL;
+    unsigned int first_slot;
     unsigned int slot;
 
     s->nic_count = 0;
     memset(s->nic_devs, 0, sizeof(s->nic_devs));
 
     /* Keep the default adapter at a stable BDF after the built-in devices. */
-    pci_init_nic_in_slot(pci_bus, mc->default_nic, NULL,
-                         stringify(IA64_VPC_NIC_SLOT));
+    first_slot = ia64_vpc_chipset_is_zx1(s) ? IA64_VPC_NIC_SLOT :
+                                              IA64_460GX_NIC_SLOT;
+    slot_arg = g_strdup_printf("%u", first_slot);
+    pci_init_nic_in_slot(pci_bus, mc->default_nic, NULL, slot_arg);
     pci_init_nic_devices(pci_bus, mc->default_nic);
 
-    for (slot = IA64_VPC_NIC_SLOT; slot < PCI_SLOT_MAX; slot++) {
+    for (slot = first_slot; slot < PCI_SLOT_MAX; slot++) {
         ia64_vpc_record_nic(s, pci_bus,
                             pci_find_device(pci_bus, 0, PCI_DEVFN(slot, 0)));
     }
@@ -4904,13 +4946,19 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         ia64_lba_set_mercury_bus(IA64_LBA(s->lba_dev), s->mercury_bus);
     } else {
         s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
+        /*
+         * The AGP master is the graphics adapter on the GXB's downstream
+         * root, so the GART translates that bus's device 0.
+         */
         object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
-                                PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), &error_abort);
+                                PCI_DEVFN(IA64_460GX_GXB_VGA_SLOT, 0),
+                                &error_abort);
         object_property_set_bool(OBJECT(s->agp_dev), "gart-enabled",
                                 s->agp_enabled, &error_abort);
         if (!pci_realize_and_unref(s->agp_dev, pci_bus, errp)) {
             return false;
         }
+
     }
 
     /*
@@ -4982,6 +5030,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         static const struct {
             const char *name;
             uint8_t bus;
+            unsigned int index;
         } expanders[IA64_460GX_EXPANDER_ROOTS] = {
             /*
              * Created youngest-first.  QEMU resolves a "-device" with no
@@ -4991,34 +5040,46 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
              * add-in cards go in the WXB slots.  Name the bus explicitly
              * ("bus=pci", "bus=gxb", ...) to place a device elsewhere.
              */
-            { "gxb",  IA64_460GX_GXB_BUS },
-            { "wxb1", IA64_460GX_WXB1_BUS },
-            { "wxb0", IA64_460GX_WXB0_BUS },
+            { "gxb",  IA64_460GX_GXB_BUS,  IA64_460GX_ROOT_GXB },
+            { "wxb1", IA64_460GX_WXB1_BUS, IA64_460GX_ROOT_WXB1 },
+            { "wxb0", IA64_460GX_WXB0_BUS, IA64_460GX_ROOT_WXB0 },
         };
         unsigned int root;
 
         for (root = 0; root < IA64_460GX_EXPANDER_ROOTS; root++) {
             unsigned int line;
 
-            s->expander_host[root] = ia64_expander_host_create(
+            unsigned int index = expanders[root].index;
+
+            s->expander_host[index] = ia64_expander_host_create(
                 OBJECT(s), expanders[root].name,
                 ia64_pci_host_mmio(pci_host), ia64_pci_host_io(pci_host),
                 expanders[root].bus, errp);
-            if (s->expander_host[root] == NULL) {
+            if (s->expander_host[index] == NULL) {
                 return false;
             }
-            s->expander_bus[root] =
-                ia64_expander_host_bus(s->expander_host[root]);
-            ia64_pci_host_add_secondary_bus(pci_host, s->expander_bus[root]);
+            s->expander_bus[index] =
+                ia64_expander_host_bus(s->expander_host[index]);
+            ia64_pci_host_add_secondary_bus(pci_host, s->expander_bus[index]);
 
             for (line = 0; line < IA64_PCI_INTX_LINES; line++) {
                 unsigned int input = IA64_PCI_INTX_GSI_BASE +
                                      expanders[root].bus *
                                      IA64_PCI_INTX_LINES + line;
 
-                qdev_connect_gpio_out(s->expander_host[root], line,
+                qdev_connect_gpio_out(s->expander_host[index], line,
                                       qdev_get_gpio_in(iosapic, input));
             }
+        }
+
+        /*
+         * The GART translates the AGP master, which lives on the GXB's
+         * downstream root, so that bus needs the same DMA routing as the
+         * bus the GXB bridge itself sits on.
+         */
+        if (s->agp_dev != NULL) {
+            ia64_agp_attach_bus(IA64_AGP(s->agp_dev),
+                                s->expander_bus[IA64_460GX_ROOT_GXB]);
         }
     }
 
@@ -5173,6 +5234,13 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (ia64_vpc_chipset_is_zx1(s)) {
         vga_bus = s->mercury_bus;
         vga_slot = IA64_MERCURY_VGA_SLOT;
+    } else {
+        /*
+         * The i2000 puts its AGP Pro graphics at 03:00.0, behind the GXB
+         * expander -- the 460GX analogue of the zx1 arrangement above.
+         */
+        vga_bus = s->expander_bus[IA64_460GX_ROOT_GXB];
+        vga_slot = IA64_460GX_GXB_VGA_SLOT;
     }
 
     if (g_strcmp0(s->vga_model, "mach64") == 0) {
@@ -5238,7 +5306,20 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      */
 #ifdef CONFIG_IA64_VPC_STORAGE
     if (s->isp_enabled) {
-        s->isp_dev = pci_create_simple(pci_bus, -1, TYPE_ISP12160_SCSI);
+        /*
+         * The i2000 carries its QLogic HBA at 01:00.0, on the first WXB
+         * expander bus.  zx1 has no such adapter, so it keeps the next free
+         * slot of its own root.
+         */
+        PCIBus *isp_bus = pci_bus;
+        int isp_devfn = -1;
+
+        if (!ia64_vpc_chipset_is_zx1(s)) {
+            isp_bus = s->expander_bus[IA64_460GX_ROOT_WXB0];
+            isp_devfn = PCI_DEVFN(IA64_460GX_WXB0_ISP_SLOT, 0);
+        }
+        s->isp_dev = pci_create_simple(isp_bus, isp_devfn,
+                                       TYPE_ISP12160_SCSI);
         ia64_vpc_configure_isp(s->isp_dev);
         scsi_bus_legacy_handle_cmdline(
             SCSI_BUS(qdev_get_child_bus(DEVICE(s->isp_dev),
