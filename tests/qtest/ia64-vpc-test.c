@@ -1884,6 +1884,70 @@ static void check_root_window_containment(const char *args)
  * WXB bus.  A guest enumerating the buses must find them where the i2000 has
  * them, with no BARs and no interrupt to arbitrate.
  */
+/* The AGP bridge's own seat: the host bridge at the top of bus 0. */
+#define IA64_AGP_SLOT           31U
+
+/*
+ * The machine presents the four PCI buses the i2000's expander bridges carry
+ * and no fifth: the chipset's own configuration space -- the SAC, the SDC,
+ * the memory cards and the expander ports -- stays firmware-facing.
+ *
+ * That is a decision, not an omission, and this pins it.  Nothing a guest
+ * does reads those registers: an OS takes its resource map from ACPI, and
+ * the one driver that touches 460GX chipset config, Linux's i460-agp, binds
+ * to the AGP bridge by device ID, which the machine presents at 00:1f.0.
+ * The software that does read them is the real SDV firmware, which has them
+ * on the realfw path at the bus number it programs itself (CBN, 0xEE) -- a
+ * number this machine could not present anyway, because a config address
+ * for it falls outside the 64 MB ECAM window and into the I/O block above.
+ */
+static void test_460gx_no_chipset_bus(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    unsigned int bus;
+
+    /* The four buses the expander bridges carry are all there... */
+    static const struct {
+        unsigned int bus;
+        unsigned int slot;
+    } occupied[] = {
+        { 0, IA64_460GX_PID_SLOT },
+        { IA64_460GX_WXB0_BUS, IA64_460GX_WXB0_SCSI_SLOT },
+        { IA64_460GX_WXB1_BUS, IA64_460GX_IHPC_SLOT },
+        { IA64_460GX_GXB_BUS, IA64_460GX_GXB_VGA_SLOT },
+    };
+    size_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(occupied); i++) {
+        g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
+                                    ((uint64_t)occupied[i].bus << 20) +
+                                    ((uint64_t)occupied[i].slot << 15)),
+                        !=, 0xffffffff);
+    }
+    /* ...and every bus above them is empty, chipset bus included. */
+    for (bus = IA64_460GX_GXB_BUS + 1; bus < 0x40; bus++) {
+        unsigned int slot;
+
+        for (slot = 0; slot < 32; slot++) {
+            g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
+                                        ((uint64_t)bus << 20) +
+                                        ((uint64_t)slot << 15)),
+                            ==, 0xffffffff);
+        }
+    }
+
+    /*
+     * The AGP bridge the GART path binds to keeps its seat.  On the board it
+     * is an expander port on the chipset bus; here it is the host bridge at
+     * 00:1f.0, which is where Linux finds it ("Found an AGP 0.0 compliant
+     * device at 0000:00:1f.0") and where >4 GB graphics DMA was validated.
+     */
+    g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
+                                ((uint64_t)IA64_AGP_SLOT << 15)),
+                    ==, 0x84ea8086);
+    qtest_quit(qts);
+}
+
 static void test_460gx_platform_identities(void)
 {
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
@@ -3395,7 +3459,6 @@ static void ati_pll_wr(ATITestDev *a, uint32_t idx, uint32_t v)
  * a non-header 64-bit BAR the driver masks to gart_bus_addr; it sits in the
  * platform PCI MMIO hole (below 4 GiB, as the 32-bit r128 AGP_BASE requires).
  */
-#define IA64_AGP_SLOT           31U
 #define IA64_AGP_BAPBASE        0x98
 #define IA64_AGP_GXBCTL         0xa0
 #define IA64_AGP_AGPSIZ         0xa2
@@ -4640,6 +4703,8 @@ int main(int argc, char **argv)
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
                    test_eepro100_eeprom_map);
+    qtest_add_func("/ia64-vpc/pci/460gx-no-chipset-bus",
+                   test_460gx_no_chipset_bus);
     qtest_add_func("/ia64-vpc/pci/460gx-platform-identities",
                    test_460gx_platform_identities);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-pic",
