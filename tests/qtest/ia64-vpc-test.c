@@ -90,7 +90,8 @@ typedef struct TestInt10Registers {
     uint32_t input_signature;
 } TestInt10Registers;
 
-#define IA64_LSI_MMIO_BASE           0x00000000ee030000ULL
+/* The SCSI HBA's register BAR, inside the WXB0 root's producer window. */
+#define IA64_LSI_MMIO_BASE           0x00000000ef200000ULL
 #define IA64_LSI_SCRIPT_ADDR         0x00100000U
 #define IA64_LSI_MSGOUT_ADDR         0x00110000U
 #define IA64_LSI_CDB_ADDR            0x00110010U
@@ -838,9 +839,12 @@ static void test_sba_ioc_identity(void)
  * on PCI\VEN_1077&DEV_1216&SUBSYS_00071077, so the identity has to be
  * exact.  The mailbox handshake is the first thing that driver does.
  */
-#define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x01820000ULL)
-/* The QLogic HBA is at 01:00.0, on the first WXB expander root. */
-#define IA64_ISP_SLOT           IA64_460GX_WXB0_ISP_SLOT
+#define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x01400000ULL)
+/*
+ * The QLogic HBA parks on the second WXB root while the LSI holds the board's
+ * SCSI seat at 01:00.0 (see plans/460gx-i2000-fidelity-plan.md).
+ */
+#define IA64_ISP_SLOT           IA64_460GX_WXB1_ISP_SLOT
 #define IA64_ISP_REG_ISTATUS    0x0aU
 #define IA64_ISP_REG_SEMAPHORE  0x0cU
 #define IA64_ISP_REG_MAILBOX0   0x70U
@@ -855,7 +859,7 @@ static void test_sba_ioc_identity(void)
 static void test_isp12160_mailbox(void)
 {
     const uint64_t cfg = IA64_PCI_CONFIG_BASE +
-                         ((uint64_t)IA64_460GX_WXB0_BUS << 20) +
+                         ((uint64_t)IA64_460GX_WXB1_BUS << 20) +
                          ((uint64_t)IA64_ISP_SLOT << 15);
     QTestState *qts = qtest_init("-machine 460gx,isp=on -cpu merced "
                                  "-m 256M -S");
@@ -1755,6 +1759,129 @@ static void test_460gx_expander_roots(void)
     qtest_quit(qts);
 }
 
+/*
+ * Every BAR must fall inside a producer window of the root the device sits
+ * behind.  A device moved onto an expander root whose _CRS does not cover its
+ * BARs gets no resources from the guest's PnP arbiter: when that device is the
+ * boot controller, Windows bugchecks with STOP 0x7B long before the disk is
+ * touched, and nothing in the firmware or the machine notices.  The window
+ * table below mirrors roms/ia64-firmware/dsdt-pci-root.asl; the two must be
+ * changed together.
+ */
+typedef struct {
+    uint64_t first;
+    uint64_t last;
+} PCIWindow;
+
+typedef struct {
+    unsigned int bus;
+    const PCIWindow *mem;
+    size_t mem_count;
+    const PCIWindow *io;
+    size_t io_count;
+} PCIRootWindows;
+
+static const PCIWindow pci0_mem[] = {
+    { 0xEE000000, 0xEF1FFFFF }, { 0xEF600000, 0xEFFFFFFF },
+};
+static const PCIWindow pci0_io[] = {
+    { 0x0000, 0x03AF }, { 0x03E0, 0xC1FF }, { 0xC400, 0xCBFF },
+    { 0xCD00, 0xFFFF },
+};
+static const PCIWindow wxb0_mem[] = { { 0xEF200000, 0xEF3FFFFF } };
+static const PCIWindow wxb0_io[] = { { 0xC200, 0xC2FF } };
+static const PCIWindow wxb1_mem[] = { { 0xEF400000, 0xEF5FFFFF } };
+static const PCIWindow wxb1_io[] = { { 0xCC00, 0xCCFF } };
+static const PCIWindow gxb_mem[] = {
+    { 0x000A0000, 0x000BFFFF }, { 0x000C0000, 0x000DFFFF },
+    { 0xF0000000, 0xFDFFFFFF },
+};
+static const PCIWindow gxb_io[] = { { 0x03B0, 0x03DF }, { 0xC300, 0xC3FF } };
+
+static const PCIRootWindows root_windows[] = {
+    { 0, pci0_mem, G_N_ELEMENTS(pci0_mem), pci0_io, G_N_ELEMENTS(pci0_io) },
+    { IA64_460GX_WXB0_BUS, wxb0_mem, G_N_ELEMENTS(wxb0_mem),
+      wxb0_io, G_N_ELEMENTS(wxb0_io) },
+    { IA64_460GX_WXB1_BUS, wxb1_mem, G_N_ELEMENTS(wxb1_mem),
+      wxb1_io, G_N_ELEMENTS(wxb1_io) },
+    { IA64_460GX_GXB_BUS, gxb_mem, G_N_ELEMENTS(gxb_mem),
+      gxb_io, G_N_ELEMENTS(gxb_io) },
+};
+
+static bool pci_window_contains(const PCIWindow *windows, size_t count,
+                                uint64_t address)
+{
+    size_t i;
+
+    for (i = 0; i < count; i++) {
+        if (address >= windows[i].first && address <= windows[i].last) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void check_root_window_containment(const char *args)
+{
+    QTestState *qts = qtest_init(args);
+    size_t root;
+
+    for (root = 0; root < G_N_ELEMENTS(root_windows); root++) {
+        const PCIRootWindows *rw = &root_windows[root];
+        unsigned int slot;
+
+        for (slot = 0; slot < 32; slot++) {
+            uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                           ((uint64_t)rw->bus << 20) +
+                           ((uint64_t)slot << 15);
+            unsigned int bar;
+
+            if (qtest_readl(qts, cfg) == 0xffffffff) {
+                continue;
+            }
+
+            for (bar = 0; bar < 6; bar++) {
+                uint32_t value = qtest_readl(qts, cfg + 0x10 + bar * 4);
+                uint64_t address;
+
+                if (value == 0) {
+                    continue;
+                }
+                if (value & PCI_BASE_ADDRESS_SPACE_IO) {
+                    address = value & PCI_BASE_ADDRESS_IO_MASK;
+                    g_assert_true(pci_window_contains(rw->io, rw->io_count,
+                                                      address));
+                    continue;
+                }
+                address = value & PCI_BASE_ADDRESS_MEM_MASK;
+                g_assert_true(pci_window_contains(rw->mem, rw->mem_count,
+                                                  address));
+                if ((value & PCI_BASE_ADDRESS_MEM_TYPE_MASK) ==
+                    PCI_BASE_ADDRESS_MEM_TYPE_64) {
+                    bar++;
+                }
+            }
+        }
+    }
+
+    qtest_quit(qts);
+}
+
+static void test_460gx_root_window_containment(void)
+{
+    /*
+     * Every optional device on, and each display adapter in turn: the
+     * graphics BARs are the largest on the machine and the ones most likely
+     * to grow past the GXB root's window.
+     */
+    check_root_window_containment("-machine 460gx,audio=on,isp=on,ide=on "
+                                  "-cpu merced -m 256M -S");
+    check_root_window_containment("-machine 460gx,vga=mach64 "
+                                  "-cpu merced -m 256M -S");
+    check_root_window_containment("-machine 460gx,vga=nv15gl "
+                                  "-cpu merced -m 256M -S");
+}
+
 static void test_iosapic_version_per_machine(void)
 {
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
@@ -1990,10 +2117,11 @@ static void test_ahci_off(void)
     QTestState *qts = ia64_vpc_start("-machine ahci=off");
     QGenericPCIBus gbus;
     /*
-     * Bus 0 after the i2000 relocation: USB at 2 and 3, the SCSI HBA at 4 and
-     * the 82559 at 5.  Graphics moved to the GXB root, so slot 6 is free.
+     * Bus 0 after the i2000 relocation: USB at 2 and 3 and the 82559 at 5.
+     * Graphics went to the GXB root and the SCSI HBA to WXB0; device 4 is
+     * the audio slot, filled only with audio=on.
      */
-    static const unsigned int kept_slots[] = { 2, 3, 4, 5 };
+    static const unsigned int kept_slots[] = { 2, 3, 5 };
     unsigned i;
 
     ia64_qpci_init(&gbus, qts);
@@ -2053,18 +2181,23 @@ static void test_pci_default_layout(void)
             .command = PCI_COMMAND_IO | PCI_COMMAND_MASTER,
             .irq_line = 18, .irq_pin = 4,
             .bars = { [4] = 0x0000c121 },
-        }, {
-            .slot = 4, .vendor = 0x1000, .device = 0x0012,
-            .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
-                       PCI_COMMAND_MASTER,
-            .irq_line = 16, .irq_pin = 1,
-            .bars = {
-                [0] = 0x0000c201,
-                [1] = 0xee030000,
-                [2] = 0xee032000,
-            },
         },
         expected_i82557b,
+    };
+    /*
+     * The SCSI HBA is at 01:00.0 on the first WXB root -- the seat the board
+     * gives its QLogic adapter, held by the LSI until the guest images can
+     * boot from the QLogic.  INTA there is 16 + 1 * 4 + (0 + 0) % 4 = 20.
+     */
+    static const struct {
+        uint32_t reg;
+        uint32_t value;
+    } wxb0_scsi[] = {
+        { PCI_VENDOR_ID, 0x00121000 },
+        { PCI_BASE_ADDRESS_0, 0x0000c201 },
+        { PCI_BASE_ADDRESS_1, 0xef200000 },
+        { PCI_BASE_ADDRESS_2, 0xef202000 },
+        { PCI_INTERRUPT_LINE, 0x00000114 },
     };
     /*
      * The graphics adapter is no longer on bus 0: it sits at 03:00.0 behind
@@ -2104,9 +2237,20 @@ static void test_pci_default_layout(void)
         g_assert_cmphex(qtest_readl(qts, cfg + gxb_vga[i].reg), ==,
                         gxb_vga[i].value);
     }
-    {
-        QPCIDevice *lsi = qpci_device_find(&gbus.bus, QPCI_DEVFN(4, 0));
+    for (i = 0; i < ARRAY_SIZE(wxb0_scsi); i++) {
+        uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                       ((uint64_t)IA64_460GX_WXB0_BUS << 20);
 
+        g_assert_cmphex(qtest_readl(qts, cfg + wxb0_scsi[i].reg), ==,
+                        wxb0_scsi[i].value);
+    }
+    {
+        QGenericPCIBus wxb0;
+        QPCIDevice *lsi;
+
+        ia64_qpci_init_on_bus(&wxb0, qts, IA64_460GX_WXB0_BUS);
+        lsi = qpci_device_find(&wxb0.bus,
+                               QPCI_DEVFN(IA64_460GX_WXB0_SCSI_SLOT, 0));
         g_assert_nonnull(lsi);
         g_assert_cmphex(qpci_config_readw(lsi, PCI_SUBSYSTEM_VENDOR_ID), ==,
                         PCI_VENDOR_ID_LSI_LOGIC);
@@ -4334,6 +4478,8 @@ int main(int argc, char **argv)
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
                    test_eepro100_eeprom_map);
+    qtest_add_func("/ia64-vpc/pci/460gx-root-window-containment",
+                   test_460gx_root_window_containment);
     qtest_add_func("/ia64-vpc/pci/460gx-expander-roots",
                    test_460gx_expander_roots);
     qtest_add_func("/ia64-vpc/iosapic/version-per-machine",

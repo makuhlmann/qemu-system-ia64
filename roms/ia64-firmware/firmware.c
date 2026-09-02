@@ -325,7 +325,7 @@ struct _EFI_UGA_DRAW_PROTOCOL {
 
 /* SAL + ACPI table scaffolds live in fw-acpi.h. */
 
-FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE == 2326u, dsdt_generated_aml_size);
+FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE == 2605u, dsdt_generated_aml_size);
 FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_AML_SIZE == 496u,
                  ssdt_generated_aml_size);
 /* The nested zx1-profile DSDT/SSDT; the larger sets ACPI_DSDT/SSDT Aml[]. */
@@ -9359,7 +9359,8 @@ static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     },
     {
         &mPciLsiHandle, &mPciLsiIoProto, &mPciLsiDevicePath,
-        0, 4, 0, FW_PCI_LSI_ATTRIBUTES, 0x00121000U,
+        IA64_460GX_WXB0_BUS, IA64_460GX_WXB0_SCSI_SLOT, 0,
+        FW_PCI_LSI_ATTRIBUTES, 0x00121000U,
         1, PCI_LSI_MMIO_BAR, 0x400, "LSI", 1,
     },
     {

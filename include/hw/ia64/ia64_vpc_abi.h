@@ -336,8 +336,17 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_460GX_ROOT_GXB           2
 /* The AGP graphics adapter sits at device 0 of the GXB root bus. */
 #define IA64_460GX_GXB_VGA_SLOT       0x00
-/* The QLogic ISP12160 sits at device 0 of the first WXB expander bus. */
-#define IA64_460GX_WXB0_ISP_SLOT      0x00
+/*
+ * The i2000's SCSI host bus adapter sits at device 0 of the first WXB
+ * expander bus.  That seat is held by the LSI 53c895a until the installed
+ * guest images can boot from the QLogic ISP12160, at which point the QLogic
+ * takes it as a drop-in replacement.  Meanwhile the QLogic, which is opt-in,
+ * parks at device 0 of the second WXB bus.
+ */
+#define IA64_460GX_WXB0_SCSI_SLOT     0x00
+#define IA64_460GX_WXB1_ISP_SLOT      0x00
+/* The Cirrus Logic CS4281 on the i2000's I/O board. */
+#define IA64_460GX_AUDIO_SLOT         0x04
 #define IA64_MERCURY_VGA_SLOT        0x00
 /* 16 MiB PAL/SAL firmware address space below 4 GiB. */
 #define IA64_FW_ADDRESS_SPACE_BASE    IA64_U64(0x00000000ff000000)

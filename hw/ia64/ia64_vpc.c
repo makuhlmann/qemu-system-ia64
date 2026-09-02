@@ -160,8 +160,20 @@
 #define IA64_E1000_IO_BASE      0x0000c400U
 #define IA64_OHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define IA64_AHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00020000ULL)
-#define IA64_LSI_MMIO_PCI_BASE  (IA64_PCI_MMIO_BASE + 0x00030000ULL)
-#define IA64_LSI_RAM_PCI_BASE   (IA64_PCI_MMIO_BASE + 0x00032000ULL)
+/*
+ * Devices behind an expander root must have their BARs inside that root's
+ * own producer window, or the guest's PnP resource arbiter cannot assign
+ * them: a boot controller that fails this bugchecks the guest with STOP
+ * 0x7B before it ever reaches the disk.  The compatibility bus keeps the
+ * bottom of the aperture (and the CS4281/graphics slices above it), and the
+ * two WXB roots get 2 MiB blocks of their own out of the free space between
+ * the NIC slices and the audio window.  The DSDT windows in
+ * roms/ia64-firmware/dsdt-pci-root.asl mirror this split exactly.
+ */
+#define IA64_WXB0_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01200000ULL)
+#define IA64_WXB1_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01400000ULL)
+#define IA64_LSI_MMIO_PCI_BASE  (IA64_WXB0_MMIO_PCI_BASE + 0x00000000ULL)
+#define IA64_LSI_RAM_PCI_BASE   (IA64_WXB0_MMIO_PCI_BASE + 0x00002000ULL)
 #define IA64_E1000_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00040000ULL)
 #define IA64_E1000_MMIO_SIZE    0x00020000ULL
 #define IA64_E1000_IO_SIZE      0x00000040U
@@ -171,8 +183,14 @@
  * includes each adapter's Flash aperture) and below the graphics
  * framebuffer at IA64_PCI_MMIO_BASE + 0x02000000.
  */
-#define IA64_ISP12160_IO_BASE    0x0000c500U
-#define IA64_ISP12160_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01820000ULL)
+/*
+ * The QLogic sits on the second WXB root, so its BAR must come out of that
+ * root's block.  Its I/O port range must also clear the NIC I/O slices
+ * (IA64_E1000_IO_BASE plus MAX_NICS * IA64_NIC_IO_STRIDE), which a second
+ * adapter would otherwise overlap.
+ */
+#define IA64_ISP12160_IO_BASE    0x0000cc00U
+#define IA64_ISP12160_MMIO_PCI_BASE (IA64_WXB1_MMIO_PCI_BASE + 0x00000000ULL)
 #define IA64_CS4281_BA0_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01800000ULL)
 #define IA64_CS4281_BA1_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01810000ULL)
 /*
@@ -3379,11 +3397,14 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_pci_irq_on_root(
         s->isp_dev,
         ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
-                               IA64_460GX_WXB0_BUS));
+                               IA64_460GX_WXB1_BUS));
     ia64_vpc_configure_pci_irq(s->ide_dev);
     ia64_vpc_configure_pci_irq(s->ohci_dev);
     ia64_vpc_configure_pci_irq(s->uhci_dev);
-    ia64_vpc_configure_pci_irq(s->lsi_dev);
+    ia64_vpc_configure_pci_irq_on_root(
+        s->lsi_dev,
+        ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
+                               IA64_460GX_WXB0_BUS));
     ia64_vpc_configure_pci_irq_on_root(
         s->vga_dev,
         ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
@@ -5192,16 +5213,32 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
 #endif
 
-    /* Put the SCSI HBA on device 4. */
+    /*
+     * The SCSI HBA.  On the i2000 it belongs at 01:00.0 on the first WXB
+     * bus, which is where the QLogic ISP12160 sits on the real board; the
+     * LSI occupies that seat until the installed guest images can boot from
+     * the QLogic, so that migration is a device swap at one address rather
+     * than another move.  Device 4 of the compatibility bus, where the LSI
+     * used to live, belongs to the CS4281 audio.  zx1 keeps device 4.
+     */
 #ifdef CONFIG_IA64_VPC_STORAGE
-    s->lsi_dev = pci_new(PCI_DEVFN(4, 0), "lsi53c895a");
-    qdev_prop_set_bit(DEVICE(s->lsi_dev),
-                      "disconnect-on-data-wait", false);
-    if (!pci_realize_and_unref(s->lsi_dev, pci_bus, errp)) {
-        return false;
+    {
+        PCIBus *scsi_bus = pci_bus;
+        int scsi_devfn = PCI_DEVFN(4, 0);
+
+        if (!ia64_vpc_chipset_is_zx1(s)) {
+            scsi_bus = s->expander_bus[IA64_460GX_ROOT_WXB0];
+            scsi_devfn = PCI_DEVFN(IA64_460GX_WXB0_SCSI_SLOT, 0);
+        }
+        s->lsi_dev = pci_new(scsi_devfn, "lsi53c895a");
+        qdev_prop_set_bit(DEVICE(s->lsi_dev),
+                          "disconnect-on-data-wait", false);
+        if (!pci_realize_and_unref(s->lsi_dev, scsi_bus, errp)) {
+            return false;
+        }
+        ia64_vpc_configure_lsi(s->lsi_dev);
+        lsi53c8xx_handle_legacy_cmdline(DEVICE(s->lsi_dev));
     }
-    ia64_vpc_configure_lsi(s->lsi_dev);
-    lsi53c8xx_handle_legacy_cmdline(DEVICE(s->lsi_dev));
 #endif
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -5294,6 +5331,18 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         ia64_vpc_init_int10(s, pci_io);
     }
 #endif
+    /*
+     * Device 4 of the compatibility bus is the i2000's audio seat.  Reserve
+     * it before any auto-placed adapter is created, so that the slot map does
+     * not depend on whether the CS4281 is switched on: an add-in card must
+     * not land there, and add-in cards belong on the WXB buses in any case.
+     * The reservation is dropped again below when the CS4281 is created.
+     */
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        pci_bus_set_slot_reserved_mask(pci_bus,
+                                       1U << IA64_460GX_AUDIO_SLOT);
+    }
+
 #ifdef CONFIG_IA64_VPC_NETWORK
     ia64_vpc_init_network(s, pci_bus);
 #endif
@@ -5307,16 +5356,17 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #ifdef CONFIG_IA64_VPC_STORAGE
     if (s->isp_enabled) {
         /*
-         * The i2000 carries its QLogic HBA at 01:00.0, on the first WXB
-         * expander bus.  zx1 has no such adapter, so it keeps the next free
-         * slot of its own root.
+         * The i2000 carries its QLogic HBA at 01:00.0, but the LSI holds
+         * that seat until the guest images boot from this adapter, so it
+         * parks on the second WXB bus meanwhile.  zx1 has no such adapter
+         * and keeps the next free slot of its own root.
          */
         PCIBus *isp_bus = pci_bus;
         int isp_devfn = -1;
 
         if (!ia64_vpc_chipset_is_zx1(s)) {
-            isp_bus = s->expander_bus[IA64_460GX_ROOT_WXB0];
-            isp_devfn = PCI_DEVFN(IA64_460GX_WXB0_ISP_SLOT, 0);
+            isp_bus = s->expander_bus[IA64_460GX_ROOT_WXB1];
+            isp_devfn = PCI_DEVFN(IA64_460GX_WXB1_ISP_SLOT, 0);
         }
         s->isp_dev = pci_create_simple(isp_bus, isp_devfn,
                                        TYPE_ISP12160_SCSI);
@@ -5336,7 +5386,15 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      */
 #ifdef CONFIG_IA64_VPC_AUDIO
     if (s->audio_enabled) {
-        s->audio_dev = pci_create_simple(pci_bus, -1, TYPE_CS4281);
+        if (!ia64_vpc_chipset_is_zx1(s)) {
+            pci_bus_clear_slot_reserved_mask(pci_bus,
+                                             1U << IA64_460GX_AUDIO_SLOT);
+        }
+        s->audio_dev = pci_create_simple(
+            pci_bus,
+            ia64_vpc_chipset_is_zx1(s) ? -1 :
+                PCI_DEVFN(IA64_460GX_AUDIO_SLOT, 0),
+            TYPE_CS4281);
         ia64_vpc_configure_audio(s->audio_dev);
     }
 #endif
