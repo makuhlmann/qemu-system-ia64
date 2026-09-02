@@ -54,6 +54,9 @@ tests = {
     migration,
     pixman,
   ],
+  'test-usb-desc-msos': [
+    meson.project_source_root() / 'hw/usb/desc-msos.c',
+  ],
 }
 
 if have_system or have_tools

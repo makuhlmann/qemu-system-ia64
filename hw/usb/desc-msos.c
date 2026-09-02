@@ -139,7 +139,7 @@ static int usb_desc_msos_prop_str(uint8_t *dest, msos_prop_type type,
     data = (void *)(dest + length);
 
     data->dwPropertyDataLength = cpu_to_le32(vlen*2);
-    length += sizeof(*prop);
+    length += sizeof(*data);
 
     for (i = 0; i < vlen; i++) {
         data->bPropertyData[i*2]   = usb_lo(value[i]);
@@ -167,7 +167,7 @@ static int usb_desc_msos_prop_dword(uint8_t *dest, const wchar_t *name,
     data->bPropertyData[1] = (value >>  8) & 0xff;
     data->bPropertyData[2] = (value >> 16) & 0xff;
     data->bPropertyData[3] = (value >> 24) & 0xff;
-    length += sizeof(*prop) + 4;
+    length += sizeof(*data) + 4;
 
     prop->dwLength = cpu_to_le32(length);
     return length;
