@@ -761,6 +761,28 @@ static void test_lba_agp_capability(void)
     /* BUS_NUMBER (0x58): secondary/subordinate = the Mercury root bus. */
     g_assert_cmphex(qtest_readw(qts, lba + 0x58), ==,
                     IA64_MERCURY_BUS | (IA64_MERCURY_BUS << 8));
+
+    /* Control/decode registers: real Mercury reset values (AGP mode). */
+    /* ARBITRATION_MASK (0x80): reset 0x01; writable 0x7f, but the F bit (0x40)
+     * is writable only in six-masters mode (our BUS_MODE is AGP) -> 0x3f. */
+    g_assert_cmphex(qtest_readl(qts, lba + 0x80), ==, 0x01);
+    qtest_writel(qts, lba + 0x80, 0xffffffffu);
+    g_assert_cmphex(qtest_readl(qts, lba + 0x80), ==, 0x3f);
+    /* STATUS_CONTROL/SIC (0x108): reset-complete (bit 32) reads set. */
+    g_assert_cmphex(qtest_readl(qts, lba + 0x10c) & 1u, ==, 1u);
+    /* LMMIO_BASE (0x200) reset 0x80000000; SLAVE_CONTROL (0x278) reset 0x6. */
+    g_assert_cmphex(qtest_readl(qts, lba + 0x200), ==, 0x80000000u);
+    g_assert_cmphex(qtest_readl(qts, lba + 0x278), ==, 0x6);
+    /* BUS_MODE (0x620): AGP bit set. */
+    g_assert_cmphex(qtest_readl(qts, lba + 0x620) & 1u, ==, 1u);
+    /* CONFIG_ADDRESS (0x40) is a writable selector, masked to 0x00fffffc. */
+    qtest_writel(qts, lba + 0x40, 0xffffffffu);
+    g_assert_cmphex(qtest_readl(qts, lba + 0x40), ==, 0x00fffffcu);
+    /* CONFIG_ADDRESS/DATA reach the Mercury bus: select the graphics adapter
+     * (bus IA64_MERCURY_BUS, dev 0, func 0, reg 0) and read its PCI vendor id
+     * (ATI 0x1002) through CONFIG_DATA (0x48). */
+    qtest_writel(qts, lba + 0x40, (uint32_t)IA64_MERCURY_BUS << 16);
+    g_assert_cmphex(qtest_readw(qts, lba + 0x48), ==, 0x1002);
     qtest_quit(qts);
 }
 

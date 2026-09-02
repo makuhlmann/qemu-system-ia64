@@ -4721,6 +4721,8 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         s->mercury_bus = ia64_mercury_host_bus(s->mercury_host);
         ia64_pci_host_set_mercury_bus(pci_host, s->mercury_bus);
         ia64_sba_attach_bus(IA64_SBA(s->sba_dev), s->mercury_bus);
+        /* The Mercury CSR CONFIG_ADDRESS/DATA pair does config on this bus. */
+        ia64_lba_set_mercury_bus(IA64_LBA(s->lba_dev), s->mercury_bus);
     } else {
         s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
         object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
