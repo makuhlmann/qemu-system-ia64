@@ -39,6 +39,9 @@
 #include "hw/ide/pci.h"
 #include "hw/input/i8042.h"
 #include "hw/acpi/acpi.h"
+#ifdef CONFIG_IA64_VPC_AUDIO
+#include "hw/audio/cs4281.h"
+#endif
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_bus.h"
 #include "hw/pci/pci_device.h"
@@ -157,6 +160,14 @@
 #define IA64_E1000_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00040000ULL)
 #define IA64_E1000_MMIO_SIZE    0x00020000ULL
 #define IA64_E1000_IO_SIZE      0x00000040U
+/*
+ * CS4281 BA0 is 4 KiB and BA1 is 64 KiB.  They sit above the NIC slices
+ * (IA64_E1000_MMIO_PCI_BASE plus MAX_NICS * IA64_NIC_MMIO_STRIDE, which
+ * includes each adapter's Flash aperture) and below the graphics
+ * framebuffer at IA64_PCI_MMIO_BASE + 0x02000000.
+ */
+#define IA64_CS4281_BA0_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01800000ULL)
+#define IA64_CS4281_BA1_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01810000ULL)
 /*
  * Per-adapter slice of the NIC memory / I/O windows.  Sized to hold the
  * largest BAR set of any supported model: the Intel PRO/100 needs a 1 MiB
@@ -477,6 +488,7 @@ struct IA64VpcMachineState {
 
     bool i8042_enabled;
     bool ahci_enabled;
+    bool audio_enabled;
     bool fw_relocate;
     uint64_t fw_map_quirk_disable;
     bool ide_enabled;
@@ -521,6 +533,7 @@ struct IA64VpcMachineState {
     DeviceState *mercury_host;      /* zx1: the Mercury (LBA) PCI host bridge */
     PCIBus *mercury_bus;            /* zx1: the Mercury second root bus         */
     PCIDevice *ahci_dev;
+    PCIDevice *audio_dev;
     PCIDevice *ide_dev;
     PCIDevice *ohci_dev;
     PCIDevice *uhci_dev;
@@ -2099,6 +2112,31 @@ static void ia64_vpc_set_ahci(Object *obj, bool value, Error **errp)
     s->ahci_enabled = value;
 }
 
+static bool ia64_vpc_get_audio(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->audio_enabled;
+}
+
+static void ia64_vpc_set_audio(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+#ifndef CONFIG_IA64_VPC_AUDIO
+    if (value) {
+        error_setg(errp, "audio support is not present in this build");
+        return;
+    }
+#else
+    (void)errp;
+#endif
+
+    s->audio_enabled = value;
+}
+
 static bool ia64_vpc_get_ide(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -2851,6 +2889,20 @@ static void ia64_vpc_configure_ahci(PCIDevice *pci_dev)
                              PCI_COMMAND_MASTER, 2);
 }
 
+static void ia64_vpc_configure_audio(PCIDevice *pci_dev)
+{
+    if (pci_dev == NULL) {
+        return;
+    }
+
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
+                             IA64_CS4281_BA0_PCI_BASE, 4);
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
+                             IA64_CS4281_BA1_PCI_BASE, 4);
+    pci_default_write_config(pci_dev, PCI_COMMAND,
+                             PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER, 2);
+}
+
 static void ia64_vpc_configure_ohci(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
@@ -3226,6 +3278,7 @@ static void ia64_vpc_configure_nic(PCIDevice *pci_dev, unsigned int index)
 static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
 {
     ia64_vpc_configure_ahci(s->ahci_dev);
+    ia64_vpc_configure_audio(s->audio_dev);
     ia64_vpc_configure_ohci(s->ohci_dev);
     ia64_vpc_configure_uhci(s->uhci_dev);
     ia64_vpc_configure_lsi(s->lsi_dev);
@@ -3236,6 +3289,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
         ia64_vpc_configure_nic(s->nic_devs[i], i);
     }
     ia64_vpc_configure_pci_irq(s->ahci_dev);
+    ia64_vpc_configure_pci_irq(s->audio_dev);
     ia64_vpc_configure_pci_irq(s->ide_dev);
     ia64_vpc_configure_pci_irq(s->ohci_dev);
     ia64_vpc_configure_pci_irq(s->uhci_dev);
@@ -4997,6 +5051,20 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #ifdef CONFIG_IA64_VPC_NETWORK
     ia64_vpc_init_network(s, pci_bus);
 #endif
+
+    /*
+     * The real i2000 carries a CS4281 codec on its I/O board, so audio=on
+     * models a device the platform actually had.  It is off by default:
+     * adding a PCI function changes what an installed guest enumerates, and
+     * nothing in the firmware needs it.  Created after every other device so
+     * enabling it cannot move another function's BDF.
+     */
+#ifdef CONFIG_IA64_VPC_AUDIO
+    if (s->audio_enabled) {
+        s->audio_dev = pci_create_simple(pci_bus, -1, TYPE_CS4281);
+        ia64_vpc_configure_audio(s->audio_dev);
+    }
+#endif
     pci_bus_clear_slot_reserved_mask(pci_bus, (1U << 0) | (1U << 1));
 
     /*
@@ -5071,6 +5139,7 @@ static void ia64_vpc_machine_instance_init(Object *obj)
      * opt-in via ide=on.
      */
     s->ahci_enabled = false;
+    s->audio_enabled = false;
     s->ide_enabled = false;
     s->firmware_ide_dma = true;
 #endif
@@ -5173,6 +5242,11 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_set_i8042);
     object_class_property_set_description(oc, "i8042",
         "Set on/off to enable/disable the i8042 PS/2 controller");
+    object_class_property_add_bool(oc, "audio",
+                                   ia64_vpc_get_audio,
+                                   ia64_vpc_set_audio);
+    object_class_property_set_description(oc, "audio",
+        "Add the CS4281 PCI audio controller (default off)");
     object_class_property_add_bool(oc, "ahci",
                                    ia64_vpc_get_ahci,
                                    ia64_vpc_set_ahci);

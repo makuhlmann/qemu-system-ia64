@@ -36,7 +36,7 @@ struct audio_model {
     void (*init)(const char *audiodev);
 };
 
-static struct audio_model audio_models[9];
+static struct audio_model audio_models[10];
 static int audio_models_count;
 
 void audio_register_model_with_cb(const char *name, const char *descr,

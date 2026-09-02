@@ -61,3 +61,7 @@ virtio_snd_handle_event(void) "event queue callback called"
 virtio_snd_pcm_stream_flush(uint32_t stream) "flushing stream %"PRIu32
 virtio_snd_handle_tx_xfer(void) "tx queue callback called"
 virtio_snd_handle_rx_xfer(void) "rx queue callback called"
+
+# cs4281.c
+cs4281_reg_access(unsigned bar, bool write, uint64_t addr, uint64_t value, unsigned size) "bar=%u write=%d addr=0x%04" PRIx64 " value=0x%08" PRIx64 " size=%u"
+cs4281_config_write(uint32_t addr, uint32_t value, unsigned size) "addr=0x%02" PRIx32 " value=0x%08" PRIx32 " size=%u"

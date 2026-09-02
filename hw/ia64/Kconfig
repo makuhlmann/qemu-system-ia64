@@ -12,11 +12,17 @@ config IA64_VPC
     select I8259
     select I8254
     select ACPI
+    imply IA64_VPC_AUDIO
     imply IA64_VPC_GRAPHICS
     imply IA64_VPC_NETWORK
     imply IA64_VPC_PS2
     imply IA64_VPC_STORAGE
     imply IA64_VPC_USB
+
+config IA64_VPC_AUDIO
+    bool
+    depends on IA64_VPC
+    select CS4281
 
 config IA64_VPC_GRAPHICS
     bool

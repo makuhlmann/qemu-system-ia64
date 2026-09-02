@@ -820,6 +820,108 @@ static void test_sba_ioc_identity(void)
  * QEMU_BUILD_BUG_ON in hw/ia64/ia64_mercury.c.)
  */
 /*
+ * CS4281 audio.  The real i2000 I/O board carries this codec, so the
+ * machine can add it with audio=on.  Walk the bring-up a driver performs:
+ * release the sound-power reset, start the clock, wait for the AC '97 link
+ * to report the codec ready, then read a codec register through the
+ * command port.
+ */
+#define IA64_CS4281_BA0_BASE    (IA64_PCI_MMIO_BASE + 0x01800000ULL)
+#define IA64_CS4281_BA0_HISR    0x0000U
+#define IA64_CS4281_BA0_HIMR    0x000cU
+#define IA64_CS4281_BA0_SSVID   0x03fcU
+#define IA64_CS4281_BA0_CLKCR1  0x0400U
+#define IA64_CS4281_BA0_SERMC   0x0420U
+#define IA64_CS4281_BA0_ACCTL   0x0460U
+#define IA64_CS4281_BA0_ACSTS   0x0464U
+#define IA64_CS4281_BA0_ACCAD   0x046cU
+#define IA64_CS4281_BA0_ACSDA   0x047cU
+#define IA64_CS4281_BA0_CWPR    0x03e0U
+#define IA64_CS4281_CWPR_KEY    0x4281U
+#define IA64_CS4281_BA0_SPMC    0x03ecU
+#define IA64_CS4281_BA0_SSPM    0x0740U
+#define IA64_CS4281_SPMC_RSTN   (1U << 0)
+#define IA64_CS4281_SSPM_ACLEN  (1U << 2)
+#define IA64_CS4281_CLKCR1_CLKON  (1U << 25)
+#define IA64_CS4281_CLKCR1_DLLRDY (1U << 24)
+#define IA64_CS4281_CLKCR1_SWCE   (1U << 5)
+#define IA64_CS4281_CLKCR1_DLLP   (1U << 4)
+#define IA64_CS4281_ACCTL_CRW   (1U << 4)
+#define IA64_CS4281_ACCTL_DCV   (1U << 3)
+#define IA64_CS4281_ACCTL_VFRM  (1U << 2)
+#define IA64_CS4281_ACCTL_ESYN  (1U << 1)
+#define IA64_CS4281_ACSTS_CRDY  (1U << 0)
+#define IA64_CS4281_AC97_VENDOR_ID1 0x7cU
+
+static void test_cs4281_codec_access(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx,audio=on -cpu merced "
+                                 "-m 256M -S");
+    uint32_t value;
+
+    /* Reset defaults published by BA0. */
+    g_assert_cmphex(qtest_readl(qts, IA64_CS4281_BA0_BASE +
+                                IA64_CS4281_BA0_HIMR), ==, 0x7fffffff);
+    g_assert_cmphex(qtest_readl(qts, IA64_CS4281_BA0_BASE +
+                                IA64_CS4281_BA0_SERMC), ==, 0x00010003);
+    g_assert_cmphex(qtest_readl(qts, IA64_CS4281_BA0_BASE +
+                                IA64_CS4281_BA0_SSVID), ==, 0x42538086);
+
+    /*
+     * The PLL only locks once the sound power reset is released; CLKON and
+     * DLLRDY are status bits the model derives, not writable ones.
+     */
+    qtest_writel(qts, IA64_CS4281_BA0_BASE + IA64_CS4281_BA0_CLKCR1,
+                 IA64_CS4281_CLKCR1_SWCE | IA64_CS4281_CLKCR1_DLLP);
+    g_assert_cmphex(qtest_readl(qts, IA64_CS4281_BA0_BASE +
+                                IA64_CS4281_BA0_CLKCR1) &
+                    (IA64_CS4281_CLKCR1_DLLRDY |
+                     IA64_CS4281_CLKCR1_CLKON), ==, 0);
+
+    /* SPMC is a vendor register: it ignores writes until CWPR is unlocked. */
+    qtest_writel(qts, IA64_CS4281_BA0_BASE + IA64_CS4281_BA0_SPMC,
+                 IA64_CS4281_SPMC_RSTN);
+    g_assert_cmphex(qtest_readl(qts, IA64_CS4281_BA0_BASE +
+                                IA64_CS4281_BA0_SPMC), ==, 0);
+
+    qtest_writel(qts, IA64_CS4281_BA0_BASE + IA64_CS4281_BA0_CWPR,
+                 IA64_CS4281_CWPR_KEY);
+    qtest_writel(qts, IA64_CS4281_BA0_BASE + IA64_CS4281_BA0_SPMC,
+                 IA64_CS4281_SPMC_RSTN);
+    g_assert_cmphex(qtest_readl(qts, IA64_CS4281_BA0_BASE +
+                                IA64_CS4281_BA0_CLKCR1) &
+                    (IA64_CS4281_CLKCR1_DLLRDY |
+                     IA64_CS4281_CLKCR1_CLKON), ==,
+                    IA64_CS4281_CLKCR1_DLLRDY |
+                    IA64_CS4281_CLKCR1_CLKON);
+
+    /* Enabling the AC-link and driving a frame makes the codec report ready. */
+    qtest_writel(qts, IA64_CS4281_BA0_BASE + IA64_CS4281_BA0_SSPM,
+                 IA64_CS4281_SSPM_ACLEN);
+    qtest_writel(qts, IA64_CS4281_BA0_BASE + IA64_CS4281_BA0_ACCTL,
+                 IA64_CS4281_ACCTL_ESYN | IA64_CS4281_ACCTL_VFRM);
+    g_assert_cmphex(qtest_readl(qts, IA64_CS4281_BA0_BASE +
+                                IA64_CS4281_BA0_ACSTS) &
+                    IA64_CS4281_ACSTS_CRDY, ==, IA64_CS4281_ACSTS_CRDY);
+
+    /* A codec read returns the CS4297A vendor id and clears DCV. */
+    qtest_writel(qts, IA64_CS4281_BA0_BASE + IA64_CS4281_BA0_ACCAD,
+                 IA64_CS4281_AC97_VENDOR_ID1);
+    qtest_writel(qts, IA64_CS4281_BA0_BASE + IA64_CS4281_BA0_ACCTL,
+                 IA64_CS4281_ACCTL_ESYN | IA64_CS4281_ACCTL_VFRM |
+                 IA64_CS4281_ACCTL_CRW | IA64_CS4281_ACCTL_DCV);
+    g_assert_cmphex(qtest_readl(qts, IA64_CS4281_BA0_BASE +
+                                IA64_CS4281_BA0_ACSDA), ==, 0x4352);
+    value = qtest_readl(qts, IA64_CS4281_BA0_BASE + IA64_CS4281_BA0_ACCTL);
+    g_assert_cmphex(value & IA64_CS4281_ACCTL_DCV, ==, 0);
+
+    /* No interrupt is pending after a bare codec access. */
+    g_assert_cmphex(qtest_readl(qts, IA64_CS4281_BA0_BASE +
+                                IA64_CS4281_BA0_HISR) & 0xff00, ==, 0);
+    qtest_quit(qts);
+}
+
+/*
  * OHCI root-hub port resume.  Resume signalling takes 20 ms plus a
  * low-speed EOP and a 3 ms recovery time before the port reports itself
  * resumed; a controller-wide USBRESUME or a port reset ends the suspend
@@ -3842,6 +3944,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
     qtest_add_func("/ia64-vpc/eepro100/csr-windows",
                    test_eepro100_csr_windows);
+    qtest_add_func("/ia64-vpc/audio/cs4281-codec",
+                   test_cs4281_codec_access);
     qtest_add_func("/ia64-vpc/ohci/port-resume", test_ohci_port_resume);
     qtest_add_func("/ia64-vpc/ohci/controller-resume",
                    test_ohci_controller_resume);

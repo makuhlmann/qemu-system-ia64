@@ -13,6 +13,11 @@ config AC97
     default y if PCI_DEVICES
     depends on PCI
 
+config CS4281
+    bool
+    default y if PCI_DEVICES
+    depends on PCI
+
 config ADLIB
     bool
     default y
