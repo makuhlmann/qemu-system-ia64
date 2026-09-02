@@ -1535,10 +1535,15 @@ static BOOLEAN test_console_output_device_paths(EFI_RUNTIME_SERVICES *Rs)
            path[0] == 0x02U && path[1] == 0x01U &&
            get_u16(path + 2U) == 12U &&
            get_u32(path + 4U) == 0x0a0341d0U &&
-           get_u32(path + 8U) == 0 &&
+           /*
+            * The VGA console adapter is behind the Mercury (LBA) PCI root on
+            * this (zx1) machine: ACPI PNP0A03 _UID 1 (PCI0 is _UID 0) and PCI
+            * device 0 (IA64_MERCURY_VGA_SLOT), not PCI0 device 5.
+            */
+           get_u32(path + 8U) == 1U &&
            path[12U] == 0x01U && path[13U] == 0x01U &&
            get_u16(path + 14U) == 6U &&
-           path[16U] == 0 && path[17U] == 5U &&
+           path[16U] == 0 && path[17U] == 0U &&
            path[18U] == 0x7fU && path[19U] == 0x01U &&
            get_u16(path + 20U) == 4U &&
            path[22U] == 0x02U && path[23U] == 0x01U &&

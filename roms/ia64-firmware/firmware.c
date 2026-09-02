@@ -13897,8 +13897,29 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
               "verification failed\r\n");
 }
 
+/*
+ * On zx1 the AGP graphics adapter lives behind the Mercury (LBA) PCI root
+ * bridge, not on PCI0: retarget the EFI console/graphics device paths from
+ * PCI0 (ACPI _UID 0) device 5 to the Mercury root (ACPI _UID 1) at
+ * IA64_MERCURY_VGA_SLOT.  Both roots advertise PNP0A03 (0x0A0341D0), so only
+ * the _UID and PCI device number change.  Run once, after the chipset profile
+ * is known (fw_phase_platform_init) and before the paths are installed as the
+ * GOP handle's device path / ConOut variables (fw_phase_efi_core_init).
+ */
+static void fw_retarget_vga_device_paths(void)
+{
+    if (!fw_platform_is_zx1()) {
+        return;
+    }
+    mGraphicsDevicePath.Acpi.Uid = 1;
+    mGraphicsDevicePath.Pci.Device = IA64_MERCURY_VGA_SLOT;
+    mConsoleOutputDevicePath.Graphics.Acpi.Uid = 1;
+    mConsoleOutputDevicePath.Graphics.Pci.Device = IA64_MERCURY_VGA_SLOT;
+}
+
 static void fw_phase_efi_core_init(void)
 {
+    fw_retarget_vga_device_paths();
     efi_init_boot_services();
     efi_init_runtime_services();
     uart_puts("UEFI Time Services:   ");
