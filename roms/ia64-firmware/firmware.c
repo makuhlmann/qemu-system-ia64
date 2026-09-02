@@ -614,6 +614,8 @@ typedef struct _EFI_PCI_IO_PROTOCOL EFI_PCI_IO_PROTOCOL;
  */
 #define FW_PCI_PIIX3_UHCI_ID 0x70208086U
 #define FW_PCI_IFB_UHCI_ID   0x76028086U
+/* Likewise the IDE controller: a discrete CMD646, or the bridge's function 1. */
+#define FW_PCI_IFB_IDE_ID    0x76018086U
 
 typedef struct FW_PCI_IO_DEVICE {
     EFI_HANDLE *Handle;
@@ -13935,12 +13937,13 @@ static void fw_retarget_vga_device_paths(void)
 }
 
 /*
- * The USB host controller is function 2 of the 82468GX I/O and Firmware
- * Bridge on the i2000, not a discrete PIIX3 function 0.  Retarget its fixed
- * PCI-I/O table entry and device path, which the static initializers give the
- * zx1 layout.  Same timing rule as fw_retarget_vga_device_paths().
+ * The USB and IDE controllers are functions 2 and 1 of the 82468GX I/O and
+ * Firmware Bridge on the i2000, not discrete function-zero devices of their
+ * own.  Retarget their fixed PCI-I/O table entries and device paths, which
+ * the static initializers give the zx1 layout.  Same timing rule as
+ * fw_retarget_vga_device_paths().
  */
-static void fw_retarget_uhci_device_path(void)
+static void fw_retarget_south_bridge_device_paths(void)
 {
     UINTN i;
 
@@ -13948,21 +13951,26 @@ static void fw_retarget_uhci_device_path(void)
         return;
     }
     for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
-        if (mPciIoDevices[i].Protocol != &mPciUhciIoProto) {
-            continue;
+        if (mPciIoDevices[i].Protocol == &mPciUhciIoProto) {
+            mPciIoDevices[i].Device = IA64_460GX_IFB_SLOT;
+            mPciIoDevices[i].Function = IA64_460GX_IFB_USB_FUNCTION;
+            mPciIoDevices[i].ExpectedId = FW_PCI_IFB_UHCI_ID;
+        } else if (mPciIoDevices[i].Protocol == &mPciIdeIoProto) {
+            mPciIoDevices[i].Device = IA64_460GX_IFB_SLOT;
+            mPciIoDevices[i].Function = IA64_460GX_IFB_IDE_FUNCTION;
+            mPciIoDevices[i].ExpectedId = FW_PCI_IFB_IDE_ID;
         }
-        mPciIoDevices[i].Device = IA64_460GX_IFB_SLOT;
-        mPciIoDevices[i].Function = IA64_460GX_IFB_USB_FUNCTION;
-        mPciIoDevices[i].ExpectedId = FW_PCI_IFB_UHCI_ID;
     }
     mPciUhciDevicePath.Pci.Device = IA64_460GX_IFB_SLOT;
     mPciUhciDevicePath.Pci.Function = IA64_460GX_IFB_USB_FUNCTION;
+    mPciIdeDevicePath.Pci.Device = IA64_460GX_IFB_SLOT;
+    mPciIdeDevicePath.Pci.Function = IA64_460GX_IFB_IDE_FUNCTION;
 }
 
 static void fw_phase_efi_core_init(void)
 {
     fw_retarget_vga_device_paths();
-    fw_retarget_uhci_device_path();
+    fw_retarget_south_bridge_device_paths();
     efi_init_boot_services();
     efi_init_runtime_services();
     uart_puts("UEFI Time Services:   ");

@@ -2215,7 +2215,10 @@ static void test_pci_default_layout(void)
      * four-function device carrying the LPC/ISA bridge, the IDE controller,
      * the UHCI host controller and the SMBus controller.  Chipset parts have
      * no subsystem identity.  The UHCI keeps the I/O base and interrupt the
-     * discrete PIIX3 function had, so nothing else in the map moves.
+     * discrete PIIX3 function had, so nothing else in the map moves.  Both
+     * IDE channels are in compatibility mode and decode the fixed legacy
+     * ports, so that function places only its bus-master BAR and takes no
+     * PCI interrupt: it uses ISA IRQs 14 and 15 through the bridge.
      */
     static const struct {
         unsigned int function;
@@ -2226,7 +2229,7 @@ static void test_pci_default_layout(void)
         uint8_t irq_pin;
     } ifb_functions[] = {
         { 0, 0x7600, PCI_CLASS_BRIDGE_ISA, 0, 0, 0 },
-        { 1, 0x7601, PCI_CLASS_STORAGE_IDE, 0x00000001, 0, 0 },
+        { 1, 0x7601, PCI_CLASS_STORAGE_IDE, 0x0000c001, 0, 0 },
         { 2, 0x7602, PCI_CLASS_SERIAL_USB, 0x0000c121, 18, 4 },
         { 3, 0x7603, PCI_CLASS_SERIAL_SMBUS, 0x0000fff1, 16, 2 },
     };
@@ -2529,10 +2532,32 @@ static void test_pci_explicit_cmd646_slot0(void)
         "-device cmd646-ide,secondary=1,addr=0,bus=pci"));
 }
 
-/* The ide=on machine option instantiates the same CMD646 at slot 0. */
+/*
+ * On zx1 the ide=on machine option instantiates the same CMD646 at slot 0.
+ * On 460gx it has nothing to do: the IDE controller is function 1 of the
+ * south bridge, part of the board and not switchable, so slot 0 stays empty
+ * and the option is accepted without effect.
+ */
 static void test_ide_on_slot0(void)
 {
-    assert_cmd646_at_slot0(ia64_vpc_start("-machine ide=on"));
+    QTestState *qts;
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+
+    assert_cmd646_at_slot0(qtest_initf("-machine zx1,ide=on -m 256M -S"));
+
+    qts = ia64_vpc_start("-machine ide=on");
+    ia64_qpci_init(&gbus, qts);
+    g_assert_null(qpci_device_find(&gbus.bus, QPCI_DEVFN(0, 0)));
+    dev = qpci_device_find(&gbus.bus,
+                           QPCI_DEVFN(IA64_460GX_IFB_SLOT,
+                                      IA64_460GX_IFB_IDE_FUNCTION));
+    g_assert_nonnull(dev);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_VENDOR_ID), ==,
+                    PCI_VENDOR_ID_INTEL);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x7601);
+    g_free(dev);
+    qtest_quit(qts);
 }
 
 static void lsi_write_script_insn(QTestState *qts, uint32_t *addr,

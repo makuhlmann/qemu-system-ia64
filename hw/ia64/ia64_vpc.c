@@ -191,6 +191,14 @@
  * adapter would otherwise overlap.
  */
 /*
+ * The south bridge's IDE bus-master register file.  Both channels are in
+ * compatibility mode and decode the fixed legacy ports, so only this BAR
+ * needs an address; it is the one the firmware allocates for a controller
+ * that arrives unassigned (PCI_IDE_BMDMA_BAR), kept identical so guest and
+ * firmware agree.
+ */
+#define IA64_IFB_IDE_BMDMA_IO_BASE 0x0000c000U
+/*
  * The south bridge's SMBus host controller.  The real SDV firmware programs
  * this BAR to 0xFFF0 and drives the board's sensor chips through it
  * (plans/phase5 SESSION 8), so use the same base here.
@@ -3045,6 +3053,29 @@ static void ia64_vpc_configure_uhci(PCIDevice *pci_dev)
                              PCI_COMMAND_IO | PCI_COMMAND_MASTER, 2);
 }
 
+/*
+ * Whether the machine carries the modelled 82468GX south bridge, and with it
+ * an IDE controller that is part of the board rather than an option.  zx1 is
+ * a different platform, and realfw mode models a south bridge of its own.
+ */
+static bool ia64_vpc_has_south_bridge(const IA64VpcMachineState *s)
+{
+    return !ia64_vpc_chipset_is_zx1(s) && s->realfw_path == NULL;
+}
+
+static void ia64_vpc_configure_ifb_ide(PCIDevice *pci_dev)
+{
+    if (pci_dev == NULL) {
+        return;
+    }
+
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_4,
+                             IA64_IFB_IDE_BMDMA_IO_BASE |
+                             PCI_BASE_ADDRESS_SPACE_IO, 4);
+    pci_default_write_config(pci_dev, PCI_COMMAND,
+                             PCI_COMMAND_IO | PCI_COMMAND_MASTER, 2);
+}
+
 static void ia64_vpc_configure_ifb_smbus(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
@@ -3412,6 +3443,8 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_isp(s->isp_dev);
     ia64_vpc_configure_ohci(s->ohci_dev);
     ia64_vpc_configure_uhci(s->uhci_dev);
+    ia64_vpc_configure_ifb_ide(
+        intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_IDE_FUNCTION));
     ia64_vpc_configure_ifb_smbus(
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
     ia64_vpc_configure_lsi(s->lsi_dev);
@@ -5173,12 +5206,13 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         ahci = ICH9_AHCI(s->ahci_dev);
         g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
         /*
-         * The AHCI ports and the cmd646 IDE controller both present an ATA
-         * "if=ide" bus.  When ide=on the CMD646 owns those drives (below), so
-         * only bind if=ide media to SATA when IDE is not the active owner;
-         * a user can still attach disks to this controller explicitly.
+         * The AHCI ports and the IDE controller both present an ATA "if=ide"
+         * bus.  IDE owns those drives whenever it is there to own them --
+         * always on a board with the south bridge, and with ide=on
+         * elsewhere -- so only bind if=ide media to SATA otherwise; a user
+         * can still attach disks to this controller explicitly.
          */
-        if (!s->ide_enabled) {
+        if (!s->ide_enabled && !ia64_vpc_has_south_bridge(s)) {
             ide_drive_get(sata_drives, ahci->ahci.ports);
             ahci_ide_create_devs(&ahci->ahci, sata_drives);
         }
@@ -5208,7 +5242,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * and converging them means re-validating the real firmware's POST, so
      * that belongs to plans/phase5-real-firmware-boot.md rather than here.
      */
-    if (!ia64_vpc_chipset_is_zx1(s) && s->realfw_path == NULL) {
+    if (ia64_vpc_has_south_bridge(s)) {
         s->ifb = intel_82468gx_ifb_create(
             pci_bus, PCI_DEVFN(IA64_460GX_IFB_SLOT,
                                IA64_460GX_IFB_LPC_FUNCTION), errp);
@@ -5506,22 +5540,30 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
     pci_bus_clear_slot_reserved_mask(pci_bus, (1U << 0) | (1U << 1));
 
-    /*
-     * With ide=on, populate the reserved slot 0 with a dual-channel CMD646
-     * PCI IDE controller.  Slot 0 is the platform-anticipated home for IDE:
-     * the firmware's fixed PCI-I/O table and the DSDT _PRT both describe an
-     * IDE function there, and it keeps every other device's BDF stable.  The
-     * firmware assigns the controller's I/O BARs on demand, exactly as for a
-     * hand-attached -device cmd646-ide.  secondary=1 enables both channels;
-     * pci_ide_create_devs() auto-binds any if=ide media across them.
-     */
 #ifdef CONFIG_IA64_VPC_STORAGE
     /*
-     * realfw mode always instantiates the controller: the SDV firmware probes
-     * a legacy IDE during POST regardless of the ide=on switch, and reaches it
-     * through the fixed legacy ports aliased below rather than the PCI BARs.
+     * The i2000's IDE controller is function 1 of the south bridge, so it is
+     * part of the board and not switchable: the ide= option has no effect
+     * there, and any if=ide media binds across its two channels.  Both
+     * channels are in compatibility mode and decode the fixed legacy ports,
+     * so only the bus-master BAR is placed.
+     *
+     * Elsewhere -- zx1, and realfw mode, which models a south bridge of its
+     * own -- ide=on populates the reserved slot 0 with a dual-channel CMD646.
+     * Slot 0 is the platform-anticipated home for IDE there: the firmware's
+     * fixed PCI-I/O table and the DSDT _PRT both describe an IDE function at
+     * that address, and it keeps every other device's BDF stable.  The
+     * firmware assigns its I/O BARs on demand, exactly as for a hand-attached
+     * -device cmd646-ide.  realfw always instantiates it, because the SDV
+     * firmware probes a legacy IDE during POST regardless of the switch and
+     * reaches it through the legacy ports aliased below.
      */
-    if (s->ide_enabled || s->realfw_path != NULL) {
+    if (s->ifb != NULL) {
+        s->ide_dev = intel_82468gx_ifb_function(s->ifb,
+                                                IA64_460GX_IFB_IDE_FUNCTION);
+        ia64_vpc_configure_ifb_ide(s->ide_dev);
+        pci_ide_create_devs(s->ide_dev);
+    } else if (s->ide_enabled || s->realfw_path != NULL) {
         s->ide_dev = pci_new(PCI_DEVFN(0, 0), "cmd646-ide");
         qdev_prop_set_uint32(DEVICE(s->ide_dev), "secondary", 1);
         if (!pci_realize_and_unref(s->ide_dev, pci_bus, errp)) {
