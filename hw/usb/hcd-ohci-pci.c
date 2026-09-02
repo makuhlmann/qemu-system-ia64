@@ -43,6 +43,7 @@ struct OHCIPCIState {
     char *masterbus;
     uint32_t num_ports;
     uint32_t firstport;
+    uint8_t interrupt_pin;
 };
 
 /**
@@ -65,7 +66,12 @@ static void usb_ohci_realize_pci(PCIDevice *dev, Error **errp)
     OHCIPCIState *ohci = PCI_OHCI(dev);
 
     dev->config[PCI_CLASS_PROG] = 0x10; /* OHCI */
-    dev->config[PCI_INTERRUPT_PIN] = 0x01; /* interrupt pin A */
+    if (ohci->interrupt_pin < 1 || ohci->interrupt_pin > PCI_NUM_PINS) {
+        error_setg(errp, "interrupt-pin must be between 1 and %d",
+                   PCI_NUM_PINS);
+        return;
+    }
+    dev->config[PCI_INTERRUPT_PIN] = ohci->interrupt_pin;
 
     usb_ohci_init(&ohci->state, DEVICE(dev), ohci->num_ports, 0,
                   ohci->masterbus, ohci->firstport,
@@ -113,6 +119,7 @@ static const Property ohci_pci_properties[] = {
     DEFINE_PROP_STRING("masterbus", OHCIPCIState, masterbus),
     DEFINE_PROP_UINT32("num-ports", OHCIPCIState, num_ports, 3),
     DEFINE_PROP_UINT32("firstport", OHCIPCIState, firstport, 0),
+    DEFINE_PROP_UINT8("interrupt-pin", OHCIPCIState, interrupt_pin, 1),
 };
 
 static const VMStateDescription vmstate_ohci = {

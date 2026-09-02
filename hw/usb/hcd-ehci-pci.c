@@ -19,6 +19,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/usb/hcd-ehci.h"
 #include "migration/vmstate.h"
+#include "qapi/error.h"
 #include "qemu/module.h"
 #include "qemu/range.h"
 
@@ -36,13 +37,31 @@ static void usb_ehci_pci_realize(PCIDevice *dev, Error **errp)
     EHCIState *s = &i->ehci;
     uint8_t *pci_conf = dev->config;
 
+    if (i->interrupt_pin < 1 || i->interrupt_pin > PCI_NUM_PINS) {
+        error_setg(errp, "interrupt-pin must be between 1 and %d",
+                   PCI_NUM_PINS);
+        return;
+    }
+    if (i->num_ports < 1 || i->num_ports > EHCI_PORTS) {
+        error_setg(errp, "num-ports must be between 1 and %d", EHCI_PORTS);
+        return;
+    }
+
+    /*
+     * usb_ehci_init() sized the port window from the default port count in
+     * instance_init; resize it before usb_ehci_realize() maps it.
+     */
+    s->portnr = i->num_ports;
+    s->caps[0x04] = i->num_ports;
+    memory_region_set_size(&s->mem_ports, 4 * i->num_ports);
+
     pci_set_byte(&pci_conf[PCI_CLASS_PROG], 0x20);
 
     /* capabilities pointer */
     pci_set_byte(&pci_conf[PCI_CAPABILITY_LIST], 0x00);
     /* pci_set_byte(&pci_conf[PCI_CAPABILITY_LIST], 0x50); */
 
-    pci_set_byte(&pci_conf[PCI_INTERRUPT_PIN], 4); /* interrupt pin D */
+    pci_set_byte(&pci_conf[PCI_INTERRUPT_PIN], i->interrupt_pin);
     pci_set_byte(&pci_conf[PCI_MIN_GNT], 0);
     pci_set_byte(&pci_conf[PCI_MAX_LAT], 0);
 
@@ -137,6 +156,8 @@ static void usb_ehci_pci_write_config(PCIDevice *dev, uint32_t addr,
 
 static const Property ehci_pci_properties[] = {
     DEFINE_EHCI_COMMON_PROPERTIES(EHCIPCIState),
+    DEFINE_PROP_UINT8("interrupt-pin", EHCIPCIState, interrupt_pin, 4),
+    DEFINE_PROP_UINT8("num-ports", EHCIPCIState, num_ports, EHCI_PORTS),
 };
 
 static const VMStateDescription vmstate_ehci_pci = {

@@ -327,6 +327,8 @@ struct EHCIPCIState {
     /*< public >*/
 
     EHCIState ehci;
+    uint8_t interrupt_pin;
+    uint8_t num_ports;
 };
 
 
