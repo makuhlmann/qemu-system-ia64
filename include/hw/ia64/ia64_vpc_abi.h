@@ -298,6 +298,14 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_LBA_DEVICE_ID            IA64_U64(0x000000000000122e) /* zx1 LBA */
 #define IA64_LBA_AGP_CAP_OFFSET       IA64_U64(0x0000000000000060)
 /*
+ * Mercury FUNCTION_CLASS (CSR 0x08): PCI class code 0x060000 (host bridge) in
+ * bytes 0x09-0x0b and revision 0x32 (rev 2.0) in byte 0x08; cache-line/latency
+ * (bytes 0x0c/0x0d) reset to 0.  Values from the HP zx1 ioa ERS and the upstream
+ * hp-zx1-ioa-regs.h identity constants.
+ */
+#define IA64_LBA_CLASS_CODE           IA64_U64(0x0000000000060000)
+#define IA64_LBA_REVISION             IA64_U64(0x0000000000000032)
+/*
  * The HP zx1 Mercury (LBA/ioa) presents its own PCI root bus so the AGP graphics
  * adapter sits behind it, exactly as on real zx1 hardware: the ACPI HWP0003 node
  * carries _CID PNP0A03, Windows pci.sys owns it as a PCI root bridge (per

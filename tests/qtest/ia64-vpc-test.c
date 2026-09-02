@@ -751,6 +751,16 @@ static void test_lba_agp_capability(void)
     qtest_writel(qts, lba + IA64_LBA_AGP_CAP_OFFSET + 8, 0xffffffffu);
     g_assert_cmphex(qtest_readl(qts, lba + IA64_LBA_AGP_CAP_OFFSET + 8), ==,
                     (uint32_t)IA64_LBA_AGP_COMMAND_WRITABLE);
+    /* Mercury identity registers a driver reads to recognise the bridge. */
+    /* FUNCTION_ID (0x00): HP vendor 0x103c, device 0x122e. */
+    g_assert_cmphex(qtest_readw(qts, lba + 0x00), ==, IA64_LBA_VENDOR_ID);
+    g_assert_cmphex(qtest_readw(qts, lba + 0x02), ==, IA64_LBA_DEVICE_ID);
+    /* FUNCTION_CLASS (0x08): host-bridge class 0x060000, revision 0x32. */
+    g_assert_cmphex(qtest_readl(qts, lba + 0x08), ==,
+                    (uint32_t)(IA64_LBA_REVISION | (IA64_LBA_CLASS_CODE << 8)));
+    /* BUS_NUMBER (0x58): secondary/subordinate = the Mercury root bus. */
+    g_assert_cmphex(qtest_readw(qts, lba + 0x58), ==,
+                    IA64_MERCURY_BUS | (IA64_MERCURY_BUS << 8));
     qtest_quit(qts);
 }
 

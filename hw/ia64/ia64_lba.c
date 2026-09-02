@@ -13,14 +13,18 @@
  *   - the AGP capability (id 0x02) sits at 0x60, with AGP status at 0x64 and a
  *     writable AGP command at 0x68.
  *
- * This is a thin MMIO shell that serves exactly those config reads.  It carries
- * no PCI config space of its own and does no DMA translation: the AGP GART is
- * the SBA's IOPDIR (hp-agp's "shared" path), so all this device does is
- * advertise the AGP capability the driver negotiates against.  The register
- * values mirror upstream hw/pci-host/hp-zx1-ioa-regs.c in AGP mode.  The block
- * is described to guests only through the ACPI HWP0003 _CRS (a CCSR
- * VendorLong), never the EFI memory map; keep base/length in lockstep with
- * LBA0 in roms/ia64-firmware/dsdt-pci-root-zx1.asl.
+ * This MMIO shell serves those reads plus the Mercury identity registers a
+ * driver reads to recognise the bridge: FUNCTION_ID (0x00, vendor/device +
+ * command/status), FUNCTION_CLASS (0x08, host-bridge class + revision),
+ * CAPABILITIES_POINTER (0x30) and BUS_NUMBER (0x58).  It carries no PCI config
+ * space of its own and does no DMA translation: the AGP GART is the SBA's IOPDIR
+ * (hp-agp's "shared" path).  The graphics adapter itself is a real PCI device on
+ * the Mercury root bus (hw/ia64/ia64_mercury.c); this block only models the
+ * Mercury CSR / AGP-capability registers.  The register values mirror upstream
+ * hw/pci-host/hp-zx1-ioa-regs.c in AGP mode.  The block is described to guests
+ * only through the ACPI HWP0003 _CRS (a CCSR VendorLong and a memory
+ * descriptor), never the EFI memory map; keep base/length in lockstep with LBA0
+ * in roms/ia64-firmware/dsdt-pci-root-zx1.asl.
  */
 
 #include "qemu/osdep.h"
@@ -42,13 +46,22 @@ static uint64_t ia64_lba_reg(IA64LBAState *s, uint64_t base)
 {
     switch (base) {
     case 0x00:
-        /* vendor | device | command(0) | status(CAP_LIST set) */
+        /* FUNCTION_ID: vendor | device | command(0) | status(CAP_LIST set). */
         return IA64_LBA_VENDOR_ID |
                (IA64_LBA_DEVICE_ID << 16) |
                (IA64_LBA_PCI_STATUS_RESET << 48);
+    case 0x08:
+        /* FUNCTION_CLASS: revision (byte 0x08) | class code (bytes 0x09-0x0b),
+         * i.e. a host bridge at revision 2.0.  Cache-line size and latency timer
+         * (bytes 0x0c/0x0d) read 0, as real Mercury resets them. */
+        return IA64_LBA_REVISION | (IA64_LBA_CLASS_CODE << 8);
     case 0x30:
         /* capabilities pointer lands in byte 0x34 -> the AGP capability. */
         return IA64_LBA_AGP_CAP_OFFSET << 32;
+    case 0x58:
+        /* BUS_NUMBER: secondary (byte 0x58) and subordinate (byte 0x59) bus of
+         * the Mercury root -- both IA64_MERCURY_BUS (no downstream bridges). */
+        return IA64_MERCURY_BUS | (IA64_MERCURY_BUS << 8);
     case 0x60:
         /* AGP capability: id 0x02 at byte 0x60, AGP status at byte 0x64. */
         return IA64_LBA_AGP_CAPABILITY;
