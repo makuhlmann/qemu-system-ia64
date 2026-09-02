@@ -352,6 +352,16 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * SDV firmware expects it -- it pokes the south bridge's config register
  * 0xd0 at 00:03.0 for its CPU-frequency mailbox (plans/phase5 SESSION 17).
  */
+/*
+ * The Programmable Interrupt Device's seat on the compatibility bus, and the
+ * Integrated Hot-Plug Controller's on each WXB bus.  Unlike the south
+ * bridge's device number, these are reconstructions: the chipset
+ * documentation places the PID on the compatibility bus (SSDM 1.7.2) without
+ * naming a device number, and nothing in the real firmware pins them down.
+ * They follow upstream's i2000 machine.
+ */
+#define IA64_460GX_PID_SLOT           0x00
+#define IA64_460GX_IHPC_SLOT          0x0f
 #define IA64_460GX_IFB_SLOT           0x03
 #define IA64_460GX_IFB_LPC_FUNCTION   0
 #define IA64_460GX_IFB_IDE_FUNCTION   1

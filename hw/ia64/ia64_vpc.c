@@ -39,6 +39,7 @@
 #include "hw/ide/pci.h"
 #include "hw/input/i8042.h"
 #include "hw/southbridge/intel_82468gx.h"
+#include "hw/ia64/ia64_460gx_identity.h"
 #include "hw/acpi/acpi.h"
 #ifdef CONFIG_IA64_VPC_STORAGE
 #include "hw/scsi/isp12160.h"
@@ -5189,6 +5190,26 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
             ia64_agp_attach_bus(IA64_AGP(s->agp_dev),
                                 s->expander_bus[IA64_460GX_ROOT_GXB]);
         }
+
+        /*
+         * Each WXB bus carries an Integrated Hot-Plug Controller for its
+         * expansion slots.  Nothing implements hot plug here; the controller
+         * is present because the board has one, and idle.
+         */
+        for (root = 0; root < IA64_460GX_EXPANDER_ROOTS; root++) {
+            unsigned int index = expanders[root].index;
+
+            if (index != IA64_460GX_ROOT_WXB0 &&
+                index != IA64_460GX_ROOT_WXB1) {
+                continue;
+            }
+            if (!pci_realize_and_unref(
+                    pci_new(PCI_DEVFN(IA64_460GX_IHPC_SLOT, 0),
+                            TYPE_IA64_460GX_IHPC),
+                    s->expander_bus[index], errp)) {
+                return false;
+            }
+        }
     }
 
     /*
@@ -5539,6 +5560,22 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
 #endif
     pci_bus_clear_slot_reserved_mask(pci_bus, (1U << 0) | (1U << 1));
+
+    /*
+     * The Programmable Interrupt Device's face in configuration space.  Its
+     * function -- the SAPIC message block every interrupt in the machine is
+     * delivered through -- is the IOSAPIC created above; this is the same
+     * chip seen by a guest enumerating the compatibility bus, which is where
+     * a 460GX platform carries it (SSDM 1.7.2).  It takes slot 0, which the
+     * CMD646 vacated when storage moved onto the south bridge.
+     */
+    if (ia64_vpc_has_south_bridge(s)) {
+        if (!pci_realize_and_unref(pci_new(PCI_DEVFN(IA64_460GX_PID_SLOT, 0),
+                                           TYPE_IA64_460GX_PID),
+                                   pci_bus, errp)) {
+            return false;
+        }
+    }
 
 #ifdef CONFIG_IA64_VPC_STORAGE
     /*

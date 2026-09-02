@@ -1879,6 +1879,66 @@ static void check_root_window_containment(const char *args)
  * realfw mode, and zx1 -- which models no south bridge yet -- must not
  * answer at all.
  */
+/*
+ * The platform devices that exist only in configuration space: the
+ * Programmable Interrupt Device, whose function is the IOSAPIC every
+ * interrupt is delivered through, and one Integrated Hot-Plug Controller per
+ * WXB bus.  A guest enumerating the buses must find them where the i2000 has
+ * them, with no BARs and no interrupt to arbitrate.
+ */
+static void test_460gx_platform_identities(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    static const struct {
+        unsigned int bus;
+        unsigned int slot;
+        uint16_t device;
+        uint16_t class_id;
+        uint8_t prog_if;
+        uint16_t subsystem_vendor;
+        uint16_t subsystem;
+    } identities[] = {
+        { 0, IA64_460GX_PID_SLOT, 0x123d, PCI_CLASS_SYSTEM_PIC, 0x20, 0, 0 },
+        { IA64_460GX_WXB0_BUS, IA64_460GX_IHPC_SLOT, 0x123f,
+          PCI_CLASS_SYSTEM_PCI_HOTPLUG, 0, PCI_VENDOR_ID_INTEL, 0x123f },
+        { IA64_460GX_WXB1_BUS, IA64_460GX_IHPC_SLOT, 0x123f,
+          PCI_CLASS_SYSTEM_PCI_HOTPLUG, 0, PCI_VENDOR_ID_INTEL, 0x123f },
+    };
+    size_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(identities); i++) {
+        uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                       ((uint64_t)identities[i].bus << 20) +
+                       ((uint64_t)identities[i].slot << 15);
+        unsigned int bar;
+
+        g_assert_cmphex(qtest_readl(qts, cfg), ==,
+                        ((uint32_t)identities[i].device << 16) |
+                        PCI_VENDOR_ID_INTEL);
+        g_assert_cmphex(qtest_readw(qts, cfg + PCI_CLASS_DEVICE), ==,
+                        identities[i].class_id);
+        g_assert_cmphex(qtest_readb(qts, cfg + PCI_CLASS_PROG), ==,
+                        identities[i].prog_if);
+        g_assert_cmphex(qtest_readw(qts, cfg + PCI_SUBSYSTEM_VENDOR_ID),
+                        ==, identities[i].subsystem_vendor);
+        g_assert_cmphex(qtest_readw(qts, cfg + PCI_SUBSYSTEM_ID), ==,
+                        identities[i].subsystem);
+        g_assert_cmphex(qtest_readb(qts, cfg + PCI_INTERRUPT_PIN), ==, 0);
+        for (bar = 0; bar < 6; bar++) {
+            g_assert_cmphex(qtest_readl(qts, cfg + PCI_BASE_ADDRESS_0 +
+                                        bar * 4), ==, 0);
+        }
+    }
+    qtest_quit(qts);
+
+    /* zx1 is a different platform and carries none of them. */
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
+                                ((uint64_t)IA64_460GX_PID_SLOT << 15)),
+                    ==, 0xffffffff);
+    qtest_quit(qts);
+}
+
 static void test_460gx_south_bridge_pic(void)
 {
     const uint64_t pic_cmd = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x20);
@@ -2268,8 +2328,11 @@ static void test_pci_default_layout(void)
     unsigned i;
 
     ia64_qpci_init(&gbus, qts);
-    /* Slot 0 (IDE, ide=on) and slot 1 (AHCI, ahci=on) are empty by default. */
-    for (i = 0; i < 8; i++) {
+    /*
+     * Slot 0 holds the Programmable Interrupt Device's single function, and
+     * slot 1 (AHCI, ahci=on) is empty by default.
+     */
+    for (i = 1; i < 8; i++) {
         QPCIDevice *empty = qpci_device_find(&gbus.bus, QPCI_DEVFN(0, i));
 
         g_assert_null(empty);
@@ -2522,21 +2585,24 @@ static void assert_cmd646_at_slot0(QTestState *qts)
     qtest_quit(qts);
 }
 
+/*
+ * A hand-attached CMD646 lands where it is told.  Slot 0 of the
+ * compatibility bus is the Programmable Interrupt Device's seat on 460gx, so
+ * this runs on zx1, where that slot is IDE's platform-anticipated home.
+ */
 static void test_pci_explicit_cmd646_slot0(void)
 {
-    /*
-     * Name the compatibility bus: with the expander roots present, a
-     * "-device" without bus= resolves to the WXB0 add-in-card bus.
-     */
-    assert_cmd646_at_slot0(ia64_vpc_start(
+    assert_cmd646_at_slot0(qtest_initf(
+        "-machine zx1 -m 256M -S "
         "-device cmd646-ide,secondary=1,addr=0,bus=pci"));
 }
 
 /*
  * On zx1 the ide=on machine option instantiates the same CMD646 at slot 0.
  * On 460gx it has nothing to do: the IDE controller is function 1 of the
- * south bridge, part of the board and not switchable, so slot 0 stays empty
- * and the option is accepted without effect.
+ * south bridge, part of the board and not switchable, and slot 0 belongs to
+ * the Programmable Interrupt Device, so the option is accepted without
+ * effect.
  */
 static void test_ide_on_slot0(void)
 {
@@ -2548,7 +2614,10 @@ static void test_ide_on_slot0(void)
 
     qts = ia64_vpc_start("-machine ide=on");
     ia64_qpci_init(&gbus, qts);
-    g_assert_null(qpci_device_find(&gbus.bus, QPCI_DEVFN(0, 0)));
+    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(IA64_460GX_PID_SLOT, 0));
+    g_assert_nonnull(dev);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x123d);
+    g_free(dev);
     dev = qpci_device_find(&gbus.bus,
                            QPCI_DEVFN(IA64_460GX_IFB_SLOT,
                                       IA64_460GX_IFB_IDE_FUNCTION));
@@ -4573,6 +4642,8 @@ int main(int argc, char **argv)
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
                    test_eepro100_eeprom_map);
+    qtest_add_func("/ia64-vpc/pci/460gx-platform-identities",
+                   test_460gx_platform_identities);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-pic",
                    test_460gx_south_bridge_pic);
     qtest_add_func("/ia64-vpc/pci/460gx-root-window-containment",
