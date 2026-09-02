@@ -64,6 +64,7 @@
 #include "hw/ia64/ia64_sba.h"
 #include "hw/ia64/ia64_lba.h"
 #include "hw/ia64/ia64_mercury.h"
+#include "hw/ia64/ia64_expander.h"
 #include "hw/core/or-irq.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
@@ -538,6 +539,9 @@ struct IA64VpcMachineState {
     PCIDevice *sba_dev;
     DeviceState *lba_dev;
     DeviceState *mercury_host;      /* zx1: the Mercury (LBA) PCI host bridge */
+    /* 460gx: the WXB0, WXB1 and GXB expander roots (buses 1, 2 and 3). */
+    DeviceState *expander_host[IA64_460GX_EXPANDER_ROOTS];
+    PCIBus *expander_bus[IA64_460GX_EXPANDER_ROOTS];
     PCIBus *mercury_bus;            /* zx1: the Mercury second root bus         */
     PCIDevice *ahci_dev;
     PCIDevice *audio_dev;
@@ -4962,6 +4966,59 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
             qdev_connect_gpio_out(s->mercury_host, i, qdev_get_gpio_in(org, 1));
         } else {
             qdev_connect_gpio_out(pci_host, i, gsi);
+        }
+    }
+
+    /*
+     * The i2000's other three PCI roots: the two WXB buses and the GXB AGP
+     * bus.  Each is a root in its own right, sharing the primary host
+     * bridge's identity-mapped windows the way the zx1 Mercury root does, and
+     * each owns its own block of four PID inputs rather than sharing bus 0's
+     * -- which is why the Programmable Interrupt Device has 64 of them.  They
+     * are created empty here; devices move onto them in a later step of
+     * plans/460gx-i2000-fidelity-plan.md.
+     */
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        static const struct {
+            const char *name;
+            uint8_t bus;
+        } expanders[IA64_460GX_EXPANDER_ROOTS] = {
+            /*
+             * Created youngest-first.  QEMU resolves a "-device" with no
+             * bus= to the most recently realized PCI bus, so this order
+             * makes WXB0 the default: on a real i2000 bus 0 is the
+             * compatibility bus carrying the on-board south bridge, while
+             * add-in cards go in the WXB slots.  Name the bus explicitly
+             * ("bus=pci", "bus=gxb", ...) to place a device elsewhere.
+             */
+            { "gxb",  IA64_460GX_GXB_BUS },
+            { "wxb1", IA64_460GX_WXB1_BUS },
+            { "wxb0", IA64_460GX_WXB0_BUS },
+        };
+        unsigned int root;
+
+        for (root = 0; root < IA64_460GX_EXPANDER_ROOTS; root++) {
+            unsigned int line;
+
+            s->expander_host[root] = ia64_expander_host_create(
+                OBJECT(s), expanders[root].name,
+                ia64_pci_host_mmio(pci_host), ia64_pci_host_io(pci_host),
+                expanders[root].bus, errp);
+            if (s->expander_host[root] == NULL) {
+                return false;
+            }
+            s->expander_bus[root] =
+                ia64_expander_host_bus(s->expander_host[root]);
+            ia64_pci_host_add_secondary_bus(pci_host, s->expander_bus[root]);
+
+            for (line = 0; line < IA64_PCI_INTX_LINES; line++) {
+                unsigned int input = IA64_PCI_INTX_GSI_BASE +
+                                     expanders[root].bus *
+                                     IA64_PCI_INTX_LINES + line;
+
+                qdev_connect_gpio_out(s->expander_host[root], line,
+                                      qdev_get_gpio_in(iosapic, input));
+            }
         }
     }
 

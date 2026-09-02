@@ -53,8 +53,11 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
             Name (_CCA, One)
             Name (_CRS, ResourceTemplate ()
             {
+                // PCI0 is the PXB compatibility bus and owns bus 0 only:
+                // the two WXB roots own buses 1 and 2 and the GXB root owns
+                // the AGP bus 3, each declared below.
                 WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
-                    PosDecode, 0, 0, 0x00FF, 0, 0x0100)
+                    PosDecode, 0, 0, 0, 0, 0x0001)
                 // PCI I/O space is 16 bits wide, so the producer window must
                 // stop at 0xFFFF.  Declaring 16 MB here let Windows' PnP I/O
                 // arbiter believe it owned 0x000000-0xFFFFFF and rebalance the
@@ -130,6 +133,156 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 Package () { 0x0006FFFF, 1, 0x00, 19 },
                 Package () { 0x0006FFFF, 2, 0x00, 16 },
                 Package () { 0x0006FFFF, 3, 0x00, 17 }
+            })
+        }
+
+        // WXB0 expander root.  It owns exactly bus 1 and its own block of four
+        // Programmable Interrupt Device inputs at 20..23, so it shares no
+        // interrupt line with the compatibility bus.  Its producer windows are
+        // added when devices move onto it.
+        Device (WXB0)
+        {
+            Name (_HID, "PNP0A03")
+            Name (_CID, "PNP0A03")
+            Name (_SEG, Zero)
+            Name (_BBN, 0x01)
+            Name (_UID, 0x01)
+            Name (_CCA, One)
+            Name (_CRS, ResourceTemplate ()
+            {
+                WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
+                    PosDecode, 0, 0x0001, 0x0001, 0, 0x0001)
+            })
+            Name (_PRT, Package ()
+            {
+                    Package () { 0x0000FFFF, 0, 0x00, 20 },
+                    Package () { 0x0000FFFF, 1, 0x00, 21 },
+                    Package () { 0x0000FFFF, 2, 0x00, 22 },
+                    Package () { 0x0000FFFF, 3, 0x00, 23 },
+                    Package () { 0x0001FFFF, 0, 0x00, 21 },
+                    Package () { 0x0001FFFF, 1, 0x00, 22 },
+                    Package () { 0x0001FFFF, 2, 0x00, 23 },
+                    Package () { 0x0001FFFF, 3, 0x00, 20 },
+                    Package () { 0x0002FFFF, 0, 0x00, 22 },
+                    Package () { 0x0002FFFF, 1, 0x00, 23 },
+                    Package () { 0x0002FFFF, 2, 0x00, 20 },
+                    Package () { 0x0002FFFF, 3, 0x00, 21 },
+                    Package () { 0x0003FFFF, 0, 0x00, 23 },
+                    Package () { 0x0003FFFF, 1, 0x00, 20 },
+                    Package () { 0x0003FFFF, 2, 0x00, 21 },
+                    Package () { 0x0003FFFF, 3, 0x00, 22 },
+                    Package () { 0x0004FFFF, 0, 0x00, 20 },
+                    Package () { 0x0004FFFF, 1, 0x00, 21 },
+                    Package () { 0x0004FFFF, 2, 0x00, 22 },
+                    Package () { 0x0004FFFF, 3, 0x00, 23 },
+                    Package () { 0x0005FFFF, 0, 0x00, 21 },
+                    Package () { 0x0005FFFF, 1, 0x00, 22 },
+                    Package () { 0x0005FFFF, 2, 0x00, 23 },
+                    Package () { 0x0005FFFF, 3, 0x00, 20 },
+                    Package () { 0x0006FFFF, 0, 0x00, 22 },
+                    Package () { 0x0006FFFF, 1, 0x00, 23 },
+                    Package () { 0x0006FFFF, 2, 0x00, 20 },
+                    Package () { 0x0006FFFF, 3, 0x00, 21 }
+            })
+        }
+
+        // WXB1 expander root.  It owns exactly bus 2 and its own block of four
+        // Programmable Interrupt Device inputs at 24..27, so it shares no
+        // interrupt line with the compatibility bus.  Its producer windows are
+        // added when devices move onto it.
+        Device (WXB1)
+        {
+            Name (_HID, "PNP0A03")
+            Name (_CID, "PNP0A03")
+            Name (_SEG, Zero)
+            Name (_BBN, 0x02)
+            Name (_UID, 0x02)
+            Name (_CCA, One)
+            Name (_CRS, ResourceTemplate ()
+            {
+                WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
+                    PosDecode, 0, 0x0002, 0x0002, 0, 0x0001)
+            })
+            Name (_PRT, Package ()
+            {
+                    Package () { 0x0000FFFF, 0, 0x00, 24 },
+                    Package () { 0x0000FFFF, 1, 0x00, 25 },
+                    Package () { 0x0000FFFF, 2, 0x00, 26 },
+                    Package () { 0x0000FFFF, 3, 0x00, 27 },
+                    Package () { 0x0001FFFF, 0, 0x00, 25 },
+                    Package () { 0x0001FFFF, 1, 0x00, 26 },
+                    Package () { 0x0001FFFF, 2, 0x00, 27 },
+                    Package () { 0x0001FFFF, 3, 0x00, 24 },
+                    Package () { 0x0002FFFF, 0, 0x00, 26 },
+                    Package () { 0x0002FFFF, 1, 0x00, 27 },
+                    Package () { 0x0002FFFF, 2, 0x00, 24 },
+                    Package () { 0x0002FFFF, 3, 0x00, 25 },
+                    Package () { 0x0003FFFF, 0, 0x00, 27 },
+                    Package () { 0x0003FFFF, 1, 0x00, 24 },
+                    Package () { 0x0003FFFF, 2, 0x00, 25 },
+                    Package () { 0x0003FFFF, 3, 0x00, 26 },
+                    Package () { 0x0004FFFF, 0, 0x00, 24 },
+                    Package () { 0x0004FFFF, 1, 0x00, 25 },
+                    Package () { 0x0004FFFF, 2, 0x00, 26 },
+                    Package () { 0x0004FFFF, 3, 0x00, 27 },
+                    Package () { 0x0005FFFF, 0, 0x00, 25 },
+                    Package () { 0x0005FFFF, 1, 0x00, 26 },
+                    Package () { 0x0005FFFF, 2, 0x00, 27 },
+                    Package () { 0x0005FFFF, 3, 0x00, 24 },
+                    Package () { 0x0006FFFF, 0, 0x00, 26 },
+                    Package () { 0x0006FFFF, 1, 0x00, 27 },
+                    Package () { 0x0006FFFF, 2, 0x00, 24 },
+                    Package () { 0x0006FFFF, 3, 0x00, 25 }
+            })
+        }
+
+        // GXB0 expander root.  It owns exactly bus 3 and its own block of four
+        // Programmable Interrupt Device inputs at 28..31, so it shares no
+        // interrupt line with the compatibility bus.  Its producer windows are
+        // added when devices move onto it.
+        Device (GXB0)
+        {
+            Name (_HID, "PNP0A03")
+            Name (_CID, "PNP0A03")
+            Name (_SEG, Zero)
+            Name (_BBN, 0x03)
+            Name (_UID, 0x03)
+            Name (_CCA, One)
+            Name (_CRS, ResourceTemplate ()
+            {
+                WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
+                    PosDecode, 0, 0x0003, 0x0003, 0, 0x0001)
+            })
+            Name (_PRT, Package ()
+            {
+                    Package () { 0x0000FFFF, 0, 0x00, 28 },
+                    Package () { 0x0000FFFF, 1, 0x00, 29 },
+                    Package () { 0x0000FFFF, 2, 0x00, 30 },
+                    Package () { 0x0000FFFF, 3, 0x00, 31 },
+                    Package () { 0x0001FFFF, 0, 0x00, 29 },
+                    Package () { 0x0001FFFF, 1, 0x00, 30 },
+                    Package () { 0x0001FFFF, 2, 0x00, 31 },
+                    Package () { 0x0001FFFF, 3, 0x00, 28 },
+                    Package () { 0x0002FFFF, 0, 0x00, 30 },
+                    Package () { 0x0002FFFF, 1, 0x00, 31 },
+                    Package () { 0x0002FFFF, 2, 0x00, 28 },
+                    Package () { 0x0002FFFF, 3, 0x00, 29 },
+                    Package () { 0x0003FFFF, 0, 0x00, 31 },
+                    Package () { 0x0003FFFF, 1, 0x00, 28 },
+                    Package () { 0x0003FFFF, 2, 0x00, 29 },
+                    Package () { 0x0003FFFF, 3, 0x00, 30 },
+                    Package () { 0x0004FFFF, 0, 0x00, 28 },
+                    Package () { 0x0004FFFF, 1, 0x00, 29 },
+                    Package () { 0x0004FFFF, 2, 0x00, 30 },
+                    Package () { 0x0004FFFF, 3, 0x00, 31 },
+                    Package () { 0x0005FFFF, 0, 0x00, 29 },
+                    Package () { 0x0005FFFF, 1, 0x00, 30 },
+                    Package () { 0x0005FFFF, 2, 0x00, 31 },
+                    Package () { 0x0005FFFF, 3, 0x00, 28 },
+                    Package () { 0x0006FFFF, 0, 0x00, 30 },
+                    Package () { 0x0006FFFF, 1, 0x00, 31 },
+                    Package () { 0x0006FFFF, 2, 0x00, 28 },
+                    Package () { 0x0006FFFF, 3, 0x00, 29 }
             })
         }
     }

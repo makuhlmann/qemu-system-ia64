@@ -29,12 +29,16 @@ struct IA64PCIState {
     qemu_irq irq[IA64_PCI_INTX_LINES];
 
     /*
-     * The HP zx1 Mercury second root bus, or NULL.  When set, the ECAM config
-     * handler dispatches config cycles for IA64_MERCURY_BUS to it, so a guest
-     * (and firmware SAL) reach devices behind the Mercury host bridge through
-     * this one segment-0 ECAM window.
+     * Secondary root buses reached through this one segment-0 ECAM window.
+     * The zx1 machine registers the Mercury root here; the 460gx machine
+     * registers its three expander roots.  A config cycle whose bus field
+     * matches a registered root's bus number is dispatched to that root, so a
+     * guest (and firmware SAL) reach every root through the same window --
+     * the faithful analog of the chipset forwarding the cycle to the bridge
+     * that owns the bus.
      */
-    PCIBus *mercury_bus;
+    PCIBus *secondary_bus[IA64_PCI_MAX_SECONDARY_ROOTS];
+    unsigned int secondary_count;
 };
 
 static hwaddr ia64_pci_sparse_io_port(hwaddr encoded)
@@ -171,15 +175,18 @@ static PCIDevice *ia64_pci_config_device(IA64PCIState *s, hwaddr addr,
     uint8_t slot = extract64(addr, 15, 5);
     uint8_t func = extract64(addr, 12, 3);
     PCIBus *target = phb->bus;
+    unsigned int i;
 
     /*
-     * Route config cycles for the Mercury bus number to the second root bus.
-     * Its bus_num override reports IA64_MERCURY_BUS, so pci_find_device() below
-     * resolves devices on it.  This is the faithful analog of the real zx1 mio
-     * forwarding a rope's config cycles to the Mercury (LBA) it hosts.
+     * Route a config cycle to whichever secondary root reports this bus
+     * number.  Each such root overrides bus_num, so pci_find_device() below
+     * resolves devices on it.
      */
-    if (s->mercury_bus != NULL && bus == IA64_MERCURY_BUS) {
-        target = s->mercury_bus;
+    for (i = 0; i < s->secondary_count; i++) {
+        if (pci_bus_num(s->secondary_bus[i]) == bus) {
+            target = s->secondary_bus[i];
+            break;
+        }
     }
 
     *reg = addr & 0xfff;
@@ -329,9 +336,17 @@ MemoryRegion *ia64_pci_host_io(DeviceState *pci_host)
     return &IA64_PCI_HOST_BRIDGE(pci_host)->pci_io;
 }
 
+void ia64_pci_host_add_secondary_bus(DeviceState *pci_host, PCIBus *bus)
+{
+    IA64PCIState *s = IA64_PCI_HOST_BRIDGE(pci_host);
+
+    g_assert(s->secondary_count < IA64_PCI_MAX_SECONDARY_ROOTS);
+    s->secondary_bus[s->secondary_count++] = bus;
+}
+
 void ia64_pci_host_set_mercury_bus(DeviceState *pci_host, PCIBus *bus)
 {
-    IA64_PCI_HOST_BRIDGE(pci_host)->mercury_bus = bus;
+    ia64_pci_host_add_secondary_bus(pci_host, bus);
 }
 
 static void ia64_pci_class_init(ObjectClass *klass, const void *data)

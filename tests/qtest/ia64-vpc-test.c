@@ -1715,6 +1715,39 @@ static uint32_t realfw_cfg_readl(QTestState *qts, uint8_t dev, uint8_t fn,
  * 2.1, which is what gives each PCI root its own block of four INTx lines.
  * zx1 keeps the narrower controller it had.
  */
+/*
+ * The i2000 reaches its PCI buses through expander bridges: the PXB carries
+ * the compatibility bus 0, the two WXBs carry buses 1 and 2, and the GXB
+ * carries the AGP bus 3.  Each is a root in its own right, reachable through
+ * the same segment-0 ECAM window by its own bus number, and each owns its own
+ * block of four interrupt inputs instead of sharing bus 0's.
+ */
+static void test_460gx_expander_roots(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S "
+                                 "-device i82559c,bus=wxb0,addr=1,romfile= "
+                                 "-device i82559c,bus=wxb1,addr=1,romfile= "
+                                 "-device i82559c,bus=gxb,addr=1,romfile=");
+    unsigned int bus;
+
+    for (bus = 1; bus <= 3; bus++) {
+        uint64_t cfg = IA64_PCI_CONFIG_BASE + ((uint64_t)bus << 20) +
+                       (1ULL << 15);
+
+        g_assert_cmphex(qtest_readl(qts, cfg), ==, 0x12298086);
+        /* An empty slot on the same root still decodes as open bus. */
+        g_assert_cmphex(qtest_readl(qts, cfg + (1ULL << 15)), ==,
+                        0xffffffff);
+    }
+
+    /* zx1 has no expander roots; its second root is Mercury's bus 0x10. */
+    qtest_quit(qts);
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE + (1ULL << 20)),
+                    ==, 0xffffffff);
+    qtest_quit(qts);
+}
+
 static void test_iosapic_version_per_machine(void)
 {
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
@@ -2236,7 +2269,12 @@ static void assert_cmd646_at_slot0(QTestState *qts)
 
 static void test_pci_explicit_cmd646_slot0(void)
 {
-    assert_cmd646_at_slot0(ia64_vpc_start("-device cmd646-ide,secondary=1,addr=0"));
+    /*
+     * Name the compatibility bus: with the expander roots present, a
+     * "-device" without bus= resolves to the WXB0 add-in-card bus.
+     */
+    assert_cmd646_at_slot0(ia64_vpc_start(
+        "-device cmd646-ide,secondary=1,addr=0,bus=pci"));
 }
 
 /* The ide=on machine option instantiates the same CMD646 at slot 0. */
@@ -4256,6 +4294,8 @@ int main(int argc, char **argv)
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
                    test_eepro100_eeprom_map);
+    qtest_add_func("/ia64-vpc/pci/460gx-expander-roots",
+                   test_460gx_expander_roots);
     qtest_add_func("/ia64-vpc/iosapic/version-per-machine",
                    test_iosapic_version_per_machine);
     qtest_add_func("/ia64-vpc/realfw/chipset-identity",

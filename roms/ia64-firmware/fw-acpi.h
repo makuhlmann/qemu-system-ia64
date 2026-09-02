@@ -11,6 +11,7 @@
 #include "fw-base.h"
 #include "fw-efi-types.h"
 #include "fw-platform-layout.h"
+#include "ia64-fw-acpi-aml.h"
 
 #define EFI_SIGNATURE_32(a,b,c,d) \
     (((UINT32)(a)<<0)|((UINT32)(b)<<8)|((UINT32)(c)<<16)|((UINT32)(d)<<24))
@@ -231,16 +232,22 @@ typedef struct {
 
 /*
  * The DSDT/SSDT AML buffers are sized to the larger of the two chipset-profile
- * variants (the nested zx1 DSDT is bigger than the flat 460gx one).  The flat
- * AML is the static initializer, so the 460gx/default table is byte-identical
- * to before; the zx1 profile copies its AML in at runtime and sets the header
- * Length/checksum from the active AML size, so the unused tail is never
- * guest-visible.  Keep these in lockstep with the FW_*_AML_SIZE asserts in
- * firmware.c.
+ * variants.  The 460gx AML is the static initializer; the zx1 profile copies
+ * its AML in at runtime and sets the header Length/checksum from the active
+ * AML size, so the unused tail is never guest-visible.  The size comes from
+ * the generated header rather than a literal, because either profile can be
+ * the larger one: the 460gx table overtook the zx1 table when the expander
+ * roots were added, and a buffer that no longer fits the initializer produces
+ * a truncated table whose checksum sends Windows to STOP 0xA5
+ * (ACPI_SYSTEM_CANNOT_START_ACPI, subcode 7, bad table checksum).
  */
+#define FW_DSDT_AML_MAX_SIZE \
+    (FW_DSDT_PCI_ROOT_AML_SIZE > FW_DSDT_PCI_ROOT_ZX1_AML_SIZE ? \
+     FW_DSDT_PCI_ROOT_AML_SIZE : FW_DSDT_PCI_ROOT_ZX1_AML_SIZE)
+
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[1182];
+    UINT8 Aml[FW_DSDT_AML_MAX_SIZE];
 } __attribute__((packed)) ACPI_DSDT;
 
 typedef struct {
@@ -667,7 +674,14 @@ FW_STATIC_ASSERT(sizeof(ACPI_XSDT) == 100, acpi_xsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDT) == 68, acpi_rsdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_RSDP) == 36, acpi_rsdp_size);
 FW_STATIC_ASSERT(sizeof(ACPI_FACS) == 64, acpi_facs_size);
-FW_STATIC_ASSERT(sizeof(ACPI_DSDT) == 1218, acpi_dsdt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_DSDT) ==
+                 sizeof(ACPI_SDT_HEADER) + FW_DSDT_AML_MAX_SIZE,
+                 acpi_dsdt_size);
+/* Both profiles' AML must fit the buffer the tables are built in. */
+FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE <= FW_DSDT_AML_MAX_SIZE,
+                 acpi_dsdt_460gx_aml_fits);
+FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_ZX1_AML_SIZE <= FW_DSDT_AML_MAX_SIZE,
+                 acpi_dsdt_zx1_aml_fits);
 FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 542, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);

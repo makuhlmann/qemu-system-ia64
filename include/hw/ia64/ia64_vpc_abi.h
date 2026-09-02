@@ -318,6 +318,18 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * chipset profile creates it; keep in lockstep with LBA0 in dsdt-pci-root-zx1.asl.
  */
 #define IA64_MERCURY_BUS              0x10
+
+/*
+ * 460GX expander roots.  The i2000 reaches its PCI buses through expander
+ * bridges on the System Address Controller: the PXB carries the
+ * compatibility bus 0, the two WXBs carry buses 1 and 2, and the GXB carries
+ * the AGP bus 3.  Each root owns its own block of four INTx inputs on the
+ * Programmable Interrupt Device, starting at IA64_PCI_INTX_GSI_BASE.
+ */
+#define IA64_460GX_EXPANDER_ROOTS     3
+#define IA64_460GX_WXB0_BUS           0x01
+#define IA64_460GX_WXB1_BUS           0x02
+#define IA64_460GX_GXB_BUS            0x03
 #define IA64_MERCURY_VGA_SLOT        0x00
 /* 16 MiB PAL/SAL firmware address space below 4 GiB. */
 #define IA64_FW_ADDRESS_SPACE_BASE    IA64_U64(0x00000000ff000000)

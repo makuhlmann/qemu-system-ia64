@@ -18,6 +18,8 @@
 
 #define IA64_PCI_INTX_GSI_BASE 16
 #define IA64_PCI_INTX_LINES    4
+/* zx1 registers one secondary root; 460gx registers three expander roots. */
+#define IA64_PCI_MAX_SECONDARY_ROOTS 4
 
 int ia64_pci_route_intx_gsi(uint8_t devfn, int irq_num);
 
@@ -36,5 +38,7 @@ MemoryRegion *ia64_pci_host_io(DeviceState *pci_host);
  * faithful analog of zx1 SAL rope-routing).  NULL until the zx1 machine wires it.
  */
 void ia64_pci_host_set_mercury_bus(DeviceState *pci_host, PCIBus *bus);
+/* Register a secondary root bus for ECAM dispatch by its own bus number. */
+void ia64_pci_host_add_secondary_bus(DeviceState *pci_host, PCIBus *bus);
 
 #endif
