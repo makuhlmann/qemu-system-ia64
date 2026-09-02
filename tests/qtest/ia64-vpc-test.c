@@ -820,6 +820,154 @@ static void test_sba_ioc_identity(void)
  * QEMU_BUILD_BUG_ON in hw/ia64/ia64_mercury.c.)
  */
 /*
+ * OHCI root-hub port resume.  Resume signalling takes 20 ms plus a
+ * low-speed EOP and a 3 ms recovery time before the port reports itself
+ * resumed; a controller-wide USBRESUME or a port reset ends the suspend
+ * without the port-resume status change.  A USB device is attached because
+ * a port only suspends while something is connected to it.
+ */
+#define IA64_OHCI_MMIO_BASE     (IA64_PCI_MMIO_BASE + 0x00010000ULL)
+#define IA64_OHCI_CONTROL       0x04U
+#define IA64_OHCI_INTR_STATUS   0x0cU
+#define IA64_OHCI_RH_PORT_1     0x54U
+#define IA64_OHCI_USB_RESUME    0x40U
+#define IA64_OHCI_USB_SUSPEND   0xc0U
+#define IA64_OHCI_INTR_RHSC     (1U << 6)
+#define IA64_OHCI_PORT_CCS      (1U << 0)
+#define IA64_OHCI_PORT_PES      (1U << 1)
+#define IA64_OHCI_PORT_PSS      (1U << 2)
+#define IA64_OHCI_PORT_POCI     (1U << 3)
+#define IA64_OHCI_PORT_PRS      (1U << 4)
+#define IA64_OHCI_PORT_CSC      (1U << 16)
+#define IA64_OHCI_PORT_PSSC     (1U << 18)
+#define IA64_OHCI_PORT_PRSC     (1U << 20)
+#define IA64_OHCI_RESUME_NS     ((20 * NANOSECONDS_PER_SECOND / 1000) + \
+                                 (3 * NANOSECONDS_PER_SECOND / 1500000) + \
+                                 (3 * NANOSECONDS_PER_SECOND / 1000))
+
+static uint32_t ohci_port_status(QTestState *qts)
+{
+    return qtest_readl(qts, IA64_OHCI_MMIO_BASE + IA64_OHCI_RH_PORT_1);
+}
+
+static void ohci_port_write(QTestState *qts, uint32_t value)
+{
+    qtest_writel(qts, IA64_OHCI_MMIO_BASE + IA64_OHCI_RH_PORT_1, value);
+}
+
+static void ohci_clear_rhsc(QTestState *qts)
+{
+    qtest_writel(qts, IA64_OHCI_MMIO_BASE + IA64_OHCI_INTR_STATUS,
+                 IA64_OHCI_INTR_RHSC);
+    g_assert_cmphex(qtest_readl(qts, IA64_OHCI_MMIO_BASE +
+                                IA64_OHCI_INTR_STATUS) &
+                    IA64_OHCI_INTR_RHSC, ==, 0);
+}
+
+static QTestState *ohci_start_suspended_port(void)
+{
+    /*
+     * No "-S": the qtest accelerator never executes guest code, but a
+     * stopped VM also freezes QEMU_CLOCK_VIRTUAL, which the resume timer
+     * runs on.
+     */
+    QTestState *qts = qtest_init("-machine ia64-vpc -m 256M "
+                                 "-device usb-kbd,bus=usb-bus.0");
+
+    g_assert_cmphex(ohci_port_status(qts) & IA64_OHCI_PORT_CCS, ==,
+                    IA64_OHCI_PORT_CCS);
+    ohci_port_write(qts, IA64_OHCI_PORT_CSC | IA64_OHCI_PORT_PES);
+    g_assert_cmphex(ohci_port_status(qts) & IA64_OHCI_PORT_PES, ==,
+                    IA64_OHCI_PORT_PES);
+
+    ohci_port_write(qts, IA64_OHCI_PORT_PSS);
+    g_assert_cmphex(ohci_port_status(qts) & IA64_OHCI_PORT_PSS, ==,
+                    IA64_OHCI_PORT_PSS);
+    ohci_clear_rhsc(qts);
+    return qts;
+}
+
+static void test_ohci_port_resume(void)
+{
+    QTestState *qts = ohci_start_suspended_port();
+    uint32_t status;
+
+    ohci_port_write(qts, IA64_OHCI_PORT_POCI);
+    status = ohci_port_status(qts);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PSS, ==, IA64_OHCI_PORT_PSS);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PSSC, ==, 0);
+
+    qtest_clock_step(qts, IA64_OHCI_RESUME_NS - 1);
+    status = ohci_port_status(qts);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PSS, ==, IA64_OHCI_PORT_PSS);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PSSC, ==, 0);
+
+    qtest_clock_step(qts, 1);
+    status = ohci_port_status(qts);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PSS, ==, 0);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PES, ==, IA64_OHCI_PORT_PES);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PSSC, ==, IA64_OHCI_PORT_PSSC);
+    g_assert_cmphex(qtest_readl(qts, IA64_OHCI_MMIO_BASE +
+                                IA64_OHCI_INTR_STATUS) &
+                    IA64_OHCI_INTR_RHSC, ==, IA64_OHCI_INTR_RHSC);
+
+    ohci_port_write(qts, IA64_OHCI_PORT_PSSC);
+    g_assert_cmphex(ohci_port_status(qts) & IA64_OHCI_PORT_PSSC, ==, 0);
+    qtest_quit(qts);
+}
+
+static void test_ohci_controller_resume(void)
+{
+    QTestState *qts = ohci_start_suspended_port();
+    uint32_t status;
+
+    qtest_writel(qts, IA64_OHCI_MMIO_BASE + IA64_OHCI_CONTROL,
+                 IA64_OHCI_USB_SUSPEND);
+    ohci_port_write(qts, IA64_OHCI_PORT_POCI);
+    qtest_writel(qts, IA64_OHCI_MMIO_BASE + IA64_OHCI_CONTROL,
+                 IA64_OHCI_USB_RESUME);
+
+    /* USBRESUME ends the suspend without a port status change. */
+    status = ohci_port_status(qts);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PES, ==, IA64_OHCI_PORT_PES);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PSS, ==, 0);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PSSC, ==, 0);
+    g_assert_cmphex(qtest_readl(qts, IA64_OHCI_MMIO_BASE +
+                                IA64_OHCI_CONTROL), ==,
+                    IA64_OHCI_USB_RESUME);
+    g_assert_cmphex(qtest_readl(qts, IA64_OHCI_MMIO_BASE +
+                                IA64_OHCI_INTR_STATUS) &
+                    IA64_OHCI_INTR_RHSC, ==, 0);
+
+    qtest_clock_step(qts, IA64_OHCI_RESUME_NS);
+    g_assert_cmphex(ohci_port_status(qts) & IA64_OHCI_PORT_PSSC, ==, 0);
+    qtest_quit(qts);
+}
+
+static void test_ohci_reset_suspended_port(void)
+{
+    QTestState *qts = ohci_start_suspended_port();
+    uint32_t status;
+
+    ohci_port_write(qts, IA64_OHCI_PORT_POCI);
+    ohci_port_write(qts, IA64_OHCI_PORT_PRS);
+
+    /* A reset cancels the pending resume and reports only PRSC. */
+    status = ohci_port_status(qts);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PES, ==, IA64_OHCI_PORT_PES);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PSS, ==, 0);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PSSC, ==, 0);
+    g_assert_cmphex(status & IA64_OHCI_PORT_PRSC, ==, IA64_OHCI_PORT_PRSC);
+    g_assert_cmphex(qtest_readl(qts, IA64_OHCI_MMIO_BASE +
+                                IA64_OHCI_INTR_STATUS) &
+                    IA64_OHCI_INTR_RHSC, ==, IA64_OHCI_INTR_RHSC);
+
+    qtest_clock_step(qts, IA64_OHCI_RESUME_NS);
+    g_assert_cmphex(ohci_port_status(qts) & IA64_OHCI_PORT_PSSC, ==, 0);
+    qtest_quit(qts);
+}
+
+/*
  * eepro100 CSR windows.  The dword at the Flash CSR spans Flash control
  * (bits 15:0) and EEPROM control (bits 31:16), and the MDI CSR reaches PHY
  * registers 0 to 31, not just 0 to 6.  The NIC is added on a free slot of
@@ -3694,6 +3842,11 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
     qtest_add_func("/ia64-vpc/eepro100/csr-windows",
                    test_eepro100_csr_windows);
+    qtest_add_func("/ia64-vpc/ohci/port-resume", test_ohci_port_resume);
+    qtest_add_func("/ia64-vpc/ohci/controller-resume",
+                   test_ohci_controller_resume);
+    qtest_add_func("/ia64-vpc/ohci/reset-suspended-port",
+                   test_ohci_reset_suspended_port);
 
     return g_test_run();
 }

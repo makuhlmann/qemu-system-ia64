@@ -57,6 +57,19 @@ static void ohci_sysbus_reset(DeviceState *dev)
     ohci_hard_reset(ohci);
 }
 
+static void ohci_sysbus_unrealize(DeviceState *dev)
+{
+    OHCISysBusState *s = SYSBUS_OHCI(dev);
+    OHCIState *ohci = &s->ohci;
+
+    ohci_bus_stop(ohci);
+    ohci_stop_endpoints(ohci);
+    if (!s->masterbus) {
+        usb_bus_release(&ohci->bus);
+    }
+    ohci_timers_cleanup(ohci);
+}
+
 static const Property ohci_sysbus_properties[] = {
     DEFINE_PROP_STRING("masterbus", OHCISysBusState, masterbus),
     DEFINE_PROP_UINT32("num-ports", OHCISysBusState, num_ports, 3),
@@ -69,6 +82,7 @@ static void ohci_sysbus_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = ohci_sysbus_realize;
+    dc->unrealize = ohci_sysbus_unrealize;
     set_bit(DEVICE_CATEGORY_USB, dc->categories);
     dc->desc = "OHCI USB Controller";
     device_class_set_props(dc, ohci_sysbus_properties);

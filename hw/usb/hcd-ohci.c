@@ -215,6 +215,19 @@ struct ohci_iso_td {
 #define OHCI_PORT_WTC         (OHCI_PORT_CSC | OHCI_PORT_PESC | \
                                OHCI_PORT_PSSC | OHCI_PORT_OCIC | \
                                OHCI_PORT_PRSC)
+
+/*
+ * Resume signalling lasts 20 ms, is closed by a low-speed EOP, and is
+ * followed by a 3 ms recovery time before the port is usable again
+ * (OHCI 1.0a 7.4.4, USB 2.0 7.1.7.7).
+ */
+#define OHCI_PORT_RESUME_SIGNAL_NS   (20 * NANOSECONDS_PER_SECOND / 1000)
+#define OHCI_PORT_RESUME_EOP_NS      \
+    (3 * NANOSECONDS_PER_SECOND / 1500000)
+#define OHCI_PORT_RESUME_RECOVERY_NS (3 * NANOSECONDS_PER_SECOND / 1000)
+#define OHCI_PORT_RESUME_NS          (OHCI_PORT_RESUME_SIGNAL_NS + \
+                                      OHCI_PORT_RESUME_EOP_NS + \
+                                      OHCI_PORT_RESUME_RECOVERY_NS)
 #define OHCI_TD_DIR_SETUP     0x0
 #define OHCI_TD_DIR_OUT       0x1
 #define OHCI_TD_DIR_IN        0x2
@@ -277,6 +290,85 @@ static inline void ohci_set_interrupt(OHCIState *ohci, uint32_t intr)
     ohci_intr_update(ohci);
 }
 
+static void ohci_port_resume_timer_update(OHCIState *ohci)
+{
+    int64_t deadline = INT64_MAX;
+    int i;
+
+    for (i = 0; i < ohci->num_ports; i++) {
+        if (ohci->resume_deadline[i] &&
+            ohci->resume_deadline[i] < deadline) {
+            deadline = ohci->resume_deadline[i];
+        }
+    }
+
+    if (deadline == INT64_MAX) {
+        timer_del(ohci->resume_timer);
+    } else {
+        timer_mod_ns(ohci->resume_timer, deadline);
+    }
+}
+
+static void ohci_port_resume_timer(void *opaque)
+{
+    OHCIState *ohci = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    bool changed = false;
+    int i;
+
+    for (i = 0; i < ohci->num_ports; i++) {
+        OHCIPort *port = &ohci->rhport[i];
+
+        if (!ohci->resume_deadline[i] ||
+            ohci->resume_deadline[i] > now) {
+            continue;
+        }
+        ohci->resume_deadline[i] = 0;
+        if (!(port->ctrl & OHCI_PORT_PSS)) {
+            continue;
+        }
+
+        trace_usb_ohci_port_resume(i);
+        port->ctrl &= ~OHCI_PORT_PSS;
+        port->ctrl |= OHCI_PORT_PES | OHCI_PORT_PSSC;
+        changed = true;
+    }
+
+    ohci_port_resume_timer_update(ohci);
+    if (changed) {
+        ohci_set_interrupt(ohci, OHCI_INTR_RHSC);
+    }
+}
+
+static bool ohci_port_resume_start(OHCIState *ohci, int portnum)
+{
+    if (!(ohci->rhport[portnum].ctrl & OHCI_PORT_PSS) ||
+        ohci->resume_deadline[portnum]) {
+        return false;
+    }
+
+    ohci->resume_deadline[portnum] =
+        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + OHCI_PORT_RESUME_NS;
+    ohci_port_resume_timer_update(ohci);
+    return true;
+}
+
+static void ohci_port_resume_cancel(OHCIState *ohci, int portnum)
+{
+    if (!ohci->resume_deadline[portnum]) {
+        return;
+    }
+
+    ohci->resume_deadline[portnum] = 0;
+    ohci_port_resume_timer_update(ohci);
+}
+
+static void ohci_port_resume_cancel_all(OHCIState *ohci)
+{
+    memset(ohci->resume_deadline, 0, sizeof(ohci->resume_deadline));
+    timer_del(ohci->resume_timer);
+}
+
 static USBDevice *ohci_find_device(OHCIState *ohci, uint8_t addr)
 {
     USBDevice *dev;
@@ -321,6 +413,7 @@ static void ohci_roothub_reset(OHCIState *ohci)
     int i;
 
     ohci_bus_stop(ohci);
+    ohci_port_resume_cancel_all(ohci);
     ohci->rhdesc_a = OHCI_RHA_NPS | ohci->num_ports;
     ohci->rhdesc_b = 0x0; /* Impl. specific */
     ohci->rhstatus = 0;
@@ -341,6 +434,7 @@ static void ohci_soft_reset(OHCIState *ohci)
     trace_usb_ohci_reset(ohci->name);
 
     ohci_bus_stop(ohci);
+    ohci_port_resume_cancel_all(ohci);
     ohci->ctl = (ohci->ctl & OHCI_CTL_IR) | OHCI_USB_SUSPEND;
     ohci->old_ctl = 0;
     ohci->status = 0;
@@ -1328,8 +1422,23 @@ static void ohci_port_power(OHCIState *ohci, int i, int p)
     if (p) {
         ohci->rhport[i].ctrl |= OHCI_PORT_PPS;
     } else {
+        ohci_port_resume_cancel(ohci, i);
         ohci->rhport[i].ctrl &= ~(OHCI_PORT_PPS | OHCI_PORT_CCS |
                                   OHCI_PORT_PSS | OHCI_PORT_PRS);
+    }
+}
+
+/* USBRESUME clears PSS without setting PES, PSSC, or RHSC. */
+static void ohci_clear_suspended_ports(OHCIState *ohci)
+{
+    int i;
+
+    ohci_port_resume_cancel_all(ohci);
+    for (i = 0; i < ohci->num_ports; i++) {
+        if (ohci->rhport[i].ctrl & OHCI_PORT_PSS) {
+            trace_usb_ohci_port_resume(i);
+            ohci->rhport[i].ctrl &= ~OHCI_PORT_PSS;
+        }
     }
 }
 
@@ -1360,6 +1469,7 @@ static void ohci_set_ctl(OHCIState *ohci, uint32_t val)
         break;
     case OHCI_USB_RESUME:
         trace_usb_ohci_resume(ohci->name);
+        ohci_clear_suspended_ports(ohci);
         break;
     case OHCI_USB_RESET:
         ohci_roothub_reset(ohci);
@@ -1439,6 +1549,7 @@ static bool ohci_resume(OHCIState *s)
         trace_usb_ohci_remote_wakeup(s->name);
         s->ctl &= ~OHCI_CTL_HCFS;
         s->ctl |= OHCI_USB_RESUME;
+        ohci_clear_suspended_ports(s);
         return true;
     }
     return false;
@@ -1499,10 +1610,15 @@ static void ohci_port_set_status(OHCIState *ohci, int portnum, uint32_t val)
         trace_usb_ohci_port_suspend(portnum);
     }
 
+    if (val & OHCI_PORT_POCI) {
+        ohci_port_resume_start(ohci, portnum);
+    }
+
     if (ohci_port_set_if_connected(ohci, portnum, val & OHCI_PORT_PRS)) {
         trace_usb_ohci_port_reset(portnum);
+        ohci_port_resume_cancel(ohci, portnum);
         usb_device_reset(port->port.dev);
-        port->ctrl &= ~OHCI_PORT_PRS;
+        port->ctrl &= ~(OHCI_PORT_PRS | OHCI_PORT_PSS | OHCI_PORT_PSSC);
         /* ??? Should this also set OHCI_PORT_PESC. */
         port->ctrl |= OHCI_PORT_PES | OHCI_PORT_PRSC;
     }
@@ -1835,6 +1951,7 @@ static void ohci_detach(USBPort *port1)
     uint32_t old_state = port->ctrl;
 
     ohci_child_detach(port1, port1->dev);
+    ohci_port_resume_cancel(s, port1->index);
 
     /* set connect status */
     if (port->ctrl & OHCI_PORT_CCS) {
@@ -1846,6 +1963,7 @@ static void ohci_detach(USBPort *port1)
         port->ctrl &= ~OHCI_PORT_PES;
         port->ctrl |= OHCI_PORT_PESC;
     }
+    port->ctrl &= ~OHCI_PORT_PSS;
     trace_usb_ohci_port_detach(port1->index);
 
     if (old_state != port->ctrl) {
@@ -1860,9 +1978,7 @@ static void ohci_wakeup(USBPort *port1)
     uint32_t intr = 0;
     if (port->ctrl & OHCI_PORT_PSS) {
         trace_usb_ohci_port_wakeup(port1->index);
-        port->ctrl |= OHCI_PORT_PSSC;
-        port->ctrl &= ~OHCI_PORT_PSS;
-        intr = OHCI_INTR_RHSC;
+        ohci_port_resume_start(s, port1->index);
     }
     /* Note that the controller can be suspended even if this port is not */
     if (ohci_resume(s)) {
@@ -1961,6 +2077,16 @@ void usb_ohci_init(OHCIState *ohci, DeviceState *dev, uint32_t num_ports,
 
     ohci->eof_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                    ohci_frame_boundary, ohci);
+    ohci->resume_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                      ohci_port_resume_timer, ohci);
+}
+
+void ohci_timers_cleanup(OHCIState *ohci)
+{
+    timer_free(ohci->resume_timer);
+    ohci->resume_timer = NULL;
+    timer_free(ohci->eof_timer);
+    ohci->eof_timer = NULL;
 }
 
 /*
@@ -2003,10 +2129,89 @@ static const VMStateDescription vmstate_ohci_eof_timer = {
     },
 };
 
+static bool ohci_resume_timer_needed(void *opaque)
+{
+    OHCIState *ohci = opaque;
+    int i;
+
+    for (i = 0; i < ohci->num_ports; i++) {
+        if (ohci->resume_deadline[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int ohci_state_pre_load(void *opaque)
+{
+    OHCIState *ohci = opaque;
+
+    ohci_port_resume_cancel_all(ohci);
+    memset(ohci->resume_remaining, 0, sizeof(ohci->resume_remaining));
+    return 0;
+}
+
+static int ohci_resume_timer_pre_save(void *opaque)
+{
+    OHCIState *ohci = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int i;
+
+    for (i = 0; i < OHCI_MAX_PORTS; i++) {
+        if (ohci->resume_deadline[i]) {
+            ohci->resume_remaining[i] =
+                MAX(ohci->resume_deadline[i] - now, 1);
+        } else {
+            ohci->resume_remaining[i] = 0;
+        }
+    }
+    return 0;
+}
+
+static int ohci_resume_timer_post_load(void *opaque, int version_id)
+{
+    OHCIState *ohci = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int i;
+
+    for (i = 0; i < OHCI_MAX_PORTS; i++) {
+        int64_t remaining = ohci->resume_remaining[i];
+
+        if (remaining < 0 || remaining > OHCI_PORT_RESUME_NS ||
+            (remaining && (i >= ohci->num_ports ||
+                           !(ohci->rhport[i].ctrl & OHCI_PORT_PSS) ||
+                           now > INT64_MAX - remaining))) {
+            return -EINVAL;
+        }
+    }
+
+    for (i = 0; i < OHCI_MAX_PORTS; i++) {
+        ohci->resume_deadline[i] = ohci->resume_remaining[i] ?
+            now + ohci->resume_remaining[i] : 0;
+        ohci->resume_remaining[i] = 0;
+    }
+    ohci_port_resume_timer_update(ohci);
+    return 0;
+}
+
+static const VMStateDescription vmstate_ohci_resume_timer = {
+    .name = "ohci-core/resume-timer",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ohci_resume_timer_needed,
+    .pre_save = ohci_resume_timer_pre_save,
+    .post_load = ohci_resume_timer_post_load,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64_ARRAY(resume_remaining, OHCIState, OHCI_MAX_PORTS),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 const VMStateDescription vmstate_ohci_state = {
     .name = "ohci-core",
     .version_id = 1,
     .minimum_version_id = 1,
+    .pre_load = ohci_state_pre_load,
     .fields = (const VMStateField[]) {
         VMSTATE_INT64(sof_time, OHCIState),
         VMSTATE_UINT32(ctl, OHCIState),
@@ -2046,6 +2251,7 @@ const VMStateDescription vmstate_ohci_state = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ohci_eof_timer,
+        &vmstate_ohci_resume_timer,
         NULL
     }
 };

@@ -103,7 +103,7 @@ static void usb_ohci_exit(PCIDevice *dev)
         usb_bus_release(&s->bus);
     }
 
-    timer_free(s->eof_timer);
+    ohci_timers_cleanup(s);
 }
 
 static void usb_ohci_reset_pci(DeviceState *d)

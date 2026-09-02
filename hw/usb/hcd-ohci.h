@@ -45,7 +45,10 @@ struct OHCIState {
     const char *name;
 
     QEMUTimer *eof_timer;
+    QEMUTimer *resume_timer;
     int64_t sof_time;
+    int64_t resume_deadline[OHCI_MAX_PORTS];
+    int64_t resume_remaining[OHCI_MAX_PORTS];
 
     /* OHCI state */
     /* Control partition */
@@ -118,6 +121,7 @@ void usb_ohci_init(OHCIState *ohci, DeviceState *dev, uint32_t num_ports,
                    void (*ohci_die_fn)(OHCIState *), Error **errp);
 void ohci_bus_stop(OHCIState *ohci);
 void ohci_stop_endpoints(OHCIState *ohci);
+void ohci_timers_cleanup(OHCIState *ohci);
 void ohci_hard_reset(OHCIState *ohci);
 void ohci_sysbus_die(struct OHCIState *ohci);
 
