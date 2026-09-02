@@ -149,8 +149,16 @@
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
 #define IA64_UHCI_IO_BASE       0x0000c120U
 /* LSI BAR0 is 0x100 bytes and therefore requires 0x100-byte alignment. */
-#define IA64_LSI_IO_BASE        0x0000c200U
-#define IA64_VGA_IO_BASE        0x0000c300U
+/*
+ * The chipset routes I/O in 4 KiB segments, one or more per logical PCI bus
+ * (SSDM 4; plans/sdv-i2000-firmware-reference.md 8.3), so a device behind an
+ * expander root takes a port range out of a segment that belongs to that
+ * root rather than a hole punched in the compatibility bus's.  Segment B is
+ * the first WXB root's, D the AGP root's and E the second WXB root's; the
+ * compatibility bus keeps the rest, including the legacy ports.
+ */
+#define IA64_LSI_IO_BASE        0x0000b000U
+#define IA64_VGA_IO_BASE        0x0000d000U
 /*
  * The vendor ATI Rage 128 vgabios hardcodes its register I/O base at 0xD800 and
  * only falls back to a port-space scan if a signature probe there fails, so in
@@ -166,14 +174,20 @@
  * Devices behind an expander root must have their BARs inside that root's
  * own producer window, or the guest's PnP resource arbiter cannot assign
  * them: a boot controller that fails this bugchecks the guest with STOP
- * 0x7B before it ever reaches the disk.  The compatibility bus keeps the
- * bottom of the aperture (and the CS4281/graphics slices above it), and the
- * two WXB roots get 2 MiB blocks of their own out of the free space between
- * the NIC slices and the audio window.  The DSDT windows in
- * roms/ia64-firmware/dsdt-pci-root.asl mirror this split exactly.
+ * 0x7B before it ever reaches the disk.
+ *
+ * The 460GX decodes one n x 32 MB aperture per logical PCI bus out of the
+ * gap below 4 GiB - 32 MiB (SSDM 4; plans/sdv-i2000-firmware-reference.md
+ * 7.1), so each root owns a whole number of those units and nothing is
+ * carved out of another root's range: the compatibility bus takes the unit
+ * at the bottom of the gap, graphics takes the five units its framebuffer
+ * and register apertures need, and the two WXB roots take one unit each at
+ * the top.  The DSDT windows in roms/ia64-firmware/dsdt-pci-root.asl mirror
+ * the split exactly.
  */
-#define IA64_WXB0_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01200000ULL)
-#define IA64_WXB1_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01400000ULL)
+#define IA64_PCI_MMIO_UNIT      0x02000000ULL
+#define IA64_WXB0_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 6 * IA64_PCI_MMIO_UNIT)
+#define IA64_WXB1_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 7 * IA64_PCI_MMIO_UNIT)
 #define IA64_LSI_MMIO_PCI_BASE  (IA64_WXB0_MMIO_PCI_BASE + 0x00000000ULL)
 #define IA64_LSI_RAM_PCI_BASE   (IA64_WXB0_MMIO_PCI_BASE + 0x00002000ULL)
 #define IA64_E1000_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00040000ULL)
@@ -186,10 +200,8 @@
  * framebuffer at IA64_PCI_MMIO_BASE + 0x02000000.
  */
 /*
- * The QLogic sits on the second WXB root, so its BAR must come out of that
- * root's block.  Its I/O port range must also clear the NIC I/O slices
- * (IA64_E1000_IO_BASE plus MAX_NICS * IA64_NIC_IO_STRIDE), which a second
- * adapter would otherwise overlap.
+ * The QLogic sits on the second WXB root, so both its memory BAR and its
+ * ports come out of that root's aperture and I/O segment.
  */
 /*
  * The south bridge's IDE bus-master register file.  Both channels are in
@@ -205,7 +217,7 @@
  * (plans/phase5 SESSION 8), so use the same base here.
  */
 #define IA64_IFB_SMBUS_IO_BASE   0x0000fff0U
-#define IA64_ISP12160_IO_BASE    0x0000cc00U
+#define IA64_ISP12160_IO_BASE    0x0000e000U
 #define IA64_ISP12160_MMIO_PCI_BASE (IA64_WXB1_MMIO_PCI_BASE + 0x00000000ULL)
 #define IA64_CS4281_BA0_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01800000ULL)
 #define IA64_CS4281_BA1_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01810000ULL)

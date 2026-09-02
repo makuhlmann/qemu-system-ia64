@@ -90,8 +90,8 @@ typedef struct TestInt10Registers {
     uint32_t input_signature;
 } TestInt10Registers;
 
-/* The SCSI HBA's register BAR, inside the WXB0 root's producer window. */
-#define IA64_LSI_MMIO_BASE           0x00000000ef200000ULL
+/* The SCSI HBA's register BAR, inside the WXB0 root's 32 MB aperture. */
+#define IA64_LSI_MMIO_BASE           0x00000000fa000000ULL
 #define IA64_LSI_SCRIPT_ADDR         0x00100000U
 #define IA64_LSI_MSGOUT_ADDR         0x00110000U
 #define IA64_LSI_CDB_ADDR            0x00110010U
@@ -839,7 +839,7 @@ static void test_sba_ioc_identity(void)
  * on PCI\VEN_1077&DEV_1216&SUBSYS_00071077, so the identity has to be
  * exact.  The mailbox handshake is the first thing that driver does.
  */
-#define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x01400000ULL)
+#define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x0e000000ULL)
 /*
  * The QLogic HBA parks on the second WXB root while the LSI holds the board's
  * SCSI seat at 01:00.0 (see plans/460gx-i2000-fidelity-plan.md).
@@ -1781,22 +1781,20 @@ typedef struct {
     size_t io_count;
 } PCIRootWindows;
 
-static const PCIWindow pci0_mem[] = {
-    { 0xEE000000, 0xEF1FFFFF }, { 0xEF600000, 0xEFFFFFFF },
-};
+static const PCIWindow pci0_mem[] = { { 0xEE000000, 0xEFFFFFFF } };
 static const PCIWindow pci0_io[] = {
-    { 0x0000, 0x03AF }, { 0x03E0, 0xC1FF }, { 0xC400, 0xCBFF },
-    { 0xCD00, 0xFFFF },
+    { 0x0000, 0x03AF }, { 0x03E0, 0xAFFF }, { 0xC000, 0xCFFF },
+    { 0xF000, 0xFFFF },
 };
-static const PCIWindow wxb0_mem[] = { { 0xEF200000, 0xEF3FFFFF } };
-static const PCIWindow wxb0_io[] = { { 0xC200, 0xC2FF } };
-static const PCIWindow wxb1_mem[] = { { 0xEF400000, 0xEF5FFFFF } };
-static const PCIWindow wxb1_io[] = { { 0xCC00, 0xCCFF } };
+static const PCIWindow wxb0_mem[] = { { 0xFA000000, 0xFBFFFFFF } };
+static const PCIWindow wxb0_io[] = { { 0xB000, 0xBFFF } };
+static const PCIWindow wxb1_mem[] = { { 0xFC000000, 0xFDFFFFFF } };
+static const PCIWindow wxb1_io[] = { { 0xE000, 0xEFFF } };
 static const PCIWindow gxb_mem[] = {
     { 0x000A0000, 0x000BFFFF }, { 0x000C0000, 0x000DFFFF },
-    { 0xF0000000, 0xFDFFFFFF },
+    { 0xF0000000, 0xF9FFFFFF },
 };
-static const PCIWindow gxb_io[] = { { 0x03B0, 0x03DF }, { 0xC300, 0xC3FF } };
+static const PCIWindow gxb_io[] = { { 0x03B0, 0x03DF }, { 0xD000, 0xDFFF } };
 
 static const PCIRootWindows root_windows[] = {
     { 0, pci0_mem, G_N_ELEMENTS(pci0_mem), pci0_io, G_N_ELEMENTS(pci0_io) },
@@ -2303,9 +2301,9 @@ static void test_pci_default_layout(void)
         uint32_t value;
     } wxb0_scsi[] = {
         { PCI_VENDOR_ID, 0x00121000 },
-        { PCI_BASE_ADDRESS_0, 0x0000c201 },
-        { PCI_BASE_ADDRESS_1, 0xef200000 },
-        { PCI_BASE_ADDRESS_2, 0xef202000 },
+        { PCI_BASE_ADDRESS_0, 0x0000b001 },
+        { PCI_BASE_ADDRESS_1, 0xfa000000 },
+        { PCI_BASE_ADDRESS_2, 0xfa002000 },
         { PCI_INTERRUPT_LINE, 0x00000114 },
     };
     /*
@@ -2319,7 +2317,7 @@ static void test_pci_default_layout(void)
     } gxb_vga[] = {
         { PCI_VENDOR_ID, 0x50461002 },
         { PCI_BASE_ADDRESS_0, 0xf0000008 },
-        { PCI_BASE_ADDRESS_1, 0x0000c301 },
+        { PCI_BASE_ADDRESS_1, 0x0000d001 },
         { PCI_BASE_ADDRESS_2, 0xf5000000 },
         { PCI_INTERRUPT_LINE, 0x0000011c },
     };

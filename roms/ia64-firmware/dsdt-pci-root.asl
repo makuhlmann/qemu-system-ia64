@@ -84,34 +84,38 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
                     EntireRange, 0, 0, 0x000003AF, 0xFFFFC000000,
                     0x000003B0, , , , TypeTranslation, SparseTranslation)
-                // Two further holes, one per WXB root: the SCSI host bus
-                // adapter's ports at 0xC200..0xC2FF behind WXB0 and the
-                // QLogic's at 0xCC00..0xCCFF behind WXB1.  A device's ports
-                // must be inside its own root's producer window or the guest
+                // The chipset routes I/O in 4 KB segments, one or more per
+                // logical PCI bus, so each root owns whole segments: B is
+                // the first WXB root's, D the AGP root's and E the second
+                // WXB root's.  The compatibility bus keeps everything else,
+                // including the legacy ports below 0x1000, the IDE
+                // bus-master and USB and network ports in segment C, and the
+                // SMBus controller in segment F.  A device's ports must be
+                // inside its own root's producer window or the guest
                 // arbiter cannot assign them.
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                    EntireRange, 0, 0x000003E0, 0x0000C1FF, 0xFFFFC000000,
-                    0x0000BE20, , , , TypeTranslation, SparseTranslation)
+                    EntireRange, 0, 0x000003E0, 0x0000AFFF, 0xFFFFC000000,
+                    0x0000AC20, , , , TypeTranslation, SparseTranslation)
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                    EntireRange, 0, 0x0000C400, 0x0000CBFF, 0xFFFFC000000,
-                    0x00000800, , , , TypeTranslation, SparseTranslation)
+                    EntireRange, 0, 0x0000C000, 0x0000CFFF, 0xFFFFC000000,
+                    0x00001000, , , , TypeTranslation, SparseTranslation)
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                    EntireRange, 0, 0x0000CD00, 0x0000FFFF, 0xFFFFC000000,
-                    0x00003300, , , , TypeTranslation, SparseTranslation)
+                    EntireRange, 0, 0x0000F000, 0x0000FFFF, 0xFFFFC000000,
+                    0x00001000, , , , TypeTranslation, SparseTranslation)
                 // The legacy VGA and option-ROM apertures moved to the GXB
                 // root with the graphics adapter (see GXB0 below).
-                // PCI0 device BARs live at 0xEE000000..0xEFFFFFFF; the
-                // graphics framebuffer, MMIO and ROM live above that and
-                // belong to the GXB root now.  Two 2 MB blocks are carved
-                // out of the middle for the WXB roots, out of the free space
-                // between the NIC slices (which end at 0xEF040000) and the
-                // audio windows at 0xEF800000.
+                //
+                // The chipset decodes one n x 32 MB aperture per logical PCI
+                // bus out of the gap below 4 GB - 32 MB, so each root here
+                // owns whole units of that size and none is carved out of
+                // another: the compatibility bus takes the unit at the
+                // bottom of the gap, which holds every BAR on it (the USB
+                // controller at 0xEE010000, the AHCI at 0xEE020000, the
+                // network adapter slices from 0xEE040000 and the audio
+                // windows at 0xEF800000).
                 QWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, NonCacheable, ReadWrite,
-                    0, 0xEE000000, 0xEF1FFFFF, 0, 0x01200000)
-                QWordMemory (ResourceProducer, PosDecode, MinFixed,
-                    MaxFixed, NonCacheable, ReadWrite,
-                    0, 0xEF600000, 0xEFFFFFFF, 0, 0x00A00000)
+                    0, 0xEE000000, 0xEFFFFFFF, 0, 0x02000000)
             })
             Name (_PRT, Package ()
             {
@@ -149,8 +153,8 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
         // WXB0 expander root.  It owns exactly bus 1 and its own block of four
         // Programmable Interrupt Device inputs at 20..23, so it shares no
         // interrupt line with the compatibility bus.  Its producer windows are
-        // the 2 MB block at 0xEF200000 and the I/O range at 0xC200, both
-        // holes in PCI0 above; the SCSI host bus adapter's BARs sit there.
+        // the 32 MB memory unit at 0xFA000000 and I/O segment B; the SCSI
+        // adapter's BARs sit there.
         Device (WXB0)
         {
             Name (_HID, "PNP0A03")
@@ -164,11 +168,11 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
                     PosDecode, 0, 0x0001, 0x0001, 0, 0x0001)
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                    EntireRange, 0, 0x0000C200, 0x0000C2FF, 0xFFFFC000000,
-                    0x00000100, , , , TypeTranslation, SparseTranslation)
+                    EntireRange, 0, 0x0000B000, 0x0000BFFF, 0xFFFFC000000,
+                    0x00001000, , , , TypeTranslation, SparseTranslation)
                 QWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, NonCacheable, ReadWrite,
-                    0, 0xEF200000, 0xEF3FFFFF, 0, 0x00200000)
+                    0, 0xFA000000, 0xFBFFFFFF, 0, 0x02000000)
             })
             Name (_PRT, Package ()
             {
@@ -206,8 +210,8 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
         // WXB1 expander root.  It owns exactly bus 2 and its own block of four
         // Programmable Interrupt Device inputs at 24..27, so it shares no
         // interrupt line with the compatibility bus.  Its producer windows are
-        // the 2 MB block at 0xEF400000 and the I/O range at 0xCC00, both
-        // holes in PCI0 above; the QLogic adapter's BARs sit there.
+        // the 32 MB memory unit at 0xFC000000 and I/O segment E; the
+        // QLogic adapter's BARs sit there.
         Device (WXB1)
         {
             Name (_HID, "PNP0A03")
@@ -221,11 +225,11 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
                     PosDecode, 0, 0x0002, 0x0002, 0, 0x0001)
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                    EntireRange, 0, 0x0000CC00, 0x0000CCFF, 0xFFFFC000000,
-                    0x00000100, , , , TypeTranslation, SparseTranslation)
+                    EntireRange, 0, 0x0000E000, 0x0000EFFF, 0xFFFFC000000,
+                    0x00001000, , , , TypeTranslation, SparseTranslation)
                 QWordMemory (ResourceProducer, PosDecode, MinFixed,
                     MaxFixed, NonCacheable, ReadWrite,
-                    0, 0xEF400000, 0xEF5FFFFF, 0, 0x00200000)
+                    0, 0xFC000000, 0xFDFFFFFF, 0, 0x02000000)
             })
             Name (_PRT, Package ()
             {
@@ -278,14 +282,16 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     PosDecode, 0, 0x0003, 0x0003, 0, 0x0001)
                 // The graphics adapter is the VGA owner, so the GXB root
                 // decodes the legacy VGA I/O and the 0xA0000 aperture
-                // together, plus the graphics I/O BAR hole punched out of
-                // PCI0 above.
+                // together.  Those ports are a sub-range of segment 0 rather
+                // than a segment of their own because the chipset routes
+                // them by its own VGA-enable, not by segment decode; the
+                // adapter's own I/O BAR lives in segment D.
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
                     EntireRange, 0, 0x000003B0, 0x000003DF, 0xFFFFC000000,
                     0x00000030, , , , TypeTranslation, SparseTranslation)
                 QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                    EntireRange, 0, 0x0000C300, 0x0000C3FF, 0xFFFFC000000,
-                    0x00000100, , , , TypeTranslation, SparseTranslation)
+                    EntireRange, 0, 0x0000D000, 0x0000DFFF, 0xFFFFC000000,
+                    0x00001000, , , , TypeTranslation, SparseTranslation)
                 DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
                     Cacheable, ReadWrite,
                     0, 0x000A0000, 0x000BFFFF, 0, 0x00020000)
@@ -296,9 +302,12 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
                     Cacheable, ReadWrite,
                     0, 0x000C0000, 0x000DFFFF, 0, 0x00020000)
+                // Five 32 MB units, enough for the largest framebuffer
+                // (128 MB), register aperture and option ROM any of the
+                // supported adapters presents.
                 QWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
                     NonCacheable, ReadWrite,
-                    0, 0xF0000000, 0xFDFFFFFF, 0, 0x0E000000)
+                    0, 0xF0000000, 0xF9FFFFFF, 0, 0x0A000000)
             })
             Name (_PRT, Package ()
             {
