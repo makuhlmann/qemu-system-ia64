@@ -338,13 +338,14 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_460GX_GXB_VGA_SLOT       0x00
 /*
  * The i2000's SCSI host bus adapter sits at device 0 of the first WXB
- * expander bus.  That seat is held by the LSI 53c895a until the installed
- * guest images can boot from the QLogic ISP12160, at which point the QLogic
- * takes it as a drop-in replacement.  Meanwhile the QLogic, which is opt-in,
- * parks at device 0 of the second WXB bus.
+ * expander bus.  That seat belongs to the QLogic ISP12160, the adapter the
+ * real board carries and the machine's default.  The LSI 53c895a is opt-in
+ * (lsi=on) for images installed before the swap; it takes the seat when the
+ * QLogic is turned off, and otherwise parks at device 0 of the second WXB
+ * bus, which is the layout an image is migrated between the two on.
  */
 #define IA64_460GX_WXB0_SCSI_SLOT     0x00
-#define IA64_460GX_WXB1_ISP_SLOT      0x00
+#define IA64_460GX_WXB1_SCSI_SLOT     0x00
 /*
  * The Intel 82468GX I/O and Firmware Bridge, the platform south bridge: a
  * four-function device carrying the LPC/ISA bridge, the IDE controller, the

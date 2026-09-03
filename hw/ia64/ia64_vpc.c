@@ -157,7 +157,12 @@
  * the first WXB root's, D the AGP root's and E the second WXB root's; the
  * compatibility bus keeps the rest, including the legacy ports.
  */
-#define IA64_LSI_IO_BASE        0x0000b000U
+/*
+ * The SCSI seat's ports come out of segment B, the first WXB root's; the
+ * second adapter parks on the second WXB root and takes segment E.
+ */
+#define IA64_SCSI_SEAT_IO_BASE  0x0000b000U
+#define IA64_SCSI_PARK_IO_BASE  0x0000e000U
 #define IA64_VGA_IO_BASE        0x0000d000U
 /*
  * The vendor ATI Rage 128 vgabios hardcodes its register I/O base at 0xD800 and
@@ -188,8 +193,14 @@
 #define IA64_PCI_MMIO_UNIT      0x02000000ULL
 #define IA64_WXB0_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 6 * IA64_PCI_MMIO_UNIT)
 #define IA64_WXB1_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 7 * IA64_PCI_MMIO_UNIT)
-#define IA64_LSI_MMIO_PCI_BASE  (IA64_WXB0_MMIO_PCI_BASE + 0x00000000ULL)
-#define IA64_LSI_RAM_PCI_BASE   (IA64_WXB0_MMIO_PCI_BASE + 0x00002000ULL)
+/*
+ * The memory BARs of whichever adapter holds the SCSI seat come out of the
+ * first WXB root's aperture, and the parked adapter's out of the second's.
+ * The LSI's script RAM BAR sits 8 KiB above its register BAR either way.
+ */
+#define IA64_SCSI_SEAT_MMIO_PCI_BASE IA64_WXB0_MMIO_PCI_BASE
+#define IA64_SCSI_PARK_MMIO_PCI_BASE IA64_WXB1_MMIO_PCI_BASE
+#define IA64_LSI_RAM_BAR_OFFSET      0x00002000ULL
 #define IA64_E1000_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00040000ULL)
 #define IA64_E1000_MMIO_SIZE    0x00020000ULL
 #define IA64_E1000_IO_SIZE      0x00000040U
@@ -198,10 +209,6 @@
  * (IA64_E1000_MMIO_PCI_BASE plus MAX_NICS * IA64_NIC_MMIO_STRIDE, which
  * includes each adapter's Flash aperture) and below the graphics
  * framebuffer at IA64_PCI_MMIO_BASE + 0x02000000.
- */
-/*
- * The QLogic sits on the second WXB root, so both its memory BAR and its
- * ports come out of that root's aperture and I/O segment.
  */
 /*
  * The south bridge's IDE bus-master register file.  Both channels are in
@@ -217,8 +224,6 @@
  * (plans/phase5 SESSION 8), so use the same base here.
  */
 #define IA64_IFB_SMBUS_IO_BASE   0x0000fff0U
-#define IA64_ISP12160_IO_BASE    0x0000e000U
-#define IA64_ISP12160_MMIO_PCI_BASE (IA64_WXB1_MMIO_PCI_BASE + 0x00000000ULL)
 #define IA64_CS4281_BA0_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01800000ULL)
 #define IA64_CS4281_BA1_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01810000ULL)
 /*
@@ -549,6 +554,7 @@ struct IA64VpcMachineState {
     bool ahci_enabled;
     bool audio_enabled;
     bool isp_enabled;
+    bool lsi_enabled;
     bool fw_relocate;
     uint64_t fw_map_quirk_disable;
     bool ide_enabled;
@@ -2227,6 +2233,31 @@ static void ia64_vpc_set_isp(Object *obj, bool value, Error **errp)
     s->isp_enabled = value;
 }
 
+static bool ia64_vpc_get_lsi(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->lsi_enabled;
+}
+
+static void ia64_vpc_set_lsi(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+#ifndef CONFIG_IA64_VPC_STORAGE
+    if (value) {
+        error_setg(errp, "SCSI support is not present in this build");
+        return;
+    }
+#else
+    (void)errp;
+#endif
+
+    s->lsi_enabled = value;
+}
+
 static bool ia64_vpc_get_ide(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -3026,6 +3057,10 @@ static void ia64_vpc_configure_audio(PCIDevice *pci_dev)
                              PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER, 2);
 }
 
+/*
+ * The QLogic is the default adapter and always holds the SCSI seat when it
+ * is present, so its BARs come out of the first WXB root's window.
+ */
 static void ia64_vpc_configure_isp(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
@@ -3033,10 +3068,10 @@ static void ia64_vpc_configure_isp(PCIDevice *pci_dev)
     }
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
-                             IA64_ISP12160_IO_BASE |
+                             IA64_SCSI_SEAT_IO_BASE |
                              PCI_BASE_ADDRESS_SPACE_IO, 4);
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
-                             IA64_ISP12160_MMIO_PCI_BASE, 4);
+                             IA64_SCSI_SEAT_MMIO_PCI_BASE, 4);
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
                              PCI_COMMAND_MASTER, 2);
@@ -3101,18 +3136,27 @@ static void ia64_vpc_configure_ifb_smbus(PCIDevice *pci_dev)
     pci_default_write_config(pci_dev, PCI_COMMAND, PCI_COMMAND_IO, 2);
 }
 
-static void ia64_vpc_configure_lsi(PCIDevice *pci_dev)
+/*
+ * The LSI holds the seat only when the QLogic is off; with both adapters
+ * present it parks on the second WXB root and its BARs follow it there.
+ */
+static void ia64_vpc_configure_lsi(IA64VpcMachineState *s, PCIDevice *pci_dev)
 {
+    uint32_t io_base;
+    uint64_t mmio_base;
+
     if (pci_dev == NULL) {
         return;
     }
 
-    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
-                             IA64_LSI_IO_BASE, 4);
-    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
-                             IA64_LSI_MMIO_PCI_BASE, 4);
+    io_base = s->isp_enabled ? IA64_SCSI_PARK_IO_BASE : IA64_SCSI_SEAT_IO_BASE;
+    mmio_base = s->isp_enabled ? IA64_SCSI_PARK_MMIO_PCI_BASE :
+                                 IA64_SCSI_SEAT_MMIO_PCI_BASE;
+
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0, io_base, 4);
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1, mmio_base, 4);
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_2,
-                             IA64_LSI_RAM_PCI_BASE, 4);
+                             mmio_base + IA64_LSI_RAM_BAR_OFFSET, 4);
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
                              PCI_COMMAND_MASTER, 2);
@@ -3449,6 +3493,34 @@ static void ia64_vpc_configure_nic(PCIDevice *pci_dev, unsigned int index)
                              PCI_COMMAND_MASTER, 2);
 }
 
+/*
+ * Build one SCSI adapter at the bus and device number the caller picked.
+ * Both take the drives given without an explicit interface, so the adapter
+ * built first -- the one holding the seat -- is the one that gets them.
+ */
+#ifdef CONFIG_IA64_VPC_STORAGE
+static bool ia64_vpc_init_lsi(IA64VpcMachineState *s, PCIBus *bus, int devfn,
+                              Error **errp)
+{
+    s->lsi_dev = pci_new(devfn, "lsi53c895a");
+    qdev_prop_set_bit(DEVICE(s->lsi_dev), "disconnect-on-data-wait", false);
+    if (!pci_realize_and_unref(s->lsi_dev, bus, errp)) {
+        return false;
+    }
+    ia64_vpc_configure_lsi(s, s->lsi_dev);
+    lsi53c8xx_handle_legacy_cmdline(DEVICE(s->lsi_dev));
+    return true;
+}
+
+static void ia64_vpc_init_isp(IA64VpcMachineState *s, PCIBus *bus, int devfn)
+{
+    s->isp_dev = pci_create_simple(bus, devfn, TYPE_ISP12160_SCSI);
+    ia64_vpc_configure_isp(s->isp_dev);
+    scsi_bus_legacy_handle_cmdline(
+        SCSI_BUS(qdev_get_child_bus(DEVICE(s->isp_dev), "isp12160-scsi.0")));
+}
+#endif
+
 static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
 {
     ia64_vpc_configure_ahci(s->ahci_dev);
@@ -3460,7 +3532,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_IDE_FUNCTION));
     ia64_vpc_configure_ifb_smbus(
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
-    ia64_vpc_configure_lsi(s->lsi_dev);
+    ia64_vpc_configure_lsi(s, s->lsi_dev);
     ia64_vpc_configure_vga(s->vga_dev,
                            s->realfw_path != NULL ? IA64_VGA_IO_BASE_REALFW
                                                   : IA64_VGA_IO_BASE);
@@ -3472,7 +3544,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_pci_irq_on_root(
         s->isp_dev,
         ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
-                               IA64_460GX_WXB1_BUS));
+                               IA64_460GX_WXB0_BUS));
     ia64_vpc_configure_pci_irq(s->ide_dev);
     ia64_vpc_configure_pci_irq(s->ohci_dev);
     ia64_vpc_configure_pci_irq(s->uhci_dev);
@@ -3483,7 +3555,8 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_pci_irq_on_root(
         s->lsi_dev,
         ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
-                               IA64_460GX_WXB0_BUS));
+                               s->isp_enabled ? IA64_460GX_WXB1_BUS :
+                                                IA64_460GX_WXB0_BUS));
     ia64_vpc_configure_pci_irq_on_root(
         s->vga_dev,
         ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
@@ -5388,14 +5461,21 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 
     /*
      * The SCSI HBA.  On the i2000 it belongs at 01:00.0 on the first WXB
-     * bus, which is where the QLogic ISP12160 sits on the real board; the
-     * LSI occupies that seat until the installed guest images can boot from
-     * the QLogic, so that migration is a device swap at one address rather
-     * than another move.  Device 4 of the compatibility bus, where the LSI
-     * used to live, belongs to the CS4281 audio.  zx1 keeps device 4.
+     * bus, and the adapter the real board carries there is the QLogic
+     * ISP12160, so that is what the machine builds by default.  The LSI
+     * 53c895a stays available behind lsi=on for images installed before the
+     * swap: on its own it takes the seat and the addresses it always had,
+     * and alongside the QLogic it parks on the second WXB bus, which is the
+     * layout an image is migrated from one adapter to the other on.
+     *
+     * Whichever adapter holds the seat is created here, before anything
+     * else that places itself automatically, so it claims the drives given
+     * without an interface and keeps the rest of the map fixed.  Device 4
+     * of the compatibility bus, where the LSI used to live, belongs to the
+     * CS4281 audio.  zx1 keeps device 4 for the seat.
      */
 #ifdef CONFIG_IA64_VPC_STORAGE
-    {
+    if (s->isp_enabled || s->lsi_enabled) {
         PCIBus *scsi_bus = pci_bus;
         int scsi_devfn = PCI_DEVFN(4, 0);
 
@@ -5403,14 +5483,11 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
             scsi_bus = s->expander_bus[IA64_460GX_ROOT_WXB0];
             scsi_devfn = PCI_DEVFN(IA64_460GX_WXB0_SCSI_SLOT, 0);
         }
-        s->lsi_dev = pci_new(scsi_devfn, "lsi53c895a");
-        qdev_prop_set_bit(DEVICE(s->lsi_dev),
-                          "disconnect-on-data-wait", false);
-        if (!pci_realize_and_unref(s->lsi_dev, scsi_bus, errp)) {
+        if (s->isp_enabled) {
+            ia64_vpc_init_isp(s, scsi_bus, scsi_devfn);
+        } else if (!ia64_vpc_init_lsi(s, scsi_bus, scsi_devfn, errp)) {
             return false;
         }
-        ia64_vpc_configure_lsi(s->lsi_dev);
-        lsi53c8xx_handle_legacy_cmdline(DEVICE(s->lsi_dev));
     }
 #endif
 
@@ -5521,32 +5598,24 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
 
     /*
-     * The i2000's SCSI host bus adapter is a QLogic 12160, for which both
-     * XP and Server 2003 ship an in-box driver (ql12160.sys, matched on
-     * PCI\VEN_1077&DEV_1216&SUBSYS_00071077).  Off by default for the same
-     * reason as audio, and created before it so the ordering is fixed.
+     * The second SCSI adapter, when both are asked for.  It parks on the
+     * second WXB bus so the seat's addresses and interrupt stay with the
+     * primary; on zx1 it takes the next free slot of the single root.
+     * Created here, after everything that has a fixed seat of its own, so
+     * asking for it cannot move another function's BDF.
      */
 #ifdef CONFIG_IA64_VPC_STORAGE
-    if (s->isp_enabled) {
-        /*
-         * The i2000 carries its QLogic HBA at 01:00.0, but the LSI holds
-         * that seat until the guest images boot from this adapter, so it
-         * parks on the second WXB bus meanwhile.  zx1 has no such adapter
-         * and keeps the next free slot of its own root.
-         */
-        PCIBus *isp_bus = pci_bus;
-        int isp_devfn = -1;
+    if (s->isp_enabled && s->lsi_enabled) {
+        PCIBus *park_bus = pci_bus;
+        int park_devfn = -1;
 
         if (!ia64_vpc_chipset_is_zx1(s)) {
-            isp_bus = s->expander_bus[IA64_460GX_ROOT_WXB1];
-            isp_devfn = PCI_DEVFN(IA64_460GX_WXB1_ISP_SLOT, 0);
+            park_bus = s->expander_bus[IA64_460GX_ROOT_WXB1];
+            park_devfn = PCI_DEVFN(IA64_460GX_WXB1_SCSI_SLOT, 0);
         }
-        s->isp_dev = pci_create_simple(isp_bus, isp_devfn,
-                                       TYPE_ISP12160_SCSI);
-        ia64_vpc_configure_isp(s->isp_dev);
-        scsi_bus_legacy_handle_cmdline(
-            SCSI_BUS(qdev_get_child_bus(DEVICE(s->isp_dev),
-                                        "isp12160-scsi.0")));
+        if (!ia64_vpc_init_lsi(s, park_bus, park_devfn, errp)) {
+            return false;
+        }
     }
 #endif
 
@@ -5672,13 +5741,19 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     /*
      * Default the SATA controller off: Windows XP/2003 IA-64 ship no inbox
      * AHCI driver and otherwise see an unidentified PCI device, so the guest
-     * that most wants storage is better served booting off the LSI SCSI HBA.
+     * that most wants storage is better served booting off the SCSI HBA.
      * Re-enable with ahci=on for SATA-aware guests.  IDE (cmd646) is likewise
      * opt-in via ide=on.
+     *
+     * The SCSI HBA is the QLogic ISP12160, the adapter the i2000 carries and
+     * the one both XP and Server 2003 have an in-box driver for.  The LSI
+     * that used to hold that seat is opt-in via lsi=on, for images installed
+     * against it.
      */
     s->ahci_enabled = false;
     s->audio_enabled = false;
-    s->isp_enabled = false;
+    s->isp_enabled = true;
+    s->lsi_enabled = false;
     s->ide_enabled = false;
     s->firmware_ide_dma = true;
 #endif
@@ -5785,7 +5860,15 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_get_isp,
                                    ia64_vpc_set_isp);
     object_class_property_set_description(oc, "isp",
-        "Add the QLogic ISP12160 SCSI controller (default off)");
+        "Set on/off to enable/disable the QLogic ISP12160 SCSI controller "
+        "(default on; it holds the platform's SCSI seat)");
+    object_class_property_add_bool(oc, "lsi",
+                                   ia64_vpc_get_lsi,
+                                   ia64_vpc_set_lsi);
+    object_class_property_set_description(oc, "lsi",
+        "Add the LSI 53c895a SCSI controller (default off; it takes the "
+        "SCSI seat when isp=off, and parks on the second expander bus "
+        "otherwise)");
     object_class_property_add_bool(oc, "audio",
                                    ia64_vpc_get_audio,
                                    ia64_vpc_set_audio);

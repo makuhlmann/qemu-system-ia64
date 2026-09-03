@@ -893,12 +893,24 @@ static void scsi_probe_transport(void)
 }
 
 /*
- * Probe the LSI first, so a platform that has one behaves exactly as it
- * always has, then the QLogic the i2000 actually carries.  While guests are
- * being migrated from one to the other both adapters are present with the
- * disk on only one, so an adapter that answers but carries no device must
- * not end the search.
+ * Probe the QLogic the i2000 actually carries first, then the LSI, which is
+ * opt-in and there for images installed against it.  While a guest is being
+ * migrated from one adapter to the other both are present with the disk on
+ * only one, so an adapter that answers but carries no device must not end
+ * the search.
  */
+static BOOLEAN scsi_probe_one(UINT32 Transport)
+{
+    fw_set_mem(mScsiDevices, sizeof(mScsiDevices), 0);
+    mScsiTransport = Transport;
+    scsi_probe_transport();
+    if (mBootScsiDevice == NULL && mDiskScsiDevice == NULL) {
+        mScsiTransport = SCSI_TRANSPORT_NONE;
+        return 0;
+    }
+    return 1;
+}
+
 void scsi_probe_devices(void)
 {
     fw_set_mem(mScsiDevices, sizeof(mScsiDevices), 0);
@@ -906,23 +918,12 @@ void scsi_probe_devices(void)
     mDiskScsiDevice = NULL;
     mScsiTransport = SCSI_TRANSPORT_NONE;
 
-    if (lsi_init_controller()) {
-        mScsiTransport = SCSI_TRANSPORT_LSI;
-        scsi_probe_transport();
-    }
-    if (mBootScsiDevice != NULL || mDiskScsiDevice != NULL) {
+    if (isp12160_initialise() && scsi_probe_one(SCSI_TRANSPORT_ISP12160)) {
         return;
     }
-
-    if (isp12160_initialise()) {
-        mScsiTransport = SCSI_TRANSPORT_ISP12160;
-        fw_set_mem(mScsiDevices, sizeof(mScsiDevices), 0);
-        scsi_probe_transport();
-        if (mBootScsiDevice == NULL && mDiskScsiDevice == NULL) {
-            mScsiTransport = SCSI_TRANSPORT_NONE;
-        }
+    if (lsi_init_controller()) {
+        scsi_probe_one(SCSI_TRANSPORT_LSI);
     }
-
 }
 
 static volatile UINT32 *ahci_reg(UINT32 Offset)

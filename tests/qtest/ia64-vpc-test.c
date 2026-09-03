@@ -186,6 +186,17 @@ static QTestState *ia64_vpc_start(const char *extra_args)
                        extra_args ?: "");
 }
 
+/*
+ * The LSI is opt-in now that the QLogic holds the platform's SCSI seat.
+ * Turning the QLogic off puts the LSI back on that seat, so these tests see
+ * the bus name and the register addresses the adapter has always had there.
+ */
+static QTestState *ia64_vpc_start_lsi(const char *extra_args)
+{
+    return qtest_initf("-machine 460gx,lsi=on,isp=off -m 256M -S %s",
+                       extra_args ?: "");
+}
+
 static uint64_t ia64_sparse_io_offset(uint32_t port)
 {
     return ((uint64_t)(port >> 2) << 12) | (port & 0xfff);
@@ -839,12 +850,14 @@ static void test_sba_ioc_identity(void)
  * on PCI\VEN_1077&DEV_1216&SUBSYS_00071077, so the identity has to be
  * exact.  The mailbox handshake is the first thing that driver does.
  */
-#define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x0e000000ULL)
 /*
- * The QLogic HBA parks on the second WXB root while the LSI holds the board's
- * SCSI seat at 01:00.0 (see plans/460gx-i2000-fidelity-plan.md).
+ * The QLogic holds the board's SCSI seat at 01:00.0 on the first WXB root
+ * (see plans/460gx-i2000-fidelity-plan.md), so its BARs come out of that
+ * root's aperture, and it is there by default.
  */
-#define IA64_ISP_SLOT           IA64_460GX_WXB1_ISP_SLOT
+#define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x0c000000ULL)
+#define IA64_ISP_SLOT           IA64_460GX_WXB0_SCSI_SLOT
+#define IA64_ISP_BUS            IA64_460GX_WXB0_BUS
 #define IA64_ISP_REG_ISTATUS    0x0aU
 #define IA64_ISP_REG_SEMAPHORE  0x0cU
 #define IA64_ISP_REG_MAILBOX0   0x70U
@@ -859,10 +872,9 @@ static void test_sba_ioc_identity(void)
 static void test_isp12160_mailbox(void)
 {
     const uint64_t cfg = IA64_PCI_CONFIG_BASE +
-                         ((uint64_t)IA64_460GX_WXB1_BUS << 20) +
+                         ((uint64_t)IA64_ISP_BUS << 20) +
                          ((uint64_t)IA64_ISP_SLOT << 15);
-    QTestState *qts = qtest_init("-machine 460gx,isp=on -cpu merced "
-                                 "-m 256M -S");
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
     unsigned int i;
 
     g_assert_cmphex(qtest_readl(qts, cfg), ==, 0x12161077);
@@ -997,10 +1009,9 @@ static void isp_build_firmware(uint16_t *image)
 static void test_isp12160_firmware_checksum(void)
 {
     const uint64_t cfg = IA64_PCI_CONFIG_BASE +
-                         ((uint64_t)IA64_460GX_WXB1_BUS << 20) +
+                         ((uint64_t)IA64_ISP_BUS << 20) +
                          ((uint64_t)IA64_ISP_SLOT << 15);
-    QTestState *qts = qtest_init("-machine 460gx,isp=on -cpu merced "
-                                 "-m 256M -S");
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
     uint16_t image[IA64_ISP_FW_SENT];
 
     qtest_writew(qts, cfg + PCI_COMMAND,
@@ -1012,7 +1023,7 @@ static void test_isp12160_firmware_checksum(void)
     qtest_quit(qts);
 
     /* Corrupting a word inside the declared image must still be caught. */
-    qts = qtest_init("-machine 460gx,isp=on -cpu merced -m 256M -S");
+    qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
     qtest_writew(qts, cfg + PCI_COMMAND,
                  PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
     isp_build_firmware(image);
@@ -2148,7 +2159,7 @@ static void test_460gx_root_window_containment(void)
      * graphics BARs are the largest on the machine and the ones most likely
      * to grow past the GXB root's window.
      */
-    check_root_window_containment("-machine 460gx,audio=on,isp=on,ide=on "
+    check_root_window_containment("-machine 460gx,audio=on,lsi=on,ide=on "
                                   "-cpu merced -m 256M -S");
     check_root_window_containment("-machine 460gx,vga=mach64 "
                                   "-cpu merced -m 256M -S");
@@ -2478,17 +2489,20 @@ static void test_pci_default_layout(void)
     };
     /*
      * The SCSI HBA is at 01:00.0 on the first WXB root -- the seat the board
-     * gives its QLogic adapter, held by the LSI until the guest images can
-     * boot from the QLogic.  INTA there is 16 + 1 * 4 + (0 + 0) % 4 = 20.
+     * gives its QLogic adapter, which is the machine's default.  Its
+     * subsystem identity is part of the match ql12160.sys makes, so pin that
+     * too, and it has no third BAR where the LSI kept its script RAM.  INTA
+     * there is 16 + 1 * 4 + (0 + 0) % 4 = 20.
      */
     static const struct {
         uint32_t reg;
         uint32_t value;
     } wxb0_scsi[] = {
-        { PCI_VENDOR_ID, 0x00121000 },
+        { PCI_VENDOR_ID, 0x12161077 },
+        { PCI_SUBSYSTEM_VENDOR_ID, 0x00071077 },
         { PCI_BASE_ADDRESS_0, 0x0000b001 },
         { PCI_BASE_ADDRESS_1, 0xfa000000 },
-        { PCI_BASE_ADDRESS_2, 0xfa002000 },
+        { PCI_BASE_ADDRESS_2, 0x00000000 },
         { PCI_INTERRUPT_LINE, 0x00000114 },
     };
     /*
@@ -2565,17 +2579,22 @@ static void test_pci_default_layout(void)
 
     {
         QGenericPCIBus wxb0;
-        QPCIDevice *lsi;
+        QGenericPCIBus wxb1;
+        QPCIDevice *scsi;
 
         ia64_qpci_init_on_bus(&wxb0, qts, IA64_460GX_WXB0_BUS);
-        lsi = qpci_device_find(&wxb0.bus,
-                               QPCI_DEVFN(IA64_460GX_WXB0_SCSI_SLOT, 0));
-        g_assert_nonnull(lsi);
-        g_assert_cmphex(qpci_config_readw(lsi, PCI_SUBSYSTEM_VENDOR_ID), ==,
-                        PCI_VENDOR_ID_LSI_LOGIC);
-        g_assert_cmphex(qpci_config_readw(lsi, PCI_SUBSYSTEM_ID), ==,
-                        PCI_VENDOR_ID_LSI_LOGIC);
-        g_free(lsi);
+        scsi = qpci_device_find(&wxb0.bus,
+                                QPCI_DEVFN(IA64_460GX_WXB0_SCSI_SLOT, 0));
+        g_assert_nonnull(scsi);
+        g_assert_cmphex(qpci_config_readw(scsi, PCI_VENDOR_ID), ==,
+                        0x1077);   /* QLogic */
+        g_free(scsi);
+
+        /* The second WXB root is the park, and nothing is parked by default. */
+        ia64_qpci_init_on_bus(&wxb1, qts, IA64_460GX_WXB1_BUS);
+        scsi = qpci_device_find(&wxb1.bus,
+                                QPCI_DEVFN(IA64_460GX_WXB1_SCSI_SLOT, 0));
+        g_assert_null(scsi);
     }
     assert_pci_device(&gbus.bus, &expected_i82557b);
     qtest_quit(qts);
@@ -2882,7 +2901,7 @@ static void test_lsi_async_nodata_command(void)
     uint8_t status;
     unsigned int i;
 
-    qts = ia64_vpc_start(
+    qts = ia64_vpc_start_lsi(
         "-blockdev driver=null-co,read-zeroes=on,"
                   "node-name=disk0,size=1048576 "
         "-device scsi-hd,drive=disk0,bus=scsi.0,scsi-id=0");
@@ -2917,7 +2936,7 @@ static void test_lsi_dbms_no_leak(void)
     QTestState *qts;
     uint8_t status;
 
-    qts = ia64_vpc_start(
+    qts = ia64_vpc_start_lsi(
         "-blockdev driver=null-co,read-zeroes=on,"
                   "node-name=disk0,size=1048576 "
         "-device scsi-hd,drive=disk0,bus=scsi.0,scsi-id=0");
@@ -2968,7 +2987,7 @@ static void test_lsi_memory_move_mmws(void)
     uint8_t dstat = 0;
     unsigned int i;
 
-    qts = ia64_vpc_start(NULL);   /* a memory move needs no SCSI target */
+    qts = ia64_vpc_start_lsi(NULL);   /* a memory move needs no SCSI target */
 
     qtest_memwrite(qts, src, src_pattern, sizeof(src_pattern));
     qtest_memset(qts, dst, 0xaa, sizeof(src_pattern));

@@ -206,23 +206,23 @@ class Ia64Storage(Ia64FirmwareTest):
     def test_scsi_mbr_fallback(self):
         self.run_scsi_layout("mbr-fallback")
 
-    def test_scsi_isp12160(self):
-        """Boot from a disk on the QLogic ISP12160 rather than the LSI.
+    def test_scsi_lsi_fallback(self):
+        """Boot from a disk on the LSI while the QLogic holds the SCSI seat.
 
-        The i2000 carries this adapter, so the firmware has to be able to
-        read a boot disk through it.  The LSI is present and empty here, so
-        this also covers the probe falling through to the second transport
-        rather than stopping at the first adapter that answers.
+        The QLogic is the machine's adapter and the one every other SCSI
+        case here runs on, so this covers the opt-in LSI: the probe has to
+        fall through to it rather than stopping at the QLogic, which answers
+        but carries no device.
         """
         app = app_path("storage")
-        media = Path(self.scratch_file("scsi-isp12160.img"))
+        media = Path(self.scratch_file("scsi-lsi.img"))
         make_fat_disk(media, app)
         drive_args = (
             "-drive", f"file={media},format=raw,if=none,id=testdisk",
-            "-device", "scsi-hd,bus=isp12160-scsi.0,drive=testdisk",
+            "-device", "scsi-hd,bus=scsi.0,drive=testdisk",
         )
-        self.run_scenario("scsi-isp12160", media, drive_args=drive_args,
-                          machine_options="isp=on")
+        self.run_scenario("scsi-lsi", media, drive_args=drive_args,
+                          machine_options="lsi=on")
 
     def test_cmd646_ide_dma(self):
         self.run_ide("dma")
