@@ -447,19 +447,6 @@ static void cmos_ioport_write(void *opaque, hwaddr addr,
             s->cmos_index = RTC_CENTURY;
             /* fall through */
         case RTC_CENTURY:
-            if (s->century_read_only) {
-                /*
-                 * Read-only hardware century byte: drop the write.  Real
-                 * hardware's century register is not writable, and the i2000
-                 * SDV firmware's end-of-POST RTC probe writes 0 to it and then
-                 * requires it to still read back the century (else it reports
-                 * EFI_DEVICE_ERROR, whose zero result count trips a break 1).
-                 * With a writable byte and the RTC halted for the probe, the
-                 * read-back would be the written 0 and the probe fails; keeping
-                 * the stored century makes the probe read back the real value.
-                 */
-                break;
-            }
             /* fall through */
         case RTC_SECONDS:
         case RTC_MINUTES:
@@ -743,25 +730,6 @@ static uint64_t cmos_ioport_read(void *opaque, hwaddr addr,
             s->cmos_index = RTC_CENTURY;
             /* fall through */
         case RTC_CENTURY:
-            if (s->century_read_only) {
-                /*
-                 * Read-only hardware century byte: always report the real
-                 * century as a two-digit BCD value (e.g. 0x20 for the 2000s),
-                 * independent of the RTC's SET/halt state, of any write (which
-                 * we drop), and crucially of REG_B_DM: unlike the time fields,
-                 * the century register is BCD even when the RTC is in binary
-                 * mode, which the i2000 SDV firmware relies on (its end-of-POST
-                 * RTC self-test both write-probes this byte and builds a year
-                 * from it that it range-checks to [1998, 2099]).
-                 */
-                time_t guest_sec = get_guest_rtc_ns(s) / NANOSECONDS_PER_SECOND;
-                struct tm tm;
-                int century;
-                gmtime_r(&guest_sec, &tm);
-                century = (tm.tm_year + 1900) / 100;
-                ret = ((century / 10) << 4) | (century % 10);
-                break;
-            }
             /* fall through */
         case RTC_SECONDS:
         case RTC_MINUTES:

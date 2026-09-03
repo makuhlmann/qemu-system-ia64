@@ -211,6 +211,20 @@ static void ifb_rtc_bank_update(Intel82468GXIFBState *s)
     memory_region_set_enabled(&s->rtc_ext_alias, !upper);
 }
 
+/*
+ * The 8259 pair's INTR output.  It has to go through a handler rather than
+ * straight to the "legacy" GPIO line: the pair is built when the bridge is
+ * realized, and a GPIO output is not bound to anything until the machine
+ * connects it afterwards, so passing the line by value here would capture the
+ * unconnected placeholder and the pair could never deliver an interrupt.
+ */
+static void ifb_legacy_irq_handler(void *opaque, int n, int level)
+{
+    Intel82468GXIFBState *s = opaque;
+
+    qemu_set_irq(s->legacy_irq, level);
+}
+
 static void ifb_isa_irq_handler(void *opaque, int irq, int level)
 {
     Intel82468GXIFBState *s = opaque;
@@ -411,7 +425,9 @@ static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
     s->functions[0] = pci;
     s->isa_bus = isa_bus_new_non_default(DEVICE(s), pci_address_space(pci),
                                          pci_address_space_io(pci));
-    s->pic_irqs = i8259_init_pair(s->isa_bus, s->legacy_irq,
+    s->pic_irqs = i8259_init_pair(s->isa_bus,
+                                  qemu_allocate_irq(ifb_legacy_irq_handler,
+                                                    s, 0),
                                   &s->master_pic);
     s->isa_irqs = qemu_allocate_irqs(ifb_isa_irq_handler, s,
                                      ISA_NUM_IRQS);

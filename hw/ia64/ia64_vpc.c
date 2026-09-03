@@ -574,9 +574,7 @@ struct IA64VpcMachineState {
     MemoryRegion realfw_cfg_io;
     MemoryRegion realfw_ide_data[2];
     MemoryRegion realfw_ide_cmd[2];
-    MemoryRegion realfw_rtc_ext_alias;
     MemoryRegion realfw_smbus_io;
-    MemoryRegion realfw_port61_io;
     qemu_irq extint;
     uint8_t *realfw_sac_data;
     uint16_t realfw_post_last;
@@ -3104,11 +3102,11 @@ static void ia64_vpc_configure_uhci(PCIDevice *pci_dev)
 /*
  * Whether the machine carries the modelled 82468GX south bridge, and with it
  * an IDE controller that is part of the board rather than an option.  zx1 is
- * a different platform, and realfw mode models a south bridge of its own.
+ * a different platform.
  */
 static bool ia64_vpc_has_south_bridge(const IA64VpcMachineState *s)
 {
-    return !ia64_vpc_chipset_is_zx1(s) && s->realfw_path == NULL;
+    return !ia64_vpc_chipset_is_zx1(s);
 }
 
 static void ia64_vpc_configure_ifb_ide(PCIDevice *pci_dev)
@@ -4181,45 +4179,6 @@ static const MemoryRegionOps ia64_realfw_smbus_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-/*
- * System Control Port B (I/O 0x61).  Near the end of POST the SDV firmware
- * uses bit 4 -- the DRAM REFRESH toggle -- as a timing reference: it reads
- * port 0x61 in a tight loop and waits for bit 4 to flip a full 0->1->0 refresh
- * period to calibrate a delay.  Real hardware toggles that bit roughly every
- * 15 us; unmodelled the port floats to a constant (open-bus 0xff, bit 4 stuck
- * at 1) and the loop never sees the flip, hanging at POST ~0x05.
- *
- * Report the pre-existing open-bus value 0xff -- which is what the firmware saw
- * for the other bits before this region existed and reached this far with, so
- * nothing that reads the port earlier regresses -- but drive bit 4 from the
- * virtual clock so the refresh toggle is observed.  Writes (the firmware pokes
- * the timer-2/speaker gate bits) are dropped, exactly as the unbacked port did.
- */
-#define IA64_REALFW_PORT61            0x61
-#define IA64_REALFW_PORT61_REFRESH_NS 15000
-
-static uint64_t ia64_realfw_port61_read(void *opaque, hwaddr addr, unsigned size)
-{
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    uint8_t refresh = (now / IA64_REALFW_PORT61_REFRESH_NS) & 1;
-
-    return (uint8_t)((0xff & ~0x10) | (refresh << 4));
-}
-
-static void ia64_realfw_port61_write(void *opaque, hwaddr addr, uint64_t val,
-                                     unsigned size)
-{
-    /* Open bus: writes are dropped, as for the previously unbacked port. */
-}
-
-static const MemoryRegionOps ia64_realfw_port61_ops = {
-    .read = ia64_realfw_port61_read,
-    .write = ia64_realfw_port61_write,
-    .valid.min_access_size = 1,
-    .valid.max_access_size = 1,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
-
 static uint64_t ia64_realfw_sac_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
@@ -4359,6 +4318,14 @@ static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
      * hardware, so the written value must survive that reset for the reboot to
      * be one-shot rather than an infinite loop.  Model it as a persistent cell
      * that ia64_vpc_reset does NOT clear.  See plans/phase5 SESSION 17.
+     *
+     * NOTE: 00:03.0 is the 82468GX's own config space now that the bridge is
+     * built for realfw too, so this cell overlays a real device's registers.
+     * It is inert in the reachable boot path -- a full POST log shows the
+     * firmware reading 0xd0 only at 00:01.0/00:01.1, never at 00:03.0 -- and
+     * the frequency detector that uses it runs after the gated CF9 reboot,
+     * which cannot be reached to test.  Resolve it by moving the cell into
+     * the bridge model once that path can be exercised.
      */
     if (s->realfw_path != NULL && bus == 0 && dev == 3 && fn == 0 &&
         (reg & 0xfc) == 0xd0) {
@@ -4643,12 +4610,14 @@ static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
     memory_region_init_io(&s->realfw_smbus_io, OBJECT(s),
                           &ia64_realfw_smbus_ops, s, "ia64-realfw.smbus",
                           IA64_REALFW_SMB_SIZE);
-    memory_region_add_subregion(pci_io, IA64_REALFW_SMB_BASE,
-                                &s->realfw_smbus_io);
-    memory_region_init_io(&s->realfw_port61_io, OBJECT(s),
-                          &ia64_realfw_port61_ops, s, "ia64-realfw.port61", 1);
-    memory_region_add_subregion(pci_io, IA64_REALFW_PORT61,
-                                &s->realfw_port61_io);
+    /*
+     * The bridge's own SMBus controller decodes the same ports once its BAR
+     * is programmed.  The vendor firmware drives the board's sensor chips
+     * through them and this stub is what answers it; give it priority until
+     * those sensors hang off the bridge's controller instead.
+     */
+    memory_region_add_subregion_overlap(pci_io, IA64_REALFW_SMB_BASE,
+                                        &s->realfw_smbus_io, 1);
     ia64_vpc_init_realfw_chipset_cfg(s);
     memory_region_init_io(&s->realfw_cfg_io, OBJECT(s),
                           &ia64_realfw_cfg_ops, s, "ia64-realfw.cfg", 8);
@@ -4711,30 +4680,6 @@ static void ia64_vpc_extint(void *opaque, int n, int level)
     if (first_cpu != NULL) {
         ia64_sapic_set_extint(first_cpu, level);
     }
-}
-
-/*
- * Real SDV firmware uses the legacy PC-AT timer tick during POST: it programs
- * the 8254 PIT channel 0 for a periodic square wave and routes its IRQ 0
- * through the 8259 PIC, whose INTR reaches the processor as an ExtINT (above).
- * The machine is otherwise IOSAPIC-only, so instantiate the pair only in
- * realfw mode and wire PIT OUT0 straight into 8259 IR0, independent of the
- * IOSAPIC-backed ISA IRQ inputs the rest of the machine uses.
- */
-/*
- * realfw mode models the chipset itself, south bridge included, so it carries
- * its own PIC rather than the one inside the modelled 82468GX (which that mode
- * does not create -- see the south-bridge comment in ia64_vpc_build).
- */
-static void ia64_vpc_init_realfw_pic(IA64VpcMachineState *s, ISABus *isa_bus)
-{
-    qemu_irq *pic_irqs;
-
-    s->extint = qemu_allocate_irq(ia64_vpc_extint, s, 0);
-    pic_irqs = i8259_init(isa_bus, s->extint);
-    /* PIT OUT0 -> 8259 IR0 (isa_irq = -1 selects the explicit alt_irq). */
-    i8254_pit_init(isa_bus, 0x40, -1, pic_irqs[0]);
-    g_free(pic_irqs);
 }
 
 static const uint8_t ia64_realfw_pal_stub[32] = {
@@ -5397,59 +5342,18 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         }
         isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
     }
-    if (s->realfw_path != NULL) {
-        ia64_vpc_init_realfw_pic(s, isa_bus);
-    }
     /*
      * The real-time clock is the standard MC146818 CMOS device at legacy
      * ports 0x70/0x71 (IRQ 8) - the invented MMIO seconds register at
      * 0xFFEF0000 is gone (rework D8).  On the 460GX it belongs to the south
      * bridge, which builds it along with the extended bank at 0x72/0x73 that
-     * RTCCFG banks (SSDM 15.5); a machine with no bridge carries its own.
+     * RTCCFG banks (SSDM 15.5), so only a machine with no bridge builds one
+     * of its own here.
      */
-    {
-        MC146818RtcState *rtc = s->ifb != NULL ?
-            intel_82468gx_ifb_rtc(s->ifb) :
-            mc146818_rtc_init(isa_bus, 2000, NULL);
-
-        if (s->realfw_path != NULL) {
-            /*
-             * Make the century byte (CMOS 0x32) a read-only hardware register,
-             * as on the real 460GX RTC.  Late in POST the i2000 SDV firmware
-             * probes it by writing 0 (with the RTC halted) and requires it to
-             * still read back the century; a writable byte reads back the
-             * written 0, the firmware's RTC self-test returns EFI_DEVICE_ERROR,
-             * and the zero result count trips a break 1 at POST 0x0a.  Dropping
-             * writes keeps the stored century so the probe reads it back.  Set
-             * directly rather than via a property because mc146818_rtc_init
-             * realizes the device before returning.  realfw-only; guests keep
-             * the standard writable byte.
-             */
-            rtc->century_read_only = true;
-            /*
-             * The 460GX RTC is a 256-byte part: the standard 128-byte bank is
-             * reached through ports 0x70/0x71 (RTCI/RTCD), and ports 0x72/0x73
-             * (RTCEI/RTCED) reach the upper 128-byte battery-backed bank ONLY
-             * when RTCCFG (IFB function 0, config offset C8h) bit 2 "Upper RAM
-             * Enable" is set.  [460GX SSDM 11.1.20, 11.2.5, 15.5.1]  The i2000
-             * firmware never writes RTCCFG (the IFB at bus0 dev 0x1e gets no
-             * config write to offset C8h), so that bit stays clear and 0x72/
-             * 0x73 alias 0x70/0x71 - the SAME 128-byte bank.  POST writes its
-             * CMOS configuration and checksum through 0x70/0x71 but reads them
-             * back through 0x72/0x73; without this alias every such read is
-             * open-bus 0xFF and the CMOS checksum never validates.  (This is
-             * distinct from the separate "New CPU frequency is set" reboot,
-             * which turns on the firmware's CPU-frequency-detection reads of
-             * unmodelled 460GX registers - see plans/phase5 SESSION 15.)
-             */
-            if (s->ifb == NULL) {
-                memory_region_init_alias(&s->realfw_rtc_ext_alias, OBJECT(s),
-                                         "rtc-ext-alias", &rtc->io, 0, 2);
-                memory_region_add_subregion(isa_bus->address_space_io, 0x72,
-                                            &s->realfw_rtc_ext_alias);
-            }
-        }
+    if (s->ifb == NULL) {
+        mc146818_rtc_init(isa_bus, 2000, NULL);
     }
+
 #ifdef CONFIG_IA64_VPC_PS2
     if (s->i8042_enabled) {
         ISADevice *i8042 = isa_new(TYPE_I8042);

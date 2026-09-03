@@ -2340,6 +2340,18 @@ static void test_460gx_south_bridge_rtc_banks(void)
     /* Byte 40h is outside the locked range and still answers. */
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
                     ==, 0xa5);
+
+    /*
+     * The century byte at 32h is inside the standard bank's user RAM
+     * (0Eh-7Fh, SSDM 15.5.1), so it is plain read/write storage.  The realfw
+     * path used to model it as a read-only hardware register; that was a
+     * deviation, and this pins the documented behaviour so it cannot come
+     * back.
+     */
+    rtc_bank_write(qts, IA64_RTC_INDEX, 0x32, 0x19);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x32), ==, 0x19);
+    rtc_bank_write(qts, IA64_RTC_INDEX, 0x32, 0x20);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x32), ==, 0x20);
     qtest_quit(qts);
 }
 

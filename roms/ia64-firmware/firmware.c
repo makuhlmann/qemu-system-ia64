@@ -13846,6 +13846,40 @@ EFI_HANDLE fw_scsi_controller_handle(VOID)
  * slots into: platform state -> EFI core init -> device/storage bring-up
  * -> protocol/selftest battery -> boot policy.
  */
+/*
+ * Mask the 8259 pair, as a PC-AT BIOS does before handing off.  The south
+ * bridge carries both PICs and the 82C54 timer, whose counter 0 free-runs on
+ * IRQ 0 from power-up (460GX SSDM 15.4); the PICs come out of reset with no
+ * mask, so leaving them alone lets that tick assert INTR, which a processor
+ * takes as an ExtINT.  This machine delivers interrupts through the IOSAPIC
+ * and neither we nor an OS loaded here services vector 0, so the tick would
+ * just burn the guest's time.  Program both controllers the conventional way
+ * -- cascade on IR2, 8086 mode, vectors 0x08/0x70 -- and then mask every
+ * line; firmware that wants the legacy tick (the vendor SDV firmware does)
+ * reprograms them for itself.
+ */
+static void fw_mask_legacy_pics(void)
+{
+    static const struct {
+        UINT16 command;
+        UINT16 data;
+        UINT8 vector_base;
+        UINT8 icw3;
+    } pics[2] = {
+        { 0x20, 0x21, 0x08, 0x04 },   /* master: slave cascaded on IR2 */
+        { 0xa0, 0xa1, 0x70, 0x02 },   /* slave: cascade identity 2 */
+    };
+    UINTN i;
+
+    for (i = 0; i < 2; i++) {
+        ata_pio_write8(LEGACY_IO_BASE + pics[i].command, 0x11);
+        ata_pio_write8(LEGACY_IO_BASE + pics[i].data, pics[i].vector_base);
+        ata_pio_write8(LEGACY_IO_BASE + pics[i].data, pics[i].icw3);
+        ata_pio_write8(LEGACY_IO_BASE + pics[i].data, 0x01);
+        ata_pio_write8(LEGACY_IO_BASE + pics[i].data, 0xff);
+    }
+}
+
 static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 {
 
@@ -13859,6 +13893,7 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     mBootStackBase = stack_top - FW_BOOT_STACK_SIZE;
     mCpuAssistBase = stack_top - IA64_FW_CPU_ASSIST_SIZE;
     fw_platform()->DecodeTopology();
+    fw_mask_legacy_pics();
     mResetFloatingPointDisableBits =
         fw_read_psr() & (IA64_PSR_DFL | IA64_PSR_DFH);
 

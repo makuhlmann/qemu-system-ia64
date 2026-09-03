@@ -25,7 +25,6 @@ struct MC146818RtcState {
     MemoryRegion coalesced_io;
     uint8_t cmos_data[128];
     uint8_t cmos_index;
-    bool century_read_only;
     uint8_t isairq;
     uint16_t io_base;
     int32_t base_year;
