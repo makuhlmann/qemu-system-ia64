@@ -902,6 +902,127 @@ static void test_isp12160_mailbox(void)
 }
 
 /*
+ * A QLogic RISC image records its own length, in words, at image word 3, and
+ * the words up to that length sum to zero.  ql12160.sys rounds its download
+ * up to whole transfer chunks, so the adapter also receives whatever the
+ * driver's bounce buffer held past the image end; MBC_VERIFY_CHECKSUM must
+ * ignore that tail.  Summing it instead made the checksum fail, and the
+ * driver's failure path then bugchecked Server 2003 with a STOP 0xD1.
+ */
+#define IA64_ISP_FW_DMA_ADDR    0x00130000U
+#define IA64_ISP_FW_RISC_ADDR   0x1000U
+#define IA64_ISP_FW_WORDS       12U     /* declared image length */
+#define IA64_ISP_FW_CHUNK       8U      /* words per LOAD RAM, as a driver */
+#define IA64_ISP_FW_SENT        (2U * IA64_ISP_FW_CHUNK)
+#define IA64_ISP_MBC_VERIFY_CHECKSUM  0x0007U
+#define IA64_ISP_MBC_LOAD_RAM_A64     0x0009U
+
+static uint16_t isp_mailbox(QTestState *qts, const uint16_t *in,
+                            unsigned int count)
+{
+    uint16_t status = 0;
+    unsigned int i;
+
+    /*
+     * Mailbox 0 goes first: until the command word is staged, writes to
+     * mailboxes 4 and 5 are queue doorbells rather than command words.
+     */
+    for (i = 0; i < count; i++) {
+        qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_MAILBOX0 + i * 2,
+                     in[i]);
+    }
+    qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_HOST_CMD,
+                 IA64_ISP_HC_SET_HOST_INT);
+    for (i = 0; i < 1000; i++) {
+        if (qtest_readw(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_SEMAPHORE) &
+            IA64_ISP_SEMAPHORE_LOCK) {
+            break;
+        }
+    }
+    status = qtest_readw(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_MAILBOX0);
+    qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_SEMAPHORE, 0);
+    qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_HOST_CMD,
+                 IA64_ISP_HC_CLEAR_RISC_INT);
+    return status;
+}
+
+/* Download the image in chunks, exactly as a driver does, and verify it. */
+static uint16_t isp_load_and_verify(QTestState *qts, const uint16_t *image)
+{
+    uint16_t mb[8];
+    unsigned int chunk;
+
+    for (chunk = 0; chunk * IA64_ISP_FW_CHUNK < IA64_ISP_FW_SENT; chunk++) {
+        uint32_t offset = chunk * IA64_ISP_FW_CHUNK;
+        uint32_t dma = IA64_ISP_FW_DMA_ADDR + offset * 2;
+
+        qtest_memwrite(qts, dma, image + offset, IA64_ISP_FW_CHUNK * 2);
+        memset(mb, 0, sizeof(mb));
+        mb[0] = IA64_ISP_MBC_LOAD_RAM_A64;
+        mb[1] = IA64_ISP_FW_RISC_ADDR + offset;
+        mb[2] = dma >> 16;
+        mb[3] = dma & 0xffffu;
+        mb[4] = IA64_ISP_FW_CHUNK;
+        g_assert_cmphex(isp_mailbox(qts, mb, 8), ==,
+                        IA64_ISP_MBS_COMMAND_COMPLETE);
+    }
+
+    memset(mb, 0, sizeof(mb));
+    mb[0] = IA64_ISP_MBC_VERIFY_CHECKSUM;
+    mb[1] = IA64_ISP_FW_RISC_ADDR;
+    return isp_mailbox(qts, mb, 2);
+}
+
+static void isp_build_firmware(uint16_t *image)
+{
+    uint16_t sum = 0;
+    unsigned int i;
+
+    memset(image, 0, IA64_ISP_FW_SENT * sizeof(*image));
+    image[0] = 0x0804;                      /* entry branch, as a real image */
+    image[3] = IA64_ISP_FW_WORDS;           /* the declared length */
+    for (i = 4; i < IA64_ISP_FW_WORDS - 1; i++) {
+        image[i] = 0x1000 + i;
+    }
+    for (i = 0; i < IA64_ISP_FW_WORDS - 1; i++) {
+        sum += image[i];
+    }
+    image[IA64_ISP_FW_WORDS - 1] = -sum;    /* image words sum to zero */
+    /* The tail past the declared length is bounce-buffer residue. */
+    for (i = IA64_ISP_FW_WORDS; i < IA64_ISP_FW_SENT; i++) {
+        image[i] = 0xdead;
+    }
+}
+
+static void test_isp12160_firmware_checksum(void)
+{
+    const uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                         ((uint64_t)IA64_460GX_WXB1_BUS << 20) +
+                         ((uint64_t)IA64_ISP_SLOT << 15);
+    QTestState *qts = qtest_init("-machine 460gx,isp=on -cpu merced "
+                                 "-m 256M -S");
+    uint16_t image[IA64_ISP_FW_SENT];
+
+    qtest_writew(qts, cfg + PCI_COMMAND,
+                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+
+    isp_build_firmware(image);
+    g_assert_cmphex(isp_load_and_verify(qts, image), ==,
+                    IA64_ISP_MBS_COMMAND_COMPLETE);
+    qtest_quit(qts);
+
+    /* Corrupting a word inside the declared image must still be caught. */
+    qts = qtest_init("-machine 460gx,isp=on -cpu merced -m 256M -S");
+    qtest_writew(qts, cfg + PCI_COMMAND,
+                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+    isp_build_firmware(image);
+    image[5] ^= 0x0001;
+    g_assert_cmphex(isp_load_and_verify(qts, image), !=,
+                    IA64_ISP_MBS_COMMAND_COMPLETE);
+    qtest_quit(qts);
+}
+
+/*
  * CS4281 audio.  The real i2000 I/O board carries this codec, so the
  * machine can add it with audio=on.  Walk the bring-up a driver performs:
  * release the sound-power reset, start the clock, wait for the AC '97 link
@@ -4719,6 +4840,8 @@ int main(int argc, char **argv)
                    test_realfw_chipset_identity);
     qtest_add_func("/ia64-vpc/scsi/isp12160-mailbox",
                    test_isp12160_mailbox);
+    qtest_add_func("/ia64-vpc/scsi/isp12160-firmware-checksum",
+                   test_isp12160_firmware_checksum);
     qtest_add_func("/ia64-vpc/audio/cs4281-codec",
                    test_cs4281_codec_access);
     qtest_add_func("/ia64-vpc/ohci/port-resume", test_ohci_port_resume);

@@ -25,6 +25,8 @@
 
 #define ISP12160_MAILBOX_BYTES          (ISP12160_MAILBOX_COUNT * 2)
 #define ISP12160_RISC_WORDS             0x10000u
+/* A QLogic RISC image records its own length, in words, at word 3. */
+#define ISP12160_FIRMWARE_LENGTH_WORD   3u
 #define ISP12160_SCSI_MAX_OUTSTANDING     256U
 #define ISP12160_SCSI_MAX_CHAIN_ENTRIES   UINT8_MAX
 #define ISP12160_SCSI_MAX_SEGMENTS        \
@@ -88,6 +90,7 @@ struct ISP12160State {
     uint16_t native_firmware_start;
     uint16_t native_firmware_checksum;
     uint32_t native_firmware_words;
+    uint32_t native_firmware_length;
     bool token_loaded;
     bool native_firmware_loaded;
     bool token_verified;
@@ -182,6 +185,7 @@ static void isp12160_invalidate_token(ISP12160State *s)
     s->native_firmware_start = 0;
     s->native_firmware_checksum = 0;
     s->native_firmware_words = 0;
+    s->native_firmware_length = 0;
     s->token_loaded = false;
     s->native_firmware_loaded = false;
     s->token_verified = false;
@@ -346,8 +350,23 @@ static uint16_t isp12160_load_native_firmware(ISP12160State *s,
         isp12160_invalidate_token(s);
         s->native_firmware_start = mb[1];
         s->native_firmware_loaded = true;
+        /*
+         * A QLogic RISC image carries its own length, in words, at image
+         * word 3. Drivers round the download up to whole transfer chunks,
+         * so the words past that length are whatever the driver's bounce
+         * buffer happened to hold; the adapter checksums the declared
+         * image only, and so must we.
+         */
+        if (mb[4] > ISP12160_FIRMWARE_LENGTH_WORD) {
+            s->native_firmware_length =
+                lduw_le_p(buffer + ISP12160_FIRMWARE_LENGTH_WORD * 2U);
+        }
     }
     for (i = 0; i < mb[4]; i++) {
+        if (s->native_firmware_length &&
+            s->native_firmware_words + i >= s->native_firmware_length) {
+            break;
+        }
         s->native_firmware_checksum += lduw_le_p(buffer + i * 2U);
     }
     s->native_firmware_words += mb[4];
@@ -365,6 +384,7 @@ static uint16_t isp12160_verify_qemu_token(ISP12160State *s,
 
     if (s->native_firmware_loaded &&
         mb[1] == s->native_firmware_start &&
+        s->native_firmware_words >= s->native_firmware_length &&
         !s->native_firmware_checksum) {
         s->token_verified = true;
         return ISP12160_MBS_COMMAND_COMPLETE;
@@ -1972,7 +1992,7 @@ static int isp12160_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_isp12160_mailbox = {
     .name = TYPE_ISP12160_MAILBOX,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = isp12160_post_load,
     .fields = (const VMStateField[]) {
@@ -1998,6 +2018,7 @@ static const VMStateDescription vmstate_isp12160_mailbox = {
         VMSTATE_UINT16_V(native_firmware_start, ISP12160State, 2),
         VMSTATE_UINT16_V(native_firmware_checksum, ISP12160State, 2),
         VMSTATE_UINT32_V(native_firmware_words, ISP12160State, 2),
+        VMSTATE_UINT32_V(native_firmware_length, ISP12160State, 3),
         VMSTATE_BOOL_V(native_firmware_loaded, ISP12160State, 2),
         VMSTATE_BOOL_V(irq_ack_pending, ISP12160State, 2),
         VMSTATE_END_OF_LIST()
@@ -2006,7 +2027,7 @@ static const VMStateDescription vmstate_isp12160_mailbox = {
 
 static const VMStateDescription vmstate_isp12160_queue = {
     .name = TYPE_ISP12160_QUEUE,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = isp12160_post_load,
     .fields = (const VMStateField[]) {
@@ -2045,6 +2066,7 @@ static const VMStateDescription vmstate_isp12160_queue = {
         VMSTATE_UINT16_V(native_firmware_start, ISP12160State, 2),
         VMSTATE_UINT16_V(native_firmware_checksum, ISP12160State, 2),
         VMSTATE_UINT32_V(native_firmware_words, ISP12160State, 2),
+        VMSTATE_UINT32_V(native_firmware_length, ISP12160State, 3),
         VMSTATE_BOOL_V(native_firmware_loaded, ISP12160State, 2),
         VMSTATE_BOOL_V(irq_ack_pending, ISP12160State, 2),
         VMSTATE_END_OF_LIST()
@@ -2053,7 +2075,7 @@ static const VMStateDescription vmstate_isp12160_queue = {
 
 static const VMStateDescription vmstate_isp12160_scsi = {
     .name = TYPE_ISP12160_SCSI,
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .pre_save = isp12160_scsi_pre_save,
     .post_load = isp12160_post_load,
@@ -2099,6 +2121,7 @@ static const VMStateDescription vmstate_isp12160_scsi = {
         VMSTATE_UINT16_V(native_firmware_start, ISP12160State, 2),
         VMSTATE_UINT16_V(native_firmware_checksum, ISP12160State, 2),
         VMSTATE_UINT32_V(native_firmware_words, ISP12160State, 2),
+        VMSTATE_UINT32_V(native_firmware_length, ISP12160State, 4),
         VMSTATE_BOOL_V(native_firmware_loaded, ISP12160State, 2),
         VMSTATE_BOOL_V(irq_ack_pending, ISP12160State, 2),
         VMSTATE_BOOL_V(response_irq_unobserved, ISP12160State, 3),
