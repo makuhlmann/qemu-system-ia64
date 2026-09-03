@@ -53,8 +53,10 @@ static ACPI_SSDT               mSsdt = {
          * object).
          *
          * Scope (\_SB) contains CPU0..CPU7 with patchable CxEN _STA values.
-         * Scope (\_SB.PCI0) carries P2EN, UAR0 (PNP0501, GSI 4), PS2K and
-         * PS2M gated on P2EN.
+         * Scope (\_SB.PCI0.ISA) -- the south bridge's LPC/ISA function --
+         * carries P2EN, UAR0 (PNP0501, GSI 4), PS2K and PS2M gated on P2EN,
+         * which is where firmware for a board with an LPC bridge declares
+         * them.
          */
 #include "ia64-fw-ssdt-platform-devices.inc"
     },

@@ -117,6 +117,22 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     MaxFixed, NonCacheable, ReadWrite,
                     0, 0xEE000000, 0xEFFFFFFF, 0, 0x02000000)
             })
+            /*
+             * The 82468GX I/O and Firmware Bridge's function 0.  The
+             * platform's legacy devices are declared under it in the
+             * platform SSDT, which is where firmware for a board with an
+             * LPC/ISA bridge puts them: Windows' ACPI driver arbitrates a
+             * device's interrupt in the pass that enumerates its parent, so
+             * an IRQ-consuming device must sit inside the PCI root's subtree
+             * (see the acpi-sb-irq-arbitration note -- moving them out to
+             * \_SB bugchecks ACPI.sys), and under the bridge that carries
+             * them is the faithful place inside it.
+             */
+            Device (ISA)
+            {
+                Name (_ADR, 0x00030000)
+            }
+
             Name (_PRT, Package ()
             {
                 Package () { 0x0000FFFF, 0, 0x00, 16 },
