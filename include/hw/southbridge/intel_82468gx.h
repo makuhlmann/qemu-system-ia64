@@ -8,6 +8,7 @@
 #define HW_SOUTHBRIDGE_INTEL_82468GX_H
 
 #include "hw/pci/pci.h"
+#include "hw/rtc/mc146818rtc.h"
 #include "qom/object.h"
 
 typedef struct IDEBus IDEBus;
@@ -37,6 +38,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Intel82468GXIFBState, INTEL_82468GX_IFB)
 
 Intel82468GXIFBState *intel_82468gx_ifb_create(PCIBus *bus, int devfn,
                                                Error **errp);
+MC146818RtcState *intel_82468gx_ifb_rtc(Intel82468GXIFBState *s);
 PCIDevice *intel_82468gx_ifb_function(Intel82468GXIFBState *s,
                                       unsigned function);
 ISABus *intel_82468gx_ifb_isa_bus(Intel82468GXIFBState *s);

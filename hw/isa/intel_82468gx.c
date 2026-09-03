@@ -14,6 +14,8 @@
 #include "hw/isa/isa.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
+#include "hw/rtc/mc146818rtc.h"
+#include "hw/timer/i8254.h"
 #include "hw/southbridge/intel_82468gx.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
@@ -32,6 +34,25 @@ typedef struct Intel82468GXSMBusState {
     OBJECT_CHECK(Intel82468GXSMBusState, (obj), \
                  TYPE_INTEL_82468GX_IFB_SMBUS)
 
+/*
+ * The RTC is a 256-byte part in two 128-byte banks (SSDM 15.5.1).  The
+ * standard bank answers at 0x70/0x71; the extended bank, a full 128 bytes of
+ * battery-backed SRAM, answers at 0x72/0x73 only while RTCCFG (config offset
+ * C8h) bit 2 "Upper RAM Enable" is set.  With that bit clear -- its reset
+ * state, and where the vendor firmware leaves it -- 0x72/0x73 alias 0x70/0x71
+ * and reach the standard bank instead, so firmware that writes its CMOS
+ * configuration through one pair and reads it back through the other sees the
+ * same bytes rather than open bus.
+ */
+#define IFB_RTC_CFG            0xc8
+#define IFB_RTC_CFG_UPPER_EN   0x04
+#define IFB_RTC_CFG_LOCK_LOWER 0x08
+#define IFB_RTC_CFG_LOCK_UPPER 0x10
+#define IFB_RTC_BANK_SIZE      128
+#define IFB_RTC_EXT_IOPORT     0x72
+#define IFB_RTC_LOCK_FIRST     0x38
+#define IFB_RTC_LOCK_LAST      0x3f
+
 struct Intel82468GXIFBState {
     PCIDevice parent_obj;
 
@@ -47,9 +68,34 @@ struct Intel82468GXIFBState {
     MemoryRegion acpi_gpe;
     ACPIREGS acpi_regs;
     Notifier powerdown_notifier;
+    ISADevice *pit;
+    MC146818RtcState *rtc;
+    MemoryRegion nmisc;
+    MemoryRegion rtc_ext;
+    MemoryRegion rtc_ext_alias;
+    uint8_t nmisc_value;
+    uint8_t rtc_ext_index;
+    uint8_t rtc_ext_ram[IFB_RTC_BANK_SIZE];
 };
 
 #define IFB_ACPI_PM_IO_SIZE 0x40
+/*
+ * Nmisc, the NMI Status and Control register at I/O 0x61 (SSDM 11.2.4.1).
+ * Bits 3:0 are read/write; bits 7, 5 and 4 are status and must be written 0.
+ */
+#define IFB_NMISC_IOPORT       0x61
+#define IFB_NMISC_WRITABLE     0x0f
+#define IFB_NMISC_TIMER2_GATE  0x01
+#define IFB_NMISC_REFRESH      0x10
+#define IFB_NMISC_TIMER2_OUT   0x20
+/*
+ * Bit 4 toggles once per DRAM refresh cycle, which the IFB drives from timer
+ * counter 1.  Counter 1's output is not otherwise observable and a guest need
+ * not have programmed it, so run the toggle off the virtual clock at the
+ * period the refresh counter is programmed for on this platform: everything
+ * that reads this bit is measuring the toggle's rate, not counter 1's state.
+ */
+#define IFB_NMISC_REFRESH_NS   15000
 #define IFB_ACPI_GPE_OFFSET 0x0c
 #define IFB_ACPI_GPE_LENGTH 4
 
@@ -63,6 +109,106 @@ static void ifb_acpi_update_sci(ACPIREGS *ar)
     } else {
         qemu_set_irq(s->sci, 0);
     }
+}
+
+static uint64_t ifb_nmisc_read(void *opaque, hwaddr addr, unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    PITChannelInfo ch;
+    uint8_t value;
+
+    value = s->nmisc_value & IFB_NMISC_WRITABLE;
+    if ((now / IFB_NMISC_REFRESH_NS) & 1) {
+        value |= IFB_NMISC_REFRESH;
+    }
+    if (s->pit != NULL) {
+        pit_get_channel_info(PIT_COMMON(s->pit), 2, &ch);
+        if (ch.out) {
+            value |= IFB_NMISC_TIMER2_OUT;
+        }
+    }
+    /* Bit 7 reports a latched SERR#, which nothing on this machine drives. */
+    return value;
+}
+
+static void ifb_nmisc_write(void *opaque, hwaddr addr, uint64_t value,
+                            unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+
+    s->nmisc_value = value & IFB_NMISC_WRITABLE;
+    if (s->pit != NULL) {
+        pit_set_gate(PIT_COMMON(s->pit), 2,
+                     (s->nmisc_value & IFB_NMISC_TIMER2_GATE) != 0);
+    }
+}
+
+static const MemoryRegionOps ifb_nmisc_ops = {
+    .read = ifb_nmisc_read,
+    .write = ifb_nmisc_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 1,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+/*
+ * Bytes 38h-3Fh of each bank can be locked away by RTCCFG bits 4 (extended
+ * bank) and 3 (standard bank): once locked they are neither readable nor
+ * writeable until a hardware reset.  The extended bank is ours to enforce;
+ * the standard bank lives inside the RTC device, so bit 3 is latched but its
+ * effect is not modelled -- nothing on this platform sets it.
+ */
+static bool ifb_rtc_ext_locked(Intel82468GXIFBState *s)
+{
+    PCIDevice *pci = PCI_DEVICE(s);
+
+    return (pci->config[IFB_RTC_CFG] & IFB_RTC_CFG_LOCK_UPPER) &&
+           s->rtc_ext_index >= IFB_RTC_LOCK_FIRST &&
+           s->rtc_ext_index <= IFB_RTC_LOCK_LAST;
+}
+
+static uint64_t ifb_rtc_ext_read(void *opaque, hwaddr addr, unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+
+    /* The index register is write-only, as on the standard bank's port. */
+    if (addr == 0 || ifb_rtc_ext_locked(s)) {
+        return 0xff;
+    }
+    return s->rtc_ext_ram[s->rtc_ext_index];
+}
+
+static void ifb_rtc_ext_write(void *opaque, hwaddr addr, uint64_t value,
+                              unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+
+    if (addr == 0) {
+        s->rtc_ext_index = value & (IFB_RTC_BANK_SIZE - 1);
+        return;
+    }
+    if (!ifb_rtc_ext_locked(s)) {
+        s->rtc_ext_ram[s->rtc_ext_index] = value;
+    }
+}
+
+static const MemoryRegionOps ifb_rtc_ext_ops = {
+    .read = ifb_rtc_ext_read,
+    .write = ifb_rtc_ext_write,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 1,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+/* Point 0x72/0x73 at whichever bank RTCCFG bit 2 currently selects. */
+static void ifb_rtc_bank_update(Intel82468GXIFBState *s)
+{
+    bool upper = (PCI_DEVICE(s)->config[IFB_RTC_CFG] &
+                  IFB_RTC_CFG_UPPER_EN) != 0;
+
+    memory_region_set_enabled(&s->rtc_ext, upper);
+    memory_region_set_enabled(&s->rtc_ext_alias, !upper);
 }
 
 static void ifb_isa_irq_handler(void *opaque, int irq, int level)
@@ -157,6 +303,9 @@ static void ifb_lpc_reset(DeviceState *dev)
     memset(pci->config + 0xe0, 0, 9);
     pci_set_long(pci->config + 0xe8, 0x00112233);
 
+    s->nmisc_value = 0;
+    s->rtc_ext_index = 0;
+
     acpi_pm1_evt_reset(&s->acpi_regs);
     acpi_pm1_cnt_reset(&s->acpi_regs);
     acpi_pm_tmr_reset(&s->acpi_regs);
@@ -177,6 +326,7 @@ static void ifb_lpc_write_config(PCIDevice *pci, uint32_t address,
         pci_word_test_and_set_mask(pci->config + 0x4e, BIT(15));
     }
     pci->config[0xc8] |= rtccfg & (BIT(4) | BIT(3));
+    ifb_rtc_bank_update(INTEL_82468GX_IFB(pci));
     if (ranges_overlap(address, length, 0x40, 5)) {
         ifb_acpi_io_update(INTEL_82468GX_IFB(pci));
     }
@@ -267,6 +417,33 @@ static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
                                      ISA_NUM_IRQS);
     isa_bus_register_input_irqs(s->isa_bus, s->isa_irqs);
 
+    /*
+     * The bridge carries the platform's three 82C54-equivalent counters as
+     * one timer unit (SSDM 15.4): counter 0 drives IRQ 0, counter 1 the DRAM
+     * refresh request and counter 2 the speaker tone, which port 0x61 gates.
+     * IRQ 0 goes through the ISA input above, so it reaches both the 8259
+     * pair and the platform's IOSAPIC line -- a firmware running the legacy
+     * tick through ExtINT and an OS running it through the IOSAPIC see the
+     * same counter.
+     */
+    s->pit = i8254_pit_init(s->isa_bus, 0x40, 0, NULL);
+    memory_region_init_io(&s->nmisc, OBJECT(s), &ifb_nmisc_ops, s,
+                          TYPE_INTEL_82468GX_IFB ".nmisc", 1);
+    memory_region_add_subregion(pci_address_space_io(pci), IFB_NMISC_IOPORT,
+                                &s->nmisc);
+
+    /* The bridge carries the RTC too (SSDM 15.5), both of its banks. */
+    s->rtc = mc146818_rtc_init(s->isa_bus, 2000, NULL);
+    memory_region_init_io(&s->rtc_ext, OBJECT(s), &ifb_rtc_ext_ops, s,
+                          TYPE_INTEL_82468GX_IFB ".rtc-ext", 2);
+    memory_region_init_alias(&s->rtc_ext_alias, OBJECT(s),
+                             TYPE_INTEL_82468GX_IFB ".rtc-ext-alias",
+                             &s->rtc->io, 0, 2);
+    memory_region_add_subregion(pci_address_space_io(pci), IFB_RTC_EXT_IOPORT,
+                                &s->rtc_ext);
+    memory_region_add_subregion(pci_address_space_io(pci), IFB_RTC_EXT_IOPORT,
+                                &s->rtc_ext_alias);
+
     memory_region_init(&s->acpi_pm, OBJECT(s),
                        TYPE_INTEL_82468GX_IFB ".acpi-pm",
                        IFB_ACPI_PM_IO_SIZE);
@@ -339,7 +516,7 @@ static int ifb_lpc_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ifb_lpc = {
     .name = TYPE_INTEL_82468GX_IFB,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = ifb_lpc_post_load,
     .fields = (const VMStateField[]) {
@@ -355,9 +532,18 @@ static const VMStateDescription vmstate_ifb_lpc = {
         VMSTATE_BUFFER_POINTER_UNSAFE(acpi_regs.gpe.en,
                                       Intel82468GXIFBState, 1,
                                       IFB_ACPI_GPE_LENGTH),
+        VMSTATE_UINT8_V(nmisc_value, Intel82468GXIFBState, 2),
+        VMSTATE_UINT8_V(rtc_ext_index, Intel82468GXIFBState, 2),
+        VMSTATE_UINT8_ARRAY_V(rtc_ext_ram, Intel82468GXIFBState,
+                              IFB_RTC_BANK_SIZE, 2),
         VMSTATE_END_OF_LIST()
     },
 };
+
+MC146818RtcState *intel_82468gx_ifb_rtc(Intel82468GXIFBState *s)
+{
+    return s->rtc;
+}
 
 static void ifb_lpc_init(Object *obj)
 {

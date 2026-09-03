@@ -2152,6 +2152,197 @@ static void test_460gx_south_bridge_pic(void)
     qtest_quit(qts);
 }
 
+/*
+ * The bridge's timer unit and its NMI Status and Control register.  The IFB
+ * carries three 82C54-equivalent counters (SSDM 15.4) -- counter 0 on IRQ 0,
+ * counter 1 driving the DRAM refresh, counter 2 the speaker tone -- and Nmisc
+ * at I/O 0x61 (SSDM 11.2.4.1), whose bits 3:0 are read/write and whose bits
+ * 7, 5 and 4 are status.  Both existed only in realfw mode before; they are
+ * platform hardware and belong to the bridge, so the machine must have them
+ * with no flag, and zx1 -- which models no south bridge -- must not.
+ */
+#define IA64_PIT_COUNTER0       0x40
+#define IA64_PIT_CONTROL        0x43
+#define IA64_NMISC_PORT         0x61
+#define IA64_NMISC_REFRESH      0x10
+#define IA64_NMISC_TIMER2_OUT   0x20
+
+static void test_460gx_south_bridge_timer(void)
+{
+    const uint64_t counter0 =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIT_COUNTER0);
+    const uint64_t control =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIT_CONTROL);
+    const uint64_t nmisc =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_NMISC_PORT);
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    uint8_t first;
+    unsigned int i;
+
+    /*
+     * Program counter 0 for a periodic square wave and read the count back
+     * through a counter-latch command: an unbacked port would answer 0xff to
+     * both halves, which is not a count this counter can hold (it was loaded
+     * with 0x1000 and only counts down).
+     */
+    qtest_writeb(qts, control, 0x36);           /* counter 0, LSB+MSB, mode 3 */
+    qtest_writeb(qts, counter0, 0x00);
+    qtest_writeb(qts, counter0, 0x10);          /* initial count 0x1000 */
+    qtest_writeb(qts, control, 0x00);           /* latch counter 0 */
+    {
+        uint8_t lsb = qtest_readb(qts, counter0);
+        uint8_t msb = qtest_readb(qts, counter0);
+
+        g_assert_cmpuint((msb << 8) | lsb, <=, 0x1000);
+    }
+
+    /* Nmisc: bits 3:0 are stored, and the status bits above them are not. */
+    qtest_writeb(qts, nmisc, 0x0f);
+    g_assert_cmphex(qtest_readb(qts, nmisc) & 0x0f, ==, 0x0f);
+    qtest_writeb(qts, nmisc, 0x00);
+    g_assert_cmphex(qtest_readb(qts, nmisc) & 0x0f, ==, 0x00);
+    /* Bit 7 (latched SERR#) and bit 6 (reserved) read zero. */
+    g_assert_cmphex(qtest_readb(qts, nmisc) & 0xc0, ==, 0x00);
+
+    /*
+     * The refresh toggle must actually toggle: the vendor firmware times a
+     * delay by waiting for a full 0->1->0 period, and a port stuck at either
+     * value hangs it.  Clock the guest forward rather than spinning.
+     */
+    first = qtest_readb(qts, nmisc) & IA64_NMISC_REFRESH;
+    for (i = 0; i < 100; i++) {
+        qtest_clock_step(qts, 20000);
+        if ((qtest_readb(qts, nmisc) & IA64_NMISC_REFRESH) != first) {
+            break;
+        }
+    }
+    g_assert_cmpuint(i, <, 100);
+
+    /*
+     * Bit 5 follows counter 2's output, and port 0x61 bit 0 is that counter's
+     * gate -- the speaker path.  Run it in mode 3 with a short count and step
+     * the clock: the output must be seen both high and low, which open bus
+     * (stuck at 1) cannot do.
+     */
+    {
+        const uint64_t counter2 =
+            IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x42);
+        bool seen_high = false;
+        bool seen_low = false;
+
+        qtest_writeb(qts, control, 0xb6);       /* counter 2, LSB+MSB, mode 3 */
+        qtest_writeb(qts, counter2, 0x20);
+        qtest_writeb(qts, counter2, 0x00);      /* initial count 0x20 */
+        qtest_writeb(qts, nmisc, 0x01);         /* gate the counter on */
+        for (i = 0; i < 200; i++) {
+            if (qtest_readb(qts, nmisc) & IA64_NMISC_TIMER2_OUT) {
+                seen_high = true;
+            } else {
+                seen_low = true;
+            }
+            if (seen_high && seen_low) {
+                break;
+            }
+            qtest_clock_step(qts, 10000);
+        }
+        g_assert_true(seen_high);
+        g_assert_true(seen_low);
+    }
+    qtest_quit(qts);
+
+    /* zx1 models no south bridge, so the port is unclaimed: open bus. */
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(qtest_readb(qts, nmisc), ==, 0xff);
+    qtest_quit(qts);
+}
+
+/*
+ * The bridge's RTC is a 256-byte part in two 128-byte banks (SSDM 15.5.1).
+ * Ports 0x70/0x71 reach the standard bank.  Ports 0x72/0x73 reach the
+ * extended bank only while RTCCFG (function 0, config offset C8h) bit 2 is
+ * set; with it clear -- the reset state, and where the vendor firmware leaves
+ * it -- they alias the standard bank, which is what lets firmware write its
+ * CMOS configuration through one pair and read it back through the other.
+ * Bits 4 and 3 lock bytes 38h-3Fh of the extended and standard bank, once,
+ * until a hardware reset.
+ */
+#define IA64_RTC_INDEX          0x70
+#define IA64_RTC_DATA           0x71
+#define IA64_RTC_EXT_INDEX      0x72
+#define IA64_RTC_EXT_DATA       0x73
+#define IA64_RTC_SCRATCH        0x40    /* user RAM, outside the lock range */
+#define IA64_RTCCFG             0xc8
+#define IA64_RTCCFG_UPPER_EN    0x04
+#define IA64_RTCCFG_LOCK_UPPER  0x10
+
+static void rtc_bank_write(QTestState *qts, uint16_t index_port,
+                           uint8_t index, uint8_t value)
+{
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(index_port),
+                 index);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(index_port + 1),
+                 value);
+}
+
+static uint8_t rtc_bank_read(QTestState *qts, uint16_t index_port,
+                             uint8_t index)
+{
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(index_port),
+                 index);
+    return qtest_readb(qts,
+                       IA64_LEGACY_IO_BASE +
+                       ia64_sparse_io_offset(index_port + 1));
+}
+
+static void test_460gx_south_bridge_rtc_banks(void)
+{
+    const uint64_t ifb_cfg = IA64_PCI_CONFIG_BASE +
+                             ((uint64_t)IA64_460GX_IFB_SLOT << 15);
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+
+    /* RTCCFG resets to zero, so 0x72/0x73 alias the standard bank. */
+    g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG), ==, 0x00);
+    rtc_bank_write(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH, 0x5a);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0x5a);
+
+    /* With Upper RAM Enable set they reach a bank of their own. */
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
+    g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG) &
+                    IA64_RTCCFG_UPPER_EN, ==, IA64_RTCCFG_UPPER_EN);
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH, 0xa5);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0xa5);
+    /* The standard bank kept its own byte: these are two banks, not one. */
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0x5a);
+
+    /* Clearing the bit puts the alias back, and the standard byte reappears. */
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, 0x00);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0x5a);
+
+    /*
+     * Lock Upper RAM Bytes: 38h-3Fh of the extended bank stop reading and
+     * writing, and the bit is write-once -- clearing it must not unlock.
+     */
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x38, 0x3c);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x38), ==, 0x3c);
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG,
+                 IA64_RTCCFG_UPPER_EN | IA64_RTCCFG_LOCK_UPPER);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x38), ==, 0xff);
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x38, 0x11);
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
+    g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG) &
+                    IA64_RTCCFG_LOCK_UPPER, ==, IA64_RTCCFG_LOCK_UPPER);
+    /* Byte 40h is outside the locked range and still answers. */
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0xa5);
+    qtest_quit(qts);
+}
+
 static void test_460gx_root_window_containment(void)
 {
     /*
@@ -4847,6 +5038,10 @@ int main(int argc, char **argv)
                    test_460gx_no_chipset_bus);
     qtest_add_func("/ia64-vpc/pci/460gx-platform-identities",
                    test_460gx_platform_identities);
+    qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",
+                   test_460gx_south_bridge_rtc_banks);
+    qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-timer",
+                   test_460gx_south_bridge_timer);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-pic",
                    test_460gx_south_bridge_pic);
     qtest_add_func("/ia64-vpc/pci/460gx-root-window-containment",

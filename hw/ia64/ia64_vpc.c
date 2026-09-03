@@ -577,7 +577,7 @@ struct IA64VpcMachineState {
     MemoryRegion realfw_rtc_ext_alias;
     MemoryRegion realfw_smbus_io;
     MemoryRegion realfw_port61_io;
-    qemu_irq realfw_extint;
+    qemu_irq extint;
     uint8_t *realfw_sac_data;
     uint16_t realfw_post_last;
     uint32_t realfw_config_address;
@@ -4704,7 +4704,7 @@ static void ia64_vpc_map_realfw_legacy_ide(IA64VpcMachineState *s,
  * line state directly -- de-asserting it (for example when firmware masks the
  * PIC before draining IVR) withdraws the pending vector 0.
  */
-static void ia64_vpc_realfw_extint(void *opaque, int n, int level)
+static void ia64_vpc_extint(void *opaque, int n, int level)
 {
     (void)opaque;
     (void)n;
@@ -4730,8 +4730,8 @@ static void ia64_vpc_init_realfw_pic(IA64VpcMachineState *s, ISABus *isa_bus)
 {
     qemu_irq *pic_irqs;
 
-    s->realfw_extint = qemu_allocate_irq(ia64_vpc_realfw_extint, s, 0);
-    pic_irqs = i8259_init(isa_bus, s->realfw_extint);
+    s->extint = qemu_allocate_irq(ia64_vpc_extint, s, 0);
+    pic_irqs = i8259_init(isa_bus, s->extint);
     /* PIT OUT0 -> 8259 IR0 (isa_irq = -1 selects the explicit alt_irq). */
     i8254_pit_init(isa_bus, 0x40, -1, pic_irqs[0]);
     g_free(pic_irqs);
@@ -5377,6 +5377,16 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
                                         INTEL_82468GX_IFB_GPIO_ISA_IRQ, i,
                                         s->isa_irqs[i]);
         }
+        /*
+         * The bridge's 8259 pair drives INTR, which a processor takes as an
+         * ExtINT.  Without this the pair answers its ports but can deliver
+         * nothing, and firmware that runs the legacy tick through the PIC --
+         * as the vendor firmware does during POST -- never sees an interrupt.
+         */
+        s->extint = qemu_allocate_irq(ia64_vpc_extint, s, 0);
+        qdev_connect_gpio_out_named(DEVICE(s->ifb),
+                                    INTEL_82468GX_IFB_GPIO_LEGACY, 0,
+                                    s->extint);
     } else {
         isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, errp);
         if (isa_bus == NULL) {
@@ -5392,11 +5402,16 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
     /*
      * The real-time clock is the standard MC146818 CMOS device at legacy
-     * ports 0x70/0x71 (IRQ 8), as the i2000/SDV Super-I/O provides - the
-     * invented MMIO seconds register at 0xFFEF0000 is gone (rework D8).
+     * ports 0x70/0x71 (IRQ 8) - the invented MMIO seconds register at
+     * 0xFFEF0000 is gone (rework D8).  On the 460GX it belongs to the south
+     * bridge, which builds it along with the extended bank at 0x72/0x73 that
+     * RTCCFG banks (SSDM 15.5); a machine with no bridge carries its own.
      */
     {
-        MC146818RtcState *rtc = mc146818_rtc_init(isa_bus, 2000, NULL);
+        MC146818RtcState *rtc = s->ifb != NULL ?
+            intel_82468gx_ifb_rtc(s->ifb) :
+            mc146818_rtc_init(isa_bus, 2000, NULL);
+
         if (s->realfw_path != NULL) {
             /*
              * Make the century byte (CMOS 0x32) a read-only hardware register,
@@ -5427,10 +5442,12 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
              * which turns on the firmware's CPU-frequency-detection reads of
              * unmodelled 460GX registers - see plans/phase5 SESSION 15.)
              */
-            memory_region_init_alias(&s->realfw_rtc_ext_alias, OBJECT(s),
-                                     "rtc-ext-alias", &rtc->io, 0, 2);
-            memory_region_add_subregion(isa_bus->address_space_io, 0x72,
-                                        &s->realfw_rtc_ext_alias);
+            if (s->ifb == NULL) {
+                memory_region_init_alias(&s->realfw_rtc_ext_alias, OBJECT(s),
+                                         "rtc-ext-alias", &rtc->io, 0, 2);
+                memory_region_add_subregion(isa_bus->address_space_io, 0x72,
+                                            &s->realfw_rtc_ext_alias);
+            }
         }
     }
 #ifdef CONFIG_IA64_VPC_PS2
