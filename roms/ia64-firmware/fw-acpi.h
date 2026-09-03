@@ -250,9 +250,18 @@ typedef struct {
     UINT8 Aml[FW_DSDT_AML_MAX_SIZE];
 } __attribute__((packed)) ACPI_DSDT;
 
+/*
+ * Same rule as the DSDT above, and for the same reason: the buffer has to
+ * hold whichever profile's SSDT is larger, so derive it from both generated
+ * sizes rather than writing a literal that the next table growth outruns.
+ */
+#define FW_SSDT_AML_MAX_SIZE \
+    (FW_SSDT_PLATFORM_DEVICES_AML_SIZE > FW_SSDT_PLATFORM_DEVICES_ZX1_AML_SIZE ? \
+     FW_SSDT_PLATFORM_DEVICES_AML_SIZE : FW_SSDT_PLATFORM_DEVICES_ZX1_AML_SIZE)
+
 typedef struct {
     ACPI_SDT_HEADER Hdr;
-    UINT8 Aml[506];
+    UINT8 Aml[FW_SSDT_AML_MAX_SIZE];
 } __attribute__((packed)) ACPI_SSDT;
 
 typedef struct {
@@ -682,7 +691,12 @@ FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE <= FW_DSDT_AML_MAX_SIZE,
                  acpi_dsdt_460gx_aml_fits);
 FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_ZX1_AML_SIZE <= FW_DSDT_AML_MAX_SIZE,
                  acpi_dsdt_zx1_aml_fits);
-FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == 542, acpi_ssdt_size);
+FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_AML_SIZE <= FW_SSDT_AML_MAX_SIZE,
+                 acpi_ssdt_460gx_aml_fits);
+FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_ZX1_AML_SIZE <= FW_SSDT_AML_MAX_SIZE,
+                 acpi_ssdt_zx1_aml_fits);
+FW_STATIC_ASSERT(sizeof(ACPI_SSDT) == sizeof(ACPI_SDT_HEADER) +
+                 FW_SSDT_AML_MAX_SIZE, acpi_ssdt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
                  acpi_mcfg_allocation_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG) == 60, acpi_mcfg_size);
