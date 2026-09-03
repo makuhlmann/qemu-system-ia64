@@ -114,6 +114,7 @@ BOOLEAN storage_reset(const FW_STORAGE_DEVICE *Device,
 void storage_invalidate_cache(const FW_STORAGE_DEVICE *Device);
 void ahci_probe_devices(void);
 void scsi_probe_devices(void);
+const CHAR8 *scsi_transport_name(void);
 void ahci_stop_all_ports(void);
 
 typedef struct {

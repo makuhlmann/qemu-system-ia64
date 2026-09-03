@@ -206,6 +206,24 @@ class Ia64Storage(Ia64FirmwareTest):
     def test_scsi_mbr_fallback(self):
         self.run_scsi_layout("mbr-fallback")
 
+    def test_scsi_isp12160(self):
+        """Boot from a disk on the QLogic ISP12160 rather than the LSI.
+
+        The i2000 carries this adapter, so the firmware has to be able to
+        read a boot disk through it.  The LSI is present and empty here, so
+        this also covers the probe falling through to the second transport
+        rather than stopping at the first adapter that answers.
+        """
+        app = app_path("storage")
+        media = Path(self.scratch_file("scsi-isp12160.img"))
+        make_fat_disk(media, app)
+        drive_args = (
+            "-drive", f"file={media},format=raw,if=none,id=testdisk",
+            "-device", "scsi-hd,bus=isp12160-scsi.0,drive=testdisk",
+        )
+        self.run_scenario("scsi-isp12160", media, drive_args=drive_args,
+                          machine_options="isp=on")
+
     def test_cmd646_ide_dma(self):
         self.run_ide("dma")
 

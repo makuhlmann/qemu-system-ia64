@@ -14439,7 +14439,9 @@ static void fw_phase_protocols_and_selftests(void)
         uart_puts("ATA PIO");
     }
     if (mBootStorageDevice.Kind == FW_STORAGE_SCSI) {
-        uart_puts(", LSI53C895A)\r\n");
+        uart_puts(", ");
+        uart_puts(scsi_transport_name());
+        uart_puts(")\r\n");
     } else if (mBootStorageDevice.Kind == FW_STORAGE_AHCI) {
         uart_puts(", AHCI)\r\n");
     } else if (mBootStorageDevice.Kind == FW_STORAGE_IDE) {
