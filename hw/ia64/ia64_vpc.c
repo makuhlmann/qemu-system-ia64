@@ -67,6 +67,8 @@
 #include "hw/ia64/ia64_lba.h"
 #include "hw/ia64/ia64_mercury.h"
 #include "hw/ia64/ia64_expander.h"
+#include "hw/i2c/i2c.h"
+#include "hw/ia64/ia64_i2000_hwmon.h"
 #include "hw/core/or-irq.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
@@ -574,7 +576,6 @@ struct IA64VpcMachineState {
     MemoryRegion realfw_cfg_io;
     MemoryRegion realfw_ide_data[2];
     MemoryRegion realfw_ide_cmd[2];
-    MemoryRegion realfw_smbus_io;
     qemu_irq extint;
     uint8_t *realfw_sac_data;
     uint16_t realfw_post_last;
@@ -4135,50 +4136,6 @@ static const MemoryRegionOps ia64_realfw_post_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-/*
- * IFB fn3 SMBus host controller (PIIX4-style register file at I/O 0xFFF0).
- *
- * During QuickBoot the SDV firmware programs the IFB Function 3 SMBus I/O BAR
- * to 0xFFF0 and runs SMBus byte-data transactions to initialise the board's
- * hardware-monitor sensor chips (observed device addresses 0x2C and 0x4E): it
- * writes SMBHSTCMD/ADD/DAT0, kicks SMBHSTCNT with START (bit 6), then spins on
- * SMBHSTSTS bit 1 (INTR = transaction complete) with HOST_BUSY (bit 0) clear
- * -- i.e. `(status & 3) == 2`.  With no I/O region here the poll floats high
- * (0xff -> status bits 11b) and the firmware hangs at POST 0xc6.
- *
- * We have no physical devices behind the bus.  The firmware only needs the
- * transaction to *complete*: it polls SMBHSTSTS for `(status & 3) == 2` (INTR
- * set, HOST_BUSY clear), so report the controller permanently idle-with-INTR
- * (0x02).  Every other register reads back 0 -- the value the firmware got for
- * these ports before this region existed (the sparse-I/O container answers 0
- * for an in-range but unclaimed port), which its controller-enable poll at
- * offset 0xe depends on: floating those bytes high (0xff) instead makes that
- * poll spin forever.  Register offsets follow the Intel PIIX4 SMBus layout
- * (SMBHSTSTS 0, SMBHSTCNT 2, SMBHSTCMD 3, SMBHSTADD 4, SMBHSTDAT0 5).
- */
-#define IA64_REALFW_SMB_STS   0x00   /* bit0 HOST_BUSY, bit1 INTR, bit2 DEV_ERR */
-#define IA64_REALFW_SMB_BASE  0xfff0
-#define IA64_REALFW_SMB_SIZE  0x10
-
-static uint64_t ia64_realfw_smbus_read(void *opaque, hwaddr addr, unsigned size)
-{
-    return (addr == IA64_REALFW_SMB_STS) ? 0x02 : 0;
-}
-
-static void ia64_realfw_smbus_write(void *opaque, hwaddr addr, uint64_t val,
-                                    unsigned size)
-{
-    /* No physical device: every transaction "completes" with nothing to do. */
-}
-
-static const MemoryRegionOps ia64_realfw_smbus_ops = {
-    .read = ia64_realfw_smbus_read,
-    .write = ia64_realfw_smbus_write,
-    .valid.min_access_size = 1,
-    .valid.max_access_size = 4,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
-
 static uint64_t ia64_realfw_sac_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
@@ -4607,17 +4564,6 @@ static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
     memory_region_init_io(&s->realfw_post_io, OBJECT(s),
                           &ia64_realfw_post_ops, s, "ia64-realfw.post", 2);
     memory_region_add_subregion(pci_io, 0x80, &s->realfw_post_io);
-    memory_region_init_io(&s->realfw_smbus_io, OBJECT(s),
-                          &ia64_realfw_smbus_ops, s, "ia64-realfw.smbus",
-                          IA64_REALFW_SMB_SIZE);
-    /*
-     * The bridge's own SMBus controller decodes the same ports once its BAR
-     * is programmed.  The vendor firmware drives the board's sensor chips
-     * through them and this stub is what answers it; give it priority until
-     * those sensors hang off the bridge's controller instead.
-     */
-    memory_region_add_subregion_overlap(pci_io, IA64_REALFW_SMB_BASE,
-                                        &s->realfw_smbus_io, 1);
     ia64_vpc_init_realfw_chipset_cfg(s);
     memory_region_init_io(&s->realfw_cfg_io, OBJECT(s),
                           &ia64_realfw_cfg_ops, s, "ia64-realfw.cfg", 8);
@@ -5314,6 +5260,23 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
              */
             pci_set_word(fn->config + PCI_SUBSYSTEM_VENDOR_ID, 0);
             pci_set_word(fn->config + PCI_SUBSYSTEM_ID, 0);
+        }
+        {
+            /*
+             * The board's hardware monitors, which the vendor firmware
+             * initialises over the bridge's SMBus during POST.  They belong
+             * to the I/O board rather than to the chipset, so the machine
+             * puts them on the bus the bridge provides.
+             */
+            I2CBus *smbus = intel_82468gx_ifb_smbus(s->ifb);
+            static const uint8_t hwmon_addrs[] = {
+                IA64_I2000_HWMON_ADDR_0, IA64_I2000_HWMON_ADDR_1,
+            };
+
+            for (i = 0; i < ARRAY_SIZE(hwmon_addrs); i++) {
+                i2c_slave_create_simple(smbus, TYPE_IA64_I2000_HWMON,
+                                        hwmon_addrs[i]);
+            }
         }
         isa_bus = intel_82468gx_ifb_isa_bus(s->ifb);
         for (i = 0; i < ISA_NUM_IRQS; i++) {

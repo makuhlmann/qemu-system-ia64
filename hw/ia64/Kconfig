@@ -12,6 +12,7 @@ config IA64_VPC
     select MC146818RTC
     select I8259
     select I8254
+    select SMBUS
     select ACPI
     imply IA64_VPC_AUDIO
     imply IA64_VPC_GRAPHICS

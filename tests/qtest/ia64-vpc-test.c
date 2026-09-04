@@ -2355,6 +2355,100 @@ static void test_460gx_south_bridge_rtc_banks(void)
     qtest_quit(qts);
 }
 
+/*
+ * The board's hardware monitors on the bridge's SMBus.  The vendor firmware
+ * initialises two chips (0x2C and 0x4E) through the bridge's PIIX4-layout
+ * host controller during POST and polls each transaction to completion; an
+ * empty bus fails them with a device error and the poll never exits, so the
+ * monitors have to be there and have to acknowledge.  Drive one byte-data
+ * write and read it back the way the firmware does.
+ */
+#define IA64_SMB_BASE_PORT      0xfff0
+#define IA64_SMB_HSTSTS         0x00
+#define IA64_SMB_HSTCNT         0x02
+#define IA64_SMB_HSTCMD         0x03
+#define IA64_SMB_HSTADD         0x04
+#define IA64_SMB_HSTDAT0        0x05
+#define IA64_SMB_CNT_BYTE_DATA  0x08
+#define IA64_SMB_CNT_START      0x40
+#define IA64_SMB_STS_HOST_BUSY  0x01
+#define IA64_SMB_STS_INTR       0x02
+#define IA64_SMB_STS_DEV_ERR    0x04
+
+/*
+ * Each group of four ports occupies its own 4 KB page of the sparse window,
+ * so a register block's ports are not contiguous in memory: every register
+ * has to be translated from its own port number.
+ */
+static uint64_t smb_reg(uint8_t reg)
+{
+    return IA64_LEGACY_IO_BASE +
+           ia64_sparse_io_offset(IA64_SMB_BASE_PORT + reg);
+}
+
+static uint8_t smb_wait(QTestState *qts)
+{
+    const uint64_t sts = smb_reg(IA64_SMB_HSTSTS);
+    uint8_t value = 0;
+    unsigned int i;
+
+    for (i = 0; i < 100; i++) {
+        value = qtest_readb(qts, sts);
+        if (!(value & IA64_SMB_STS_HOST_BUSY)) {
+            break;
+        }
+    }
+    return value;
+}
+
+static void smb_start(QTestState *qts, uint8_t address, uint8_t command,
+                      uint8_t data, bool read)
+{
+    qtest_writeb(qts, smb_reg(IA64_SMB_HSTSTS), 0xff);   /* clear status */
+    qtest_writeb(qts, smb_reg(IA64_SMB_HSTCMD), command);
+    qtest_writeb(qts, smb_reg(IA64_SMB_HSTADD),
+                 (address << 1) | (read ? 1 : 0));
+    qtest_writeb(qts, smb_reg(IA64_SMB_HSTDAT0), data);
+    qtest_writeb(qts, smb_reg(IA64_SMB_HSTCNT),
+                 IA64_SMB_CNT_START | IA64_SMB_CNT_BYTE_DATA);
+}
+
+static void test_460gx_smbus_hwmon(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    unsigned int i;
+
+    /*
+     * The firmware finds the controller at 0xFFF0 because the machine
+     * programs the bridge's SMBus BAR there, as the real firmware does.
+     * Registers the controller does not implement must read zero -- the
+     * firmware uses offset 0x0e as a controller-enable check and spins if it
+     * floats high.
+     */
+    g_assert_cmphex(qtest_readb(qts, smb_reg(0x0e)), ==, 0x00);
+
+    /* Both monitors acknowledge: a completed transaction, no device error. */
+    for (i = 0; i < 2; i++) {
+        const uint8_t address = i == 0 ? 0x2c : 0x4e;
+
+        smb_start(qts, address, 0x13, 0x5a, false);
+        g_assert_cmphex(smb_wait(qts) & (IA64_SMB_STS_INTR |
+                                         IA64_SMB_STS_DEV_ERR), ==,
+                        IA64_SMB_STS_INTR);
+    }
+
+    /* The byte written is the byte read back from that register. */
+    smb_start(qts, 0x2c, 0x13, 0x00, true);
+    g_assert_cmphex(smb_wait(qts) & IA64_SMB_STS_DEV_ERR, ==, 0);
+    g_assert_cmphex(qtest_readb(qts, smb_reg(IA64_SMB_HSTDAT0)), ==, 0x5a);
+
+    /* An address with nothing on it reports a device error instead. */
+    smb_start(qts, 0x55, 0x00, 0x00, false);
+    g_assert_cmphex(smb_wait(qts) & IA64_SMB_STS_DEV_ERR, ==,
+                    IA64_SMB_STS_DEV_ERR);
+    qtest_quit(qts);
+}
+
 static void test_460gx_root_window_containment(void)
 {
     /*
@@ -5050,6 +5144,7 @@ int main(int argc, char **argv)
                    test_460gx_no_chipset_bus);
     qtest_add_func("/ia64-vpc/pci/460gx-platform-identities",
                    test_460gx_platform_identities);
+    qtest_add_func("/ia64-vpc/pci/460gx-smbus-hwmon", test_460gx_smbus_hwmon);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",
                    test_460gx_south_bridge_rtc_banks);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-timer",
