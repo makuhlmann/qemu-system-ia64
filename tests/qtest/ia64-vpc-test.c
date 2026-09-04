@@ -2744,6 +2744,49 @@ static void test_realfw_flash_window(void)
     g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
 
     /*
+     * Register-based block locking.  Every block comes out of reset
+     * write-locked, and 0x91 directs the access that follows to the
+     * addressed block's lock register at offset 2 -- the sequence the SDV
+     * firmware runs before each erase, with 0x00 ("full access") as the
+     * value.  A program aimed at a locked block must abort with SR.1 Device
+     * Protect set and leave the array alone.
+     */
+    {
+        const uint64_t blk = base + 0x10000;    /* the image's second block */
+        const uint64_t cell = blk + 0x1000;     /* erased space inside it */
+
+        /* Out of reset the block is write-locked. */
+        qtest_writeb(qts, blk, 0x91);
+        g_assert_cmphex(qtest_readb(qts, blk + 2), ==, 0x01);
+        qtest_writeb(qts, blk, 0xff);           /* end the register access */
+
+        /* A program aborts with SR.1 and leaves the array alone. */
+        qtest_writeb(qts, blk, 0x50);
+        qtest_writeb(qts, cell, 0x40);
+        qtest_writeb(qts, cell, 0x5a);
+        qtest_writeb(qts, blk, 0x70);
+        g_assert_cmphex(qtest_readb(qts, blk) & 0x02, ==, 0x02);
+        qtest_writeb(qts, blk, 0xff);
+        g_assert_cmphex(qtest_readb(qts, cell), ==, 0xff);
+
+        /* Unlock it the way the firmware does, and the program takes. */
+        qtest_writeb(qts, blk, 0x91);
+        qtest_writeb(qts, blk + 2, 0x00);
+        qtest_writeb(qts, blk, 0x50);
+        qtest_writeb(qts, cell, 0x40);
+        qtest_writeb(qts, cell, 0x5a);
+        qtest_writeb(qts, blk, 0x70);
+        g_assert_cmphex(qtest_readb(qts, blk) & 0x02, ==, 0x00);
+        qtest_writeb(qts, blk, 0xff);
+        g_assert_cmphex(qtest_readb(qts, cell), ==, 0x5a);
+
+        /* The register reads back what was written. */
+        qtest_writeb(qts, blk, 0x91);
+        g_assert_cmphex(qtest_readb(qts, blk + 2), ==, 0x00);
+        qtest_writeb(qts, blk, 0xff);
+    }
+
+    /*
      * The south bridge's IDE function is in compatibility mode and decodes
      * the fixed legacy ports the SDV firmware polls.  With no media the
      * empty primary channel reports status 0x00 (BSY clear, no drive) at

@@ -4617,6 +4617,12 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
         qdev_prop_set_uint16(dev, "id1", 0x0089);        /* Intel (offset 0) */
         qdev_prop_set_uint16(dev, "id2", 0x0000);
         qdev_prop_set_uint16(dev, "id3", 0x00ac);        /* 82802AC (offset 1) */
+        /*
+         * The board's firmware storage is Intel 82802AC Firmware Hubs, which
+         * lock every block for writing out of reset and expect firmware to
+         * clear the lock register before programming (datasheet 290658).
+         */
+        qdev_prop_set_bit(dev, "block-locking", true);
         qdev_prop_set_string(dev, "name", "ia64-realfw-flash");
         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 

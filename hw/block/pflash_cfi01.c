@@ -55,6 +55,15 @@
 #include "trace.h"
 
 #define PFLASH_BE          0
+/*
+ * Register-based block locking, as the Intel 82802AB/AC Firmware Hub has it
+ * (datasheet 290658, Table 5/6): one lock register per block holding a
+ * write-lock bit, a lock-down bit and a read-lock bit, all write-locked out
+ * of reset, and an erase or program aimed at a locked block aborts with the
+ * Device Protect status bit set instead of touching the array.  Off by
+ * default: parts that do not have it must keep taking programs unlocked.
+ */
+#define PFLASH_BLOCK_LOCK 2
 #define PFLASH_SECURE      1
 
 struct PFlashCFI01 {
@@ -83,6 +92,7 @@ struct PFlashCFI01 {
     MemoryRegion mem;
     char *name;
     void *storage;
+    uint8_t *block_lock;        /* one lock register per block, or NULL */
     VMChangeStateEntry *vmstate;
 
     /* block update buffer */
@@ -259,6 +269,39 @@ static uint32_t pflash_data_read(PFlashCFI01 *pfl, hwaddr offset,
     return ret;
 }
 
+/* 82802-style block locking (datasheet 290658 §4.9); see PFLASH_BLOCK_LOCK. */
+#define PFLASH_LOCK_WRITE   0x01
+#define PFLASH_LOCK_DOWN    0x02
+#define PFLASH_LOCK_READ    0x04
+#define PFLASH_LOCK_REG_OFF 0x02    /* register offset within the block */
+
+static uint8_t *pflash_lock_reg(PFlashCFI01 *pfl, hwaddr offset)
+{
+    hwaddr block = offset / pfl->sector_len;
+
+    if (pfl->block_lock == NULL || block >= pfl->nb_blocs) {
+        return NULL;
+    }
+    return &pfl->block_lock[block];
+}
+
+/*
+ * An erase or program aimed at a write-locked block is abandoned and reports
+ * Device Protect (SR.1) together with the erase or program error bit, which
+ * is how the part tells firmware to unlock the block first.
+ */
+static bool pflash_write_locked(PFlashCFI01 *pfl, hwaddr offset, uint8_t err)
+{
+    uint8_t *reg = pflash_lock_reg(pfl, offset);
+
+    if (reg == NULL || !(*reg & PFLASH_LOCK_WRITE)) {
+        return false;
+    }
+    trace_pflash_write(pfl->name, "blocked: block is write-locked");
+    pfl->status |= 0x02 | err;
+    return true;
+}
+
 static uint32_t pflash_read(PFlashCFI01 *pfl, hwaddr offset,
                             int width, int be)
 {
@@ -346,6 +389,14 @@ static uint32_t pflash_read(PFlashCFI01 *pfl, hwaddr offset,
             }
         }
         break;
+    case 0x91: {
+        uint8_t *reg = pflash_lock_reg(pfl, offset);
+
+        ret = (reg != NULL &&
+               (offset & (pfl->sector_len - 1)) == PFLASH_LOCK_REG_OFF)
+              ? *reg : 0;
+        break;
+    }
     case 0x98: /* Query mode */
         if (!pfl->device_width) {
             /* Preserve old behavior if device width not specified */
@@ -488,7 +539,9 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
 
             trace_pflash_write_block_erase(pfl->name, offset, pfl->sector_len);
 
-            if (!pfl->ro) {
+            if (pflash_write_locked(pfl, offset, 0x20)) {
+                /* Aborted: the array is untouched. */
+            } else if (!pfl->ro) {
                 memset(p + offset, 0xff, pfl->sector_len);
                 pflash_update(pfl, offset, pfl->sector_len);
             } else {
@@ -511,6 +564,21 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
         case 0x60: /* Block (un)lock */
             trace_pflash_write(pfl->name, "block unlock");
             break;
+        case 0x91: /* Block lock register access */
+            if (pfl->block_lock == NULL) {
+                goto error_flash;
+            }
+            /*
+             * Directs the access that follows to the addressed block's lock
+             * register rather than to the array, which is how firmware
+             * reaches the registers the datasheet maps into the FWH's own
+             * register space when the platform gives it no way to address
+             * that space directly.
+             */
+            trace_pflash_write(pfl->name, "block lock register access");
+            pfl->cmd = cmd;
+            pfl->wcycle++;
+            return;
         case 0x70: /* Status Register */
             trace_pflash_write(pfl->name, "read status register");
             pfl->cmd = cmd;
@@ -543,7 +611,9 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
         case 0x10: /* Single Byte Program */
         case 0x40: /* Single Byte Program */
             trace_pflash_write(pfl->name, "single byte program (1)");
-            if (!pfl->ro) {
+            if (pflash_write_locked(pfl, offset, 0x10)) {
+                /* Aborted: the array is untouched. */
+            } else if (!pfl->ro) {
                 pflash_data_write(pfl, offset, value, width, be);
                 pflash_update(pfl, offset, width);
             } else {
@@ -577,6 +647,18 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
             pfl->counter = value;
             pfl->wcycle++;
             break;
+        case 0x91: { /* Block lock register write */
+            uint8_t *reg = pflash_lock_reg(pfl, offset);
+
+            if (reg != NULL && (offset & (pfl->sector_len - 1)) ==
+                PFLASH_LOCK_REG_OFF && !(*reg & PFLASH_LOCK_DOWN)) {
+                /* Lock-Down can be set but never cleared, only by reset. */
+                *reg = value & (PFLASH_LOCK_WRITE | PFLASH_LOCK_DOWN |
+                                PFLASH_LOCK_READ);
+                trace_pflash_write(pfl->name, "block lock register written");
+            }
+            goto mode_read_array;
+        }
         case 0x60:
             if (cmd == 0xd0) {
                 pfl->wcycle = 0;
@@ -833,6 +915,9 @@ static void pflash_cfi01_realize(DeviceState *dev, Error **errp)
     }
 
     pfl->storage = memory_region_get_ram_ptr(&pfl->mem);
+    if (pfl->features & (1 << PFLASH_BLOCK_LOCK)) {
+        pfl->block_lock = g_malloc(pfl->nb_blocs);
+    }
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &pfl->mem);
 
     if (pfl->blk) {
@@ -881,6 +966,10 @@ static void pflash_cfi01_system_reset(DeviceState *dev)
     PFlashCFI01 *pfl = PFLASH_CFI01(dev);
 
     trace_pflash_reset(pfl->name);
+    if (pfl->block_lock != NULL) {
+        /* Every block comes out of reset write-locked (datasheet Table 5). */
+        memset(pfl->block_lock, PFLASH_LOCK_WRITE, pfl->nb_blocs);
+    }
     /*
      * The command 0x00 is not assigned by the CFI open standard,
      * but QEMU historically uses it for the READ_ARRAY command (0xff).
@@ -932,6 +1021,8 @@ static const Property pflash_cfi01_properties[] = {
     DEFINE_PROP_UINT16("id2", PFlashCFI01, ident2, 0),
     DEFINE_PROP_UINT16("id3", PFlashCFI01, ident3, 0),
     DEFINE_PROP_STRING("name", PFlashCFI01, name),
+    DEFINE_PROP_BIT("block-locking", PFlashCFI01, features, PFLASH_BLOCK_LOCK,
+                    0),
 };
 
 static void pflash_cfi01_class_init(ObjectClass *klass, const void *data)
