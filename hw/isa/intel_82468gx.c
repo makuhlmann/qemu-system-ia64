@@ -44,6 +44,8 @@ typedef struct Intel82468GXSMBusState {
  * configuration through one pair and reads it back through the other sees the
  * same bytes rather than open bus.
  */
+#define IFB_FREQ_MAILBOX       0xd0
+#define IFB_FREQ_MAILBOX_DONE  0x8000
 #define IFB_RTC_CFG            0xc8
 #define IFB_RTC_CFG_UPPER_EN   0x04
 #define IFB_RTC_CFG_LOCK_LOWER 0x08
@@ -74,6 +76,17 @@ struct Intel82468GXIFBState {
     MemoryRegion rtc_ext;
     MemoryRegion rtc_ext_alias;
     uint8_t nmisc_value;
+    /*
+     * CPU-frequency mailbox (config offset D0h).  The SDV firmware writes a
+     * frequency command here with bit 15 clear and polls until the register
+     * reads back with bit 15 set -- the hardware "done/valid" flag -- then
+     * compares the detected frequency against its reference and reboots
+     * through port 0xCF9 if they disagree.  Real silicon latches the value
+     * and the register is battery-backed, so this cell survives reset (a
+     * cleared mailbox makes the detection fall back to a sentinel and the
+     * reboot repeat forever).  See plans/phase5 SESSION 17.
+     */
+    uint32_t freq_mailbox;
     uint8_t rtc_ext_index;
     uint8_t rtc_ext_ram[IFB_RTC_BANK_SIZE];
 };
@@ -329,11 +342,57 @@ static void ifb_lpc_reset(DeviceState *dev)
     ifb_acpi_io_update(s);
 }
 
+static bool ifb_freq_mailbox_reg(uint32_t address)
+{
+    return address >= IFB_FREQ_MAILBOX && address < IFB_FREQ_MAILBOX + 4;
+}
+
+static uint32_t ifb_lpc_read_config(PCIDevice *pci, uint32_t address,
+                                    int length)
+{
+    Intel82468GXIFBState *s = INTEL_82468GX_IFB(pci);
+    uint32_t value = 0;
+    int i;
+
+    if (!ranges_overlap(address, length, IFB_FREQ_MAILBOX, 4)) {
+        return pci_default_read_config(pci, address, length);
+    }
+
+    /* Present the stored command with the done flag set: we latch at once. */
+    for (i = 0; i < length; i++) {
+        uint32_t byte = address + i;
+        uint8_t data;
+
+        if (ifb_freq_mailbox_reg(byte)) {
+            uint32_t cell = s->freq_mailbox | IFB_FREQ_MAILBOX_DONE;
+
+            data = cell >> ((byte - IFB_FREQ_MAILBOX) * 8);
+        } else {
+            data = pci_default_read_config(pci, byte, 1);
+        }
+        value |= (uint32_t)data << (i * 8);
+    }
+    return value;
+}
+
 static void ifb_lpc_write_config(PCIDevice *pci, uint32_t address,
                                  uint32_t value, int length)
 {
+    Intel82468GXIFBState *s = INTEL_82468GX_IFB(pci);
     uint16_t biosen = pci_get_word(pci->config + 0x4e);
     uint8_t rtccfg = pci->config[0xc8];
+    int i;
+
+    for (i = 0; i < length; i++) {
+        uint32_t byte = address + i;
+
+        if (ifb_freq_mailbox_reg(byte)) {
+            unsigned shift = (byte - IFB_FREQ_MAILBOX) * 8;
+
+            s->freq_mailbox &= ~(0xffU << shift);
+            s->freq_mailbox |= ((value >> (i * 8)) & 0xff) << shift;
+        }
+    }
 
     pci_default_write_config(pci, address, value, length);
     if (biosen & BIT(15)) {
@@ -552,6 +611,7 @@ static const VMStateDescription vmstate_ifb_lpc = {
         VMSTATE_UINT8_V(rtc_ext_index, Intel82468GXIFBState, 2),
         VMSTATE_UINT8_ARRAY_V(rtc_ext_ram, Intel82468GXIFBState,
                               IFB_RTC_BANK_SIZE, 2),
+        VMSTATE_UINT32_V(freq_mailbox, Intel82468GXIFBState, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -581,6 +641,7 @@ static void ifb_lpc_class_init(ObjectClass *klass, const void *data)
 
     pc->realize = ifb_lpc_realize;
     pc->exit = ifb_lpc_exit;
+    pc->config_read = ifb_lpc_read_config;
     pc->config_write = ifb_lpc_write_config;
     pc->vendor_id = INTEL_82468GX_IFB_VENDOR_ID;
     pc->device_id = INTEL_82468GX_IFB_LPC_DEVICE_ID;

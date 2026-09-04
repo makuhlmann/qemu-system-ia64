@@ -13880,6 +13880,36 @@ static void fw_mask_legacy_pics(void)
     }
 }
 
+/*
+ * Move the 460GX's own configuration space off bus 0.  The chipset's SAC,
+ * SDC, memory cards and expander ports answer configuration cycles on the
+ * bus the CBN register names, and CBN comes out of reset as 0 -- so until
+ * firmware programs it the chipset shadows device numbers on the
+ * compatibility bus, where the platform's real devices live (460GX SSDM
+ * 2.3.2, Table 2-1).  Program it to the bus number the vendor firmware
+ * uses.  CBN itself is reached at bus 0 device 10h, which is reserved for
+ * exactly this and is never forwarded.
+ *
+ * Nothing here needs the chipset's registers -- this firmware enumerates
+ * through ECAM -- but leaving CBN at 0 would leave CF8/CFC answering for
+ * the chipset at addresses that belong to real devices.
+ */
+#define FW_460GX_CBN_BUS      0xee
+#define FW_460GX_CBN_DEVICE   0x10
+#define FW_460GX_CBN_REGISTER 0x40
+
+static void fw_program_chipset_bus_number(void)
+{
+    volatile UINT32 *config_address =
+        (volatile UINT32 *)(UINTN)(LEGACY_IO_BASE + 0xcf8);
+    volatile UINT8 *config_data =
+        (volatile UINT8 *)(UINTN)(LEGACY_IO_BASE + 0xcfc);
+
+    *config_address = 0x80000000U | ((UINT32)FW_460GX_CBN_DEVICE << 11) |
+                      FW_460GX_CBN_REGISTER;
+    *config_data = FW_460GX_CBN_BUS;
+}
+
 static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 {
 
@@ -13894,6 +13924,7 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     mCpuAssistBase = stack_top - IA64_FW_CPU_ASSIST_SIZE;
     fw_platform()->DecodeTopology();
     fw_mask_legacy_pics();
+    fw_program_chipset_bus_number();
     mResetFloatingPointDisableBits =
         fw_read_psr() & (IA64_PSR_DFL | IA64_PSR_DFH);
 

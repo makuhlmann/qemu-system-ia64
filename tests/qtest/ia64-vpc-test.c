@@ -2449,6 +2449,76 @@ static void test_460gx_smbus_hwmon(void)
     qtest_quit(qts);
 }
 
+/*
+ * The chipset answers PCI configuration cycles at CF8/CFC (460GX SSDM 2.3),
+ * the mechanism the vendor firmware enumerates through.  It is real hardware
+ * and the machine carries it whichever firmware runs.  Device numbers on the
+ * bus CBN names are the chipset's own functions (Table 2-1); every other
+ * address forwards to the PCI bus.  CBN resets to 0, so until firmware
+ * programs it the chipset shadows the compatibility bus -- which is why our
+ * firmware programs it, as the vendor firmware does.
+ */
+#define IA64_CF8_PORT   0xcf8
+#define IA64_CFC_PORT   0xcfc
+#define IA64_CBN_DEVICE 0x10
+#define IA64_CBN_REG    0x40
+#define IA64_CBN_BUS    0xee
+
+static void cf8_select(QTestState *qts, uint8_t bus, uint8_t device,
+                       uint8_t function, uint8_t reg)
+{
+    qtest_writel(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CF8_PORT),
+                 0x80000000U | ((uint32_t)bus << 16) |
+                 ((uint32_t)device << 11) | ((uint32_t)function << 8) |
+                 (reg & 0xfc));
+}
+
+static uint32_t cf8_readl(QTestState *qts, uint8_t bus, uint8_t device,
+                          uint8_t function, uint8_t reg)
+{
+    cf8_select(qts, bus, device, function, reg);
+    return qtest_readl(qts, IA64_LEGACY_IO_BASE +
+                       ia64_sparse_io_offset(IA64_CFC_PORT));
+}
+
+static void test_460gx_config_ports(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+
+    /* Out of reset CBN is 0 and the chipset sits on the compatibility bus. */
+    g_assert_cmphex(cf8_readl(qts, 0, 0x00, 0, PCI_VENDOR_ID), ==, 0x84e08086);
+
+    /* Program CBN through the device reserved for it, as firmware does. */
+    cf8_select(qts, 0, IA64_CBN_DEVICE, 0, IA64_CBN_REG);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 IA64_CBN_BUS);
+
+    /* The chipset has moved: the SAC answers on CBN ... */
+    g_assert_cmphex(cf8_readl(qts, IA64_CBN_BUS, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0x84e08086);
+    g_assert_cmphex(cf8_readl(qts, IA64_CBN_BUS, 0x04, 0, PCI_VENDOR_ID), ==,
+                    0x84e18086);
+
+    /* ... and bus 0 now forwards to the machine's real devices. */
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_460GX_IFB_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x76008086);
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_460GX_PID_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x123d8086);
+    /* Devices behind the expander roots are reachable by bus number too. */
+    g_assert_cmphex(cf8_readl(qts, IA64_460GX_WXB0_BUS,
+                              IA64_460GX_WXB0_SCSI_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x12161077);
+
+    /* An empty device number reads as absent, not as zero. */
+    g_assert_cmphex(cf8_readl(qts, 0, 0x1d, 0, PCI_VENDOR_ID), ==, 0xffffffff);
+    qtest_quit(qts);
+
+    /* zx1 is a different chipset and answers no configuration cycles here. */
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(cf8_readl(qts, 0, 0x00, 0, PCI_VENDOR_ID), ==, 0xffffffff);
+    qtest_quit(qts);
+}
+
 static void test_460gx_root_window_containment(void)
 {
     /*
@@ -2537,9 +2607,18 @@ static void test_realfw_chipset_identity(void)
     g_assert_cmphex(realfw_cfg_readl(qts, 0x04, 0, PCI_CACHE_LINE_SIZE) &
                     0x00800000, ==, 0);
 
-    /* The IFB the firmware scans bus 0 for is still where it was. */
-    g_assert_cmphex(realfw_cfg_readl(qts, 0x1e, 0, PCI_VENDOR_ID), ==,
-                    0x76008086);
+    /*
+     * A device number the chipset does not claim forwards to the PCI bus:
+     * the south bridge the firmware scans bus 0 for answers from the real
+     * 82468GX at 00:03.0, not from a shadow in the config store.  Its
+     * frequency mailbox at register D0h reads back with the done flag set,
+     * which is what lets the firmware's frequency detection finish instead
+     * of rebooting through 0xCF9 forever (plans/phase5 SESSION 17).
+     */
+    g_assert_cmphex(realfw_cfg_readl(qts, IA64_460GX_IFB_SLOT, 0,
+                                     PCI_VENDOR_ID), ==, 0x76008086);
+    g_assert_cmphex(realfw_cfg_readl(qts, IA64_460GX_IFB_SLOT, 0, 0xd0) &
+                    0x8000, ==, 0x8000);
 
     qtest_quit(qts);
     g_assert_cmpint(g_unlink(path), ==, 0);
@@ -5144,6 +5223,7 @@ int main(int argc, char **argv)
                    test_460gx_no_chipset_bus);
     qtest_add_func("/ia64-vpc/pci/460gx-platform-identities",
                    test_460gx_platform_identities);
+    qtest_add_func("/ia64-vpc/pci/460gx-config-ports", test_460gx_config_ports);
     qtest_add_func("/ia64-vpc/pci/460gx-smbus-hwmon", test_460gx_smbus_hwmon);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",
                    test_460gx_south_bridge_rtc_banks);

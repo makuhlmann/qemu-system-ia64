@@ -573,22 +573,16 @@ struct IA64VpcMachineState {
     PFlashCFI01 *realfw_flash;
     MemoryRegion realfw_post_io;
     MemoryRegion realfw_sac_mmio;
-    MemoryRegion realfw_cfg_io;
+    MemoryRegion cfg_io;
     MemoryRegion realfw_ide_data[2];
     MemoryRegion realfw_ide_cmd[2];
     qemu_irq extint;
     uint8_t *realfw_sac_data;
     uint16_t realfw_post_last;
-    uint32_t realfw_config_address;
-    /*
-     * Persistent CPU-frequency mailbox (south bridge 00:03.0 reg 0xd0), NOT
-     * cleared by ia64_vpc_reset so the firmware's one-time "New CPU frequency
-     * is set" write survives its CF9 reboot.  See ia64_realfw_cfg_read.
-     */
-    uint32_t realfw_freq_mailbox;
+    uint32_t cfg_address;
     /* 460GX chipset config space: bus CBN devices, 8 fns x 256 bytes. */
-    uint8_t *realfw_chipset_cfg;
-    PCIBus *realfw_pci_bus;
+    uint8_t *chipset_cfg;
+    PCIBus *host_pci_bus;
     char *vga_model;
     bool alat_full;
 
@@ -3818,7 +3812,7 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
  * after this handler, so we must NOT read ROM content here.  PE32+
  * plabel parsing is deferred to the machine_done notifier.
  */
-static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s);
+static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s);
 
 static void ia64_vpc_reset(void *opaque)
 {
@@ -3850,8 +3844,8 @@ static void ia64_vpc_reset(void *opaque)
      * power-on identity on every reset (harmless on the initial cold reset,
      * which merely repeats the init-time seed).
      */
-    if (s->realfw_path != NULL) {
-        ia64_vpc_init_realfw_chipset_cfg(s);
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        ia64_vpc_init_chipset_cfg(s);
     }
 
     acpi_pm1_evt_reset(&s->acpi_regs);
@@ -4187,16 +4181,20 @@ static const MemoryRegionOps ia64_realfw_sac_ops = {
  * Memory Card A claims presence with a MAC ID, dev 10h reg 40h is the CBN.
  * Accesses to non-chipset device numbers forward to the QEMU PCI bus.
  */
-#define IA64_REALFW_IFB_DEV       0x1e
-static const uint8_t ia64_realfw_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
-                                                    IA64_REALFW_IFB_DEV,
-                                                    0x10 };
-#define IA64_REALFW_CFG_FN_SIZE   256
-#define IA64_REALFW_CFG_DEV_SIZE  (8 * IA64_REALFW_CFG_FN_SIZE)
-#define IA64_REALFW_CFG_SIZE      \
-    (ARRAY_SIZE(ia64_realfw_chipset_devs) * IA64_REALFW_CFG_DEV_SIZE)
-#define IA64_REALFW_CBN_DEV       0x10
-#define IA64_REALFW_CBN_REG       0x40
+/*
+ * The chipset's own functions, on bus CBN (460GX SSDM Table 2-1): the SAC at
+ * 00h/01h, the SDC at 04h, the memory cards at 05h/06h and the expander
+ * ports at 10h+.  The south bridge is NOT among them -- it is an ordinary
+ * PCI device on the compatibility bus, and this machine models it there.
+ */
+static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
+                                                   0x10 };
+#define IA64_460GX_CFG_FN_SIZE   256
+#define IA64_460GX_CFG_DEV_SIZE  (8 * IA64_460GX_CFG_FN_SIZE)
+#define IA64_460GX_CFG_SIZE      \
+    (ARRAY_SIZE(ia64_460gx_chipset_devs) * IA64_460GX_CFG_DEV_SIZE)
+#define IA64_460GX_CBN_DEV       0x10
+#define IA64_460GX_CBN_REG       0x40
 
 /*
  * SPD EEPROM served through the MAC's I2C pass-through: firmware writes the
@@ -4209,7 +4207,7 @@ static const uint8_t ia64_realfw_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
  * 4 banks, 1 module rank, x72 ECC) - 4 x 256 MB = 1 GiB on Memory Card A.
  */
 #define IA64_REALFW_SAC_IIADR_REG 0x68
-static const uint8_t ia64_realfw_spd[64] = {
+static const uint8_t ia64_460gx_spd[64] = {
     [0] = 128,    /* bytes written by manufacturer */
     [1] = 8,      /* log2 of EEPROM size (256 bytes) */
     [2] = 4,      /* memory type: SDRAM */
@@ -4227,33 +4225,54 @@ static const uint8_t ia64_realfw_spd[64] = {
     [31] = 0x40,  /* module rank density: 256 MB */
 };
 
-static uint8_t *ia64_realfw_chipset_cfg(IA64VpcMachineState *s,
+static uint8_t *ia64_460gx_chipset_cfg(IA64VpcMachineState *s,
                                         uint8_t bus, uint8_t dev, uint8_t fn)
 {
-    uint8_t cbn = s->realfw_chipset_cfg[(ARRAY_SIZE(ia64_realfw_chipset_devs)
-                                         - 1) * IA64_REALFW_CFG_DEV_SIZE +
-                                        IA64_REALFW_CBN_REG];
+    uint8_t cbn = s->chipset_cfg[(ARRAY_SIZE(ia64_460gx_chipset_devs)
+                                         - 1) * IA64_460GX_CFG_DEV_SIZE +
+                                        IA64_460GX_CBN_REG];
     unsigned i;
 
     /* Dev 10h is always on bus 0; the rest live on bus CBN. */
-    if (bus == 0 && dev == IA64_REALFW_CBN_DEV) {
-        dev = IA64_REALFW_CBN_DEV;
+    if (bus == 0 && dev == IA64_460GX_CBN_DEV) {
+        dev = IA64_460GX_CBN_DEV;
     } else if (bus != cbn) {
         return NULL;
     }
-    for (i = 0; i < ARRAY_SIZE(ia64_realfw_chipset_devs); i++) {
-        if (ia64_realfw_chipset_devs[i] == dev) {
-            return s->realfw_chipset_cfg + i * IA64_REALFW_CFG_DEV_SIZE +
-                   fn * IA64_REALFW_CFG_FN_SIZE;
+    for (i = 0; i < ARRAY_SIZE(ia64_460gx_chipset_devs); i++) {
+        if (ia64_460gx_chipset_devs[i] == dev) {
+            return s->chipset_cfg + i * IA64_460GX_CFG_DEV_SIZE +
+                   fn * IA64_460GX_CFG_FN_SIZE;
         }
     }
     return NULL;
 }
 
-static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
+/*
+ * Find the device a configuration address names.  The 460GX's expander
+ * ports each carry their own PCI bus, and this machine models them as
+ * separate roots rather than as bridges below the compatibility bus, so a
+ * lookup that starts at bus 0 only ever finds bus 0.  A configuration cycle
+ * reaches all of them on real hardware, so try each root in turn.
+ */
+static PCIDevice *ia64_460gx_cfg_find_device(IA64VpcMachineState *s,
+                                             uint8_t bus, uint8_t devfn)
+{
+    PCIDevice *pci_dev = pci_find_device(s->host_pci_bus, bus, devfn);
+    unsigned int i;
+
+    for (i = 0; pci_dev == NULL && i < ARRAY_SIZE(s->expander_bus); i++) {
+        if (s->expander_bus[i] != NULL) {
+            pci_dev = pci_find_device(s->expander_bus[i], bus, devfn);
+        }
+    }
+    return pci_dev;
+}
+
+static uint64_t ia64_460gx_cfg_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
-    uint32_t cf8 = s->realfw_config_address;
+    uint32_t cf8 = s->cfg_address;
     uint8_t bus = cf8 >> 16, dev = (cf8 >> 11) & 0x1f, fn = (cf8 >> 8) & 7;
     unsigned reg = (cf8 & 0xfc) | (addr & 3);
     uint8_t *cfg;
@@ -4261,50 +4280,12 @@ static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
     unsigned i;
 
     if (addr < 4) {
-        return s->realfw_config_address >> (addr * 8);
+        return s->cfg_address >> (addr * 8);
     }
     if (!(cf8 & 0x80000000)) {
         return (1ULL << (size * 8)) - 1;
     }
-    /*
-     * CPU-frequency mailbox (south bridge 00:03.0 reg 0xd0).  The SDV firmware
-     * stores the detected processor frequency here and reads it back on the
-     * next boot; a fresh (zero) mailbox makes its frequency detector fall back
-     * to a sentinel and take the one-time "New CPU frequency is set. System
-     * resets." reboot (port 0xCF9).  The register is battery-backed on real
-     * hardware, so the written value must survive that reset for the reboot to
-     * be one-shot rather than an infinite loop.  Model it as a persistent cell
-     * that ia64_vpc_reset does NOT clear.  See plans/phase5 SESSION 17.
-     *
-     * NOTE: 00:03.0 is the 82468GX's own config space now that the bridge is
-     * built for realfw too, so this cell overlays a real device's registers.
-     * It is inert in the reachable boot path -- a full POST log shows the
-     * firmware reading 0xd0 only at 00:01.0/00:01.1, never at 00:03.0 -- and
-     * the frequency detector that uses it runs after the gated CF9 reboot,
-     * which cannot be reached to test.  Resolve it by moving the cell into
-     * the bridge model once that path can be exercised.
-     */
-    if (s->realfw_path != NULL && bus == 0 && dev == 3 && fn == 0 &&
-        (reg & 0xfc) == 0xd0) {
-        {
-            /*
-             * Bit 15 is the hardware "done/valid" flag: the firmware writes a
-             * frequency command (bit 15 clear) and polls until the mailbox
-             * reads back with bit 15 set.  Real silicon sets it once it has
-             * latched the value; our model completes instantly, so present the
-             * stored command with bit 15 forced set.
-             */
-            uint32_t cell = s->realfw_freq_mailbox | 0x8000;
-            for (i = 0; i < size; i++) {
-                unsigned b = (reg & 3) + i;
-                if (b < 4) {
-                    val |= (uint64_t)((cell >> (b * 8)) & 0xff) << (i * 8);
-                }
-            }
-        }
-        return val;
-    }
-    cfg = ia64_realfw_chipset_cfg(s, bus, dev, fn);
+    cfg = ia64_460gx_chipset_cfg(s, bus, dev, fn);
     if (cfg != NULL && dev == 0x05 && (fn == 2 || fn == 3)) {
         /*
          * MAC I2C pass-through: serve the addressed DIMM's SPD EEPROM.
@@ -4318,11 +4299,11 @@ static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
          * longer resolves these functions and the lookup returns NULL, so use
          * 'bus' and guard defensively.
          */
-        uint8_t *sac = ia64_realfw_chipset_cfg(s, bus, 0, 0);
-        uint8_t *r4 = ia64_realfw_chipset_cfg(s, bus, 0x05, 4);
-        uint8_t *r5 = ia64_realfw_chipset_cfg(s, bus, 0x05, 5);
-        uint8_t *r6 = ia64_realfw_chipset_cfg(s, bus, 0x05, 6);
-        uint8_t *r7 = ia64_realfw_chipset_cfg(s, bus, 0x05, 7);
+        uint8_t *sac = ia64_460gx_chipset_cfg(s, bus, 0, 0);
+        uint8_t *r4 = ia64_460gx_chipset_cfg(s, bus, 0x05, 4);
+        uint8_t *r5 = ia64_460gx_chipset_cfg(s, bus, 0x05, 5);
+        uint8_t *r6 = ia64_460gx_chipset_cfg(s, bus, 0x05, 6);
+        uint8_t *r7 = ia64_460gx_chipset_cfg(s, bus, 0x05, 7);
 
         if (sac != NULL && r4 != NULL && r5 != NULL && r6 != NULL &&
             r7 != NULL) {
@@ -4334,8 +4315,8 @@ static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
                 for (i = 0; i < size; i++) {
                     unsigned off = (reg + i) & 0xff;
 
-                    val |= (uint64_t)(off < sizeof(ia64_realfw_spd)
-                                      ? ia64_realfw_spd[off] : 0) << (i * 8);
+                    val |= (uint64_t)(off < sizeof(ia64_460gx_spd)
+                                      ? ia64_460gx_spd[off] : 0) << (i * 8);
                 }
             }
         }
@@ -4356,8 +4337,8 @@ static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
             val |= (uint64_t)cfg[(reg + i) & 0xff] << (i * 8);
         }
     } else {
-        PCIDevice *pci_dev = pci_find_device(s->realfw_pci_bus, bus,
-                                             PCI_DEVFN(dev, fn));
+        PCIDevice *pci_dev = ia64_460gx_cfg_find_device(s, bus,
+                                                        PCI_DEVFN(dev, fn));
 
         val = pci_dev != NULL
             ? pci_host_config_read_common(pci_dev, reg,
@@ -4370,11 +4351,11 @@ static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
     return val;
 }
 
-static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
+static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
                                   unsigned size)
 {
     IA64VpcMachineState *s = opaque;
-    uint32_t cf8 = s->realfw_config_address;
+    uint32_t cf8 = s->cfg_address;
     uint8_t bus = cf8 >> 16, dev = (cf8 >> 11) & 0x1f, fn = (cf8 >> 8) & 7;
     unsigned reg = (cf8 & 0xfc) | (addr & 3);
     uint8_t *cfg;
@@ -4399,8 +4380,8 @@ static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
 
     if (addr < 4) {
         for (i = 0; i < size && addr + i < 4; i++) {
-            s->realfw_config_address &= ~(0xffU << ((addr + i) * 8));
-            s->realfw_config_address |= ((data >> (i * 8)) & 0xff) <<
+            s->cfg_address &= ~(0xffU << ((addr + i) * 8));
+            s->cfg_address |= ((data >> (i * 8)) & 0xff) <<
                                         ((addr + i) * 8);
         }
         return;
@@ -4408,19 +4389,7 @@ static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
     if (!(cf8 & 0x80000000)) {
         return;
     }
-    /* CPU-frequency mailbox at 00:03.0 reg 0xd0 - see the read path. */
-    if (s->realfw_path != NULL && bus == 0 && dev == 3 && fn == 0 &&
-        (reg & 0xfc) == 0xd0) {
-        for (i = 0; i < size; i++) {
-            unsigned b = (reg & 3) + i;
-            if (b < 4) {
-                s->realfw_freq_mailbox &= ~(0xffU << (b * 8));
-                s->realfw_freq_mailbox |= ((data >> (i * 8)) & 0xff) << (b * 8);
-            }
-        }
-        return;
-    }
-    cfg = ia64_realfw_chipset_cfg(s, bus, dev, fn);
+    cfg = ia64_460gx_chipset_cfg(s, bus, dev, fn);
     qemu_log_mask(LOG_UNIMP, "ia64-realfw: cfg%c write %02x:%02x.%x "
                   "@0x%02x/%u = 0x%" PRIx64 "\n", cfg ? '*' : ' ',
                   bus, dev, fn, reg, size, data);
@@ -4431,8 +4400,8 @@ static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
         return;
     }
     {
-        PCIDevice *pci_dev = pci_find_device(s->realfw_pci_bus, bus,
-                                             PCI_DEVFN(dev, fn));
+        PCIDevice *pci_dev = ia64_460gx_cfg_find_device(s, bus,
+                                                        PCI_DEVFN(dev, fn));
 
         if (pci_dev != NULL) {
             pci_host_config_write_common(pci_dev, reg,
@@ -4442,9 +4411,9 @@ static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
     }
 }
 
-static const MemoryRegionOps ia64_realfw_cfg_ops = {
-    .read = ia64_realfw_cfg_read,
-    .write = ia64_realfw_cfg_write,
+static const MemoryRegionOps ia64_460gx_cfg_ops = {
+    .read = ia64_460gx_cfg_read,
+    .write = ia64_460gx_cfg_write,
     .valid.min_access_size = 1,
     .valid.max_access_size = 4,
     .impl.min_access_size = 1,
@@ -4458,14 +4427,14 @@ static const MemoryRegionOps ia64_realfw_cfg_ops = {
  * medium.  The rest of the function's config space stays read/write
  * scratch.
  */
-static void ia64_vpc_init_realfw_chipset_identity(IA64VpcMachineState *s,
+static void ia64_vpc_init_chipset_identity(IA64VpcMachineState *s,
                                                   uint8_t dev, uint8_t fn,
                                                   uint16_t device_id,
                                                   uint8_t revision,
                                                   uint16_t class_id,
                                                   bool multifunction)
 {
-    uint8_t *cfg = ia64_realfw_chipset_cfg(s, 0, dev, fn);
+    uint8_t *cfg = ia64_460gx_chipset_cfg(s, 0, dev, fn);
 
     if (cfg == NULL) {
         return;
@@ -4482,16 +4451,16 @@ static void ia64_vpc_init_realfw_chipset_identity(IA64VpcMachineState *s,
     }
 }
 
-static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s)
+static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
 {
     uint8_t *mac_a;
 
-    if (s->realfw_chipset_cfg == NULL) {
-        s->realfw_chipset_cfg = g_malloc0(IA64_REALFW_CFG_SIZE);
+    if (s->chipset_cfg == NULL) {
+        s->chipset_cfg = g_malloc0(IA64_460GX_CFG_SIZE);
     } else {
-        memset(s->realfw_chipset_cfg, 0, IA64_REALFW_CFG_SIZE);
+        memset(s->chipset_cfg, 0, IA64_460GX_CFG_SIZE);
     }
-    s->realfw_config_address = 0;
+    s->cfg_address = 0;
     /*
      * The chipset's own functions carry their real identities.  Without
      * them a firmware config read of the SAC, SDC or expander returns a
@@ -4501,23 +4470,23 @@ static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s)
      * expander device numbers per plans/sdv-i2000-firmware-reference.md,
      * which places expander port n at bus CBN device 10h + n.
      */
-    ia64_vpc_init_realfw_chipset_identity(s, 0x00, 0, 0x84e0, 0x03,
+    ia64_vpc_init_chipset_identity(s, 0x00, 0, 0x84e0, 0x03,
                                           PCI_CLASS_BRIDGE_HOST, true);
-    ia64_vpc_init_realfw_chipset_identity(s, 0x01, 0, 0x84e0, 0x03,
+    ia64_vpc_init_chipset_identity(s, 0x01, 0, 0x84e0, 0x03,
                                           PCI_CLASS_BRIDGE_HOST, false);
-    ia64_vpc_init_realfw_chipset_identity(s, 0x04, 0, 0x84e1, 0x03,
+    ia64_vpc_init_chipset_identity(s, 0x04, 0, 0x84e1, 0x03,
                                           PCI_CLASS_BRIDGE_HOST, false);
     /*
      * Expander port 0 is the PXB, which hosts the compatibility bus.  Its
      * function 0 is the downstream SAC; function 1 is the bridge itself.
      * Function 0 register 40h is also where the firmware programs CBN
-     * (observed; see ia64_realfw_chipset_cfg), so only the header is
+     * (observed; see ia64_460gx_chipset_cfg), so only the header is
      * seeded here.
      */
-    ia64_vpc_init_realfw_chipset_identity(s, IA64_REALFW_CBN_DEV, 0,
+    ia64_vpc_init_chipset_identity(s, IA64_460GX_CBN_DEV, 0,
                                           0x84e0, 0x03,
                                           PCI_CLASS_BRIDGE_HOST, true);
-    ia64_vpc_init_realfw_chipset_identity(s, IA64_REALFW_CBN_DEV, 1,
+    ia64_vpc_init_chipset_identity(s, IA64_460GX_CBN_DEV, 1,
                                           0x84cb, 0x05,
                                           PCI_CLASS_BRIDGE_HOST, false);
 
@@ -4526,30 +4495,31 @@ static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s)
      * (8086:84E3, rev B-1 = 03h; pci.ids, flagged unverified in
      * plans/460gx-config-space-notes.md).  Memory Card B stays absent.
      */
-    mac_a = ia64_realfw_chipset_cfg(s, 0, 0x05, 0);
+    mac_a = ia64_460gx_chipset_cfg(s, 0, 0x05, 0);
     stw_le_p(mac_a + PCI_VENDOR_ID, 0x8086);
     stw_le_p(mac_a + PCI_DEVICE_ID, 0x84e3);
     mac_a[PCI_REVISION_ID] = 0x03;
 
-    /*
-     * 460GX I/O & Firmware Bridge (IFB), the platform south bridge.  Real
-     * SDV firmware's QuickBoot scans bus 0 for it (8086:7600) and fatal-spins
-     * if absent (POST 0x98).  Model Function 0's identity per the 460GX SSDM
-     * §11: multi-function ISA/LPC bridge.  The other functions (fn1 IDE,
-     * fn2 USB, fn3 SMBus) and the config-register behaviours are added as the
-     * firmware exercises them; the rest of the config space is read/write
-     * scratch (see ia64_realfw_cfg_read/write).
-     */
-    {
-        uint8_t *ifb0 = ia64_realfw_chipset_cfg(s, 0, IA64_REALFW_IFB_DEV, 0);
+}
 
-        stw_le_p(ifb0 + PCI_VENDOR_ID, 0x8086);          /* VID */
-        stw_le_p(ifb0 + PCI_DEVICE_ID, 0x7600);          /* DID = IFB */
-        ifb0[PCI_REVISION_ID] = 0x03;                    /* RID (stepping) */
-        ifb0[PCI_CLASS_PROG] = 0x00;                     /* CLASSC 060100h: */
-        stw_le_p(ifb0 + PCI_CLASS_DEVICE, 0x0601);       /*   ISA bridge */
-        ifb0[PCI_HEADER_TYPE] = 0x80;                    /* multi-function */
-    }
+/*
+ * The chipset answers PCI configuration cycles at the architected CF8/CFC
+ * port pair (460GX SSDM 2.3): CONFIG_ADDRESS at 0xCF8 latches bus, device,
+ * function and register, and a CFC access reads or writes the addressed
+ * config space.  Device numbers on the bus the CBN register maps the chipset
+ * into are the chipset's own functions (Table 2-1); everything else forwards
+ * to the PCI bus.  This is the mechanism the vendor firmware enumerates
+ * through, and it is real hardware, so the machine carries it whichever
+ * firmware runs -- ECAM, which is what our firmware and guests use, reaches
+ * the four expander buses and stays the only way a guest sees the machine.
+ */
+static void ia64_vpc_init_460gx_config_ports(IA64VpcMachineState *s,
+                                             MemoryRegion *pci_io)
+{
+    ia64_vpc_init_chipset_cfg(s);
+    memory_region_init_io(&s->cfg_io, OBJECT(s),
+                          &ia64_460gx_cfg_ops, s, "ia64-460gx.cfg", 8);
+    memory_region_add_subregion(pci_io, 0xcf8, &s->cfg_io);
 }
 
 static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
@@ -4564,10 +4534,6 @@ static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
     memory_region_init_io(&s->realfw_post_io, OBJECT(s),
                           &ia64_realfw_post_ops, s, "ia64-realfw.post", 2);
     memory_region_add_subregion(pci_io, 0x80, &s->realfw_post_io);
-    ia64_vpc_init_realfw_chipset_cfg(s);
-    memory_region_init_io(&s->realfw_cfg_io, OBJECT(s),
-                          &ia64_realfw_cfg_ops, s, "ia64-realfw.cfg", 8);
-    memory_region_add_subregion(pci_io, 0xcf8, &s->realfw_cfg_io);
 }
 
 /*
@@ -5054,8 +5020,11 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     pci_bus_set_slot_reserved_mask(pci_bus, 1U << 0);
     pci_io = pci_bus->address_space_io;
     ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
+    s->host_pci_bus = pci_bus;
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        ia64_vpc_init_460gx_config_ports(s, pci_io);
+    }
     if (s->realfw_path != NULL) {
-        s->realfw_pci_bus = pci_bus;
         ia64_vpc_init_realfw_devices(s, pci_io);
     }
 
@@ -5233,7 +5202,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * the parentless ISA bus until it gets one of its own.
      *
      * realfw mode keeps it too: that path replaces the whole chipset with the
-     * shadow config space in ia64_vpc_init_realfw_chipset_cfg(), which models
+     * shadow config space in ia64_vpc_init_chipset_cfg(), which models
      * an IFB of its own (at device 1Eh, where the SDV firmware's bus scan
      * happens to find it).  Two models of one chip on one bus is incoherent,
      * and converging them means re-validating the real firmware's POST, so
