@@ -4294,14 +4294,13 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
         /*
          * Port 0xCF9 (RST_CNT): an 8-bit access is the legacy PC reset-control
          * register, aliased with byte 1 of the 0xCF8 config-address register.
-         * RST_CPU (bit 2) set triggers a system reset.  The SDV firmware writes
-         * 0xCF9=2 then 0xCF9=6 to reboot after its one-time "New CPU frequency
-         * is set" configuration step (the historical POST-0xc6 "wall").  The
-         * warm-boot path this reset lands in is still being brought up (the
-         * post-reset video-ROM POST diverges), so honouring the reset is gated
-         * behind STDBG_CF9RESET for now — see plans/phase5-real-firmware-boot.md.
+         * Software addresses the config register with dword writes, so only a
+         * byte access here is the reset control -- as on real hardware, which
+         * aliases them the same way.  RST_CPU (bit 2) resets the system.
          */
-        if ((data & 0x04) && getenv("STDBG_CF9RESET")) {
+        qemu_log_mask(LOG_UNIMP, "ia64-460gx: CF9 write 0x%02x\n",
+                      (unsigned)(data & 0xff));
+        if (data & 0x04) {
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             return;
         }

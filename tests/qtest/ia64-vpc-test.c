@@ -2554,6 +2554,20 @@ static void test_460gx_config_ports(void)
 
     /* An empty device number reads as absent, not as zero. */
     g_assert_cmphex(cf8_readl(qts, 0, 0x1d, 0, PCI_VENDOR_ID), ==, 0xffffffff);
+
+    /*
+     * Port 0xCF9 is the reset control, aliased with byte 1 of the config
+     * address: a byte write with RST_CPU set resets the system, while the
+     * dword writes software addresses the config register with do not.  The
+     * reset re-seeds the chipset store, so CBN coming back as 0 -- the
+     * chipset answering on the compatibility bus again -- is what shows the
+     * machine went through reset.
+     */
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0xcf9),
+                 0x06);
+    g_assert_cmphex(cf8_readl(qts, 0, 0x00, 0, PCI_VENDOR_ID), ==, 0x84e08086);
+    g_assert_cmphex(cf8_readl(qts, IA64_CBN_BUS, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0xffffffff);
     qtest_quit(qts);
 
     /* zx1 is a different chipset and answers no configuration cycles here. */
