@@ -2744,10 +2744,25 @@ static void test_realfw_flash_window(void)
     g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
 
     /*
-     * realfw mode aliases the CMD646 register blocks onto the legacy IDE
-     * ports the SDV firmware polls.  With no media the empty primary channel
-     * reports status 0x00 (BSY clear, no drive) at port 0x1f7 -- not the
-     * open-bus 0xff that would hang the firmware's drive detection.
+     * Block lock configuration (0x91).  The command goes to a block's base
+     * address and the write that follows carries that block's lock bits at
+     * base + 2; the SDV firmware sweeps every block this way to unlock the
+     * part before programming it.  The pair has to be absorbed as one
+     * two-cycle command -- decoded separately, the second write would be
+     * read as a fresh command -- and the part is left in read-array mode.
+     * Nothing is locked in this model, so the read-back reports zero.
+     */
+    qtest_writeb(qts, base, 0x91);
+    g_assert_cmphex(qtest_readb(qts, base + 2), ==, 0x00);
+    qtest_writeb(qts, base + 2, 0x00);
+    g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
+
+    /*
+     * The south bridge's IDE function is in compatibility mode and decodes
+     * the fixed legacy ports the SDV firmware polls.  With no media the
+     * empty primary channel reports status 0x00 (BSY clear, no drive) at
+     * port 0x1f7 -- not the open-bus 0xff that would hang the firmware's
+     * drive detection.
      */
     g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE +
                                 ia64_sparse_io_offset(0x1f7)), ==, 0x00);

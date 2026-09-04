@@ -346,6 +346,10 @@ static uint32_t pflash_read(PFlashCFI01 *pfl, hwaddr offset,
             }
         }
         break;
+    case 0x91:
+        /* Lock configuration read-back: this model locks no block. */
+        ret = 0;
+        break;
     case 0x98: /* Query mode */
         if (!pfl->device_width) {
             /* Preserve old behavior if device width not specified */
@@ -511,6 +515,23 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
         case 0x60: /* Block (un)lock */
             trace_pflash_write(pfl->name, "block unlock");
             break;
+        case 0x91: /* Block lock configuration */
+            /*
+             * Two-cycle block lock configuration: the command goes to the
+             * block's base address and the following write carries the lock
+             * bits for that block, at base + 2.  Block locking itself is not
+             * modelled -- the 0x60 commands above are accepted and ignored
+             * the same way -- so the configuration write is absorbed and the
+             * device returns to read-array mode, which is what a device with
+             * nothing locked does.  Firmware that unlocks every block before
+             * programming (the Intel SDV firmware sweeps the whole part this
+             * way) then proceeds instead of having its second write decoded
+             * as a fresh command.
+             */
+            trace_pflash_write(pfl->name, "block lock configuration");
+            pfl->cmd = cmd;
+            pfl->wcycle++;
+            return;
         case 0x70: /* Status Register */
             trace_pflash_write(pfl->name, "read status register");
             pfl->cmd = cmd;
@@ -577,6 +598,9 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
             pfl->counter = value;
             pfl->wcycle++;
             break;
+        case 0x91: /* Block lock configuration: absorb the lock bits. */
+            trace_pflash_write(pfl->name, "block lock configuration data");
+            goto mode_read_array;
         case 0x60:
             if (cmd == 0xd0) {
                 pfl->wcycle = 0;
