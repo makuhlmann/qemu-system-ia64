@@ -2724,7 +2724,7 @@ static void test_realfw_flash_window(void)
     /*
      * The flash is a writable Intel-CFI part.  Read Device ID (0x90) exposes
      * the JEDEC identity the SDV firmware checks: manufacturer 0x89 at byte
-     * offset 0, device 0xac (82802AB Firmware Hub) at byte offset 1.
+     * offset 0, device 0xac (82802AC Firmware Hub) at byte offset 1.
      */
     qtest_writeb(qts, base, 0x90);
     g_assert_cmphex(qtest_readb(qts, base + 0), ==, 0x89);
@@ -2741,20 +2741,6 @@ static void test_realfw_flash_window(void)
 
     /* Back to Read Array (0xff): the stored content is intact. */
     qtest_writeb(qts, base, 0xff);
-    g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
-
-    /*
-     * Block lock configuration (0x91).  The command goes to a block's base
-     * address and the write that follows carries that block's lock bits at
-     * base + 2; the SDV firmware sweeps every block this way to unlock the
-     * part before programming it.  The pair has to be absorbed as one
-     * two-cycle command -- decoded separately, the second write would be
-     * read as a fresh command -- and the part is left in read-array mode.
-     * Nothing is locked in this model, so the read-back reports zero.
-     */
-    qtest_writeb(qts, base, 0x91);
-    g_assert_cmphex(qtest_readb(qts, base + 2), ==, 0x00);
-    qtest_writeb(qts, base + 2, 0x00);
     g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
 
     /*

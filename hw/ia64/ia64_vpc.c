@@ -4603,7 +4603,9 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
         qdev_prop_set_bit(dev, "big-endian", 0);
         /*
          * JEDEC ID the firmware checks: manufacturer 0x89 (Intel), device
-         * 0xAC (82802AB Firmware Hub).  It byte-reads read-ID offset 0 for
+         * 0xAC (82802AC Firmware Hub, 8 Mbit -- the part the 460GX datasheet
+         * names, though the vendor image mapped here is larger than one).
+         * It byte-reads read-ID offset 0 for
          * the manufacturer and offset 1 for the device, then combines them to
          * 0xAC89.  pflash returns id0<<8|id1 at word offset 0 and id2<<8|id3
          * at word offset 1, so a byte read of offset 0 yields id1 (hold the
@@ -4614,7 +4616,7 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
         qdev_prop_set_uint16(dev, "id0", 0x00ac);
         qdev_prop_set_uint16(dev, "id1", 0x0089);        /* Intel (offset 0) */
         qdev_prop_set_uint16(dev, "id2", 0x0000);
-        qdev_prop_set_uint16(dev, "id3", 0x00ac);        /* 82802AB (offset 1) */
+        qdev_prop_set_uint16(dev, "id3", 0x00ac);        /* 82802AC (offset 1) */
         qdev_prop_set_string(dev, "name", "ia64-realfw-flash");
         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 
