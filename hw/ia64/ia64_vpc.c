@@ -139,9 +139,9 @@
  * grant register as always-granted-to-id-0; everything else in the page
  * is write-store/read-back scratch, logged for the stage-1 inventory.
  */
-#define IA64_REALFW_SAC_BASE      IA64_U64(0x00000000feb00000)
-#define IA64_REALFW_SAC_SIZE      0x10000
-#define IA64_REALFW_SAC_BOOT_SEM  0xcc0
+#define IA64_460GX_SAC_BASE      IA64_U64(0x00000000feb00000)
+#define IA64_460GX_SAC_SIZE      0x10000
+#define IA64_460GX_SAC_BOOT_SEM  0xcc0
 #define IA64_REALFW_PTR_FIT       (IA64_REALFW_WINDOW_END - 32)
 #define IA64_REALFW_PTR_SALE      (IA64_REALFW_WINDOW_END - 24)
 /* Bit 63 in firmware pointers is the uncacheable-attribute flag, not
@@ -571,14 +571,12 @@ struct IA64VpcMachineState {
     uint64_t realfw_entry;
     uint64_t realfw_base;
     PFlashCFI01 *realfw_flash;
-    MemoryRegion realfw_post_io;
-    MemoryRegion realfw_sac_mmio;
+    MemoryRegion post_io;
+    MemoryRegion sac_mmio;
     MemoryRegion cfg_io;
-    MemoryRegion realfw_ide_data[2];
-    MemoryRegion realfw_ide_cmd[2];
     qemu_irq extint;
-    uint8_t *realfw_sac_data;
-    uint16_t realfw_post_last;
+    uint8_t *sac_data;
+    uint16_t post_last;
     uint32_t cfg_address;
     /* 460GX chipset config space: bus CBN devices, 8 fns x 256 bytes. */
     uint8_t *chipset_cfg;
@@ -4097,18 +4095,18 @@ static bool ia64_vpc_relocate_firmware(uint8_t *image, int64_t size,
  * tabulated in plans/sdv-i2000-firmware-reference.md sec 6.5).  Logged on
  * change only, so a code re-written in a wait loop cannot flood the log.
  */
-static uint64_t ia64_realfw_post_read(void *opaque, hwaddr addr, unsigned size)
+static uint64_t ia64_460gx_post_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
 
-    return s->realfw_post_last >> (addr * 8);
+    return s->post_last >> (addr * 8);
 }
 
-static void ia64_realfw_post_write(void *opaque, hwaddr addr, uint64_t val,
+static void ia64_460gx_post_write(void *opaque, hwaddr addr, uint64_t val,
                                    unsigned size)
 {
     IA64VpcMachineState *s = opaque;
-    uint16_t code = s->realfw_post_last;
+    uint16_t code = s->post_last;
 
     if (size == 2 && addr == 0) {
         code = val;
@@ -4116,55 +4114,55 @@ static void ia64_realfw_post_write(void *opaque, hwaddr addr, uint64_t val,
         code &= ~(0xff << (addr * 8));
         code |= (val & 0xff) << (addr * 8);
     }
-    if (code != s->realfw_post_last) {
-        s->realfw_post_last = code;
-        qemu_log("ia64-realfw: POST %02x%02x\n", code >> 8, code & 0xff);
+    if (code != s->post_last) {
+        s->post_last = code;
+        qemu_log("ia64-460gx: POST %02x%02x\n", code >> 8, code & 0xff);
     }
 }
 
-static const MemoryRegionOps ia64_realfw_post_ops = {
-    .read = ia64_realfw_post_read,
-    .write = ia64_realfw_post_write,
+static const MemoryRegionOps ia64_460gx_post_ops = {
+    .read = ia64_460gx_post_read,
+    .write = ia64_460gx_post_write,
     .valid.min_access_size = 1,
     .valid.max_access_size = 2,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static uint64_t ia64_realfw_sac_read(void *opaque, hwaddr addr, unsigned size)
+static uint64_t ia64_460gx_sac_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
     uint64_t val = 0;
     unsigned i;
 
     for (i = 0; i < size; i++) {
-        val |= (uint64_t)s->realfw_sac_data[addr + i] << (i * 8);
+        val |= (uint64_t)s->sac_data[addr + i] << (i * 8);
     }
-    if (addr <= IA64_REALFW_SAC_BOOT_SEM &&
-        addr + size > IA64_REALFW_SAC_BOOT_SEM) {
+    if (addr <= IA64_460GX_SAC_BOOT_SEM &&
+        addr + size > IA64_460GX_SAC_BOOT_SEM) {
         /* Boot semaphore: granted, holder id 0 (the BSP's LID.id). */
-        val |= 0x80ULL << ((IA64_REALFW_SAC_BOOT_SEM - addr) * 8);
+        val |= 0x80ULL << ((IA64_460GX_SAC_BOOT_SEM - addr) * 8);
     }
-    qemu_log_mask(LOG_UNIMP, "ia64-realfw: SAC read  +%04x/%u = 0x%" PRIx64
+    qemu_log_mask(LOG_UNIMP, "ia64-460gx: SAC read  +%04x/%u = 0x%" PRIx64
                   "\n", (unsigned)addr, size, val);
     return val;
 }
 
-static void ia64_realfw_sac_write(void *opaque, hwaddr addr, uint64_t val,
+static void ia64_460gx_sac_write(void *opaque, hwaddr addr, uint64_t val,
                                   unsigned size)
 {
     IA64VpcMachineState *s = opaque;
     unsigned i;
 
     for (i = 0; i < size; i++) {
-        s->realfw_sac_data[addr + i] = val >> (i * 8);
+        s->sac_data[addr + i] = val >> (i * 8);
     }
-    qemu_log_mask(LOG_UNIMP, "ia64-realfw: SAC write +%04x/%u = 0x%" PRIx64
+    qemu_log_mask(LOG_UNIMP, "ia64-460gx: SAC write +%04x/%u = 0x%" PRIx64
                   "\n", (unsigned)addr, size, val);
 }
 
-static const MemoryRegionOps ia64_realfw_sac_ops = {
-    .read = ia64_realfw_sac_read,
-    .write = ia64_realfw_sac_write,
+static const MemoryRegionOps ia64_460gx_sac_ops = {
+    .read = ia64_460gx_sac_read,
+    .write = ia64_460gx_sac_write,
     .valid.min_access_size = 1,
     .valid.max_access_size = 8,
     .endianness = DEVICE_LITTLE_ENDIAN,
@@ -4206,7 +4204,7 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
  * 256 MB registered SDRAM (32Mx4 devices: 13 row / 10 column address bits,
  * 4 banks, 1 module rank, x72 ECC) - 4 x 256 MB = 1 GiB on Memory Card A.
  */
-#define IA64_REALFW_SAC_IIADR_REG 0x68
+#define IA64_460GX_SAC_IIADR_REG 0x68
 static const uint8_t ia64_460gx_spd[64] = {
     [0] = 128,    /* bytes written by manufacturer */
     [1] = 8,      /* log2 of EEPROM size (256 bytes) */
@@ -4307,7 +4305,7 @@ static uint64_t ia64_460gx_cfg_read(void *opaque, hwaddr addr, unsigned size)
 
         if (sac != NULL && r4 != NULL && r5 != NULL && r6 != NULL &&
             r7 != NULL) {
-            uint8_t iiadr = sac[IA64_REALFW_SAC_IIADR_REG];
+            uint8_t iiadr = sac[IA64_460GX_SAC_IIADR_REG];
             bool row0 = r4[0x48] == 1 && r5[0x48] == 0 &&
                         r6[0x48] == 0 && r7[0x48] == 0;
 
@@ -4345,7 +4343,7 @@ static uint64_t ia64_460gx_cfg_read(void *opaque, hwaddr addr, unsigned size)
                                           pci_config_size(pci_dev), size)
             : (1ULL << (size * 8)) - 1;
     }
-    qemu_log_mask(LOG_UNIMP, "ia64-realfw: cfg%c read  %02x:%02x.%x "
+    qemu_log_mask(LOG_UNIMP, "ia64-460gx: cfg%c read  %02x:%02x.%x "
                   "@0x%02x/%u = 0x%" PRIx64 "\n", cfg ? '*' : ' ',
                   bus, dev, fn, reg, size, val);
     return val;
@@ -4390,7 +4388,7 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
         return;
     }
     cfg = ia64_460gx_chipset_cfg(s, bus, dev, fn);
-    qemu_log_mask(LOG_UNIMP, "ia64-realfw: cfg%c write %02x:%02x.%x "
+    qemu_log_mask(LOG_UNIMP, "ia64-460gx: cfg%c write %02x:%02x.%x "
                   "@0x%02x/%u = 0x%" PRIx64 "\n", cfg ? '*' : ' ',
                   bus, dev, fn, reg, size, data);
     if (cfg != NULL) {
@@ -4513,69 +4511,34 @@ static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
  * firmware runs -- ECAM, which is what our firmware and guests use, reaches
  * the four expander buses and stays the only way a guest sees the machine.
  */
-static void ia64_vpc_init_460gx_config_ports(IA64VpcMachineState *s,
-                                             MemoryRegion *pci_io)
+static void ia64_vpc_init_460gx_chipset(IA64VpcMachineState *s,
+                                       MemoryRegion *pci_io)
 {
+    /*
+     * The System Address Controller's memory-mapped register aperture, and
+     * the diagnostic port every PC-class platform decodes at I/O 0x80.  The
+     * firmware arbitrates which processor boots through a semaphore in the
+     * SAC block (clear bit 7, poll bit 7, compare the low seven bits against
+     * LID.id); this model grants it to id 0, so the boot processor proceeds
+     * and an application processor waits, which is what a UP or an SMP boot
+     * both need.  The rest of the block is read/write scratch.
+     */
+    s->sac_data = g_malloc0(IA64_460GX_SAC_SIZE);
+    memory_region_init_io(&s->sac_mmio, OBJECT(s), &ia64_460gx_sac_ops, s,
+                          "ia64-460gx.sac", IA64_460GX_SAC_SIZE);
+    memory_region_add_subregion(get_system_memory(), IA64_460GX_SAC_BASE,
+                                &s->sac_mmio);
+    memory_region_init_io(&s->post_io, OBJECT(s), &ia64_460gx_post_ops, s,
+                          "ia64-460gx.post", 2);
+    memory_region_add_subregion(pci_io, 0x80, &s->post_io);
+
     ia64_vpc_init_chipset_cfg(s);
     memory_region_init_io(&s->cfg_io, OBJECT(s),
                           &ia64_460gx_cfg_ops, s, "ia64-460gx.cfg", 8);
     memory_region_add_subregion(pci_io, 0xcf8, &s->cfg_io);
 }
 
-static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
-                                         MemoryRegion *pci_io)
-{
-    s->realfw_sac_data = g_malloc0(IA64_REALFW_SAC_SIZE);
-    memory_region_init_io(&s->realfw_sac_mmio, OBJECT(s),
-                          &ia64_realfw_sac_ops, s, "ia64-realfw.sac",
-                          IA64_REALFW_SAC_SIZE);
-    memory_region_add_subregion(get_system_memory(), IA64_REALFW_SAC_BASE,
-                                &s->realfw_sac_mmio);
-    memory_region_init_io(&s->realfw_post_io, OBJECT(s),
-                          &ia64_realfw_post_ops, s, "ia64-realfw.post", 2);
-    memory_region_add_subregion(pci_io, 0x80, &s->realfw_post_io);
-}
 
-/*
- * Real SDV firmware drives IDE through the fixed legacy I/O ports, not the
- * controller's PCI BARs: it polls the primary status register at 0x1f7 during
- * drive detection and spins forever if nothing answers.  The CMD646's ATA
- * register blocks are otherwise only reachable at firmware-assigned BAR
- * addresses, so alias them into the legacy ranges (command block 0x1f0-0x1f7
- * and 0x170-0x177, control block at 0x3f4/0x374 whose offset-2 register is the
- * 0x3f6/0x376 alt-status).  With no media attached the channels report an
- * empty bus, which the firmware reads as "no drive" and moves on.  This runs
- * only in realfw mode; our own firmware and guests use the PCI BARs.
- */
-static void ia64_vpc_map_realfw_legacy_ide(IA64VpcMachineState *s,
-                                           MemoryRegion *pci_io)
-{
-    PCIIDEState *ide = PCI_IDE(s->ide_dev);
-    static const struct {
-        uint16_t data_base;
-        uint16_t cmd_base;
-    } channel[2] = {
-        { 0x1f0, 0x3f4 },
-        { 0x170, 0x374 },
-    };
-    int i;
-
-    for (i = 0; i < 2; i++) {
-        g_autofree char *data_name =
-            g_strdup_printf("ia64-realfw.ide-data%d", i);
-        g_autofree char *cmd_name =
-            g_strdup_printf("ia64-realfw.ide-cmd%d", i);
-
-        memory_region_init_alias(&s->realfw_ide_data[i], OBJECT(s), data_name,
-                                 &ide->data_bar[i], 0, 8);
-        memory_region_add_subregion(pci_io, channel[i].data_base,
-                                    &s->realfw_ide_data[i]);
-        memory_region_init_alias(&s->realfw_ide_cmd[i], OBJECT(s), cmd_name,
-                                 &ide->cmd_bar[i], 0, 4);
-        memory_region_add_subregion(pci_io, channel[i].cmd_base,
-                                    &s->realfw_ide_cmd[i]);
-    }
-}
 
 /*
  * The master 8259's INTR line, delivered to the boot processor as an IA-64
@@ -5022,10 +4985,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
     s->host_pci_bus = pci_bus;
     if (!ia64_vpc_chipset_is_zx1(s)) {
-        ia64_vpc_init_460gx_config_ports(s, pci_io);
-    }
-    if (s->realfw_path != NULL) {
-        ia64_vpc_init_realfw_devices(s, pci_io);
+        ia64_vpc_init_460gx_chipset(s, pci_io);
     }
 
     /*
@@ -5519,22 +5479,19 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * channels are in compatibility mode and decode the fixed legacy ports,
      * so only the bus-master BAR is placed.
      *
-     * Elsewhere -- zx1, and realfw mode, which models a south bridge of its
-     * own -- ide=on populates the reserved slot 0 with a dual-channel CMD646.
-     * Slot 0 is the platform-anticipated home for IDE there: the firmware's
-     * fixed PCI-I/O table and the DSDT _PRT both describe an IDE function at
-     * that address, and it keeps every other device's BDF stable.  The
-     * firmware assigns its I/O BARs on demand, exactly as for a hand-attached
-     * -device cmd646-ide.  realfw always instantiates it, because the SDV
-     * firmware probes a legacy IDE during POST regardless of the switch and
-     * reaches it through the legacy ports aliased below.
+     * On zx1, which has no such bridge, ide=on populates the reserved slot 0
+     * with a dual-channel CMD646.  Slot 0 is the platform-anticipated home
+     * for IDE there: the firmware's fixed PCI-I/O table and the DSDT _PRT
+     * both describe an IDE function at that address, and it keeps every
+     * other device's BDF stable.  The firmware assigns its I/O BARs on
+     * demand, exactly as for a hand-attached -device cmd646-ide.
      */
     if (s->ifb != NULL) {
         s->ide_dev = intel_82468gx_ifb_function(s->ifb,
                                                 IA64_460GX_IFB_IDE_FUNCTION);
         ia64_vpc_configure_ifb_ide(s->ide_dev);
         pci_ide_create_devs(s->ide_dev);
-    } else if (s->ide_enabled || s->realfw_path != NULL) {
+    } else if (s->ide_enabled) {
         s->ide_dev = pci_new(PCI_DEVFN(0, 0), "cmd646-ide");
         qdev_prop_set_uint32(DEVICE(s->ide_dev), "secondary", 1);
         if (!pci_realize_and_unref(s->ide_dev, pci_bus, errp)) {
@@ -5542,9 +5499,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         }
         ia64_vpc_configure_pci_irq(s->ide_dev);
         pci_ide_create_devs(s->ide_dev);
-        if (s->realfw_path != NULL) {
-            ia64_vpc_map_realfw_legacy_ide(s, pci_io);
-        }
     }
 #endif
 

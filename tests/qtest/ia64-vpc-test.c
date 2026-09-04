@@ -2481,6 +2481,49 @@ static uint32_t cf8_readl(QTestState *qts, uint8_t bus, uint8_t device,
                        ia64_sparse_io_offset(IA64_CFC_PORT));
 }
 
+/*
+ * The System Address Controller's register aperture and the platform's
+ * diagnostic port.  The firmware arbitrates which processor boots through a
+ * semaphore in the SAC block -- it clears bit 7, polls for bit 7, and
+ * compares the low seven bits against its own LID.id -- so the block has to
+ * answer, and the semaphore has to read granted to id 0.  Chipset hardware,
+ * so the machine carries it whichever firmware runs; zx1 has neither.
+ */
+#define IA64_SAC_BASE      0x00000000feb00000ULL
+#define IA64_SAC_BOOT_SEM  0xcc0
+#define IA64_POST_PORT     0x80
+
+static void test_460gx_sac_aperture(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    const uint64_t post = IA64_LEGACY_IO_BASE +
+        ia64_sparse_io_offset(IA64_POST_PORT);
+
+    /* The boot semaphore reads granted (bit 7) to holder id 0. */
+    g_assert_cmphex(qtest_readb(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM), ==,
+                    0x80);
+    /* Clearing bit 7, as the firmware does, still reads back granted. */
+    qtest_writeb(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM, 0x00);
+    g_assert_cmphex(qtest_readb(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM), ==,
+                    0x80);
+
+    /* The rest of the aperture is read/write scratch, not open bus. */
+    qtest_writel(qts, IA64_SAC_BASE + 0x100, 0xa55aa55a);
+    g_assert_cmphex(qtest_readl(qts, IA64_SAC_BASE + 0x100), ==, 0xa55aa55a);
+    g_assert_cmphex(qtest_readl(qts, IA64_SAC_BASE + 0x200), ==, 0);
+
+    /* The diagnostic port latches the last code written to it. */
+    qtest_writeb(qts, post, 0xc6);
+    g_assert_cmphex(qtest_readb(qts, post), ==, 0xc6);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(qtest_readb(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM), ==,
+                    0x00);
+    g_assert_cmphex(qtest_readb(qts, post), ==, 0xff);
+    qtest_quit(qts);
+}
+
 static void test_460gx_config_ports(void)
 {
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
@@ -5224,6 +5267,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/460gx-platform-identities",
                    test_460gx_platform_identities);
     qtest_add_func("/ia64-vpc/pci/460gx-config-ports", test_460gx_config_ports);
+    qtest_add_func("/ia64-vpc/pci/460gx-sac-aperture", test_460gx_sac_aperture);
     qtest_add_func("/ia64-vpc/pci/460gx-smbus-hwmon", test_460gx_smbus_hwmon);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",
                    test_460gx_south_bridge_rtc_banks);
