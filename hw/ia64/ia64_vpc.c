@@ -165,15 +165,15 @@
  */
 #define IA64_SCSI_SEAT_IO_BASE  0x0000b000U
 #define IA64_SCSI_PARK_IO_BASE  0x0000e000U
-#define IA64_VGA_IO_BASE        0x0000d000U
 /*
  * The vendor ATI Rage 128 vgabios hardcodes its register I/O base at 0xD800 and
- * only falls back to a port-space scan if a signature probe there fails, so in
- * realfw mode the card's I/O BAR must live at 0xD800 for the BIOS's register
- * accesses (MM_INDEX/DATA, the PLL file) to reach the device.  Guests read the
- * BAR from config space, so they use the layout-fixed IA64_VGA_IO_BASE.
+ * only falls back to a port-space scan if a signature probe there fails, so the
+ * card's I/O BAR lives there: it is the address the card's own BIOS expects to
+ * find it at, and a guest reads the BAR from config space and follows.  It is
+ * inside the graphics root's I/O segment either way (0xD000-0xDFFF, see
+ * roms/ia64-firmware/dsdt-pci-root.asl).
  */
-#define IA64_VGA_IO_BASE_REALFW 0x0000d800U
+#define IA64_VGA_IO_BASE        0x0000d800U
 #define IA64_E1000_IO_BASE      0x0000c400U
 #define IA64_OHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define IA64_AHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00020000ULL)
@@ -1624,74 +1624,10 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
 }
 
 /*
- * Real-firmware video-ROM shadow.  The synthetic INT10 ROM above is a passive
- * 2 KiB image for Windows guests, which read the video BIOS through the PCI ROM
- * BAR (VideoPortGetRomImage).  The vendor SDV firmware instead POSTs the video
- * card's option ROM the legacy PC-AT way: shadow it to 0xC0000 and call
- * C000:0003.  Its shadow copy reads through the ROM BAR, and our ROM-BAR model
- * is not faithful enough for that read to capture the whole image -- only the
- * header lands, so the option ROM's entry jump (e.g. std vgabios `jmp 0x55C3`)
- * runs the CPU into empty shadow and hangs POST at ~0xc6.
- *
- * Place a complete option ROM at the 0xC0000 shadow directly so the firmware
- * finds a whole, valid option ROM to POST in place.  This is the realfw analogue
- * of install_int10 (the synthetic stub is skipped in realfw).  The ROM is the
- * emulated card's own expansion ROM by default, or -- when realfw-vga-rom= names
- * a file -- an authentic vendor card BIOS (e.g. the ATI Rage 128 Pro the SDV
- * shipped with), so the firmware POSTs the real BIOS for accurate emulation.
- */
-static void ia64_vpc_install_realfw_video_rom(IA64VpcMachineState *s)
-{
-    PCIDevice *pci_dev = s->vga_dev;
-    g_autofree uint8_t *file_rom = NULL;
-    const uint8_t *rom = NULL;
-    uint64_t rom_size = 0;
-    uint32_t declared;
-
-    if (s->realfw_vga_rom_path != NULL) {
-        GError *gerr = NULL;
-        gsize len = 0;
-
-        if (!g_file_get_contents(s->realfw_vga_rom_path, (gchar **)&file_rom,
-                                 &len, &gerr)) {
-            warn_report("realfw-vga-rom '%s': %s (falling back to card ROM)",
-                        s->realfw_vga_rom_path, gerr->message);
-            g_error_free(gerr);
-        } else {
-            rom = file_rom;
-            rom_size = len;
-        }
-    }
-    if (file_rom == NULL) {
-        if (pci_dev == NULL ||
-            pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
-            return;
-        }
-        rom = memory_region_get_ram_ptr(&pci_dev->rom);
-        rom_size = memory_region_size(&pci_dev->rom);
-    }
-    if (rom == NULL || rom_size < 0x400 || rom[0] != 0x55 || rom[1] != 0xaa) {
-        return;
-    }
-    declared = (uint32_t)rom[2] * 512U;
-    if (declared == 0 || declared > rom_size) {
-        declared = rom_size;
-    }
-    /* The legacy video-ROM window is C0000h-CFFFFh (64 KiB). */
-    if (declared > 0x10000) {
-        declared = 0x10000;
-    }
-    cpu_physical_memory_write(IA64_INT10_ROM_BASE, rom, declared);
-}
-
-/*
- * When realfw-vga-rom= supplies an authentic card BIOS, load it into the video
- * device's own expansion ROM as well as the 0xC0000 shadow.  The vendor firmware
- * re-shadows the option ROM's header from the PCI ROM BAR during POST; if the BAR
- * still held the emulated card's stock vgabios, that header's entry jump (a
- * different offset) would be laid over the real BIOS body already shadowed at
- * 0xC0000, and the CPU would jump into the wrong image and run away.  Keeping the
- * BAR and the shadow the same image keeps the re-shadow consistent.  Called
+ * When realfw-vga-rom= supplies an authentic card BIOS -- e.g. the ATI Rage 128
+ * Pro the SDV shipped with -- load it into the video device's own expansion ROM,
+ * so a firmware that POSTs the card's option ROM the legacy PC-AT way shadows
+ * and runs the real BIOS rather than the emulated card's stock vgabios.  Called
  * before configure_vga() so the ATI table / checksum fixups act on this image.
  */
 static void ia64_vpc_load_realfw_device_rom(IA64VpcMachineState *s)
@@ -3525,8 +3461,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
     ia64_vpc_configure_lsi(s, s->lsi_dev);
     ia64_vpc_configure_vga(s->vga_dev,
-                           s->realfw_path != NULL ? IA64_VGA_IO_BASE_REALFW
-                                                  : IA64_VGA_IO_BASE);
+                           IA64_VGA_IO_BASE);
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_nic(s->nic_devs[i], i);
     }
@@ -3852,19 +3787,15 @@ static void ia64_vpc_reset(void *opaque)
     acpi_gpe_reset(&s->acpi_regs);
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     /*
-     * The synthetic INT10 ROM is a passive 2 KiB image for Windows guests that
-     * read the video BIOS through the PCI ROM BAR.  In realfw mode the vendor
-     * SDV firmware instead POSTs the video device's own expansion ROM the
-     * legacy way (shadow to 0xC0000, call C000:0003); a 2 KiB stub whose entry
-     * jumps into its (absent) body then runs the CPU away into empty shadow, so
-     * shadow the device's complete option ROM there instead.
+     * The synthetic INT10 ROM: a passive 2 KiB image at the legacy video-ROM
+     * window for guests that read the video BIOS through the PCI ROM BAR.
+     * What sits at 0xC0000 is firmware's business rather than the machine's --
+     * a firmware that POSTs the card's own option ROM the legacy PC-AT way
+     * shadows it over this -- so put the same image there whichever firmware
+     * is about to run.
      */
     if (s->vga_dev != NULL) {
-        if (s->realfw_path != NULL) {
-            ia64_vpc_install_realfw_video_rom(s);
-        } else {
-            ia64_vpc_reset_int10(s);
-        }
+        ia64_vpc_reset_int10(s);
     }
 #endif
 }
@@ -5386,8 +5317,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
     ia64_vpc_load_realfw_device_rom(s);
     ia64_vpc_configure_vga(s->vga_dev,
-                           s->realfw_path != NULL ? IA64_VGA_IO_BASE_REALFW
-                                                  : IA64_VGA_IO_BASE);
+                           IA64_VGA_IO_BASE);
     ia64_vpc_map_vga_fixed_windows(s, s->vga_dev);
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     if (s->vga_dev != NULL) {

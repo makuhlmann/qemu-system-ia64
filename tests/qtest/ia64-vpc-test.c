@@ -2935,7 +2935,7 @@ static void test_pci_default_layout(void)
     } gxb_vga[] = {
         { PCI_VENDOR_ID, 0x50461002 },
         { PCI_BASE_ADDRESS_0, 0xf0000008 },
-        { PCI_BASE_ADDRESS_1, 0x0000d001 },
+        { PCI_BASE_ADDRESS_1, 0x0000d801 },
         { PCI_BASE_ADDRESS_2, 0xf5000000 },
         { PCI_INTERRUPT_LINE, 0x0000011c },
     };
