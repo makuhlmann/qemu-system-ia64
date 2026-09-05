@@ -288,3 +288,287 @@ jobs:
             build/meson-logs/
             build/ninja-build.log
           if-no-files-found: ignore
+
+  macos:
+    # One package per architecture, each built and smoke-tested natively on a
+    # runner that is free for public repositories. The build OS sets the floor,
+    # not the ceiling: Mach-O binaries stay forward compatible, so each package
+    # runs on its build OS and every later release. It will NOT run on an
+    # earlier one -- clang's default deployment target and the Homebrew bottles
+    # it links against are both built for the runner's own OS version.
+    #
+    #   arm64   macos-14        -> macOS 14+   (oldest arm64 image on offer)
+    #   x86_64  macos-15-intel  -> macOS 15+   (oldest Intel image on offer;
+    #                                           the alternative, macos-26-intel,
+    #                                           would raise the floor to 26)
+    #
+    # Both macos-14 labels are already marked deprecated, and GitHub retires
+    # x86_64 Actions runners entirely in 2027; when macos-14 goes, move the
+    # arm64 build to macos-15 and the floor rises with it.
+    #
+    # macos-14-large would give an Intel build on macOS 14, but it is a larger
+    # runner and those need a Team/Enterprise plan.
+    #
+    # A single universal binary was considered and rejected: cross-building
+    # x86_64 on the arm64 runner means a second Homebrew prefix of Intel
+    # bottles for every dependency, lipo'ing each bundled dylib as well as the
+    # emulator, and building twice anyway -- and the arm64 images carry no
+    # Rosetta, so the x86_64 half could never be run before publishing it.
+    # Two natively tested packages beat one untested fat one.
+    name: macOS build (${{ matrix.arch }}, macOS ${{ matrix.min_os }}+)
+    needs: linux
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+            min_os: "14"
+          - arch: x86_64
+            runner: macos-15-intel
+            min_os: "15"
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+      HOMEBREW_NO_ENV_HINTS: 1
+    steps:
+      - name: Install dependencies
+        # Curated to libraries that relocate cleanly: every one of these is a
+        # plain dylib, and Cocoa (the native equivalent of the Linux package's
+        # GTK display) plus CoreAudio are system frameworks that cost nothing.
+        # Deliberately left out: GTK, whose dlopen'd module stack is fragile to
+        # bundle on macOS, and gnutls / curl / libusb / usbredir / curses. Any
+        # of them is one formula plus one --enable- switch away.
+        run: |
+          brew install --quiet glib pixman libslirp libpng jpeg-turbo zstd \
+                               sdl2 ninja ccache
+          command -v pkg-config >/dev/null || brew install --quiet pkgconf
+          # jpeg-turbo is keg-only, so its libjpeg.pc is off the default path.
+          echo "PKG_CONFIG_PATH=$(brew --prefix jpeg-turbo)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
+            >> "$GITHUB_ENV"
+          # ccache's cc/clang shims have to come first in PATH.
+          ccache_libexec="$(brew --prefix ccache)/libexec"
+          if [ -d "$ccache_libexec" ]; then
+            echo "$ccache_libexec" >> "$GITHUB_PATH"
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Download the IA-64 firmware
+        # The firmware needs an IA-64 cross toolchain, which does not exist for
+        # macOS, so it is taken from the linux job instead of being built here.
+        uses: actions/download-artifact@v4
+        with:
+          name: ia64-firmware
+          path: fw
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-macos-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: ccache-macos-${{ matrix.arch }}-
+
+      - name: Configure
+        # Feature set and optimization settings follow the .deb pipeline in
+        # build/deb/in-container.sh: --without-default-features plus an
+        # explicit list, LTO, -Doptimization=2 (the level is set through Meson
+        # only, never as -O in --extra-cflags, so exactly one reaches the
+        # compiler) and install-time strip. The perf cflags are probed because
+        # Apple clang does not accept all of GCC's.
+        #
+        # --disable-tools keeps qemu-img and friends out: it makes the package
+        # minimal, and together with --disable-fdt (nothing on these machines
+        # needs a device tree, and the internal libfdt is a downloaded meson
+        # subproject) it cuts the *built* files in the install manifest down to
+        # exactly two, which is what lets the staging step below install
+        # without building the firmware. Use Homebrew's qemu for image tools.
+        run: |
+          extra_cflags=""
+          for flag in -fno-stack-protector -fzero-call-used-regs=skip \
+                      -ftrivial-auto-var-init=uninitialized; do
+            if printf 'int main(void){return 0;}\n' | \
+               cc "$flag" -x c -c -o /dev/null - >/dev/null 2>&1; then
+              extra_cflags="${extra_cflags:+$extra_cflags }$flag"
+            else
+              echo "    (compiler lacks $flag - skipping)"
+            fi
+          done
+          echo "    extra-cflags: $extra_cflags"
+          mkdir build
+          cd build
+          ../configure \
+            --prefix=/qemu \
+            --target-list=ia64-softmmu \
+            --without-default-features \
+            --enable-system --enable-tcg \
+            --enable-pixman --disable-fdt \
+            --enable-cocoa --enable-sdl \
+            --enable-vnc --enable-png -Dvnc_jpeg=enabled \
+            -Dzstd=enabled --enable-slirp \
+            -Dcoreaudio=enabled --audio-drv-list=coreaudio \
+            --enable-vpc --enable-vhdx --enable-vdi --enable-vmdk --enable-qed \
+            --enable-qcow1 --enable-parallels --enable-vvfat --enable-bochs \
+            --enable-cloop --enable-dmg \
+            --disable-tools --disable-guest-agent \
+            --disable-docs --disable-werror \
+            --disable-qom-cast-debug --disable-stack-protector \
+            --enable-lto --enable-strip -Doptimization=2 \
+            --extra-cflags="$extra_cflags"
+
+      - name: Check that the install is relocatable
+        # Same contract as the other two jobs: the package is used from
+        # wherever it is unpacked, so share/qemu must be found relative to the
+        # binary. A single-component prefix such as "/" silently turns that
+        # off -- see the Windows job for why.
+        run: |
+          prefix=$(sed -n 's/^#define CONFIG_PREFIX "\(.*\)"$/\1/p' \
+                   build/config-host.h)
+          case "$prefix" in
+            /?*) echo "relocatable install anchored at $prefix" ;;
+            *) echo "CONFIG_PREFIX '$prefix' disables relocation" >&2; exit 1 ;;
+          esac
+
+      - name: Build qemu-system-ia64
+        # These two named targets are exactly the built files the install
+        # manifest wants (`meson introspect --installed`); naming them instead
+        # of running plain ninja is what keeps the firmware custom_target --
+        # build_by_default, and impossible here without an IA-64 cross
+        # compiler -- out of the build.
+        #
+        # On Darwin qemu-system-ia64 is a custom_target that post-processes the
+        # real executable (Meson names it qemu-system-ia64-unsigned) to attach
+        # the QEMU icon. That step needs full Xcode, which the runner images
+        # have; Homebrew builds QEMU the same way on the same images.
+        run: |
+          set -o pipefail
+          ninja -C build qemu-system-ia64 trace/trace-events-all \
+            2>&1 | tee build/ninja-build.log
+          ccache -s || true
+
+      - name: Assemble macOS package
+        # --no-rebuild is what keeps `meson install` from invoking ninja and
+        # thereby building the firmware (build_by_default, install:false). It
+        # does still check that every file in the manifest exists, which is why
+        # the build step above names trace-events-all as well as the emulator;
+        # everything else installed here is a static blob, keymap or icon.
+        run: |
+          build/pyvenv/bin/meson install -C build --no-rebuild \
+            --destdir "$PWD/dist"
+          cp fw/ia64-firmware.bin dist/qemu/share/qemu/
+          # Nothing in this feature set installs headers or a lib/ of its own,
+          # but keep the guard: lib/ must hold the bundled dylibs and nothing
+          # else.
+          rm -rf dist/qemu/include dist/qemu/lib
+          cat > dist/qemu/README.txt <<'TXT'
+          qemu-system-ia64 for macOS
+          ==========================
+
+          Built on macOS ${{ matrix.min_os }} for ${{ matrix.arch }}; runs on
+          macOS ${{ matrix.min_os }} and later, on Macs of that architecture.
+
+          GitHub strips the executable bit from artifact downloads, and macOS
+          quarantines anything that arrives from the web. After unpacking:
+
+              chmod +x bin/qemu-system-ia64
+              xattr -dr com.apple.quarantine .
+
+          Then run bin/qemu-system-ia64 from wherever you put it -- it finds
+          share/qemu (the IA-64 firmware, video BIOSes, keymaps) next to
+          itself, and the libraries it needs are in lib/.
+          TXT
+
+      - name: Bundle dependent dylibs and re-sign
+        # The macOS analogue of the Windows job's DLL sweep: three passes
+        # converge on transitive dependencies. Anything under /usr/lib or
+        # /System is part of macOS and must not be copied.
+        run: |
+          cd dist/qemu
+          mkdir -p lib
+          for pass in 1 2 3; do
+            for f in bin/* lib/*.dylib; do
+              [ -f "$f" ] || continue
+              otool -L "$f" | awk '/^\t/ {print $1}'
+            done | sort -u | while read -r dep; do
+              case "$dep" in /usr/lib/*|/System/*|@*) continue ;; esac
+              base="${dep##*/}"
+              if [ ! -f "lib/$base" ]; then
+                cp -L "$dep" "lib/$base"
+                chmod u+w "lib/$base"
+              fi
+            done
+          done
+          # Rewrite every absolute reference to @rpath and anchor the rpath to
+          # the package layout, so it runs from wherever it is unpacked.
+          for f in lib/*.dylib; do
+            install_name_tool -id "@rpath/${f##*/}" "$f"
+          done
+          for f in bin/* lib/*.dylib; do
+            otool -L "$f" | awk '/^\t/ {print $1}' | while read -r dep; do
+              case "$dep" in /usr/lib/*|/System/*|@*) continue ;; esac
+              install_name_tool -change "$dep" "@rpath/${dep##*/}" "$f"
+            done
+          done
+          install_name_tool -add_rpath "@executable_path/../lib" \
+                            bin/qemu-system-ia64 || true
+          for f in lib/*.dylib; do
+            install_name_tool -add_rpath "@loader_path" "$f" || true
+          done
+          # install_name_tool and the install-time strip both invalidate the
+          # ad-hoc signature the linker applies, and an arm64 binary whose
+          # signature does not match is killed on sight. Re-sign, ad-hoc.
+          for f in bin/* lib/*.dylib; do
+            codesign --force --sign - "$f"
+          done
+          codesign --verify --strict bin/qemu-system-ia64
+          # A dependency left pointing into the Homebrew prefix (/opt/homebrew
+          # on arm64, /usr/local on Intel) only fails on someone else's Mac,
+          # so fail here instead.
+          leftovers=$(otool -L bin/* lib/*.dylib | awk '/^\t/ {print $1}' |
+                      sort -u | grep -Ev '^(@|/usr/lib/|/System/)' || true)
+          if [ -n "$leftovers" ]; then
+            echo "unbundled dependencies:" >&2
+            echo "$leftovers" >&2
+            exit 1
+          fi
+          ls -l bin lib
+
+      - name: Smoke-test the package
+        # Runs the *packaged* binary, which is what proves the bundled dylibs
+        # resolve, the ad-hoc signature survived, and the relocated datadir
+        # lookup finds the injected firmware -- note the deliberate absence of
+        # -bios. The firmware banner appears within a second or two of the
+        # machine starting; the sleep is slack, not a wait for progress.
+        run: |
+          cd dist/qemu
+          ./bin/qemu-system-ia64 -version
+          ./bin/qemu-system-ia64 -machine help | grep -E '^(zx1|460gx) '
+          ./bin/qemu-system-ia64 \
+            -M zx1,firmware-console=serial,nvram=none,firmware-boot-timeout=1 \
+            -m 1G -display none -monitor none -serial file:"$PWD/boot.log" &
+          pid=$!
+          sleep 30
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          cat boot.log
+          grep -q "qemu-system-ia64 Firmware" boot.log
+          rm -f boot.log
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-system-ia64-macos-${{ matrix.arch }}
+          path: dist/qemu/
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-build-logs
+          path: |
+            build/meson-logs/
+            build/ninja-build.log
+          if-no-files-found: ignore
