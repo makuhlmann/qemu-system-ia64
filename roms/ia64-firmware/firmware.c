@@ -13881,14 +13881,14 @@ static void fw_mask_legacy_pics(void)
 }
 
 /*
- * Move the 460GX's own configuration space off bus 0.  The chipset's SAC,
- * SDC, memory cards and expander ports answer configuration cycles on the
- * bus the CBN register names, and CBN comes out of reset as 0 -- so until
- * firmware programs it the chipset shadows device numbers on the
- * compatibility bus, where the platform's real devices live (460GX SSDM
- * 2.3.2, Table 2-1).  Program it to the bus number the vendor firmware
- * uses.  CBN itself is reached at bus 0 device 10h, which is reserved for
- * exactly this and is never forwarded.
+ * Give the 460GX's own configuration space its bus number.  The chipset's
+ * SAC, SDC, memory cards and expander ports answer configuration cycles on
+ * the bus the CBN register names; it comes out of reset as FFh, and the
+ * vendor firmware moves it to EEh once it has finished enumerating (460GX
+ * SSDM 2.3.2, Table 2-1).  Program the same number so the chipset sits where
+ * that firmware, and everything written against it, expects.  CBN itself is
+ * reached at bus 0 device 10h, which is reserved for exactly this and is
+ * never forwarded.
  *
  * Nothing here needs the chipset's registers -- this firmware enumerates
  * through ECAM -- but leaving CBN at 0 would leave CF8/CFC answering for

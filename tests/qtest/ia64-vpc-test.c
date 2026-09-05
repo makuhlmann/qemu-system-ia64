@@ -1834,22 +1834,30 @@ static void test_nvram_commit_and_restart(void)
  */
 /*
  * In realfw mode the 460GX chipset answers CF8/CFC configuration cycles for
- * its own functions on bus CBN.  Each one must report its real identity:
+ * its own functions on bus CBN -- FFh out of reset.  Each one must report its
+ * real identity:
  * a zero vendor id is neither "present" nor the architected "absent"
  * 0xffff, so firmware probing the chipset cannot tell what it found.
  */
 #define IA64_REALFW_CF8         0x0cf8U
 #define IA64_REALFW_CFC         0x0cfcU
 
-static uint32_t realfw_cfg_readl(QTestState *qts, uint8_t dev, uint8_t fn,
-                                 uint8_t reg)
+static uint32_t realfw_cfg_readl_bus(QTestState *qts, uint8_t bus,
+                                     uint8_t dev, uint8_t fn, uint8_t reg)
 {
     qtest_writel(qts, IA64_LEGACY_IO_BASE +
                  ia64_sparse_io_offset(IA64_REALFW_CF8),
-                 0x80000000U | ((uint32_t)dev << 11) |
+                 0x80000000U | ((uint32_t)bus << 16) | ((uint32_t)dev << 11) |
                  ((uint32_t)fn << 8) | reg);
     return qtest_readl(qts, IA64_LEGACY_IO_BASE +
                        ia64_sparse_io_offset(IA64_REALFW_CFC));
+}
+
+/* The chipset's own functions, on bus CBN -- FFh out of reset. */
+static uint32_t realfw_cfg_readl(QTestState *qts, uint8_t dev, uint8_t fn,
+                                 uint8_t reg)
+{
+    return realfw_cfg_readl_bus(qts, 0xff, dev, fn, reg);
 }
 
 /*
@@ -2471,9 +2479,10 @@ static void test_460gx_smbus_hwmon(void)
  * the mechanism the vendor firmware enumerates through.  It is real hardware
  * and the machine carries it whichever firmware runs.  Device numbers on the
  * bus CBN names are the chipset's own functions (Table 2-1); every other
- * address forwards to the PCI bus.  CBN resets to 0, so until firmware
- * programs it the chipset shadows the compatibility bus -- which is why our
- * firmware programs it, as the vendor firmware does.
+ * address forwards to the PCI bus.  CBN resets to FFh, so the chipset's own
+ * functions answer on bus FF from power-on and the compatibility bus shows
+ * its real devices immediately; the vendor firmware programs the chipset
+ * there through POST and moves it to 0xEE only at the end of enumeration.
  */
 #define IA64_CF8_PORT   0xcf8
 #define IA64_CFC_PORT   0xcfc
@@ -2545,8 +2554,26 @@ static void test_460gx_config_ports(void)
 {
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
 
-    /* Out of reset CBN is 0 and the chipset sits on the compatibility bus. */
-    g_assert_cmphex(cf8_readl(qts, 0, 0x00, 0, PCI_VENDOR_ID), ==, 0x84e08086);
+    /* Out of reset CBN is FFh: the chipset answers there, not on bus 0. */
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0x84e08086);
+    g_assert_cmphex(cf8_readl(qts, 0xff, IA64_CBN_DEVICE, 0, 0x40) & 0xff,
+                    ==, 0xff);
+    /* ... and bus 0 is the real compatibility bus: the PID at 00:00.0. */
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_460GX_PID_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x123d8086);
+    g_assert_cmphex(cf8_readl(qts, 0, 5, 0, PCI_VENDOR_ID), ==, 0x12298086);
+    /* The i2000's expander ports: WXB at 12h/13h, GXB at 14h (three fns). */
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x12, 1, PCI_VENDOR_ID), ==,
+                    0x84e68086);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x13, 1, PCI_VENDOR_ID), ==,
+                    0x84e68086);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, PCI_VENDOR_ID), ==,
+                    0x84ea8086);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 2, PCI_VENDOR_ID), ==,
+                    0x84e28086);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x15, 0, PCI_VENDOR_ID), ==,
+                    0xffffffff);
 
     /* Program CBN through the device reserved for it, as firmware does. */
     cf8_select(qts, 0, IA64_CBN_DEVICE, 0, IA64_CBN_REG);
@@ -2576,13 +2603,14 @@ static void test_460gx_config_ports(void)
      * Port 0xCF9 is the reset control, aliased with byte 1 of the config
      * address: a byte write with RST_CPU set resets the system, while the
      * dword writes software addresses the config register with do not.  The
-     * reset re-seeds the chipset store, so CBN coming back as 0 -- the
-     * chipset answering on the compatibility bus again -- is what shows the
-     * machine went through reset.
+     * reset re-seeds the chipset store, so CBN coming back as FFh -- the
+     * chipset answering on bus FF again -- is what shows the machine went
+     * through reset.
      */
     qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0xcf9),
                  0x06);
-    g_assert_cmphex(cf8_readl(qts, 0, 0x00, 0, PCI_VENDOR_ID), ==, 0x84e08086);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0x84e08086);
     g_assert_cmphex(cf8_readl(qts, IA64_CBN_BUS, 0x00, 0, PCI_VENDOR_ID), ==,
                     0xffffffff);
     qtest_quit(qts);
@@ -2689,10 +2717,10 @@ static void test_realfw_chipset_identity(void)
      * which is what lets the firmware's frequency detection finish instead
      * of rebooting through 0xCF9 forever (plans/phase5 SESSION 17).
      */
-    g_assert_cmphex(realfw_cfg_readl(qts, IA64_460GX_IFB_SLOT, 0,
-                                     PCI_VENDOR_ID), ==, 0x76008086);
-    g_assert_cmphex(realfw_cfg_readl(qts, IA64_460GX_IFB_SLOT, 0, 0xd0) &
-                    0x8000, ==, 0x8000);
+    g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
+                                         PCI_VENDOR_ID), ==, 0x76008086);
+    g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0, 0xd0)
+                    & 0x8000, ==, 0x8000);
 
     qtest_quit(qts);
     g_assert_cmpint(g_unlink(path), ==, 0);

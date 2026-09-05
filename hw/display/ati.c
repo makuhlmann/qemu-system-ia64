@@ -2306,6 +2306,18 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
     VGACommonState *vga = &s->vga;
     I2CBus *i2cbus;
 
+    /*
+     * The Rage 128 answers expansion-ROM reads as soon as the ROM BAR's
+     * enable bit is set, memory decode or not.  The Intel SDV / HP i2000
+     * firmware relies on that: its PCI enumeration leaves the card's command
+     * register at bus-master-only (it treats the card as a second VGA and
+     * disables decode) and its CSM then reads the BIOS through the ROM BAR
+     * with Memory Space Enable still clear; the BIOS's own POST enables the
+     * card.  Without this the CSM reads zeros, skips the video POST and the
+     * console never comes up.
+     */
+    dev->rom_decodes_without_memory_enable = true;
+
 #ifndef CONFIG_PIXMAN
     if (s->use_pixman != 0) {
         warn_report("x-pixman != 0, not effective without PIXMAN");

@@ -4100,8 +4100,9 @@ static const MemoryRegionOps ia64_460gx_sac_ops = {
 };
 
 /*
- * 460GX CF8/CFC configuration space (realfw mode).  Bus CBN (reset 0)
- * carries the chipset's own devices (SSDM Table 2-1): dev 00h/01h SAC,
+ * 460GX CF8/CFC configuration space.  Bus CBN (reset FFh, programmed to
+ * EEh by both firmwares) carries the chipset's own devices (SSDM Table 2-1):
+ * dev 00h/01h SAC,
  * 04h SDC, 05h/06h Memory Card A/B (MAC; SPD EEPROMs tunnel through its
  * higher functions over I2C), dev 10h the CBN-programming device.  The
  * public SSDM documents none of the platform-setup register offsets
@@ -4117,7 +4118,7 @@ static const MemoryRegionOps ia64_460gx_sac_ops = {
  * PCI device on the compatibility bus, and this machine models it there.
  */
 static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
-                                                   0x10 };
+                                                   0x10, 0x12, 0x13, 0x14 };
 #define IA64_460GX_CFG_FN_SIZE   256
 #define IA64_460GX_CFG_DEV_SIZE  (8 * IA64_460GX_CFG_FN_SIZE)
 #define IA64_460GX_CFG_SIZE      \
@@ -4154,12 +4155,25 @@ static const uint8_t ia64_460gx_spd[64] = {
     [31] = 0x40,  /* module rank density: 256 MB */
 };
 
+
+/* The CBN register lives in expander port 0's function 0 (bus 0 dev 10h). */
+static uint8_t ia64_460gx_cbn(IA64VpcMachineState *s)
+{
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(ia64_460gx_chipset_devs); i++) {
+        if (ia64_460gx_chipset_devs[i] == IA64_460GX_CBN_DEV) {
+            return s->chipset_cfg[i * IA64_460GX_CFG_DEV_SIZE +
+                                  IA64_460GX_CBN_REG];
+        }
+    }
+    g_assert_not_reached();
+}
+
 static uint8_t *ia64_460gx_chipset_cfg(IA64VpcMachineState *s,
                                         uint8_t bus, uint8_t dev, uint8_t fn)
 {
-    uint8_t cbn = s->chipset_cfg[(ARRAY_SIZE(ia64_460gx_chipset_devs)
-                                         - 1) * IA64_460GX_CFG_DEV_SIZE +
-                                        IA64_460GX_CBN_REG];
+    uint8_t cbn = ia64_460gx_cbn(s);
     unsigned i;
 
     /* Dev 10h is always on bus 0; the rest live on bus CBN. */
@@ -4362,7 +4376,8 @@ static void ia64_vpc_init_chipset_identity(IA64VpcMachineState *s,
                                                   uint16_t class_id,
                                                   bool multifunction)
 {
-    uint8_t *cfg = ia64_460gx_chipset_cfg(s, 0, dev, fn);
+    uint8_t cbn = ia64_460gx_cbn(s);
+    uint8_t *cfg = ia64_460gx_chipset_cfg(s, cbn, dev, fn);
 
     if (cfg == NULL) {
         return;
@@ -4417,13 +4432,72 @@ static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
     ia64_vpc_init_chipset_identity(s, IA64_460GX_CBN_DEV, 1,
                                           0x84cb, 0x05,
                                           PCI_CLASS_BRIDGE_HOST, false);
+    /*
+     * The other expander ports the i2000 populates, at Table 2-1's
+     * device numbers: Expander 1 is the WXB with its two buses (12h/13h,
+     * fn1 the bridge, 84E6), Expander 2 the GXB (14h; fn1 the AGP bridge
+     * 84EA, fn2 its GART function 84E2).  Each port's fn0 is its
+     * downstream SAC face, as on port 0.  The vendor firmware scans for
+     * exactly these (ee:12.0/13.0/14.0 @48h, ee:12.1 @80h, ee:14.1/14.2) and
+     * decides which buses carry a window -- the graphics card behind the GXB
+     * stays disabled unless its port exists.
+     */
+    ia64_vpc_init_chipset_identity(s, 0x12, 0, 0x84e0, 0x03,
+                                          PCI_CLASS_BRIDGE_HOST, true);
+    ia64_vpc_init_chipset_identity(s, 0x12, 1, 0x84e6, 0x07,
+                                          PCI_CLASS_BRIDGE_HOST, false);
+    ia64_vpc_init_chipset_identity(s, 0x13, 0, 0x84e0, 0x03,
+                                          PCI_CLASS_BRIDGE_HOST, true);
+    ia64_vpc_init_chipset_identity(s, 0x13, 1, 0x84e6, 0x07,
+                                          PCI_CLASS_BRIDGE_HOST, false);
+    ia64_vpc_init_chipset_identity(s, 0x14, 0, 0x84e0, 0x03,
+                                          PCI_CLASS_BRIDGE_HOST, true);
+    ia64_vpc_init_chipset_identity(s, 0x14, 1, 0x84ea, 0x02,
+                                          PCI_CLASS_BRIDGE_HOST, false);
+    ia64_vpc_init_chipset_identity(s, 0x14, 2, 0x84e2, 0x02,
+                                          PCI_CLASS_BRIDGE_HOST, false);
+
+    /*
+     * CBN comes out of reset as FFh: the chipset's own functions answer on
+     * bus FF until firmware moves them.  The vendor firmware programs its
+     * SAC and expander ports there throughout POST and only writes 0xEE at
+     * the end of enumeration, so a store that reset CBN to 0 both dropped
+     * all of that programming and shadowed the compatibility bus's real
+     * devices 00h-05h behind the chipset's.
+     */
+    ia64_460gx_chipset_cfg(s, 0, IA64_460GX_CBN_DEV, 0)[IA64_460GX_CBN_REG] =
+        0xff;
+    /*
+     * The SAC's device-specific registers (40h-FFh of devices 00h/01h) are
+     * not documented in the SSDM.  The vendor firmware's early POST reads
+     * them before writing anything (it selects a register through 78h and
+     * reads 60h, and checks DEVNPRES at 70h), and it stops at POST 0x54 when
+     * they read as zero while it passes when they read as open bus -- which
+     * is what they were on this machine before bus FF was modelled.  Seed
+     * them with 0xFF and let writes stick.  The memory card (dev 05h) must
+     * not be seeded: its SPD/I2C tunnel reading 0xFF fails memory init at
+     * POST 0xF1.
+     */
+    {
+        unsigned i, fn;
+
+        for (i = 0; i < ARRAY_SIZE(ia64_460gx_chipset_devs); i++) {
+            if (ia64_460gx_chipset_devs[i] > 0x01) {
+                continue;
+            }
+            for (fn = 0; fn < 8; fn++) {
+                memset(s->chipset_cfg + i * IA64_460GX_CFG_DEV_SIZE +
+                       fn * IA64_460GX_CFG_FN_SIZE + 0x40, 0xff, 0xc0);
+            }
+        }
+    }
 
     /*
      * Memory Card A (dev 05h fn 0) claims presence with the MAC identity
      * (8086:84E3, rev B-1 = 03h; pci.ids, flagged unverified in
      * plans/460gx-config-space-notes.md).  Memory Card B stays absent.
      */
-    mac_a = ia64_460gx_chipset_cfg(s, 0, 0x05, 0);
+    mac_a = ia64_460gx_chipset_cfg(s, 0xff, 0x05, 0);
     stw_le_p(mac_a + PCI_VENDOR_ID, 0x8086);
     stw_le_p(mac_a + PCI_DEVICE_ID, 0x84e3);
     mac_a[PCI_REVISION_ID] = 0x03;

@@ -157,6 +157,13 @@ struct PCIDevice {
     char *romfile;
     uint32_t romsize;
     bool has_rom;
+    /*
+     * Decode the expansion ROM whenever its BAR enable bit is set, even with
+     * Memory Space Enable clear in the command register.  PCI 2.2 6.2.5.2
+     * requires both, but some adapters answer ROM cycles on the enable bit
+     * alone and firmware exists that depends on it (see hw/display/ati.c).
+     */
+    bool rom_decodes_without_memory_enable;
     MemoryRegion rom;
     int32_t rom_bar;
 

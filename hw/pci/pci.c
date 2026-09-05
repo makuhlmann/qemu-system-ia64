@@ -1679,7 +1679,8 @@ pcibus_t pci_bar_address(PCIDevice *d,
         return new_addr;
     }
 
-    if (!(cmd & PCI_COMMAND_MEMORY)) {
+    if (!(cmd & PCI_COMMAND_MEMORY) &&
+        !(reg == PCI_ROM_SLOT && d->rom_decodes_without_memory_enable)) {
         return PCI_BAR_UNMAPPED;
     }
     new_addr = pci_config_get_bar_addr(d, reg, type, size);
