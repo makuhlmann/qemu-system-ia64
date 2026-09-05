@@ -37,12 +37,21 @@ typedef struct Intel82468GXSMBusState {
 /*
  * The RTC is a 256-byte part in two 128-byte banks (SSDM 15.5.1).  The
  * standard bank answers at 0x70/0x71; the extended bank, a full 128 bytes of
- * battery-backed SRAM, answers at 0x72/0x73 only while RTCCFG (config offset
- * C8h) bit 2 "Upper RAM Enable" is set.  With that bit clear -- its reset
- * state, and where the vendor firmware leaves it -- 0x72/0x73 alias 0x70/0x71
- * and reach the standard bank instead, so firmware that writes its CMOS
- * configuration through one pair and reads it back through the other sees the
- * same bytes rather than open bus.
+ * battery-backed SRAM, answers at 0x72/0x73 while RTCCFG (config offset C8h)
+ * bit 2 "Upper RAM Enable" is set, and with the bit clear 0x72/0x73 alias
+ * 0x70/0x71 and reach the standard bank instead.
+ *
+ * The SSDM (11.1.20) gives RTCCFG a reset value of 00h.  The i2000's own
+ * firmware (v1.30) never writes RTCCFG, yet keeps its configuration store in
+ * the extended bank through 0x72/0x73 -- including an 0xFF fill of bytes
+ * 08h-1Fh during POST.  Under the documented reset value that fill would land
+ * on the standard bank's registers A-D, put the divider chain in reset and set
+ * SET, and the clock would stop for good (which is exactly what happened here:
+ * the firmware's PXE timeouts are driven by GetTime and never expired).  A
+ * board whose firmware halted its own clock on every boot could not have
+ * shipped, so the silicon must present the extended bank at 0x72/0x73 out of
+ * reset; the bit therefore resets set here, and stays writable so software can
+ * still select the alias.
  */
 #define IFB_FREQ_MAILBOX       0xd0
 #define IFB_FREQ_MAILBOX_DONE  0x8000
@@ -324,7 +333,8 @@ static void ifb_lpc_reset(DeviceState *dev)
     pci_set_word(pci->config + 0x84, 0x0500);
     pci_set_word(pci->config + 0x90, 0);
     pci_set_long(pci->config + 0x92, 0);
-    pci->config[0xc8] = 0;
+    pci->config[0xc8] = IFB_RTC_CFG_UPPER_EN;
+    ifb_rtc_bank_update(s);
     pci_set_long(pci->config + 0xd0, 1);
     pci->config[0xd4] = 0;
     memset(pci->config + 0xe0, 0, 9);

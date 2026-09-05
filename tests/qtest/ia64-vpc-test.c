@@ -2301,13 +2301,30 @@ static void test_460gx_south_bridge_rtc_banks(void)
                              ((uint64_t)IA64_460GX_IFB_SLOT << 15);
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
 
-    /* RTCCFG resets to zero, so 0x72/0x73 alias the standard bank. */
-    g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG), ==, 0x00);
+    /*
+     * Out of reset 0x72/0x73 reach the extended bank: Upper RAM Enable is
+     * set, contrary to the SSDM's 00h default, because the vendor firmware
+     * never sets it and still keeps its configuration there (it 0xFF-fills
+     * extended bytes 08h-1Fh during POST, which through the alias would halt
+     * the clock).  So a write through 0x70/0x71 must not show up at 0x72/0x73.
+     */
+    g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG), ==,
+                    IA64_RTCCFG_UPPER_EN);
     rtc_bank_write(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH, 0x5a);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0x00);
+    /* Filling extended 0Ah-0Dh leaves the clock's registers A-D alone. */
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x0a, 0xff);
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x0b, 0xff);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x0a) & 0x70, ==, 0x20);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x0b) & 0x80, ==, 0x00);
+
+    /* Clearing the bit makes 0x72/0x73 alias the standard bank. */
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, 0x00);
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
                     ==, 0x5a);
 
-    /* With Upper RAM Enable set they reach a bank of their own. */
+    /* With Upper RAM Enable set again they reach their own bank. */
     qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
     g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG) &
                     IA64_RTCCFG_UPPER_EN, ==, IA64_RTCCFG_UPPER_EN);
