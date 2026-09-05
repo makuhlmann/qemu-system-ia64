@@ -1320,6 +1320,16 @@ void ide_atapi_cmd(IDEState *s)
     uint8_t *buf = s->io_buffer;
     const struct AtapiCmd *cmd = &atapi_cmd_table[s->io_buffer[0]];
 
+    /*
+     * The packet has just been delivered; a device raises BSY while it
+     * processes it (ATA/ATAPI-5 packet command protocol), and the vendor
+     * i2000 firmware waits for that before it waits for DRQ.  Same one-shot
+     * latch as ide_bus_exec_cmd applies after the command byte.
+     */
+    if (s->bus->bsy_after_cmd) {
+        s->bsy_latched = true;
+    }
+
     trace_ide_atapi_cmd(s, s->io_buffer[0]);
 
     if (trace_event_get_state_backends(TRACE_IDE_ATAPI_CMD_PACKET)) {

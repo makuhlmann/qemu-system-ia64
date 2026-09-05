@@ -2323,7 +2323,8 @@ uint32_t ide_ioport_read(void *opaque, uint32_t addr)
         } else {
             ret = s->status;
             if (s->bsy_latched) {
-                ret |= BUSY_STAT;
+                /* While BSY is set the other bits are not yet valid. */
+                ret = (ret & ~(DRQ_STAT | ERR_STAT)) | BUSY_STAT;
                 s->bsy_latched = false;
             }
         }
@@ -2347,7 +2348,7 @@ uint32_t ide_status_read(void *opaque, uint32_t addr)
     } else {
         ret = s->status;
         if (s->bsy_latched) {
-            ret |= BUSY_STAT;
+            ret = (ret & ~(DRQ_STAT | ERR_STAT)) | BUSY_STAT;
             s->bsy_latched = false;
         }
     }
@@ -2843,6 +2844,16 @@ void ide_bus_init_output_irq(IDEBus *bus, qemu_irq irq_out)
 
 void ide_bus_set_irq(IDEBus *bus)
 {
+    /*
+     * The device is asserting its interrupt, so the command is past the
+     * window in which it holds BSY: whatever the status register now says is
+     * what software must see.  Drop a pending one-shot BSY (see
+     * ide_bus_exec_cmd) rather than injecting it into a later phase -- the
+     * vendor i2000 firmware treats BSY after it has read a data-phase
+     * interrupt reason as a failed command and abandons the transfer.
+     */
+    bus->ifs[0].bsy_latched = false;
+    bus->ifs[1].bsy_latched = false;
     if (!(bus->cmd & IDE_CTRL_DISABLE_IRQ)) {
         qemu_irq_raise(bus->irq);
     }
