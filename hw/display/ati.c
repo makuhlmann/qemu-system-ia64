@@ -2437,6 +2437,14 @@ static void ati_vga_reset(DeviceState *dev)
     ati_vga_update_irq(s);
 
     /*
+     * Every register goes back to its power-up value.  That includes
+     * CRTC_GEN_CNTL, whose enables were surviving a reset and kept the last
+     * frame on screen until the BIOS re-initialised the card; a reset turns
+     * the display off until then, as it does on the real part.
+     */
+    memset(&s->regs, 0, sizeof(s->regs));
+
+    /*
      * PLL and init-register power-up values from the RAGE 128 PRO Register
      * Reference Guide.  PLL indices follow the chip's PLL address space:
      * 0x01 CLK_PIN_CNTL, 0x02 PPLL_CNTL, 0x0b XPLL_CNTL, 0x0c XDLL_CNTL,
