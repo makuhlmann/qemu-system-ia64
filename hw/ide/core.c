@@ -2205,6 +2205,20 @@ void ide_bus_exec_cmd(IDEBus *bus, uint32_t val)
         ide_cmd_done(s);
         ide_bus_set_irq(s->bus);
     }
+    /*
+     * A device sets BSY within 400 ns of a command being written (ATA-5
+     * 9.7), so software may read the status register right away and see it
+     * busy before the result appears.  The emulated command completes
+     * inside the write, which means BSY is never visible -- and firmware
+     * that probes a drive by waiting for BSY to assert before it waits for
+     * it to clear (the Intel SDV / HP i2000 firmware's IDE driver polls a
+     * thousand times for it after IDENTIFY PACKET DEVICE) concludes there is
+     * no device.  On a bus that asks for it, report BSY once on the first
+     * status read after each command.
+     */
+    if (bus->bsy_after_cmd) {
+        s->bsy_latched = true;
+    }
 }
 
 /* IOport [R]ead [R]egisters */
@@ -2308,6 +2322,10 @@ uint32_t ide_ioport_read(void *opaque, uint32_t addr)
             ret = 0;
         } else {
             ret = s->status;
+            if (s->bsy_latched) {
+                ret |= BUSY_STAT;
+                s->bsy_latched = false;
+            }
         }
         qemu_irq_lower(bus->irq);
         break;
@@ -2328,6 +2346,10 @@ uint32_t ide_status_read(void *opaque, uint32_t addr)
         ret = 0;
     } else {
         ret = s->status;
+        if (s->bsy_latched) {
+            ret |= BUSY_STAT;
+            s->bsy_latched = false;
+        }
     }
 
     trace_ide_status_read(addr, ret, bus, s);

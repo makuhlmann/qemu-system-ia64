@@ -83,6 +83,7 @@ struct IDEState {
 
     uint8_t select;
     uint8_t status;
+    bool bsy_latched;
 
     bool io8;
     bool reset_reverts;
