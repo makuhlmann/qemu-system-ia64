@@ -576,6 +576,11 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
         env->cr[cr_num] = value;
         ia64_itm_update(env, env->cr[IA64_CR_ITM]);
         break;
+    case IA64_CR_LRR0:
+    case IA64_CR_LRR1:
+        env->cr[cr_num] = value;
+        ia64_lint_lrr_written(env, cr_num - IA64_CR_LRR0);
+        break;
     default:
         env->cr[cr_num] = value;
         break;

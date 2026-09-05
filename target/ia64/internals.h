@@ -65,6 +65,8 @@ typedef struct IA64InterruptState {
     /* Architected Local SAPIC and pending external interrupt state. */
     uint8_t pending_extint;
     bool pal_halt_wake;
+    /* Level of the LINT0/LINT1 pins as last driven by the platform. */
+    bool lint_level[2];
     uint64_t sapic_irr[4];
     uint64_t sapic_isr[4];
 

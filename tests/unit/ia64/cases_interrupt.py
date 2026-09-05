@@ -15,6 +15,9 @@ from .encoding import (
     IA64_BREAK_VECTOR,
     IA64_CR_ITM,
     IA64_CR_ITV,
+    IA64_LRR_DM_EXTINT,
+    IA64_LRR_TM,
+    IA64_CR_LRR0,
     IA64_CR_SAPIC_EOI,
     IA64_CR_SAPIC_IRR3,
     IA64_CR_SAPIC_IVR,
@@ -141,6 +144,8 @@ from .encoding import (
     ssm,
     setf_sig,
     st1_postinc,
+    tbit_z,
+    ld1,
     st2,
     st8,
     st8_postinc,
@@ -1035,6 +1040,91 @@ test_sapic_same_class_higher_vector_preempts = require_registers(
         "r8": 0x5a,
         "r31": 2,
     }, entry=0x10)
+
+
+# 460GX: the south bridge's 8259 drives the processor's LINT0 pin, steered by
+# LRR0.  The pin must do nothing while LRR0 keeps its masked reset value and
+# pend ExtINT (vector 0, level) once LRR0 is programmed the way the SDV
+# firmware does (0x8700); the INTA byte then fetches the PIC's vector.  Ports
+# are reached through the sparse legacy I/O window in physical mode.
+def _sparse_port(port):
+    return (0x8000000000000000 | 0xffffc000000 |
+            ((port >> 2) << 12) | (port & 0xfff))
+
+
+def lint0_extint_program():
+    psr_ic = 1 << 13
+    ivr_spurious = 0x0f
+    lrr0_extint_level = IA64_LRR_TM | IA64_LRR_DM_EXTINT
+
+    return [
+        # 8259 master: ICW1-4 with vector base 8, then unmask IRQ 0 only.
+        (0x10, *movl_mlx(2, _sparse_port(0x20))),
+        (0x20, *movl_mlx(3, _sparse_port(0x21))),
+        (0x30, 0x00, adds(4, 0x11, 0), nop_i(), nop_i()),
+        (0x40, 0x00, st1_postinc(2, 4, 0), nop_i(), nop_i()),
+        (0x50, 0x00, adds(4, 0x08, 0), nop_i(), nop_i()),
+        (0x60, 0x00, st1_postinc(3, 4, 0), nop_i(), nop_i()),
+        (0x70, 0x00, adds(4, 0x04, 0), nop_i(), nop_i()),
+        (0x80, 0x00, st1_postinc(3, 4, 0), nop_i(), nop_i()),
+        (0x90, 0x00, adds(4, 0x01, 0), nop_i(), nop_i()),
+        (0xa0, 0x00, st1_postinc(3, 4, 0), nop_i(), nop_i()),
+        (0xb0, 0x00, adds(4, 0xfe, 0), nop_i(), nop_i()),
+        (0xc0, 0x00, st1_postinc(3, 4, 0), nop_i(), nop_i()),
+        # 8254 counter 0: mode 2, count 0x0010 -> IRQ 0 within microseconds.
+        (0xd0, *movl_mlx(2, _sparse_port(0x43))),
+        (0xe0, *movl_mlx(3, _sparse_port(0x40))),
+        (0xf0, 0x00, adds(4, 0x34, 0), nop_i(), nop_i()),
+        (0x100, 0x00, st1_postinc(2, 4, 0), nop_i(), nop_i()),
+        (0x110, 0x00, adds(4, 0x10, 0), nop_i(), nop_i()),
+        (0x120, 0x00, st1_postinc(3, 4, 0), nop_i(), nop_i()),
+        (0x130, 0x00, st1_postinc(3, 0, 0), nop_i(), nop_i()),
+        # psr.ic on so IVR is readable; interrupts stay off (psr.i = 0).
+        (0x140, *movl_mlx(19, psr_ic)),
+        (0x150, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        # Wait for the tick: poll the master's IRR (OCW3 read IRR) until
+        # bit 0 is set, bounded by lc.
+        (0x160, *movl_mlx(2, _sparse_port(0x20))),
+        (0x170, *movl_mlx(8, 0x100000)),
+        (0x180, 0x02, nop_m(), mov_lc_gr(8), nop_i()),
+        (0x190, 0x00, adds(4, 0x0a, 0), nop_i(), nop_i()),
+        (0x1a0, 0x00, st1_postinc(2, 4, 0), nop_i(), nop_i()),
+        (0x1b0, 0x00, ld1(5, 2), nop_i(), nop_i()),
+        (0x1c0, 0x00, nop_m(), tbit_z(6, 7, 5, 0), nop_i()),
+        (0x1d0, 0x10, nop_m(), nop_i(), br_cloop(0x1d0, 0x1b0, qp=6)),
+        # LRR0 still holds its masked reset value: nothing pended.
+        (0x1e0, 0x00, mov_m_cr_gr(9, IA64_CR_SAPIC_IVR), nop_i(), nop_i()),
+        # Program LRR0 for a level ExtINT as the firmware does; the asserted
+        # INTR line now pends vector 0.
+        (0x1f0, *movl_mlx(3, lrr0_extint_level)),
+        (0x200, 0x00, mov_m_gr_cr(3, IA64_CR_LRR0), nop_i(), nop_i()),
+        (0x210, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x220, 0x00, mov_m_cr_gr(10, IA64_CR_SAPIC_IVR), nop_i(), nop_i()),
+        # The INTA byte in the processor interrupt block runs the 8259 cycle.
+        (0x230, *movl_mlx(2, 0x80000000fefe0000)),
+        (0x240, 0x00, ld1(11, 2), nop_i(), nop_i()),
+        # Masking the pin withdraws the level indication: IVR is spurious
+        # again even though the PIC still holds an in-service IRQ 0.
+        (0x250, 0x00, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), nop_i(), nop_i()),
+        (0x260, *movl_mlx(3, IA64_VECTOR_MASKED | lrr0_extint_level)),
+        (0x270, 0x00, mov_m_gr_cr(3, IA64_CR_LRR0), nop_i(), nop_i()),
+        (0x280, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x290, 0x00, mov_m_cr_gr(12, IA64_CR_SAPIC_IVR), nop_i(), nop_i()),
+        (0x2a0, 0x10, nop_m(), nop_i(), br_cond(0x2a0, 0x2a0)),
+    ]
+
+
+test_lint0_follows_lrr0_mask_and_extint = require_registers(
+    "lint0_follows_lrr0_mask_and_extint",
+    lint0_extint_program(),
+    {
+        "ip": 0x2a0,
+        "exception": IA64_EXCP_NONE,
+        "r9": 0x0f,
+        "r10": 0x00,
+        "r11": 0x08,
+        "r12": 0x0f,
+    }, entry=0x10, cpu="merced", machine="460gx")
 
 test_masked_itv_discards_due_timer = require_registers(
     "masked_itv_discards_due_timer", [
@@ -4872,6 +4962,7 @@ CASE_NAMES = (
     'timer_cover_rfi_preserves_large_frame_halfword_rmw',
     'timer_interrupt_preserves_banked_word_rmw',
     'sapic_extint_masks_external_until_eoi',
+    'lint0_follows_lrr0_mask_and_extint',
     'sapic_same_class_higher_vector_preempts',
     'timer_interrupt_exits_chained_loop_after_virtual_deadline',
     'tpr_mmi_masks_timer_until_cleared',

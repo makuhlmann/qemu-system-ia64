@@ -37,8 +37,6 @@ static bool ia64_cr_write_is_plain_store(uint32_t cr_num)
     case IA64_CR_IHA:
     case IA64_CR_PMV:
     case IA64_CR_CMCV:
-    case IA64_CR_LRR0:
-    case IA64_CR_LRR1:
         return true;
     default:
         return false;

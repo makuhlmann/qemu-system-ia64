@@ -54,7 +54,8 @@ def ia32_environment_bundles(address, target, reg=31,
 def run_program(qemu, bundles, entry=0x10, alat="full",
                 terminal_ip=None, expected=None, timeout=2.0,
                 name="ia64-microprogram", poll_initial_s=0.001,
-                poll_max_s=0.020, cpu=None, smp="1", memory=None):
+                poll_max_s=0.020, cpu=None, smp="1", memory=None,
+                machine="ia64-vpc"):
     """Run until an explicit architectural terminal state."""
     expected = dict(expected or {})
     if terminal_ip is None:
@@ -75,6 +76,7 @@ def run_program(qemu, bundles, entry=0x10, alat="full",
                               poll_max_s=poll_max_s,
                               predicate=predicate),
         machine_args=(() if alat is None else (f"alat={alat}",)),
+        machine=machine,
         cpu=cpu,
         smp=smp,
         memory=memory,
@@ -151,10 +153,11 @@ def run_program_jit(qemu, bundles, entry=0x10, terminal_ip=None, memory=None):
 
 
 def require_registers(name, bundles, expected, entry=0x10, alat="full",
-                      cpu=None, smp="1"):
+                      cpu=None, smp="1", machine="ia64-vpc"):
     def tc(qemu):
         run_program(qemu, bundles, entry=entry, alat=alat,
-                    expected=expected, name=name, cpu=cpu, smp=smp)
+                    expected=expected, name=name, cpu=cpu, smp=smp,
+                    machine=machine)
     features = set()
     if alat is not None:
         features.add(f"alat:{alat}")
@@ -162,6 +165,8 @@ def require_registers(name, bundles, expected, entry=0x10, alat="full",
         features.add(f"cpu-model:{cpu}")
     if smp != "1":
         features.add("smp")
+    if machine != "ia64-vpc":
+        features.add(f"machine:{machine}")
     return IA64Case(
         name=name, runner=tc,
         bundles=tuple(tuple(bundle) for bundle in bundles),

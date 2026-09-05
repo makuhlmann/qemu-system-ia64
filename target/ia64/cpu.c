@@ -867,6 +867,14 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.impl_rid_bits = icc->impl_rid_bits;
     cpu->env.impl_key_bits = icc->impl_key_bits;
     /*
+     * The LINT0/LINT1 pins start masked: the architecture leaves LRR0-1
+     * undefined out of reset and firmware programs them before it relies on
+     * a pin (SDM vol 2 5.8.3.9), and nothing must reach the SAPIC through a
+     * pin nobody has steered yet.
+     */
+    cpu->env.cr[IA64_CR_LRR0] = 1ULL << 16;
+    cpu->env.cr[IA64_CR_LRR1] = 1ULL << 16;
+    /*
      * Bound of the persistent region-7 KSEG physical alias (see
      * ia64_sal_boot_identity_pa_type()): the kernel reaches KSEG0 structures
      * through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE.  Clamp the

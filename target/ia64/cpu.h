@@ -1590,7 +1590,8 @@ void ia64_rse_delivery_check(CPUIA64State *env, int excp);
 
 CPUState *ia64_cpu_by_sapic_id(uint8_t id, uint8_t eid);
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector);
-void ia64_sapic_set_extint(CPUState *cs, int level);
+void ia64_cpu_set_lint(CPUState *cs, int pin, int level);
+void ia64_lint_lrr_written(CPUIA64State *env, int pin);
 void ia64_sapic_update_interrupt(CPUIA64State *env);
 bool ia64_sapic_has_pending(CPUIA64State *env);
 int  ia64_sapic_accept(CPUIA64State *env);

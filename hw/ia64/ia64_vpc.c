@@ -4545,19 +4545,19 @@ static void ia64_vpc_init_460gx_chipset(IA64VpcMachineState *s,
 
 
 /*
- * The master 8259's INTR line, delivered to the boot processor as an IA-64
- * ExtINT (SAPIC vector 0): while the PIC asserts INTR the processor takes an
- * external interrupt whose IVR reads 0, and firmware then fetches the real
- * 8-bit vector from the PIC itself.  ExtINT is level-sensitive, so forward the
- * line state directly -- de-asserting it (for example when firmware masks the
- * PIC before draining IVR) withdraws the pending vector 0.
+ * The master 8259's INTR line drives the boot processor's LINT0 pin.  What
+ * the processor makes of it is up to its Local Redirection Register 0: the
+ * SDV firmware programs a level-triggered ExtINT there for its legacy tick
+ * (IVR reads 0 and it fetches the 8-bit vector through the INTA byte), and
+ * an operating system masks the pin before it enables interrupts.  The PIC
+ * never programs the IOSAPIC; the pair's INTR does not pass through it.
  */
 static void ia64_vpc_extint(void *opaque, int n, int level)
 {
     (void)opaque;
     (void)n;
     if (first_cpu != NULL) {
-        ia64_sapic_set_extint(first_cpu, level);
+        ia64_cpu_set_lint(first_cpu, 0, level);
     }
 }
 

@@ -234,34 +234,94 @@ void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
     }
 }
 
-static void ia64_sapic_set_extint_work(CPUState *cs, run_on_cpu_data data)
-{
-    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+/*
+ * LINT0/LINT1: the two external interrupt pins wired straight to the
+ * processor.  Each is steered by its Local Redirection Register (SDM vol 2
+ * 5.8.3.9): the mask bit discards occurrences, the delivery mode picks the
+ * vector to pend (ExtINT is vector 0, NMI vector 2, INT the vector field),
+ * and the trigger mode decides whether the pending indication follows the
+ * pin (level) or latches on an inactive-to-active edge.  On the 460GX the
+ * south bridge's 8259 pair drives LINT0, which is how the SDV firmware runs
+ * its legacy tick (it programs LRR0 = 0x8700: level ExtINT) and why the XP
+ * HAL masks both pins (LRR = 0x10000) before it enables interrupts.
+ */
+#define IA64_LRR_VECTOR_MASK    0xffULL
+#define IA64_LRR_DM_SHIFT       8
+#define IA64_LRR_DM_MASK        7ULL
+#define IA64_LRR_DM_INT         0
+#define IA64_LRR_DM_NMI         4
+#define IA64_LRR_DM_EXTINT      7
+#define IA64_LRR_TM             (1ULL << 15)
+#define IA64_LRR_M              (1ULL << 16)
 
-    /*
-     * ExtINT is SAPIC vector 0 and is level-sensitive: it follows the external
-     * 8259 PIC's INTR line rather than latching like a normal edge-delivered
-     * vector.  Track the line directly in IRR bit 0 so that de-asserting INTR
-     * (for example when firmware masks the PIC before draining IVR) withdraws
-     * the pending ExtINT instead of leaving a phantom vector 0 that a stray
-     * IVR read would move in-service and never EOI.
-     */
-    if (data.host_int) {
-        cpu->env.interrupt.sapic_irr[0] |= 1ULL;
-    } else {
-        cpu->env.interrupt.sapic_irr[0] &= ~1ULL;
+static int ia64_lrr_vector(uint64_t lrr)
+{
+    switch ((lrr >> IA64_LRR_DM_SHIFT) & IA64_LRR_DM_MASK) {
+    case IA64_LRR_DM_INT: {
+        int vector = lrr & IA64_LRR_VECTOR_MASK;
+
+        return ia64_external_interrupt_vector_valid(vector) ? vector : -1;
     }
-    ia64_sapic_update_interrupt(&cpu->env);
+    case IA64_LRR_DM_NMI:
+        return 2;
+    case IA64_LRR_DM_EXTINT:
+        return 0;
+    default:
+        /* PMI and INIT delivery through a LINT pin are not modelled. */
+        return -1;
+    }
 }
 
-void ia64_sapic_set_extint(CPUState *cs, int level)
+static void ia64_lint_update(CPUIA64State *env, int pin, bool rising)
 {
-    run_on_cpu_data data = RUN_ON_CPU_HOST_INT(!!level);
+    uint64_t lrr = env->cr[IA64_CR_LRR0 + pin];
+    int vector = ia64_lrr_vector(lrr);
+    bool level = (lrr & IA64_LRR_TM) != 0;
+
+    if (vector < 0) {
+        return;
+    }
+    if (level) {
+        /*
+         * A level pin pends its vector while asserted and unmasked and
+         * withdraws it otherwise (deassertion clears the indication, and a
+         * masked pin's occurrences are not pended).
+         */
+        if (env->interrupt.lint_level[pin] && !(lrr & IA64_LRR_M)) {
+            env->interrupt.sapic_irr[vector / 64] |= 1ULL << (vector % 64);
+        } else {
+            env->interrupt.sapic_irr[vector / 64] &= ~(1ULL << (vector % 64));
+        }
+    } else if (rising && !(lrr & IA64_LRR_M)) {
+        env->interrupt.sapic_irr[vector / 64] |= 1ULL << (vector % 64);
+    }
+    ia64_sapic_update_interrupt(env);
+}
+
+void ia64_lint_lrr_written(CPUIA64State *env, int pin)
+{
+    ia64_lint_update(env, pin, false);
+}
+
+static void ia64_cpu_set_lint_work(CPUState *cs, run_on_cpu_data data)
+{
+    IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
+    int pin = data.host_int >> 1;
+    bool level = data.host_int & 1;
+    bool rising = level && !cpu->env.interrupt.lint_level[pin];
+
+    cpu->env.interrupt.lint_level[pin] = level;
+    ia64_lint_update(&cpu->env, pin, rising);
+}
+
+void ia64_cpu_set_lint(CPUState *cs, int pin, int level)
+{
+    run_on_cpu_data data = RUN_ON_CPU_HOST_INT((pin << 1) | !!level);
 
     if (qemu_cpu_is_self(cs)) {
-        ia64_sapic_set_extint_work(cs, data);
+        ia64_cpu_set_lint_work(cs, data);
     } else {
-        async_run_on_cpu(cs, ia64_sapic_set_extint_work, data);
+        async_run_on_cpu(cs, ia64_cpu_set_lint_work, data);
     }
 }
 
