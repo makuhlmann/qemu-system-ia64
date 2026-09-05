@@ -502,10 +502,19 @@ static inline void pflash_data_write(PFlashCFI01 *pfl, hwaddr offset,
         p = pfl->storage + offset;
     }
 
+    /*
+     * Programming can only clear bits: a cell holds a 1 after erase and a
+     * program pulse moves it to 0, never back (82802AB/AC datasheet 4.4, and
+     * every flash part this model stands for).  Firmware that keeps state
+     * machines in flash relies on it -- the SDV firmware advances a marker
+     * byte through 3F, 2F, 23, F5, F1 and expects to read back 21; a model
+     * that overwrote would leave F1, an invalid state that stops the next
+     * boot at QuickBoot.
+     */
     if (be) {
-        stn_be_p(p, width, value);
+        stn_be_p(p, width, ldn_be_p(p, width) & value);
     } else {
-        stn_le_p(p, width, value);
+        stn_le_p(p, width, ldn_le_p(p, width) & value);
     }
 }
 

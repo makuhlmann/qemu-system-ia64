@@ -2829,6 +2829,25 @@ static void test_realfw_flash_window(void)
         qtest_writeb(qts, blk, 0x91);
         g_assert_cmphex(qtest_readb(qts, blk + 2), ==, 0x00);
         qtest_writeb(qts, blk, 0xff);
+
+        /*
+         * Programming only clears bits.  The firmware walks a marker byte
+         * through 3F, 2F, 23, F5, F1 and reads back 21; an overwriting
+         * model leaves F1, which its QuickBoot rejects on the next boot.
+         */
+        {
+            static const uint8_t steps[] = { 0x3f, 0x2f, 0x23, 0xf5, 0xf1 };
+            const uint64_t mark = blk + 0x200;
+            unsigned k;
+
+            for (k = 0; k < ARRAY_SIZE(steps); k++) {
+                qtest_writeb(qts, blk, 0x50);
+                qtest_writeb(qts, mark, 0x40);
+                qtest_writeb(qts, mark, steps[k]);
+                qtest_writeb(qts, blk, 0xff);
+            }
+            g_assert_cmphex(qtest_readb(qts, mark), ==, 0x21);
+        }
     }
 
     /*
