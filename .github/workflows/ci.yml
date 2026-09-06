@@ -341,9 +341,11 @@ jobs:
         # Deliberately left out: GTK, whose dlopen'd module stack is fragile to
         # bundle on macOS, and gnutls / curl / libusb / usbredir / curses. Any
         # of them is one formula plus one --enable- switch away.
+        #
+        # sdl2 is left out for a harder reason -- see the configure step.
         run: |
           brew install --quiet glib pixman libslirp libpng jpeg-turbo zstd \
-                               sdl2 ninja ccache
+                               ninja ccache
           command -v pkg-config >/dev/null || brew install --quiet pkgconf
           # jpeg-turbo is keg-only, so its libjpeg.pc is off the default path.
           echo "PKG_CONFIG_PATH=$(brew --prefix jpeg-turbo)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
@@ -379,6 +381,17 @@ jobs:
         # compiler) and install-time strip. The perf cflags are probed because
         # Apple clang does not accept all of GCC's.
         #
+        # --disable-sdl is not just tidiness. Homebrew's SDL2 runs a modal
+        # NSAlert from a *dylib constructor*, so on a headless machine
+        # qemu-system-ia64 blocks in dyld's initializer pass and never reaches
+        # main() -- `qemu-system-ia64 -version` hung until the job timeout
+        # until this was found (sample(1) backtrace, 2026-09-06). It also drags
+        # libX11/libxcb/libXau/libXdmcp into what is meant to be a Cocoa
+        # package. Cocoa is the native display here and SDL adds nothing on
+        # macOS; Homebrew's own qemu formula also builds --disable-sdl.
+        # --without-default-features already implies it -- it is spelled out so
+        # nobody re-enables it by reflex.
+        #
         # --disable-tools keeps qemu-img and friends out: it makes the package
         # minimal, and together with --disable-fdt (nothing on these machines
         # needs a device tree, and the internal libfdt is a downloaded meson
@@ -405,7 +418,7 @@ jobs:
             --without-default-features \
             --enable-system --enable-tcg \
             --enable-pixman --disable-fdt \
-            --enable-cocoa --enable-sdl \
+            --enable-cocoa --disable-sdl \
             --enable-vnc --enable-png -Dvnc_jpeg=enabled \
             -Dzstd=enabled --enable-slirp \
             -Dcoreaudio=enabled --audio-drv-list=coreaudio \
