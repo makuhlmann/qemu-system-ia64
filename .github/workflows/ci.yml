@@ -539,22 +539,84 @@ jobs:
         # Runs the *packaged* binary, which is what proves the bundled dylibs
         # resolve, the ad-hoc signature survived, and the relocated datadir
         # lookup finds the injected firmware -- note the deliberate absence of
-        # -bios. The firmware banner appears within a second or two of the
-        # machine starting; the sleep is slack, not a wait for progress.
+        # -bios.
+        #
+        # Everything here is bounded and announced, because the first version
+        # of this step hung until the job timeout with nothing to show for it.
+        # Two ways that happens, both closed off below:
+        #
+        #  - a foreground run that never returns. macOS has no timeout(1), so
+        #    run() polls instead, and on expiry dumps the process's stacks with
+        #    sample(1) before killing it -- a hang here is expensive to
+        #    diagnose across a CI round trip, so pay for the backtrace once.
+        #    The "==>" markers say which command was running.
+        #  - a *background* run that outlives the script. The Actions runner
+        #    holds a step open until every process inheriting its stdout pipe
+        #    exits, so the emulator gets its own log files and /dev/null stdin,
+        #    is polled for progress rather than slept at, and is escalated to
+        #    SIGKILL if SIGTERM does not take.
+        timeout-minutes: 10
         run: |
           cd dist/qemu
-          ./bin/qemu-system-ia64 -version
-          ./bin/qemu-system-ia64 -machine help | grep -E '^(zx1|460gx) '
+
+          run() {   # run <seconds> <description> <command...>
+            secs=$1; what=$2; shift 2
+            echo "==> $what (limit ${secs}s)"
+            "$@" &
+            run_pid=$!
+            waited=0
+            while [ "$waited" -lt "$secs" ] && kill -0 "$run_pid" 2>/dev/null; do
+              sleep 1
+              waited=$((waited + 1))
+            done
+            if kill -0 "$run_pid" 2>/dev/null; then
+              echo "!!! $what still running after ${secs}s; its stacks:" >&2
+              sample "$run_pid" 3 2>&1 | head -100 || true
+              kill -9 "$run_pid" 2>/dev/null || true
+              wait "$run_pid" 2>/dev/null || true
+              return 124
+            fi
+            wait "$run_pid"
+          }
+
+          run 60 "qemu-system-ia64 -version" ./bin/qemu-system-ia64 -version
+          run 60 "machine list" ./bin/qemu-system-ia64 -machine help > machines.txt
+          cat machines.txt
+          grep -E '^(zx1|460gx) ' machines.txt
+
+          echo "==> firmware boot (no -bios: the package must find its own)"
           ./bin/qemu-system-ia64 \
             -M zx1,firmware-console=serial,nvram=none,firmware-boot-timeout=1 \
-            -m 1G -display none -monitor none -serial file:"$PWD/boot.log" &
+            -m 1G -display none -monitor none -serial file:"$PWD/boot.log" \
+            </dev/null >qemu-out.log 2>&1 &
           pid=$!
-          sleep 30
+          # The banner lands a second or two in; poll for it instead of
+          # sleeping blind, and stop early once the emulator has proved itself.
+          for _ in $(seq 1 60); do
+            if grep -q "qemu-system-ia64 Firmware" boot.log 2>/dev/null; then
+              break
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "!!! the emulator exited on its own" >&2
+              break
+            fi
+            sleep 1
+          done
           kill "$pid" 2>/dev/null || true
+          for _ in $(seq 1 10); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "!!! SIGTERM was ignored, escalating to SIGKILL" >&2
+            kill -9 "$pid" 2>/dev/null || true
+          fi
           wait "$pid" 2>/dev/null || true
-          cat boot.log
+
+          echo "--- serial console ---"; cat boot.log 2>/dev/null || true
+          echo "--- stdout/stderr ---"; cat qemu-out.log 2>/dev/null || true
           grep -q "qemu-system-ia64 Firmware" boot.log
-          rm -f boot.log
+          rm -f boot.log qemu-out.log machines.txt
 
       - name: Upload macOS package
         uses: actions/upload-artifact@v4
