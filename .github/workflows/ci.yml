@@ -490,6 +490,8 @@ jobs:
           Then run bin/qemu-system-ia64 from wherever you put it -- it finds
           share/qemu (the IA-64 firmware, video BIOSes, keymaps) next to
           itself, and the libraries it needs are in lib/.
+
+          Licensing, including that of the bundled libraries, is in licenses/.
           TXT
 
       - name: Bundle dependent dylibs and re-sign
@@ -499,6 +501,11 @@ jobs:
         run: |
           cd dist/qemu
           mkdir -p lib
+          # Where each dylib came from, so the licence step can map it back to
+          # its Homebrew formula -- the equivalent of the Windows packaging's
+          # `rpm -qf` lookup.
+          srcs="${RUNNER_TEMP:-/tmp}/bundled-sources.txt"
+          : > "$srcs"
           for pass in 1 2 3; do
             for f in bin/* lib/*.dylib; do
               [ -f "$f" ] || continue
@@ -509,6 +516,7 @@ jobs:
               if [ ! -f "lib/$base" ]; then
                 cp -L "$dep" "lib/$base"
                 chmod u+w "lib/$base"
+                echo "$dep" >> "$srcs"
               fi
             done
           done
@@ -546,6 +554,117 @@ jobs:
             exit 1
           fi
           ls -l bin lib
+
+      - name: Collect license files
+        # Same contract as the Windows and .deb packaging in build/: QEMU's own
+        # licence texts, plus one directory per bundled third-party library so
+        # that a self-contained binary distribution carries what the GPL, LGPL,
+        # MIT and BSD terms require of it.
+        #
+        # The Windows job maps each bundled DLL to its rpm and copies
+        # `rpm -q --licensefiles`. Homebrew has no equivalent query, and many
+        # formulae install no licence text at all, so this collects whatever
+        # the keg does ship and always records the formula's version and SPDX
+        # identifier beside it. Best-effort throughout: a library that ships
+        # nothing must not fail the build, exactly as in
+        # build/win-in-container.sh.
+        run: |
+          lic=dist/qemu/licenses
+          mkdir -p "$lic/thirdparty"
+          for f in LICENSE COPYING COPYING.LIB; do
+            [ -f "$f" ] && cp "$f" "$lic/QEMU-$f"
+          done
+
+          cellar="$(brew --cellar)"
+          srcs="${RUNNER_TEMP:-/tmp}/bundled-sources.txt"
+          list="${RUNNER_TEMP:-/tmp}/formulae.txt"
+          files="${RUNNER_TEMP:-/tmp}/keg-licences.txt"
+          map="${RUNNER_TEMP:-/tmp}/spdx.txt"
+          : > "$list"; : > "$map"
+
+          # A dylib's install name points through opt/<formula>, a symlink into
+          # Cellar/<formula>/<version>: resolve the directory and the first two
+          # components name the formula and the version it was built from.
+          while IFS= read -r dep; do
+            [ -n "$dep" ] || continue
+            dir=$(cd "$(dirname "$dep")" 2>/dev/null && pwd -P) || continue
+            case "$dir" in
+              "$cellar"/*) rest=${dir#"$cellar"/} ;;
+              *) echo "    not a Homebrew keg, skipping: $dep"; continue ;;
+            esac
+            name=${rest%%/*}
+            rest=${rest#*/}
+            version=${rest%%/*}
+            grep -q "^$name " "$list" 2>/dev/null || \
+              echo "$name $version" >> "$list"
+          done < "$srcs"
+
+          # One brew call for the lot. The SPDX id is what Homebrew actually
+          # records, and it is the fallback when a keg ships no text.
+          names=$(cut -d' ' -f1 "$list" | tr '\n' ' ')
+          if [ -n "$names" ]; then
+            brew info --json=v2 $names 2>/dev/null \
+              | jq -r '.formulae[] | "\(.name) \(.license // "")"' \
+              >> "$map" || true
+          fi
+
+          while read -r name version; do
+            [ -n "$name" ] || continue
+            keg="$cellar/$name/$version"
+            out="$lic/thirdparty/$name"
+            mkdir -p "$out"
+            find "$keg" -maxdepth 5 -type f \
+                 \( -iname 'LICENSE*' -o -iname 'COPYING*' \
+                    -o -iname 'COPYRIGHT*' -o -iname 'NOTICE*' \) \
+                 2>/dev/null | head -20 > "$files" || true
+            found=0
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              rel=${f#"$keg"/}
+              # Flatten the keg-relative path so two COPYINGs cannot collide.
+              cp "$f" "$out/${rel//\//_}" 2>/dev/null && found=$((found + 1)) || true
+            done < "$files"
+            spdx=$(awk -v n="$name" '$1 == n { $1 = ""; sub(/^ /, ""); print }' \
+                   "$map" 2>/dev/null || true)
+            {
+              echo "formula: $name"
+              echo "version: $version"
+              echo "license: ${spdx:-see the accompanying files}"
+              echo "source:  https://formulae.brew.sh/formula/$name"
+              if [ "$found" = 0 ]; then
+                echo
+                echo "This keg ships no licence text of its own. The SPDX"
+                echo "identifier above is Homebrew's record of its terms; the"
+                echo "full text is with the upstream project."
+              fi
+            } > "$out/FORMULA.txt"
+            echo "    $name $version (${spdx:-unknown}): $found licence file(s)"
+          done < "$list"
+
+          cat > "$lic/README.txt" <<'TXT'
+          qemu-system-ia64 -- license information
+          =======================================
+          The QEMU emulator is licensed under the GNU General Public License
+          version 2. QEMU-LICENSE describes the per-component licensing;
+          QEMU-COPYING is the GPLv2 text and QEMU-COPYING.LIB the LGPL text.
+
+          This package also bundles third-party runtime libraries (GLib,
+          pixman, libslirp, libpng, jpeg-turbo, zstd and their dependencies)
+          in ../lib. Each retains its own license. Whatever text each one
+          ships is under thirdparty/<formula>/, beside a FORMULA.txt recording
+          its version and SPDX license identifier.
+
+          Source code
+          -----------
+          Complete corresponding source for qemu-system-ia64 is at
+          https://github.com/makuhlmann/qemu-system-ia64 (branch: develop).
+          Upstream QEMU source is at https://www.qemu.org/. Source for the
+          bundled libraries is available from Homebrew
+          ("brew fetch --build-from-source <formula>") and the respective
+          upstream projects.
+          TXT
+
+          echo "QEMU licenses + $(ls -1 "$lic/thirdparty" | wc -l | tr -d ' ') third-party sets"
 
       - name: Smoke-test the package
         # Runs the *packaged* binary, which is what proves the bundled dylibs
