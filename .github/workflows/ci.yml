@@ -292,22 +292,21 @@ jobs:
   macos:
     # One package per architecture, each built and smoke-tested natively on a
     # runner that is free for public repositories. The build OS sets the floor,
-    # not the ceiling: Mach-O binaries stay forward compatible, so each package
-    # runs on its build OS and every later release. It will NOT run on an
-    # earlier one -- clang's default deployment target and the Homebrew bottles
-    # it links against are both built for the runner's own OS version.
+    # not the ceiling: Mach-O binaries stay forward compatible, so both
+    # packages run on macOS 15 and every later release. They will NOT run on
+    # macOS 14 or earlier -- clang's default deployment target and the Homebrew
+    # bottles they link against are both built for the runner's own OS version.
     #
-    #   arm64   macos-14        -> macOS 14+   (oldest arm64 image on offer)
-    #   x86_64  macos-15-intel  -> macOS 15+   (oldest Intel image on offer;
-    #                                           the alternative, macos-26-intel,
-    #                                           would raise the floor to 26)
+    #   arm64   macos-15        -> macOS 15+
+    #   x86_64  macos-15-intel  -> macOS 15+
     #
-    # Both macos-14 labels are already marked deprecated, and GitHub retires
-    # x86_64 Actions runners entirely in 2027; when macos-14 goes, move the
-    # arm64 build to macos-15 and the floor rises with it.
-    #
-    # macos-14-large would give an Intel build on macOS 14, but it is a larger
-    # runner and those need a Team/Enterprise plan.
+    # 15 is the oldest pair that is free, current and matched across both
+    # architectures. macos-14 would lower the arm64 floor by one release, but
+    # both macos-14 labels are deprecated and the Intel image of that
+    # generation is a larger runner (Team/Enterprise plans only), so the two
+    # halves could not be kept on the same OS anyway. Going the other way,
+    # macos-26-intel would raise the floor to 26. GitHub retires x86_64
+    # runners entirely in 2027, and macos-15-intel goes with them.
     #
     # A single universal binary was considered and rejected: cross-building
     # x86_64 on the arm64 runner means a second Homebrew prefix of Intel
@@ -324,8 +323,8 @@ jobs:
       matrix:
         include:
           - arch: arm64
-            runner: macos-14
-            min_os: "14"
+            runner: macos-15
+            min_os: "15"
           - arch: x86_64
             runner: macos-15-intel
             min_os: "15"
