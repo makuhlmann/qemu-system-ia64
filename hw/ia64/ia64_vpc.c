@@ -4121,8 +4121,15 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
                                                    0x10, 0x12, 0x13, 0x14 };
 #define IA64_460GX_CFG_FN_SIZE   256
 #define IA64_460GX_CFG_DEV_SIZE  (8 * IA64_460GX_CFG_FN_SIZE)
+/*
+ * One block per chipset device, plus one more for the CBN window: bus 0
+ * device 10h is a register file of its own (SSDM 2.2.1 and 2.3.2, "Device
+ * 10h on Bus #0 is mapped to the SAC; it contains the programmable Chipset
+ * Bus Number"), distinct from the expander port that Table 2-1 puts at
+ * device 10h on bus CBN.
+ */
 #define IA64_460GX_CFG_SIZE      \
-    (ARRAY_SIZE(ia64_460gx_chipset_devs) * IA64_460GX_CFG_DEV_SIZE)
+    ((ARRAY_SIZE(ia64_460gx_chipset_devs) + 1) * IA64_460GX_CFG_DEV_SIZE)
 #define IA64_460GX_CBN_DEV       0x10
 #define IA64_460GX_CBN_REG       0x40
 
@@ -4156,30 +4163,33 @@ static const uint8_t ia64_460gx_spd[64] = {
 };
 
 
-/* The CBN register lives in expander port 0's function 0 (bus 0 dev 10h). */
+/* Bus 0 device 10h: the SAC face that carries the Chipset Bus Number. */
+static uint8_t *ia64_460gx_cbn_window(IA64VpcMachineState *s, uint8_t fn)
+{
+    return s->chipset_cfg +
+           ARRAY_SIZE(ia64_460gx_chipset_devs) * IA64_460GX_CFG_DEV_SIZE +
+           fn * IA64_460GX_CFG_FN_SIZE;
+}
+
 static uint8_t ia64_460gx_cbn(IA64VpcMachineState *s)
 {
-    unsigned i;
-
-    for (i = 0; i < ARRAY_SIZE(ia64_460gx_chipset_devs); i++) {
-        if (ia64_460gx_chipset_devs[i] == IA64_460GX_CBN_DEV) {
-            return s->chipset_cfg[i * IA64_460GX_CFG_DEV_SIZE +
-                                  IA64_460GX_CBN_REG];
-        }
-    }
-    g_assert_not_reached();
+    return ia64_460gx_cbn_window(s, 0)[IA64_460GX_CBN_REG];
 }
 
 static uint8_t *ia64_460gx_chipset_cfg(IA64VpcMachineState *s,
                                         uint8_t bus, uint8_t dev, uint8_t fn)
 {
-    uint8_t cbn = ia64_460gx_cbn(s);
     unsigned i;
 
-    /* Dev 10h is always on bus 0; the rest live on bus CBN. */
+    /*
+     * The CBN window answers on bus 0 whatever CBN itself holds, so resolve
+     * it before consulting CBN -- which also keeps the two apart if firmware
+     * ever programs CBN to 0.  Everything else lives on bus CBN.
+     */
     if (bus == 0 && dev == IA64_460GX_CBN_DEV) {
-        dev = IA64_460GX_CBN_DEV;
-    } else if (bus != cbn) {
+        return ia64_460gx_cbn_window(s, fn);
+    }
+    if (bus != ia64_460gx_cbn(s)) {
         return NULL;
     }
     for (i = 0; i < ARRAY_SIZE(ia64_460gx_chipset_devs); i++) {
@@ -4396,6 +4406,7 @@ static void ia64_vpc_init_chipset_identity(IA64VpcMachineState *s,
 
 static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
 {
+    uint8_t *cbn_window;
     uint8_t *mac_a;
 
     if (s->chipset_cfg == NULL) {
@@ -4404,6 +4415,30 @@ static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
         memset(s->chipset_cfg, 0, IA64_460GX_CFG_SIZE);
     }
     s->cfg_address = 0;
+    /*
+     * CBN comes out of reset as FFh: the chipset's own functions answer on
+     * bus FF until firmware moves them.  The vendor firmware programs its
+     * SAC and expander ports there throughout POST and only writes 0xEE at
+     * the end of enumeration, so a store that reset CBN to 0 both dropped
+     * all of that programming and shadowed the compatibility bus's real
+     * devices 00h-05h behind the chipset's.  This has to happen before the
+     * identity seeding below, which resolves every device through CBN and
+     * would otherwise seed bus 0's blocks.
+     */
+    cbn_window = ia64_460gx_cbn_window(s, 0);
+    cbn_window[IA64_460GX_CBN_REG] = 0xff;
+    /*
+     * The SSDM says the device holding CBN *is* the SAC, so its window
+     * carries the SAC identity rather than the expander port's.
+     */
+    stw_le_p(cbn_window + PCI_VENDOR_ID, PCI_VENDOR_ID_INTEL);
+    stw_le_p(cbn_window + PCI_DEVICE_ID, 0x84e0);
+    stw_le_p(cbn_window + PCI_STATUS, PCI_STATUS_DEVSEL_MEDIUM);
+    cbn_window[PCI_REVISION_ID] = 0x03;
+    stw_le_p(cbn_window + PCI_CLASS_DEVICE, PCI_CLASS_BRIDGE_HOST);
+    stw_le_p(cbn_window + PCI_SUBSYSTEM_VENDOR_ID, PCI_VENDOR_ID_INTEL);
+    stw_le_p(cbn_window + PCI_SUBSYSTEM_ID, 0x84e0);
+    cbn_window[PCI_HEADER_TYPE] = PCI_HEADER_TYPE_MULTI_FUNCTION;
     /*
      * The chipset's own functions carry their real identities.  Without
      * them a firmware config read of the SAC, SDC or expander returns a
@@ -4457,16 +4492,6 @@ static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
     ia64_vpc_init_chipset_identity(s, 0x14, 2, 0x84e2, 0x02,
                                           PCI_CLASS_BRIDGE_HOST, false);
 
-    /*
-     * CBN comes out of reset as FFh: the chipset's own functions answer on
-     * bus FF until firmware moves them.  The vendor firmware programs its
-     * SAC and expander ports there throughout POST and only writes 0xEE at
-     * the end of enumeration, so a store that reset CBN to 0 both dropped
-     * all of that programming and shadowed the compatibility bus's real
-     * devices 00h-05h behind the chipset's.
-     */
-    ia64_460gx_chipset_cfg(s, 0, IA64_460GX_CBN_DEV, 0)[IA64_460GX_CBN_REG] =
-        0xff;
     /*
      * The SAC's device-specific registers (40h-FFh of devices 00h/01h) are
      * not documented in the SSDM.  The vendor firmware's early POST reads

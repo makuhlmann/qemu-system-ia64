@@ -2557,7 +2557,11 @@ static void test_460gx_config_ports(void)
     /* Out of reset CBN is FFh: the chipset answers there, not on bus 0. */
     g_assert_cmphex(cf8_readl(qts, 0xff, 0x00, 0, PCI_VENDOR_ID), ==,
                     0x84e08086);
-    g_assert_cmphex(cf8_readl(qts, 0xff, IA64_CBN_DEVICE, 0, 0x40) & 0xff,
+    /*
+     * CBN lives in bus 0 device 10h, which is a register file of its own --
+     * not the expander port that bus CBN carries at the same device number.
+     */
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_CBN_DEVICE, 0, 0x40) & 0xff,
                     ==, 0xff);
     /* ... and bus 0 is the real compatibility bus: the PID at 00:00.0. */
     g_assert_cmphex(cf8_readl(qts, 0, IA64_460GX_PID_SLOT, 0, PCI_VENDOR_ID),
@@ -2595,6 +2599,22 @@ static void test_460gx_config_ports(void)
     g_assert_cmphex(cf8_readl(qts, IA64_460GX_WXB0_BUS,
                               IA64_460GX_WXB0_SCSI_SLOT, 0, PCI_VENDOR_ID),
                     ==, 0x12161077);
+
+    /*
+     * Expander port 0 sits at device 10h on bus CBN and shares neither
+     * storage nor meaning with the CBN window on bus 0: programming its
+     * registers must not move the chipset.
+     */
+    cf8_select(qts, IA64_CBN_BUS, IA64_CBN_DEVICE, 0, IA64_CBN_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 0x55);
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_CBN_DEVICE, 0, IA64_CBN_REG) & 0xff,
+                    ==, IA64_CBN_BUS);
+    g_assert_cmphex(cf8_readl(qts, IA64_CBN_BUS, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0x84e08086);
+    g_assert_cmphex(cf8_readl(qts, 0x55, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0xffffffff);
 
     /* An empty device number reads as absent, not as zero. */
     g_assert_cmphex(cf8_readl(qts, 0, 0x1d, 0, PCI_VENDOR_ID), ==, 0xffffffff);
