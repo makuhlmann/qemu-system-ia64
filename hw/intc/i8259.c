@@ -139,13 +139,28 @@ static void pic_set_irq(void *opaque, int irq, int level)
             s->last_irr &= ~mask;
         }
     } else {
-        /* edge triggered */
+        /*
+         * Edge triggered.  The edge latch (last_irr) makes a request need a
+         * low-to-high transition, but the request itself is only presented
+         * while the input stays asserted: an 8259A that has latched an edge
+         * and then sees the input go away before the acknowledge has nothing
+         * left to report, which is exactly why it answers a spurious IR7
+         * instead ("the IRQ inputs must remain active until after the falling
+         * edge of the first INTA#.  If the IRQ input goes inactive before this
+         * time, a default IRQ7 will occur", 460GX SSDM 15.2.5, and the 8259A
+         * datasheet before it).  Dropping an unacknowledged request here is
+         * what lets firmware poll the IRR for a device interrupt with the IRQ
+         * masked -- the vendor i2000 CSM's ATAPI wait does exactly that, and a
+         * request latched for the rest of the boot makes every wait after the
+         * first return at once.
+         */
         if (level) {
             if ((s->last_irr & mask) == 0) {
                 s->irr |= mask;
             }
             s->last_irr |= mask;
         } else {
+            s->irr &= ~mask;
             s->last_irr &= ~mask;
         }
     }

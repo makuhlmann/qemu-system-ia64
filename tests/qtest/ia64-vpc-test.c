@@ -2378,6 +2378,49 @@ static void test_460gx_pit_ticks_survive(void)
 }
 
 /*
+ * An 8259A presents a request only while the edge latch is set *and* the input
+ * is still asserted: a latched edge whose input goes away before the
+ * acknowledge leaves nothing to report, which is why the part answers a
+ * spurious IR7 instead (SSDM 15.2.5, "the IRQ inputs must remain active until
+ * after the falling edge of the first INTA#").  Firmware depends on it -- the
+ * vendor i2000 CSM masks the IDE interrupt and polls the IRR for it, so a
+ * request that stayed latched for the rest of the boot made every wait after
+ * the first return immediately, and every ATAPI read after the first fail.
+ */
+static void test_460gx_pic_edge_withdrawal(void)
+{
+    QTestState *qts = ia64_vpc_start_running();
+
+    pic_master_init(qts);
+    g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==, IA64_PIC_SPURIOUS);
+    pic_master_eoi(qts);
+
+    /*
+     * Mode 0 gives a clean edge: the output sits low while the counter runs
+     * and goes high at terminal count, and reloading the count drops it again.
+     */
+    pit_counter0_program(qts, 0, IA64_PIT_100HZ_COUNT);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x00);
+    qtest_clock_step(qts, IA64_PIT_100HZ_NS);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x01);
+
+    /* The input goes away with the request still unacknowledged. */
+    pit_counter0_program(qts, 0, IA64_PIT_100HZ_COUNT);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x00);
+    g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==, IA64_PIC_SPURIOUS);
+    pic_master_eoi(qts);
+
+    /* The edge latch re-arms with it, so the next assertion is a request. */
+    qtest_clock_step(qts, IA64_PIT_100HZ_NS);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==, IA64_PIC_VECTOR_BASE);
+    pic_master_eoi(qts);
+
+    qtest_quit(qts);
+}
+
+
+/*
  * The bridge's RTC is a 256-byte part in two 128-byte banks (SSDM 15.5.1).
  * Ports 0x70/0x71 reach the standard bank.  Ports 0x72/0x73 reach the
  * extended bank only while RTCCFG (function 0, config offset C8h) bit 2 is
@@ -5532,6 +5575,8 @@ int main(int argc, char **argv)
                    test_460gx_south_bridge_pic);
     qtest_add_func("/ia64-vpc/pci/460gx-pit-ticks-survive",
                    test_460gx_pit_ticks_survive);
+    qtest_add_func("/ia64-vpc/pci/460gx-pic-edge-withdrawal",
+                   test_460gx_pic_edge_withdrawal);
     qtest_add_func("/ia64-vpc/pci/460gx-root-window-containment",
                    test_460gx_root_window_containment);
     qtest_add_func("/ia64-vpc/pci/460gx-expander-roots",
