@@ -22,6 +22,7 @@
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_regs.h"
 #include "hw/ia64/ia64_vpc_abi.h"
+#include "hw/southbridge/intel_82468gx.h"
 #include "hw/net/e1000_regs.h"
 
 /* Platform addresses come from hw/ia64/ia64_vpc_abi.h; test-only register
@@ -2326,6 +2327,25 @@ static void pit_counter0_program(QTestState *qts, uint8_t mode, uint16_t count)
 }
 
 /*
+ * The generic host helper addresses one bus: it builds config addresses as
+ * ecam_alloc_ptr + (devfn << 12) + offset.  Offsetting the base by the bus
+ * number therefore points the whole QPCIBus at that bus, which is how the
+ * tests reach devices behind the 460GX expander roots.
+ */
+static void ia64_qpci_init_on_bus(QGenericPCIBus *gbus, QTestState *qts,
+                                  unsigned int bus)
+{
+    qpci_init_generic(gbus, qts, NULL, false);
+    gbus->ecam_alloc_ptr = IA64_PCI_CONFIG_BASE + ((uint64_t)bus << 20);
+    gbus->gpex_pio_base = IA64_LEGACY_IO_BASE;
+}
+
+static void ia64_qpci_init(QGenericPCIBus *gbus, QTestState *qts)
+{
+    ia64_qpci_init_on_bus(gbus, qts, 0);
+}
+
+/*
  * The counters have to be clocked, and QEMU_CLOCK_VIRTUAL only runs while the
  * machine is running, so these tests must not pass -S.
  */
@@ -3080,13 +3100,29 @@ static void test_realfw_flash_window(void)
 
     /*
      * The south bridge's IDE function is in compatibility mode and decodes
-     * the fixed legacy ports the SDV firmware polls.  With no media the
-     * empty primary channel reports status 0x00 (BSY clear, no drive) at
-     * port 0x1f7 -- not the open-bus 0xff that would hang the firmware's
-     * drive detection.
+     * the fixed legacy ports the SDV firmware polls -- but only once that
+     * firmware has set IDETIM's decode enable, which is what it does before
+     * it looks at a port (SSDM 12.2.10, and see the ide-decode-enable test).
+     * The machine is stopped here, so the register is still at its reset
+     * value and port 0x1f7 is open bus; with the bit set, the empty primary
+     * channel reports status 0x00 -- BSY clear, no drive.
      */
-    g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE +
-                                ia64_sparse_io_offset(0x1f7)), ==, 0x00);
+    {
+        const uint64_t status = IA64_LEGACY_IO_BASE +
+            ia64_sparse_io_offset(0x1f7);
+        QGenericPCIBus idebus;
+        QPCIDevice *ide;
+
+        g_assert_cmphex(qtest_readb(qts, status), ==, 0xff);
+        ia64_qpci_init(&idebus, qts);
+        ide = qpci_device_find(&idebus.bus,
+                               QPCI_DEVFN(IA64_460GX_IFB_SLOT,
+                                          IA64_460GX_IFB_IDE_FUNCTION));
+        g_assert_nonnull(ide);
+        qpci_config_writew(ide, INTEL_82468GX_IFB_IDETIM_PRIMARY, 0x8000);
+        g_assert_cmphex(qtest_readb(qts, status), ==, 0x00);
+        g_free(ide);
+    }
 
     /*
      * realfw mode wires an 8259 PIC for the legacy timer tick, reachable
@@ -3118,24 +3154,6 @@ static void test_realfw_flash_window(void)
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
-/*
- * The generic host helper addresses one bus: it builds config addresses as
- * ecam_alloc_ptr + (devfn << 12) + offset.  Offsetting the base by the bus
- * number therefore points the whole QPCIBus at that bus, which is how the
- * tests reach devices behind the 460GX expander roots.
- */
-static void ia64_qpci_init_on_bus(QGenericPCIBus *gbus, QTestState *qts,
-                                  unsigned int bus)
-{
-    qpci_init_generic(gbus, qts, NULL, false);
-    gbus->ecam_alloc_ptr = IA64_PCI_CONFIG_BASE + ((uint64_t)bus << 20);
-    gbus->gpex_pio_base = IA64_LEGACY_IO_BASE;
-}
-
-static void ia64_qpci_init(QGenericPCIBus *gbus, QTestState *qts)
-{
-    ia64_qpci_init_on_bus(gbus, qts, 0);
-}
 
 static void assert_pci_device(QPCIBus *bus, const ExpectedPCIDevice *expected)
 {
@@ -3596,6 +3614,65 @@ static void test_ide_on_slot0(void)
     g_assert_cmphex(qpci_config_readw(dev, PCI_VENDOR_ID), ==,
                     PCI_VENDOR_ID_INTEL);
     g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x7601);
+    g_free(dev);
+    qtest_quit(qts);
+}
+
+/*
+ * IDETIM bit 15, the channel's IDE Decode Enable (SSDM 12.2.10).  It resets
+ * clear, and while it is clear the channel's ATA command and control blocks
+ * are not decoded here at all -- the access falls through to LPC, which on
+ * this board answers nothing.  Firmware sets it, and an operating system
+ * reads it back to decide whether the channel is there, so a model that
+ * decoded the ports regardless would tell the two different stories: Windows'
+ * PIIX miniport reports the channel disabled straight from this bit and never
+ * touches a port, which is how a guest ends up with no boot device at all.
+ *
+ * With the block decoded and no drive on the channel the status register
+ * reads zero; undecoded it is open bus, so the two are easy to tell apart.
+ */
+#define IA64_IFB_IDE_PRIMARY_STATUS     0x1f7
+#define IA64_IFB_IDE_SECONDARY_STATUS   0x177
+
+static void test_460gx_ide_decode_enable(void)
+{
+    const uint64_t primary = IA64_LEGACY_IO_BASE +
+        ia64_sparse_io_offset(IA64_IFB_IDE_PRIMARY_STATUS);
+    const uint64_t secondary = IA64_LEGACY_IO_BASE +
+        ia64_sparse_io_offset(IA64_IFB_IDE_SECONDARY_STATUS);
+    QTestState *qts = ia64_vpc_start("");
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+
+    ia64_qpci_init(&gbus, qts);
+    dev = qpci_device_find(&gbus.bus,
+                           QPCI_DEVFN(IA64_460GX_IFB_SLOT,
+                                      IA64_460GX_IFB_IDE_FUNCTION));
+    g_assert_nonnull(dev);
+
+    g_assert_cmphex(qtest_readb(qts, primary), ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts, secondary), ==, 0xff);
+
+    /* Each channel's decode follows its own register. */
+    qpci_config_writew(dev, INTEL_82468GX_IFB_IDETIM_PRIMARY, 0x8000);
+    g_assert_cmphex(qtest_readb(qts, primary), ==, 0x00);
+    g_assert_cmphex(qtest_readb(qts, secondary), ==, 0xff);
+
+    qpci_config_writew(dev, INTEL_82468GX_IFB_IDETIM_SECONDARY, 0x8000);
+    g_assert_cmphex(qtest_readb(qts, secondary), ==, 0x00);
+
+    /* Clearing it takes the block back off the bus. */
+    qpci_config_writew(dev, INTEL_82468GX_IFB_IDETIM_PRIMARY, 0x0000);
+    g_assert_cmphex(qtest_readb(qts, primary), ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts, secondary), ==, 0x00);
+
+    /* The timing fields are writable and do not move the decode. */
+    qpci_config_writew(dev, INTEL_82468GX_IFB_IDETIM_SECONDARY, 0xe371);
+    g_assert_cmphex(qpci_config_readw(dev,
+                                      INTEL_82468GX_IFB_IDETIM_SECONDARY),
+                    ==, 0xe371);
+    g_assert_cmphex(qtest_readb(qts, secondary), ==, 0x00);
+
     g_free(dev);
     qtest_quit(qts);
 }
@@ -5627,6 +5704,8 @@ int main(int argc, char **argv)
                    test_460gx_south_bridge_pic);
     qtest_add_func("/ia64-vpc/pci/460gx-pit-ticks-survive",
                    test_460gx_pit_ticks_survive);
+    qtest_add_func("/ia64-vpc/pci/460gx-ide-decode-enable",
+                   test_460gx_ide_decode_enable);
     qtest_add_func("/ia64-vpc/pci/460gx-pit-mode2-out-level",
                    test_460gx_pit_mode2_out_level);
     qtest_add_func("/ia64-vpc/pci/460gx-pic-edge-withdrawal",

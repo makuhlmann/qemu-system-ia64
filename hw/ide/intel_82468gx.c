@@ -13,6 +13,7 @@
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "qemu/range.h"
 
 #include "ide-internal.h"
 #include "trace.h"
@@ -89,6 +90,54 @@ static void ifb_bmdma_bar_init(PCIIDEState *d)
     }
 }
 
+/*
+ * The fixed ports a channel decodes in compatibility mode, and the ISA
+ * interrupt it drives there.
+ */
+static const struct {
+    uint16_t command;
+    uint16_t control;
+    uint8_t irq;
+} ifb_ide_ports[2] = {
+    { 0x1f0, 0x3f6, 14 },
+    { 0x170, 0x376, 15 },
+};
+
+/*
+ * IDETIM bit 15 is the channel's IDE Decode Enable (SSDM 12.2.10): set, the
+ * ATA command and control blocks are positively decoded on PCI and driven on
+ * the IDE interface; clear -- which is how the register resets -- they are
+ * not decoded here at all and the access falls through to LPC.  Board
+ * firmware is what turns it on, and an operating system reads it back to
+ * decide whether the channel exists, so the two have to agree: Windows' PIIX
+ * miniport returns ChannelDisabled straight from this bit
+ * (WSRV03 drivers/storage/ide/miniport/intel/init.c:172).
+ */
+static void ifb_ide_update_decode(PCIDevice *pci)
+{
+    PCIIDEState *d = PCI_IDE(pci);
+    unsigned ch;
+
+    for (ch = 0; ch < 2; ch++) {
+        uint16_t idetim = pci_get_word(pci->config +
+                                       INTEL_82468GX_IFB_IDETIM_PRIMARY +
+                                       ch * 2);
+        bool decode = idetim & INTEL_82468GX_IFB_IDETIM_DECODE;
+
+        portio_list_set_enabled(&d->bus[ch].portio_list, decode);
+        portio_list_set_enabled(&d->bus[ch].portio2_list, decode);
+    }
+}
+
+static void ifb_ide_config_write(PCIDevice *pci, uint32_t addr, uint32_t val,
+                                 int len)
+{
+    pci_default_write_config(pci, addr, val, len);
+    if (ranges_overlap(addr, len, INTEL_82468GX_IFB_IDETIM_PRIMARY, 4)) {
+        ifb_ide_update_decode(pci);
+    }
+}
+
 static void ifb_ide_reset(DeviceState *dev)
 {
     PCIIDEState *d = PCI_IDE(dev);
@@ -106,19 +155,14 @@ static void ifb_ide_reset(DeviceState *dev)
     pci->config[0x44] = 0;
     pci->config[0x48] = 0;
     pci_set_word(pci->config + 0x4a, 0);
+    ifb_ide_update_decode(pci);
 }
 
 static void ifb_ide_init_bus(PCIIDEState *d, ISABus *isa_bus,
                              unsigned channel)
 {
-    static const struct {
-        uint16_t command;
-        uint16_t control;
-        uint8_t irq;
-    } ports[] = {
-        { 0x1f0, 0x3f6, 14 },
-        { 0x170, 0x376, 15 },
-    };
+    const uint16_t command = ifb_ide_ports[channel].command;
+    const uint16_t control = ifb_ide_ports[channel].control;
     IDEBus *bus = &d->bus[channel];
 
     ide_bus_init(bus, sizeof(*bus), DEVICE(d), channel, 2);
@@ -126,14 +170,14 @@ static void ifb_ide_init_bus(PCIIDEState *d, ISABus *isa_bus,
                      TYPE_INTEL_82468GX_IFB_IDE ".command");
     portio_list_add(&bus->portio_list,
                     pci_address_space_io(PCI_DEVICE(d)),
-                    ports[channel].command);
+                    command);
     portio_list_init(&bus->portio2_list, OBJECT(d), ide_portio2_list, bus,
                      TYPE_INTEL_82468GX_IFB_IDE ".control");
     portio_list_add(&bus->portio2_list,
                     pci_address_space_io(PCI_DEVICE(d)),
-                    ports[channel].control);
+                    control);
     ide_bus_init_output_irq(bus, isa_bus_get_irq(isa_bus,
-                                                 ports[channel].irq));
+                                                 ifb_ide_ports[channel].irq));
     /*
      * The board's firmware probes each drive by waiting for BSY to assert
      * after IDENTIFY, as the ATA timing lets it; give it the busy cycle it
@@ -215,6 +259,7 @@ static void ifb_ide_class_init(ObjectClass *klass, const void *data)
 
     pc->realize = ifb_ide_realize;
     pc->exit = ifb_ide_exit;
+    pc->config_write = ifb_ide_config_write;
     pc->vendor_id = INTEL_82468GX_IFB_VENDOR_ID;
     pc->device_id = INTEL_82468GX_IFB_IDE_DEVICE_ID;
     pc->revision = 0;
