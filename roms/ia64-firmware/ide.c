@@ -305,6 +305,33 @@ static BOOLEAN ide_configure_channels_from_pci(void)
                                            location.Function,
                                            PCI_CFG_CLASS_PROG_OFFSET, 1);
 
+    /*
+     * The 82468GX I/O and Firmware Bridge gates each channel's ATA register
+     * blocks behind IDETIM bit 15, "IDE Decode Enable" (SSDM 12.2.10), whose
+     * reset value is 0: with it clear the command and control blocks are not
+     * decoded on PCI at all.  Board firmware is what turns it on, and an
+     * operating system reads it back to decide whether a channel exists --
+     * Windows' PIIX miniport returns ChannelDisabled straight from this bit
+     * (WSRV03 drivers/storage/ide/miniport/intel/init.c:172), so leaving it
+     * clear costs the guest every drive on the controller.  Enable both
+     * channels before anything looks at a port; the timing fields keep their
+     * reset values, which this platform's IDE runs at anyway.
+     */
+    if (pci_config_read_value(0, location.Bus, location.Device,
+                              location.Function, 0, 4) ==
+        IFB_IDE_VENDOR_DEVICE) {
+        for (ch = 0; ch < IDE_CHANNEL_COUNT; ch++) {
+            UINT16 idetim = (UINT16)pci_config_read_value(
+                0, location.Bus, location.Device, location.Function,
+                (UINT8)(IFB_IDE_IDETIM_OFFSET + ch * 2U), 2);
+
+            pci_config_write_value(0, location.Bus, location.Device,
+                                   location.Function,
+                                   (UINT8)(IFB_IDE_IDETIM_OFFSET + ch * 2U), 2,
+                                   idetim | IFB_IDE_IDETIM_DECODE_ENABLE);
+        }
+    }
+
     for (i = 0; i < 5; i++) {
         bar[i] = (UINT32)pci_config_read_value(0, location.Bus, location.Device,
                                                location.Function,

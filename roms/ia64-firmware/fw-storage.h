@@ -142,6 +142,15 @@ typedef struct {
 #define PCI_HEADER_TYPE_MULTI_FUNC    0x80U
 #define PCI_BASE_CLASS_MASS_STORAGE   0x01U
 #define PCI_SUB_CLASS_IDE             0x01U
+/*
+ * The 82468GX IFB's IDE function and its IDE Timing register (SSDM 12.2.10):
+ * one 16-bit register per channel, whose bit 15 enables the channel's ATA
+ * register-block decode.  Reset value 0, so firmware has to set it.
+ */
+#define IFB_IDE_VENDOR_DEVICE         0x76018086U
+#define IFB_IDE_IDETIM_OFFSET         0x40U
+#define IFB_IDE_IDETIM_DECODE_ENABLE  0x8000U
+
 #define PCI_IDE_BAR0_OFFSET           0x10U
 #define PCI_IDE_BAR1_OFFSET           0x14U
 #define PCI_IDE_BAR2_OFFSET           0x18U
