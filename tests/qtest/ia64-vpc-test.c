@@ -2378,6 +2378,58 @@ static void test_460gx_pit_ticks_survive(void)
 }
 
 /*
+ * The same counter read back through the status command, whose top bit is OUT.
+ * A rate generator idles high and drops for a single input clock just before
+ * the reload, so a sample taken at any ordinary moment reads high; the notch is
+ * one 838ns clock, which the counter's own timer deadlines step straight onto.
+ * Modelled the other way up -- low, with OUT high only at the instant of the
+ * reload -- every sample reads low instead, which is what the status byte and
+ * Nmisc bit 5 used to report.
+ */
+#define IA64_PIT_READBACK_STATUS_C0     0xe2
+#define IA64_PIT_STATUS_OUT             0x80
+
+static uint8_t pit_counter0_status(QTestState *qts)
+{
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIT_CONTROL),
+                 IA64_PIT_READBACK_STATUS_C0);
+    return qtest_readb(qts, IA64_LEGACY_IO_BASE +
+                       ia64_sparse_io_offset(IA64_PIT_COUNTER0));
+}
+
+static void test_460gx_pit_mode2_out_level(void)
+{
+    QTestState *qts = ia64_vpc_start_running();
+    bool seen_low = false;
+    unsigned int i;
+
+    /*
+     * High from the moment the counter is programmed, not from its first
+     * terminal count.
+     */
+    pit_counter0_program(qts, 2, IA64_PIT_100HZ_COUNT);
+    g_assert_cmphex(pit_counter0_status(qts) & IA64_PIT_STATUS_OUT, ==,
+                    IA64_PIT_STATUS_OUT);
+
+    /* Nine samples spread over the period, all of them clear of the notch. */
+    for (i = 0; i < 9; i++) {
+        qtest_clock_step(qts, IA64_PIT_100HZ_NS / 10);
+        g_assert_cmphex(pit_counter0_status(qts) & IA64_PIT_STATUS_OUT, ==,
+                        IA64_PIT_STATUS_OUT);
+    }
+
+    /* The notch is still there: the counter's own deadlines land on it. */
+    for (i = 0; i < 8 && !seen_low; i++) {
+        qtest_clock_step_next(qts);
+        seen_low = (pit_counter0_status(qts) & IA64_PIT_STATUS_OUT) == 0;
+    }
+    g_assert_true(seen_low);
+
+    qtest_quit(qts);
+}
+
+/*
  * An 8259A presents a request only while the edge latch is set *and* the input
  * is still asserted: a latched edge whose input goes away before the
  * acknowledge leaves nothing to report, which is why the part answers a
@@ -5575,6 +5627,8 @@ int main(int argc, char **argv)
                    test_460gx_south_bridge_pic);
     qtest_add_func("/ia64-vpc/pci/460gx-pit-ticks-survive",
                    test_460gx_pit_ticks_survive);
+    qtest_add_func("/ia64-vpc/pci/460gx-pit-mode2-out-level",
+                   test_460gx_pit_mode2_out_level);
     qtest_add_func("/ia64-vpc/pci/460gx-pic-edge-withdrawal",
                    test_460gx_pic_edge_withdrawal);
     qtest_add_func("/ia64-vpc/pci/460gx-root-window-containment",

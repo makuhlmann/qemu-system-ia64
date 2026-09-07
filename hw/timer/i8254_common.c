@@ -55,11 +55,14 @@ int pit_get_out(PITChannelState *s, int64_t current_time)
         out = (d >= s->count);
         break;
     case 2:
-        if ((d % s->count) == 0 && d != 0) {
-            out = 1;
-        } else {
-            out = 0;
-        }
+        /*
+         * Rate generator: OUT is high from the moment the counter is
+         * programmed and drops for a single CLK when the count reaches 1, one
+         * clock short of the reload (82C54 datasheet, "Mode 2").  A count of 1
+         * is illegal here, so report the idle level for it rather than a
+         * permanent notch.
+         */
+        out = s->count <= 1 || (d % s->count) != s->count - 1;
         break;
     case 3:
         out = (d % s->count) < ((s->count + 1) >> 1);
@@ -100,11 +103,14 @@ int64_t pit_get_next_transition_time(PITChannelState *s, int64_t current_time)
         }
         break;
     case 2:
+        if (s->count <= 1) {
+            return -1;
+        }
         base = QEMU_ALIGN_DOWN(d, s->count);
-        if ((d - base) == 0 && d != 0) {
-            next_time = base + s->count;
+        if (d - base < s->count - 1) {
+            next_time = base + s->count - 1;    /* into the notch */
         } else {
-            next_time = base + s->count + 1;
+            next_time = base + s->count;        /* out of it */
         }
         break;
     case 3:
