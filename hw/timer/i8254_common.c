@@ -66,7 +66,16 @@ int pit_get_out(PITChannelState *s, int64_t current_time)
         break;
     case 4:
     case 5:
-        out = (d == s->count);
+        /*
+         * Strobe: OUT idles high and goes low for one CLK at terminal count
+         * (82C54 datasheet, "Mode 4: Software Triggered Strobe").  Modelling
+         * it the other way round -- idle low with a one-clock high pulse --
+         * puts an interrupt request on the wire for 838ns, which is far too
+         * short for the guest to acknowledge; an interrupt controller that
+         * withdraws an unacknowledged edge request when the input deasserts
+         * (as a real 8259A does) would drop the strobe entirely.
+         */
+        out = (d != s->count);
         break;
     }
     return out;

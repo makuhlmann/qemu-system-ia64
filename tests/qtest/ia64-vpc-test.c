@@ -2265,6 +2265,119 @@ static void test_460gx_south_bridge_timer(void)
 }
 
 /*
+ * The path from the counters to the PIC.  Counter 0 drives IRQ 0, which is how
+ * a test can put a controlled edge on a PIC input with no CPU to run: mode 0
+ * holds the output low while the counter runs and raises it at terminal count,
+ * mode 2 is the periodic tick, and mode 4 a one-shot strobe.  Their output
+ * shapes matter beyond the tick rate, because a controller that presents a
+ * request only while its input is still asserted -- which is what an 8259A
+ * does -- can only deliver an interrupt whose source holds the line long
+ * enough to acknowledge.
+ */
+#define IA64_PIC_INTA           0xfefe0000ULL
+#define IA64_PIC_CMD            0x20
+#define IA64_PIC_DATA           0x21
+#define IA64_PIC_VECTOR_BASE    0x08
+#define IA64_PIC_SPURIOUS       (IA64_PIC_VECTOR_BASE + 7)
+/* 11932 counts of the 1.193182 MHz input, and the nanoseconds they take. */
+#define IA64_PIT_100HZ_COUNT    0x2e9c
+#define IA64_PIT_100HZ_NS       10002150
+
+static void pic_master_init(QTestState *qts)
+{
+    const uint64_t cmd =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIC_CMD);
+    const uint64_t data =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIC_DATA);
+
+    qtest_writeb(qts, cmd, 0x11);                    /* ICW1: cascade, ICW4 */
+    qtest_writeb(qts, data, IA64_PIC_VECTOR_BASE);   /* ICW2: vector base */
+    qtest_writeb(qts, data, 0x04);                   /* ICW3: slave on IR2 */
+    qtest_writeb(qts, data, 0x01);                   /* ICW4: 8086 mode */
+    qtest_writeb(qts, data, 0x00);                   /* OCW1: unmask all */
+}
+
+static uint8_t pic_master_irr(QTestState *qts)
+{
+    const uint64_t cmd =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIC_CMD);
+
+    qtest_writeb(qts, cmd, 0x0a);                    /* OCW3: read IRR */
+    return qtest_readb(qts, cmd);
+}
+
+static void pic_master_eoi(QTestState *qts)
+{
+    /* OCW2: non-specific EOI. */
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIC_CMD),
+                 0x20);
+}
+
+static void pit_counter0_program(QTestState *qts, uint8_t mode, uint16_t count)
+{
+    const uint64_t control =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIT_CONTROL);
+    const uint64_t counter0 =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIT_COUNTER0);
+
+    qtest_writeb(qts, control, 0x30 | (mode << 1));  /* counter 0, LSB+MSB */
+    qtest_writeb(qts, counter0, count & 0xff);
+    qtest_writeb(qts, counter0, count >> 8);
+}
+
+/*
+ * The counters have to be clocked, and QEMU_CLOCK_VIRTUAL only runs while the
+ * machine is running, so these tests must not pass -S.
+ */
+static QTestState *ia64_vpc_start_running(void)
+{
+    return qtest_init("-machine 460gx -cpu merced -m 256M");
+}
+
+/*
+ * Withdrawing unacknowledged requests only works if the sources hold their
+ * line the way the hardware does.  Counter 0 in mode 2 is the periodic tick:
+ * its output is high for the whole period bar one input clock, so every tick
+ * is still there to acknowledge.  A strobe (mode 4) idles high and pulses low
+ * for one clock, so its interrupt is the edge at the end of the pulse and the
+ * line is asserted from then on -- modelled upside down, as a 838ns high
+ * pulse, the strobe would be gone before anything could take it.
+ */
+static void test_460gx_pit_ticks_survive(void)
+{
+    QTestState *qts = ia64_vpc_start_running();
+    unsigned int i;
+
+    pic_master_init(qts);
+    pic_master_eoi(qts);
+
+    pit_counter0_program(qts, 2, IA64_PIT_100HZ_COUNT);
+    for (i = 0; i < 10; i++) {
+        qtest_clock_step(qts, IA64_PIT_100HZ_NS);
+        g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==,
+                        IA64_PIC_VECTOR_BASE);
+        pic_master_eoi(qts);
+    }
+
+    /*
+     * Leave the line low first, so the strobe's rising edge is the one the
+     * counter makes rather than one left over from the mode 0 run.
+     */
+    pit_counter0_program(qts, 0, IA64_PIT_100HZ_COUNT);
+    pit_counter0_program(qts, 4, IA64_PIT_100HZ_COUNT);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==, IA64_PIC_VECTOR_BASE);
+    pic_master_eoi(qts);
+
+    qtest_clock_step(qts, IA64_PIT_100HZ_NS);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==, IA64_PIC_VECTOR_BASE);
+    pic_master_eoi(qts);
+
+    qtest_quit(qts);
+}
+
+/*
  * The bridge's RTC is a 256-byte part in two 128-byte banks (SSDM 15.5.1).
  * Ports 0x70/0x71 reach the standard bank.  Ports 0x72/0x73 reach the
  * extended bank only while RTCCFG (function 0, config offset C8h) bit 2 is
@@ -5417,6 +5530,8 @@ int main(int argc, char **argv)
                    test_460gx_south_bridge_timer);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-pic",
                    test_460gx_south_bridge_pic);
+    qtest_add_func("/ia64-vpc/pci/460gx-pit-ticks-survive",
+                   test_460gx_pit_ticks_survive);
     qtest_add_func("/ia64-vpc/pci/460gx-root-window-containment",
                    test_460gx_root_window_containment);
     qtest_add_func("/ia64-vpc/pci/460gx-expander-roots",
