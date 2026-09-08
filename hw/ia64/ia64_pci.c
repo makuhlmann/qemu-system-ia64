@@ -22,6 +22,8 @@ struct IA64PCIState {
 
     MemoryRegion pci_mmio;
     MemoryRegion pci_mmio_window;
+    MemoryRegion pci_mmio_low_window;
+    bool low_window_mapped;
     MemoryRegion pci_io;
     MemoryRegion pci_io_sparse;
     MemoryRegion pci_config;
@@ -366,6 +368,27 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
                                         &s->pci_io_sparse, 1);
     memory_region_add_subregion(get_system_memory(), IA64_PCI_CONFIG_BASE,
                                 &s->pci_config);
+}
+
+void ia64_pci_host_set_low_mmio_window(DeviceState *pci_host, uint64_t base)
+{
+    IA64PCIState *s = IA64_PCI_HOST_BRIDGE(pci_host);
+
+    if (s->low_window_mapped) {
+        memory_region_del_subregion(get_system_memory(),
+                                    &s->pci_mmio_low_window);
+        object_unparent(OBJECT(&s->pci_mmio_low_window));
+        s->low_window_mapped = false;
+    }
+    if (base >= IA64_PCI_MMIO_BASE) {
+        return;
+    }
+    memory_region_init_alias(&s->pci_mmio_low_window, OBJECT(s),
+                             "pci-mmio-low-window", &s->pci_mmio, base,
+                             IA64_PCI_MMIO_BASE - base);
+    memory_region_add_subregion_overlap(get_system_memory(), base,
+                                        &s->pci_mmio_low_window, -1);
+    s->low_window_mapped = true;
 }
 
 MemoryRegion *ia64_pci_host_mmio(DeviceState *pci_host)

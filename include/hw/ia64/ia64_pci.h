@@ -48,6 +48,12 @@ void ia64_pci_host_set_intx_routes(DeviceState *dev,
  * fixed aperture the machine already programs -- see ia64_mercury.c.
  */
 MemoryRegion *ia64_pci_host_mmio(DeviceState *pci_host);
+/*
+ * Route [base, IA64_PCI_MMIO_BASE) to PCI as well -- the 460GX's variable
+ * gap, whose bottom the compatibility port's PCIS register sets.  RAM below
+ * it keeps priority; base >= IA64_PCI_MMIO_BASE removes the extension.
+ */
+void ia64_pci_host_set_low_mmio_window(DeviceState *pci_host, uint64_t base);
 MemoryRegion *ia64_pci_host_io(DeviceState *pci_host);
 
 /*

@@ -636,6 +636,9 @@ struct IA64VpcMachineState {
     MemoryRegion acpi_reset;
     MemoryRegion debug_uart_legacy_io;
     SerialMM *debug_uart;
+    MemoryRegion console_uart_legacy_io;
+    SerialMM *console_uart;
+    DeviceState *pci_host_dev;
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     MemoryRegion int10_pci_io;
     IA64Int10Registers int10_request;
@@ -4219,6 +4222,17 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
  */
 #define IA64_460GX_XXB_BUSNO_REG 0x48
 #define IA64_460GX_XXB_SUBNO_REG 0x49
+/*
+ * PCIS: the port's PCI memory window base in 32 MB units.  "PCIS[7] -
+ * FDFF_FFFFh: PCIx, PCIS register determines target PCI bus" (SSDM
+ * memory-map table; 4.1.3.1 for the variable gap it bounds).  The vendor
+ * DSDT hands [PCIS << 25, FE000000h) to Windows as PCI0's window, so the
+ * compatibility port's value is where the machine's routed window has to
+ * start -- Windows placed the OHCI's and 82557's BARs below the fixed
+ * EE000000h aperture and their drivers read open bus (Code 10).
+ */
+#define IA64_460GX_XXB_PCIS_REG  0x84
+#define IA64_460GX_COMPAT_PORT   0x10
 
 /*
  * SPD EEPROM served through the MAC's I2C pass-through: firmware writes the
@@ -4537,6 +4551,11 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
             } else {
                 cfg[off] = data >> (i * 8);
             }
+            if (bus != 0 && dev == IA64_460GX_COMPAT_PORT && fn == 0 &&
+                off == IA64_460GX_XXB_PCIS_REG) {
+                ia64_pci_host_set_low_mmio_window(
+                    s->pci_host_dev, (uint64_t)cfg[off] << 25);
+            }
         }
         return;
     }
@@ -4607,6 +4626,9 @@ static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
         memset(s->chipset_cfg, 0, IA64_460GX_CFG_SIZE);
     }
     s->cfg_address = 0;
+    if (s->pci_host_dev != NULL) {
+        ia64_pci_host_set_low_mmio_window(s->pci_host_dev, ~0ULL);
+    }
     /*
      * CBN comes out of reset as FFh: the chipset's own functions answer on
      * bus FF until firmware moves them.  The vendor firmware programs its
@@ -5103,9 +5125,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(iosapic), 0, IA64_IOSAPIC_BASE);
 
-    serial_mm_init(get_system_memory(), IA64_UART_BASE, 0,
-                   qdev_get_gpio_in(iosapic, 4),
-                   115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+    s->console_uart = serial_mm_init(get_system_memory(), IA64_UART_BASE, 0,
+                                     qdev_get_gpio_in(iosapic, 4),
+                                     115200, serial_hd(0),
+                                     DEVICE_LITTLE_ENDIAN);
     if (debug_port_get_chardev()) {
         s->debug_uart = serial_mm_init(get_system_memory(),
                                        IA64_DEBUG_UART_BASE, 0,
@@ -5128,6 +5151,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     qemu_add_machine_init_done_notifier(&s->done_notifier);
 
     pci_host = qdev_new(TYPE_IA64_PCI_HOST_BRIDGE);
+    s->pci_host_dev = pci_host;
     if (!ia64_vpc_chipset_is_zx1(s)) {
         ia64_pci_host_set_intx_routes(pci_host, ia64_i2000_pci0_intx,
                                       ARRAY_SIZE(ia64_i2000_pci0_intx),
@@ -5245,6 +5269,20 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
                                  IA64_LEGACY_COM1_IO_SIZE);
         memory_region_add_subregion(pci_io, IA64_LEGACY_COM1_IO_BASE,
                                     &s->debug_uart_legacy_io);
+    } else if (!ia64_vpc_chipset_is_zx1(s) && s->console_uart != NULL) {
+        /*
+         * Otherwise the i2000's COM1 is the console: the Super I/O's UART1
+         * at 3F8h on IRQ 4, which is what the vendor DSDT reports for it
+         * (UAR1, LDN 4) and what its firmware talks to.  The console UART
+         * already sits on PID input 4, so the same device serves both the
+         * memory-mapped window this firmware uses and the legacy one.
+         */
+        memory_region_init_alias(&s->console_uart_legacy_io, OBJECT(s),
+                                 "ia64-vpc.console-uart-legacy-io",
+                                 &s->console_uart->serial.io, 0,
+                                 IA64_LEGACY_COM1_IO_SIZE);
+        memory_region_add_subregion(pci_io, IA64_LEGACY_COM1_IO_BASE,
+                                    &s->console_uart_legacy_io);
     }
 
     /*
