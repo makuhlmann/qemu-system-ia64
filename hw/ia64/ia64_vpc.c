@@ -4150,6 +4150,24 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
     ((ARRAY_SIZE(ia64_460gx_chipset_devs) + 1) * IA64_460GX_CFG_DEV_SIZE)
 #define IA64_460GX_CBN_DEV       0x10
 #define IA64_460GX_CBN_REG       0x40
+/*
+ * An expander port's bus-number pair, at the offsets the vendor firmware's
+ * host enumeration programs and its DSDT reads (\_SB.CBN.SACn.BSNO/SBNO,
+ * the register the SSDM only names: "the destination ... is determined by
+ * the Bus Number and Subordinate Bus Number of each PCI port in each PXB",
+ * 2.3.1).  Port 0 is "Expander 0, Bus a ... the compatibility bus (where
+ * the boot vector is always directed)" (Table 2-1), and bus 0 is that bus
+ * by definition (2.2.1: every non-chipset device number on bus 0 forwards
+ * to it), so its pair is fixed at 0.  The firmware walks the port through
+ * 0x10, 0x30 ... 0xD0 while enumerating and leaves the last value behind;
+ * its own DSDT then hands PCI0's _CRS bus range to Windows from this
+ * register with _BBN a static 0, and pci.sys scans whatever bus the
+ * descriptor names -- 0xD0 when the writes stuck, and no device was ever
+ * found there (STOP 0x7B, plans/phase5-real-firmware-boot.md session 23).
+ */
+#define IA64_460GX_XXB_BUSNO_REG 0x48
+#define IA64_460GX_XXB_SUBNO_REG 0x49
+#define IA64_460GX_COMPAT_PORT   0x10
 
 /*
  * SPD EEPROM served through the MAC's I2C pass-through: firmware writes the
@@ -4402,6 +4420,11 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
             unsigned off = (reg + i) & 0xff;
             uint8_t *file = ia64_460gx_sac_indexed(s, dev, fn, cfg, off);
 
+            if (bus != 0 && dev == IA64_460GX_COMPAT_PORT && fn == 0 &&
+                (off == IA64_460GX_XXB_BUSNO_REG ||
+                 off == IA64_460GX_XXB_SUBNO_REG)) {
+                continue;   /* the compatibility bus is bus 0, always */
+            }
             if (file != NULL) {
                 *file = data >> (i * 8);
             } else {
