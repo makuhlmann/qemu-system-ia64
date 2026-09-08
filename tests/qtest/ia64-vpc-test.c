@@ -2874,23 +2874,26 @@ static void test_460gx_config_ports(void)
     g_assert_cmphex(cf8_readl(qts, 0, 0x1d, 0, PCI_VENDOR_ID), ==, 0xffffffff);
 
     /*
-     * Expander port 0 is the compatibility bus (Table 2-1), which is bus 0
-     * by definition (2.2.1): its Bus Number / Subordinate Bus Number pair at
-     * 48h/49h reads 0 whatever the firmware's enumeration writes there.  The
-     * vendor DSDT builds PCI0's _CRS bus range from exactly these two bytes,
-     * so a value that stuck sent Windows to enumerate the wrong bus.  The
-     * other ports' pairs are theirs to program.
+     * Configuration cycles route by each port's Bus Number / Subordinate Bus
+     * Number pair (SSDM 2.3.1): number the WXB's port a 0x12 and its bus
+     * answers there, the port's own number as a type 0 cycle even before
+     * SUBNO is raised.  Bus 0 stays the compatibility bus (2.2.1), and the
+     * compatibility port's own number reaches it as well (Table 2-1).
      */
+    cf8_select(qts, IA64_CBN_BUS, 0x12, 0, 0x48);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 0x12);
+    g_assert_cmphex(cf8_readl(qts, 0x12, IA64_460GX_WXB0_SCSI_SLOT, 0,
+                              PCI_VENDOR_ID), ==, 0x12161077);
+    g_assert_cmphex(cf8_readl(qts, 0x13, IA64_460GX_WXB0_SCSI_SLOT, 0,
+                              PCI_VENDOR_ID), ==, 0xffffffff);
     cf8_select(qts, IA64_CBN_BUS, IA64_CBN_DEVICE, 0, 0x48);
     qtest_writew(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
                  0xd0d0);
-    g_assert_cmphex(cf8_readl(qts, IA64_CBN_BUS, IA64_CBN_DEVICE, 0, 0x48)
-                    & 0xffff, ==, 0x0000);
-    cf8_select(qts, IA64_CBN_BUS, 0x12, 0, 0x48);
-    qtest_writew(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
-                 0xd2d2);
-    g_assert_cmphex(cf8_readl(qts, IA64_CBN_BUS, 0x12, 0, 0x48) & 0xffff,
-                    ==, 0xd2d2);
+    g_assert_cmphex(cf8_readl(qts, 0xd0, IA64_460GX_IFB_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x76008086);
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_460GX_IFB_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x76008086);
 
     /*
      * Port 0xCF9 is the reset control, aliased with byte 1 of the config

@@ -4152,22 +4152,20 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
 #define IA64_460GX_CBN_REG       0x40
 /*
  * An expander port's bus-number pair, at the offsets the vendor firmware's
- * host enumeration programs and its DSDT reads (\_SB.CBN.SACn.BSNO/SBNO,
- * the register the SSDM only names: "the destination ... is determined by
- * the Bus Number and Subordinate Bus Number of each PCI port in each PXB",
- * 2.3.1).  Port 0 is "Expander 0, Bus a ... the compatibility bus (where
- * the boot vector is always directed)" (Table 2-1), and bus 0 is that bus
- * by definition (2.2.1: every non-chipset device number on bus 0 forwards
- * to it), so its pair is fixed at 0.  The firmware walks the port through
- * 0x10, 0x30 ... 0xD0 while enumerating and leaves the last value behind;
- * its own DSDT then hands PCI0's _CRS bus range to Windows from this
- * register with _BBN a static 0, and pci.sys scans whatever bus the
- * descriptor names -- 0xD0 when the writes stuck, and no device was ever
- * found there (STOP 0x7B, plans/phase5-real-firmware-boot.md session 23).
+ * host enumeration programs and its DSDT reads (\_SB.CBN.SACn.BSNO/SBNO;
+ * the SSDM names the registers without placing them: "the destination ...
+ * is determined by the Bus Number and Subordinate Bus Number of each PCI
+ * port in each PXB", 2.3.1).  Port 0 is "Expander 0, Bus a ... the
+ * compatibility bus (where the boot vector is always directed)" (Table
+ * 2-1), which bus 0 reaches regardless (2.2.1: every non-chipset device
+ * number on bus 0 forwards to it), and which its programmed pair reaches
+ * like any other port's -- the firmware only computes a port's windows
+ * (PCIS, IOR) from what it finds on the bus it just numbered, so a port
+ * that ignored its pair would leave PCI0 without a window, and its DSDT
+ * hands that pair to Windows as PCI0's _CRS bus range.
  */
 #define IA64_460GX_XXB_BUSNO_REG 0x48
 #define IA64_460GX_XXB_SUBNO_REG 0x49
-#define IA64_460GX_COMPAT_PORT   0x10
 
 /*
  * SPD EEPROM served through the MAC's I2C pass-through: firmware writes the
@@ -4257,18 +4255,79 @@ static uint8_t *ia64_460gx_sac_indexed(IA64VpcMachineState *s, uint8_t dev,
 }
 
 /*
- * Find the device a configuration address names.  The 460GX's expander
- * ports each carry their own PCI bus, and this machine models them as
- * separate roots rather than as bridges below the compatibility bus, so a
- * lookup that starts at bus 0 only ever finds bus 0.  A configuration cycle
- * reaches all of them on real hardware, so try each root in turn.
+ * The expander ports this board populates, in Table 2-1's device numbers,
+ * and the root each one's PCI bus is modelled as: Expander 1 (the WXB) at
+ * 12h/13h with its buses a and b, Expander 2 (the GXB) at 14h.  Expander 0
+ * is the compatibility bus, handled before these are consulted.
+ */
+#define IA64_460GX_ROOT_COMPAT   (-1)
+static const struct {
+    uint8_t dev;
+    int root;
+} ia64_460gx_expander_ports[] = {
+    { 0x10, IA64_460GX_ROOT_COMPAT },
+    { 0x12, IA64_460GX_ROOT_WXB0 },
+    { 0x13, IA64_460GX_ROOT_WXB1 },
+    { 0x14, IA64_460GX_ROOT_GXB },
+};
+
+/*
+ * Find the device a configuration address names.  "If the Bus Number is not
+ * CBN, the destination and type of access is determined by the Bus Number
+ * and Subordinate Bus Number of each PCI port in each PXB.  A type 0 access
+ * is generated on the appropriate PCI bus if one of the PXB port's bus number
+ * is matched.  Otherwise, a type 1 configuration cycle is generated on the
+ * appropriate PCI bus below the PXB port whose subordinate bus number is in
+ * that range" (SSDM 2.3.1).  So a port whose firmware-programmed pair
+ * brackets the bus claims the cycle: its own bus number reaches the root's
+ * children, a higher one descends through the bridges below, which carry
+ * the numbers the same firmware gave them.  Bus 0 is the compatibility bus
+ * (Table 2-1) whatever its port's pair says, and is never looked up.
+ *
+ * A bus no port claims falls back to the board's fixed numbering -- the one
+ * ECAM uses and this machine's own firmware and guests enumerate by -- so a
+ * cycle to those buses keeps working with the ports unprogrammed.
  */
 static PCIDevice *ia64_460gx_cfg_find_device(IA64VpcMachineState *s,
                                              uint8_t bus, uint8_t devfn)
 {
-    PCIDevice *pci_dev = pci_find_device(s->host_pci_bus, bus, devfn);
+    PCIDevice *pci_dev;
     unsigned int i;
 
+    if (bus != 0) {
+        uint8_t cbn = ia64_460gx_cbn(s);
+
+        for (i = 0; i < ARRAY_SIZE(ia64_460gx_expander_ports); i++) {
+            int root_index = ia64_460gx_expander_ports[i].root;
+            PCIBus *root = root_index == IA64_460GX_ROOT_COMPAT
+                ? s->host_pci_bus : s->expander_bus[root_index];
+            const uint8_t *cfg = ia64_460gx_chipset_cfg(
+                s, cbn, ia64_460gx_expander_ports[i].dev, 0);
+            uint8_t busno, subno;
+
+            if (root == NULL || cfg == NULL) {
+                continue;
+            }
+            busno = cfg[IA64_460GX_XXB_BUSNO_REG];
+            subno = cfg[IA64_460GX_XXB_SUBNO_REG];
+            if (busno == 0) {
+                continue;
+            }
+            /*
+             * The port's own number is a type 0 cycle whatever SUBNO holds:
+             * firmware writes BUSNO, scans the bus, and only then raises
+             * SUBNO, so the scan must already reach the port's devices.
+             */
+            if (bus == busno) {
+                return pci_find_device(root, pci_bus_num(root), devfn);
+            }
+            if (bus > busno && bus <= subno) {
+                return pci_find_device(root, bus, devfn);
+            }
+        }
+    }
+
+    pci_dev = pci_find_device(s->host_pci_bus, bus, devfn);
     for (i = 0; pci_dev == NULL && i < ARRAY_SIZE(s->expander_bus); i++) {
         if (s->expander_bus[i] != NULL) {
             pci_dev = pci_find_device(s->expander_bus[i], bus, devfn);
@@ -4420,11 +4479,6 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
             unsigned off = (reg + i) & 0xff;
             uint8_t *file = ia64_460gx_sac_indexed(s, dev, fn, cfg, off);
 
-            if (bus != 0 && dev == IA64_460GX_COMPAT_PORT && fn == 0 &&
-                (off == IA64_460GX_XXB_BUSNO_REG ||
-                 off == IA64_460GX_XXB_SUBNO_REG)) {
-                continue;   /* the compatibility bus is bus 0, always */
-            }
             if (file != NULL) {
                 *file = data >> (i * 8);
             } else {
