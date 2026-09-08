@@ -42,7 +42,10 @@ struct IA64ExpanderState {
     uint8_t first_bus;       /* fixed bus number of this root bus */
     char bus_name[16];
     char bus_path[8];        /* "0000:01" style, stable for the monitor */
-    qemu_irq irq[IA64_PCI_INTX_LINES];
+    qemu_irq irq[IA64_PCI_INTX_MAX_OUTPUTS];
+    const IA64IntxRoute *intx_routes;
+    unsigned int intx_nroutes;
+    unsigned int intx_fallback_base;
 };
 
 /* Bus subclass whose bus_num reports the board-assigned first_bus. */
@@ -73,8 +76,22 @@ static const TypeInfo ia64_expander_bus_info = {
     .class_init    = ia64_expander_bus_class_init,
 };
 
+static unsigned int ia64_expander_intx_outputs(const IA64ExpanderState *s)
+{
+    return s->intx_routes != NULL ? IA64_PCI_INTX_MAX_OUTPUTS
+                                  : IA64_PCI_INTX_LINES;
+}
+
 static int ia64_expander_map_irq(PCIDevice *pdev, int pin)
 {
+    IA64ExpanderState *s =
+        IA64_EXPANDER_HOST(pci_get_bus(pdev)->qbus.parent);
+
+    if (s->intx_routes != NULL) {
+        return ia64_intx_route_lookup(s->intx_routes, s->intx_nroutes,
+                                      s->intx_fallback_base, pdev->devfn,
+                                      pin);
+    }
     return (PCI_SLOT(pdev->devfn) + pin) % IA64_PCI_INTX_LINES;
 }
 
@@ -82,7 +99,7 @@ static void ia64_expander_set_irq(void *opaque, int irq_num, int level)
 {
     IA64ExpanderState *s = opaque;
 
-    if (irq_num >= 0 && irq_num < IA64_PCI_INTX_LINES) {
+    if (irq_num >= 0 && irq_num < (int)ia64_expander_intx_outputs(s)) {
         qemu_set_irq(s->irq[irq_num], level);
     }
 }
@@ -107,12 +124,13 @@ static void ia64_expander_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    qdev_init_gpio_out(dev, s->irq, IA64_PCI_INTX_LINES);
+    qdev_init_gpio_out(dev, s->irq, ia64_expander_intx_outputs(s));
 
     bus = pci_register_root_bus(dev, s->bus_name, ia64_expander_set_irq,
                                 ia64_expander_map_irq, s, s->pci_mem,
                                 s->pci_io, PCI_DEVFN(0, 0),
-                                IA64_PCI_INTX_LINES, TYPE_IA64_EXPANDER_BUS);
+                                ia64_expander_intx_outputs(s),
+                                TYPE_IA64_EXPANDER_BUS);
     IA64_EXPANDER_BUS_OBJ(bus)->first_bus = s->first_bus;
     host->bus = bus;
     snprintf(s->bus_path, sizeof(s->bus_path), "0000:%02x", s->first_bus);
@@ -138,7 +156,11 @@ static const TypeInfo ia64_expander_info = {
 
 DeviceState *ia64_expander_host_create(Object *parent, const char *name,
                                        MemoryRegion *mem, MemoryRegion *io,
-                                       uint8_t first_bus, Error **errp)
+                                       uint8_t first_bus,
+                                       const IA64IntxRoute *routes,
+                                       unsigned int nroutes,
+                                       unsigned int fallback_base,
+                                       Error **errp)
 {
     DeviceState *dev = qdev_new(TYPE_IA64_EXPANDER_HOST);
     IA64ExpanderState *s = IA64_EXPANDER_HOST(dev);
@@ -147,6 +169,9 @@ DeviceState *ia64_expander_host_create(Object *parent, const char *name,
     s->pci_mem = mem;
     s->pci_io = io;
     s->first_bus = first_bus;
+    s->intx_routes = routes;
+    s->intx_nroutes = nroutes;
+    s->intx_fallback_base = fallback_base;
     pstrcpy(s->bus_name, sizeof(s->bus_name), name);
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), errp)) {
         return NULL;

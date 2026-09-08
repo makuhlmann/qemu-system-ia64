@@ -124,7 +124,7 @@ typedef struct TestInt10Registers {
  * IA64_PCI_INTX_GSI_BASE + (5 + 0) % 4 = 17.
  */
 #define IA64_E1000_SLOT              5U
-#define IA64_E1000_GSI               17U
+#define IA64_E1000_GSI               44U   /* i2000: bus-0 slot 5 INTA */
 #define IA64_E1000_TX_DESC_ADDR      0x00120000U
 #define IA64_E1000_TX_BUFFER_ADDR    0x00121000U
 #define IA64_E1000_RX_DESC_ADDR      0x00122000U
@@ -3377,7 +3377,7 @@ static void test_ahci_on(void)
     static const ExpectedPCIDevice ahci_dev = {
         .slot = 1, .vendor = 0x8086, .device = 0x2922,
         .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
-        .irq_line = 17, .irq_pin = 1,
+        .irq_line = 35, .irq_pin = 1,
         .bars = { [4] = 0x0000c101, [5] = 0xee020000 },
     };
     QTestState *qts = ia64_vpc_start("-machine ahci=on");
@@ -3405,7 +3405,7 @@ static void test_pci_default_layout(void)
         {
             .slot = 2, .vendor = 0x106b, .device = 0x003f,
             .command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
-            .irq_line = 18, .irq_pin = 1,
+            .irq_line = 39, .irq_pin = 1,
             .bars = { [0] = 0xee010000 },
         },
         expected_i82557b,
@@ -3430,8 +3430,8 @@ static void test_pci_default_layout(void)
     } ifb_functions[] = {
         { 0, 0x7600, PCI_CLASS_BRIDGE_ISA, 0, 0, 0 },
         { 1, 0x7601, PCI_CLASS_STORAGE_IDE, 0x0000c001, 0, 0 },
-        { 2, 0x7602, PCI_CLASS_SERIAL_USB, 0x0000c121, 18, 4 },
-        { 3, 0x7603, PCI_CLASS_SERIAL_SMBUS, 0x0000fff1, 16, 2 },
+        { 2, 0x7602, PCI_CLASS_SERIAL_USB, 0x0000c121, 47, 4 },
+        { 3, 0x7603, PCI_CLASS_SERIAL_SMBUS, 0x0000fff1, 46, 2 },
     };
     /*
      * The SCSI HBA is at 01:00.0 on the first WXB root -- the seat the board
@@ -3449,7 +3449,7 @@ static void test_pci_default_layout(void)
         { PCI_BASE_ADDRESS_0, 0x0000b001 },
         { PCI_BASE_ADDRESS_1, 0xfa000000 },
         { PCI_BASE_ADDRESS_2, 0x00000000 },
-        { PCI_INTERRUPT_LINE, 0x00000114 },
+        { PCI_INTERRUPT_LINE, 0x00000113 },
     };
     /*
      * The graphics adapter is no longer on bus 0: it sits at 03:00.0 behind
@@ -3464,7 +3464,7 @@ static void test_pci_default_layout(void)
         { PCI_BASE_ADDRESS_0, 0xf0000008 },
         { PCI_BASE_ADDRESS_1, 0x0000d801 },
         { PCI_BASE_ADDRESS_2, 0xf5000000 },
-        { PCI_INTERRUPT_LINE, 0x0000011c },
+        { PCI_INTERRUPT_LINE, 0x00000137 },
     };
     QTestState *qts = ia64_vpc_start(NULL);
     QGenericPCIBus gbus;

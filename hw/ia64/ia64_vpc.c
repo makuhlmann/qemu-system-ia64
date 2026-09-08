@@ -2933,6 +2933,51 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
 }
 
 /*
+ * How the i2000 wires PCI INTx into the 460GX Programmable Interrupt Device,
+ * per slot, INTA..INTD.  This is the board's own description of itself: the
+ * _PRT packages of the vendor firmware's DSDT (W460GXBS, PLAT()=1 branch),
+ * which Windows programs the PID's 64 inputs from.  A slot a root's table
+ * does not list has no interrupt on the real board; here it swizzles into
+ * the spare inputs at IA64_460GX_INTX_FALLBACK_GSI so an add-in card in an
+ * unlisted slot still works.  Keep in lockstep with the _PRT packages in
+ * roms/ia64-firmware/dsdt-pci-root.asl.
+ */
+static const IA64IntxRoute ia64_i2000_pci0_intx[] = {
+    { 0x01, { 35, 34, 33, 32 } },
+    { 0x02, { 39, 38, 37, 36 } },   /* OHCI */
+    { 0x03, { 46, 46, 47, 47 } },   /* 82468GX: SMBus INTB, USB INTD */
+    { 0x04, { 45, 45, 45, 45 } },
+    { 0x05, { 44, 44, 44, 44 } },   /* 82557 */
+};
+static const IA64IntxRoute ia64_i2000_wxb0_intx[] = {
+    { 0x00, { 19, 18, 17, 16 } },   /* SCSI */
+    { 0x01, { 23, 22, 21, 20 } },
+    { 0x02, { 43, 42, 41, 40 } },
+    { 0x0f, { 56, 56, 56, 56 } },   /* hot-plug controller */
+};
+static const IA64IntxRoute ia64_i2000_wxb1_intx[] = {
+    { 0x00, { 27, 26, 25, 24 } },
+    { 0x01, { 31, 30, 29, 28 } },
+    { 0x0f, { 57, 57, 57, 57 } },
+};
+static const IA64IntxRoute ia64_i2000_gxb_intx[] = {
+    { 0x00, { 55, 54, 55, 54 } },   /* AGP graphics */
+};
+#define IA64_460GX_INTX_FALLBACK_GSI 60
+
+static const struct {
+    const IA64IntxRoute *routes;
+    unsigned int nroutes;
+} ia64_i2000_root_intx[IA64_460GX_EXPANDER_ROOTS] = {
+    [IA64_460GX_ROOT_WXB0] = { ia64_i2000_wxb0_intx,
+                               ARRAY_SIZE(ia64_i2000_wxb0_intx) },
+    [IA64_460GX_ROOT_WXB1] = { ia64_i2000_wxb1_intx,
+                               ARRAY_SIZE(ia64_i2000_wxb1_intx) },
+    [IA64_460GX_ROOT_GXB]  = { ia64_i2000_gxb_intx,
+                               ARRAY_SIZE(ia64_i2000_gxb_intx) },
+};
+
+/*
  * Program a device's interrupt line from the interrupt block its root owns.
  * Devices on bus 0, and everything on zx1 (where both roots wire-OR into one
  * block of four), use IA64_PCI_INTX_GSI_BASE.  Each 460GX expander root has
@@ -2951,17 +2996,18 @@ static void ia64_vpc_configure_pci_irq_on_root(PCIDevice *pci_dev,
 
     pin = pci_dev->config[PCI_INTERRUPT_PIN];
     if (pin >= 1 && pin <= PCI_NUM_PINS) {
-        unsigned int line = gsi_base +
-            (ia64_pci_route_intx_gsi(pci_dev->devfn, pin - 1) -
-             IA64_PCI_INTX_GSI_BASE);
+        unsigned int line;
 
+        if (gsi_base == IA64_460GX_INTX_FALLBACK_GSI) {
+            /* A 460gx root: its bus maps the pin straight to a PID input. */
+            line = pci_get_bus(pci_dev)->map_irq(pci_dev, pin - 1);
+        } else {
+            line = gsi_base +
+                (ia64_pci_route_intx_gsi(pci_dev->devfn, pin - 1) -
+                 IA64_PCI_INTX_GSI_BASE);
+        }
         pci_default_write_config(pci_dev, PCI_INTERRUPT_LINE, line, 1);
     }
-}
-
-static void ia64_vpc_configure_pci_irq(PCIDevice *pci_dev)
-{
-    ia64_vpc_configure_pci_irq_on_root(pci_dev, IA64_PCI_INTX_GSI_BASE);
 }
 
 /* The interrupt block owned by the root that carries bus @bus. */
@@ -2971,7 +3017,13 @@ static unsigned int ia64_vpc_root_gsi_base(const IA64VpcMachineState *s,
     if (ia64_vpc_chipset_is_zx1(s)) {
         return IA64_PCI_INTX_GSI_BASE;
     }
-    return IA64_PCI_INTX_GSI_BASE + bus * IA64_PCI_INTX_LINES;
+    return IA64_460GX_INTX_FALLBACK_GSI;
+}
+
+static void ia64_vpc_configure_pci_irq(IA64VpcMachineState *s,
+                                       PCIDevice *pci_dev)
+{
+    ia64_vpc_configure_pci_irq_on_root(pci_dev, ia64_vpc_root_gsi_base(s, 0));
 }
 
 static void ia64_vpc_configure_ahci(PCIDevice *pci_dev)
@@ -3484,18 +3536,18 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_nic(s->nic_devs[i], i);
     }
-    ia64_vpc_configure_pci_irq(s->ahci_dev);
-    ia64_vpc_configure_pci_irq(s->audio_dev);
+    ia64_vpc_configure_pci_irq(s, s->ahci_dev);
+    ia64_vpc_configure_pci_irq(s, s->audio_dev);
     ia64_vpc_configure_pci_irq_on_root(
         s->isp_dev,
         ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
                                IA64_460GX_WXB0_BUS));
-    ia64_vpc_configure_pci_irq(s->ide_dev);
-    ia64_vpc_configure_pci_irq(s->ohci_dev);
-    ia64_vpc_configure_pci_irq(s->uhci_dev);
-    ia64_vpc_configure_pci_irq(
+    ia64_vpc_configure_pci_irq(s, s->ide_dev);
+    ia64_vpc_configure_pci_irq(s, s->ohci_dev);
+    ia64_vpc_configure_pci_irq(s, s->uhci_dev);
+    ia64_vpc_configure_pci_irq(s,
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_IDE_FUNCTION));
-    ia64_vpc_configure_pci_irq(
+    ia64_vpc_configure_pci_irq(s,
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
     ia64_vpc_configure_pci_irq_on_root(
         s->lsi_dev,
@@ -3507,7 +3559,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
         ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
                                IA64_460GX_GXB_BUS));
     for (unsigned int i = 0; i < s->nic_count; i++) {
-        ia64_vpc_configure_pci_irq(s->nic_devs[i]);
+        ia64_vpc_configure_pci_irq(s, s->nic_devs[i]);
     }
 }
 
@@ -3529,7 +3581,7 @@ static void ia64_vpc_record_nic(IA64VpcMachineState *s, PCIBus *bus,
 
     s->nic_devs[s->nic_count] = pci_dev;
     ia64_vpc_configure_nic(pci_dev, s->nic_count);
-    ia64_vpc_configure_pci_irq(pci_dev);
+    ia64_vpc_configure_pci_irq(s, pci_dev);
     s->nic_count++;
 }
 
@@ -5076,6 +5128,11 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     qemu_add_machine_init_done_notifier(&s->done_notifier);
 
     pci_host = qdev_new(TYPE_IA64_PCI_HOST_BRIDGE);
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        ia64_pci_host_set_intx_routes(pci_host, ia64_i2000_pci0_intx,
+                                      ARRAY_SIZE(ia64_i2000_pci0_intx),
+                                      IA64_460GX_INTX_FALLBACK_GSI);
+    }
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(pci_host), errp)) {
         return false;
     }
@@ -5199,10 +5256,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * input (level-triggered, wire-OR -- exactly how the two roots share the
      * platform's four PCI interrupt lines).
      */
-    for (i = 0; i < IA64_PCI_INTX_LINES; i++) {
-        qemu_irq gsi = qdev_get_gpio_in(iosapic, IA64_PCI_INTX_GSI_BASE + i);
-
-        if (ia64_vpc_chipset_is_zx1(s)) {
+    if (ia64_vpc_chipset_is_zx1(s)) {
+        for (i = 0; i < IA64_PCI_INTX_LINES; i++) {
+            qemu_irq gsi = qdev_get_gpio_in(iosapic,
+                                            IA64_PCI_INTX_GSI_BASE + i);
             DeviceState *org = qdev_new(TYPE_OR_IRQ);
 
             object_property_set_int(OBJECT(org), "num-lines", 2, &error_abort);
@@ -5210,8 +5267,15 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
             qdev_connect_gpio_out(org, 0, gsi);
             qdev_connect_gpio_out(pci_host, i, qdev_get_gpio_in(org, 0));
             qdev_connect_gpio_out(s->mercury_host, i, qdev_get_gpio_in(org, 1));
-        } else {
-            qdev_connect_gpio_out(pci_host, i, gsi);
+        }
+    } else {
+        /*
+         * On the i2000 each root's outputs are numbered by PID input (the
+         * board tables above), so every output goes to the input of the
+         * same number; inputs 0-15 stay the ISA lines, which no table names.
+         */
+        for (i = IA64_PCI_INTX_GSI_BASE; i < IA64_PCI_INTX_MAX_OUTPUTS; i++) {
+            qdev_connect_gpio_out(pci_host, i, qdev_get_gpio_in(iosapic, i));
         }
     }
 
@@ -5252,7 +5316,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
             s->expander_host[index] = ia64_expander_host_create(
                 OBJECT(s), expanders[root].name,
                 ia64_pci_host_mmio(pci_host), ia64_pci_host_io(pci_host),
-                expanders[root].bus, errp);
+                expanders[root].bus,
+                ia64_i2000_root_intx[index].routes,
+                ia64_i2000_root_intx[index].nroutes,
+                IA64_460GX_INTX_FALLBACK_GSI, errp);
             if (s->expander_host[index] == NULL) {
                 return false;
             }
@@ -5260,13 +5327,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
                 ia64_expander_host_bus(s->expander_host[index]);
             ia64_pci_host_add_secondary_bus(pci_host, s->expander_bus[index]);
 
-            for (line = 0; line < IA64_PCI_INTX_LINES; line++) {
-                unsigned int input = IA64_PCI_INTX_GSI_BASE +
-                                     expanders[root].bus *
-                                     IA64_PCI_INTX_LINES + line;
-
+            for (line = IA64_PCI_INTX_GSI_BASE;
+                 line < IA64_PCI_INTX_MAX_OUTPUTS; line++) {
                 qdev_connect_gpio_out(s->expander_host[index], line,
-                                      qdev_get_gpio_in(iosapic, input));
+                                      qdev_get_gpio_in(iosapic, line));
             }
         }
 
@@ -5686,7 +5750,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         if (!pci_realize_and_unref(s->ide_dev, pci_bus, errp)) {
             return false;
         }
-        ia64_vpc_configure_pci_irq(s->ide_dev);
+        ia64_vpc_configure_pci_irq(s, s->ide_dev);
         pci_ide_create_devs(s->ide_dev);
     }
 #endif

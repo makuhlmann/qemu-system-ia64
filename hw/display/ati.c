@@ -2443,6 +2443,14 @@ static void ati_vga_reset(DeviceState *dev)
      * the display off until then, as it does on the real part.
      */
     memset(&s->regs, 0, sizeof(s->regs));
+    /*
+     * CRTC2_CUR_EN is gone with the registers, so the sprite the console
+     * still shows for the host-side cursor must go too; a guest-rendered
+     * cursor lives in VRAM and needs nothing here.
+     */
+    if (!s->cursor_guest_mode && s->vga.con != NULL) {
+        dpy_mouse_set(s->vga.con, 0, 0, false);
+    }
 
     /*
      * PLL and init-register power-up values from the RAGE 128 PRO Register

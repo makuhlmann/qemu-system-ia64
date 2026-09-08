@@ -24,6 +24,24 @@
 int ia64_pci_route_intx_gsi(uint8_t devfn, int irq_num);
 
 /*
+ * A board's INTx wiring for one PCI slot: the interrupt-controller input each
+ * of INTA..INTD reaches.  A root given a table drives those inputs directly
+ * (its GPIO outputs are numbered by input); a slot the table does not list
+ * swizzles into the four inputs at @fallback_base.
+ */
+typedef struct IA64IntxRoute {
+    uint8_t slot;
+    uint8_t gsi[4];          /* INTA..INTD */
+} IA64IntxRoute;
+#define IA64_PCI_INTX_MAX_OUTPUTS 64
+int ia64_intx_route_lookup(const IA64IntxRoute *routes, unsigned int nroutes,
+                           unsigned int fallback_base, uint8_t devfn, int pin);
+void ia64_pci_host_set_intx_routes(DeviceState *dev,
+                                   const IA64IntxRoute *routes,
+                                   unsigned int nroutes,
+                                   unsigned int fallback_base);
+
+/*
  * The shared identity-mapped MMIO/I/O windows of the primary host bridge.  The
  * zx1 Mercury host bridge (hw/ia64/ia64_mercury.c) registers its second root bus
  * against these same regions so device BARs on the Mercury bus land in the same

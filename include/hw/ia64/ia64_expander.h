@@ -19,6 +19,8 @@
 #ifndef HW_IA64_EXPANDER_H
 #define HW_IA64_EXPANDER_H
 
+#include "hw/ia64/ia64_pci.h"
+
 #include "qemu/typedefs.h"
 #include "qapi/error.h"
 
@@ -34,7 +36,11 @@
  */
 DeviceState *ia64_expander_host_create(Object *parent, const char *name,
                                        MemoryRegion *mem, MemoryRegion *io,
-                                       uint8_t first_bus, Error **errp);
+                                       uint8_t first_bus,
+                                       const IA64IntxRoute *routes,
+                                       unsigned int nroutes,
+                                       unsigned int fallback_base,
+                                       Error **errp);
 
 /* The expander's root bus. */
 PCIBus *ia64_expander_host_bus(DeviceState *dev);

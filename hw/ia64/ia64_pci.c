@@ -26,7 +26,10 @@ struct IA64PCIState {
     MemoryRegion pci_io_sparse;
     MemoryRegion pci_config;
     AddressSpace pci_io_as;
-    qemu_irq irq[IA64_PCI_INTX_LINES];
+    qemu_irq irq[IA64_PCI_INTX_MAX_OUTPUTS];
+    const IA64IntxRoute *intx_routes;
+    unsigned int intx_nroutes;
+    unsigned int intx_fallback_base;
 
     /*
      * Secondary root buses reached through this one segment-0 ECAM window.
@@ -259,8 +262,46 @@ int ia64_pci_route_intx_gsi(uint8_t devfn, int irq_num)
     return IA64_PCI_INTX_GSI_BASE + ia64_pci_route_intx_output(devfn, irq_num);
 }
 
+int ia64_intx_route_lookup(const IA64IntxRoute *routes, unsigned int nroutes,
+                           unsigned int fallback_base, uint8_t devfn, int pin)
+{
+    unsigned int i;
+
+    for (i = 0; i < nroutes; i++) {
+        if (routes[i].slot == PCI_SLOT(devfn)) {
+            return routes[i].gsi[pin & 3];
+        }
+    }
+    return fallback_base + (PCI_SLOT(devfn) + pin) % IA64_PCI_INTX_LINES;
+}
+
+void ia64_pci_host_set_intx_routes(DeviceState *dev,
+                                   const IA64IntxRoute *routes,
+                                   unsigned int nroutes,
+                                   unsigned int fallback_base)
+{
+    IA64PCIState *s = IA64_PCI_HOST_BRIDGE(dev);
+
+    s->intx_routes = routes;
+    s->intx_nroutes = nroutes;
+    s->intx_fallback_base = fallback_base;
+}
+
+static unsigned int ia64_pci_intx_outputs(const IA64PCIState *s)
+{
+    return s->intx_routes != NULL ? IA64_PCI_INTX_MAX_OUTPUTS
+                                  : IA64_PCI_INTX_LINES;
+}
+
 static int ia64_pci_map_irq(PCIDevice *d, int irq_num)
 {
+    IA64PCIState *s = IA64_PCI_HOST_BRIDGE(pci_get_bus(d)->qbus.parent);
+
+    if (s->intx_routes != NULL) {
+        return ia64_intx_route_lookup(s->intx_routes, s->intx_nroutes,
+                                      s->intx_fallback_base, d->devfn,
+                                      irq_num);
+    }
     return ia64_pci_route_intx_output(d->devfn, irq_num);
 }
 
@@ -268,7 +309,7 @@ static void ia64_pci_set_irq(void *opaque, int irq_num, int level)
 {
     IA64PCIState *s = opaque;
 
-    if (irq_num < IA64_PCI_INTX_LINES) {
+    if (irq_num >= 0 && irq_num < (int)ia64_pci_intx_outputs(s)) {
         qemu_set_irq(s->irq[irq_num], level);
     }
 }
@@ -306,12 +347,13 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
                           &ia64_pci_config_ops, s, "ia64-pci-config",
                           IA64_PCI_CONFIG_SIZE);
 
-    qdev_init_gpio_out(dev, s->irq, IA64_PCI_INTX_LINES);
+    qdev_init_gpio_out(dev, s->irq, ia64_pci_intx_outputs(s));
 
     phb->bus = pci_register_root_bus(dev, "pci",
                                      ia64_pci_set_irq, ia64_pci_map_irq, s,
                                      &s->pci_mmio, &s->pci_io,
-                                     PCI_DEVFN(0, 0), 4, TYPE_PCI_BUS);
+                                     PCI_DEVFN(0, 0),
+                                     ia64_pci_intx_outputs(s), TYPE_PCI_BUS);
 
     memory_region_add_subregion_overlap(get_system_memory(),
                                         IA64_PCI_MMIO_BASE,
