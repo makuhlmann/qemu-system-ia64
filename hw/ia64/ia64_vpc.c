@@ -38,6 +38,7 @@
 #include "hw/ide/ide-dev.h"
 #include "hw/ide/pci.h"
 #include "hw/input/i8042.h"
+#include "hw/isa/smsc_lpc47b27x.h"
 #include "hw/southbridge/intel_82468gx.h"
 #include "hw/ia64/ia64_460gx_identity.h"
 #include "hw/acpi/acpi.h"
@@ -5407,6 +5408,12 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         qdev_connect_gpio_out_named(DEVICE(s->ifb),
                                     INTEL_82468GX_IFB_GPIO_LEGACY, 0,
                                     s->extint);
+        /*
+         * The board's Super I/O behind the bridge, as far as its
+         * configuration space: the vendor DSDT finds COM1 and the keyboard
+         * controller through it (see hw/isa/smsc_lpc47b27x.c).
+         */
+        isa_create_simple(isa_bus, TYPE_SMSC_LPC47B27X);
     } else {
         isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, errp);
         if (isa_bus == NULL) {

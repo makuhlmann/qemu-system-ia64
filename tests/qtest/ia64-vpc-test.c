@@ -2778,6 +2778,50 @@ static void test_460gx_sac_aperture(void)
     qtest_quit(qts);
 }
 
+/*
+ * The i2000's SMSC LPC47B27x Super I/O answers its configuration pair at
+ * 2Eh/2Fh: 55h enters, AAh leaves, index 07h selects the logical device,
+ * and the vendor DSDT reads COM1 (LDN 4) as ACTR 30h / IOAH-IOAL 60h-61h /
+ * INTR 70h -- 3F8h on IRQ 4, active, as the board's firmware configures it.
+ * Outside configuration mode the data port reads open bus.
+ */
+static void test_460gx_superio(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    uint64_t idx = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2e);
+    uint64_t dat = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2f);
+
+    qtest_writeb(qts, idx, 0x07);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xff);
+    qtest_writeb(qts, idx, 0x55);
+    qtest_writeb(qts, idx, 0x20);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x51);
+    qtest_writeb(qts, idx, 0x07);
+    qtest_writeb(qts, dat, 0x04);
+    qtest_writeb(qts, idx, 0x30);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x01);
+    qtest_writeb(qts, idx, 0x60);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x03);
+    qtest_writeb(qts, idx, 0x61);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xf8);
+    qtest_writeb(qts, idx, 0x70);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x04);
+    qtest_writeb(qts, idx, 0x07);
+    qtest_writeb(qts, dat, 0x05);
+    qtest_writeb(qts, idx, 0x30);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x00);
+    qtest_writeb(qts, idx, 0xaa);
+    qtest_writeb(qts, idx, 0x30);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xff);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    qtest_writeb(qts, idx, 0x55);
+    qtest_writeb(qts, idx, 0x20);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xff);
+    qtest_quit(qts);
+}
+
 static void test_460gx_config_ports(void)
 {
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
@@ -4273,13 +4317,15 @@ static void test_openbus_io_port(void)
     /*
      * A legacy I/O port that no device claims floats the bus high: a byte
      * read returns 0xff, not 0x00.  Real SDV firmware byte-reads a Super I/O
-     * device-ID register at port 0x2f (and the 0x2e index alongside it) and
-     * requires 0xff for an absent chip.  A port a device does answer keeps
+     * device-ID register through the 0x2e/0x2f pair and accepts 0xff there
+     * as "no chip fitted"; the 460gx board now carries the chip at 0x2e, so
+     * the alternate pair at 0x4e/0x4f, which the same firmware also probes,
+     * is the one that must float.  A port a device does answer keeps
      * returning its own value.  (Sparse I/O maps consecutive ports to
      * non-consecutive addresses, so only single-port byte reads are probed.)
      */
-    const uint64_t sio2f = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2f);
-    const uint64_t sio2e = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2e);
+    const uint64_t sio2f = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x4f);
+    const uint64_t sio2e = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x4e);
     const uint32_t pm_port = IA64_ACPI_PM_IO_BASE + IA64_ACPI_PM1_CNT_OFFSET;
     const uint64_t pm = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(pm_port);
     QTestState *qts = ia64_vpc_start(NULL);
@@ -5809,6 +5855,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/460gx-platform-identities",
                    test_460gx_platform_identities);
     qtest_add_func("/ia64-vpc/pci/460gx-config-ports", test_460gx_config_ports);
+    qtest_add_func("/ia64-vpc/isa/460gx-superio", test_460gx_superio);
     qtest_add_func("/ia64-vpc/pci/460gx-sac-indexed-file",
                    test_460gx_sac_indexed_file);
     qtest_add_func("/ia64-vpc/pci/460gx-sac-aperture", test_460gx_sac_aperture);
