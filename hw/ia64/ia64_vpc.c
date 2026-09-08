@@ -549,6 +549,22 @@ struct IA64VpcMachineClass {
     uint64_t chipset_profile;
 };
 
+/*
+ * The SAC's function-0 indexed register file.  Neither the register pair nor
+ * the file is published -- the SSDM documents only the SAC's error, monitor
+ * and interrupt registers -- but the vendor firmware's use of it is not
+ * ambiguous: it writes an entry number to 64h, reads 64h back to confirm the
+ * selector took, then reads and rewrites 70h-73h, and it walks that sequence
+ * over entries 01h, 03h-07h and 10h-1Eh -- Table 2-1's chipset device numbers,
+ * expander ports included.  Backing 70h with one cell, as ordinary config
+ * storage does, makes every entry the same cell: the firmware's own walk then
+ * reads at entry 04h what it wrote at 03h, so anything it concludes about
+ * which expander ports exist is an artefact of the alias.
+ */
+#define IA64_460GX_SAC_IDX_REG      0x64
+#define IA64_460GX_SAC_IDX_DATA     0x70
+#define IA64_460GX_SAC_IDX_ENTRIES  256
+
 struct IA64VpcMachineState {
     MachineState parent_obj;
 
@@ -580,6 +596,8 @@ struct IA64VpcMachineState {
     uint32_t cfg_address;
     /* 460GX chipset config space: bus CBN devices, 8 fns x 256 bytes. */
     uint8_t *chipset_cfg;
+    /* The SAC function-0 register file behind 64h/70h, one per SAC. */
+    uint8_t sac_indexed[2][IA64_460GX_SAC_IDX_ENTRIES][4];
     PCIBus *host_pci_bus;
     char *vga_model;
     bool alat_full;
@@ -4202,6 +4220,25 @@ static uint8_t *ia64_460gx_chipset_cfg(IA64VpcMachineState *s,
 }
 
 /*
+ * The byte a SAC function-0 register-file access lands on: 70h-73h is a window
+ * onto the entry 64h selects, so it comes from the file rather than from the
+ * device's own config storage.  Any other device, function or offset stays
+ * where it was.
+ */
+static uint8_t *ia64_460gx_sac_indexed(IA64VpcMachineState *s, uint8_t dev,
+                                       uint8_t fn, const uint8_t *cfg,
+                                       unsigned off)
+{
+    if (fn != 0 || dev > 0x01 ||
+        off < IA64_460GX_SAC_IDX_DATA ||
+        off >= IA64_460GX_SAC_IDX_DATA + 4) {
+        return NULL;
+    }
+    return &s->sac_indexed[dev][cfg[IA64_460GX_SAC_IDX_REG]]
+                          [off - IA64_460GX_SAC_IDX_DATA];
+}
+
+/*
  * Find the device a configuration address names.  The 460GX's expander
  * ports each carry their own PCI bus, and this machine models them as
  * separate roots rather than as bridges below the compatibility bus, so a
@@ -4287,7 +4324,10 @@ static uint64_t ia64_460gx_cfg_read(void *opaque, hwaddr addr, unsigned size)
         val = 0;
     } else if (cfg != NULL) {
         for (i = 0; i < size; i++) {
-            val |= (uint64_t)cfg[(reg + i) & 0xff] << (i * 8);
+            unsigned off = (reg + i) & 0xff;
+            const uint8_t *file = ia64_460gx_sac_indexed(s, dev, fn, cfg, off);
+
+            val |= (uint64_t)(file != NULL ? *file : cfg[off]) << (i * 8);
         }
     } else if (bus == ia64_460gx_cbn(s)) {
         /*
@@ -4359,7 +4399,14 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
                   bus, dev, fn, reg, size, data);
     if (cfg != NULL) {
         for (i = 0; i < size; i++) {
-            cfg[(reg + i) & 0xff] = data >> (i * 8);
+            unsigned off = (reg + i) & 0xff;
+            uint8_t *file = ia64_460gx_sac_indexed(s, dev, fn, cfg, off);
+
+            if (file != NULL) {
+                *file = data >> (i * 8);
+            } else {
+                cfg[off] = data >> (i * 8);
+            }
         }
         return;
     }
@@ -4518,6 +4565,13 @@ static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
      * not be seeded: its SPD/I2C tunnel reading 0xFF fails memory init at
      * POST 0xF1.
      */
+    /*
+     * The register file behind 64h/70h resets with the same open bus its
+     * window used to read, so an entry the firmware has not written answers
+     * exactly as it did when one cell stood in for all of them.
+     */
+    memset(s->sac_indexed, 0xff, sizeof(s->sac_indexed));
+
     {
         unsigned i, fn;
 

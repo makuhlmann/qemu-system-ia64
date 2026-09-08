@@ -2895,6 +2895,73 @@ static void test_460gx_config_ports(void)
     qtest_quit(qts);
 }
 
+/*
+ * The SAC's function-0 indexed register file: 64h selects an entry, 70h-73h is
+ * the window onto it.  Undocumented -- the SSDM publishes only the SAC's
+ * error, monitor and interrupt registers -- but the vendor firmware walks it
+ * unmistakably, writing an entry number to 64h, reading 64h back, then reading
+ * and rewriting 70h, over Table 2-1's chipset device numbers.  Backed by one
+ * cell, as plain config storage is, every entry aliases: the firmware's own
+ * walk reads at one entry what it wrote at the one before, so what it decides
+ * about which expander ports exist comes from the alias rather than from the
+ * machine.  Each SAC has its own file.
+ */
+#define IA64_SAC_IDX_REG    0x64
+#define IA64_SAC_IDX_DATA   0x70
+
+static void sac_idx_write(QTestState *qts, uint8_t sac, uint8_t entry,
+                          uint32_t value)
+{
+    cf8_select(qts, 0xff, sac, 0, IA64_SAC_IDX_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 entry);
+    cf8_select(qts, 0xff, sac, 0, IA64_SAC_IDX_DATA);
+    qtest_writel(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 value);
+}
+
+static uint32_t sac_idx_read(QTestState *qts, uint8_t sac, uint8_t entry)
+{
+    cf8_select(qts, 0xff, sac, 0, IA64_SAC_IDX_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 entry);
+    return cf8_readl(qts, 0xff, sac, 0, IA64_SAC_IDX_DATA);
+}
+
+static void test_460gx_sac_indexed_file(void)
+{
+    QTestState *qts = ia64_vpc_start("");
+
+    /* The selector reads back, which is how the firmware checks it took. */
+    cf8_select(qts, 0xff, 0x00, 0, IA64_SAC_IDX_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 0x13);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x00, 0, IA64_SAC_IDX_REG) & 0xff,
+                    ==, 0x13);
+
+    /* An entry nobody has written reads the open bus its window always did. */
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x14), ==, 0xffffffff);
+
+    /* Entries keep their own values rather than sharing one cell. */
+    sac_idx_write(qts, 0x00, 0x10, 0x11223344);
+    sac_idx_write(qts, 0x00, 0x12, 0x55667788);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x10), ==, 0x11223344);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x12), ==, 0x55667788);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x14), ==, 0xffffffff);
+
+    /* And the second SAC has a file of its own. */
+    sac_idx_write(qts, 0x01, 0x10, 0x99aabbcc);
+    g_assert_cmphex(sac_idx_read(qts, 0x01, 0x10), ==, 0x99aabbcc);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x10), ==, 0x11223344);
+
+    qtest_quit(qts);
+}
+
+
 static void test_460gx_root_window_containment(void)
 {
     /*
@@ -5720,6 +5787,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/460gx-platform-identities",
                    test_460gx_platform_identities);
     qtest_add_func("/ia64-vpc/pci/460gx-config-ports", test_460gx_config_ports);
+    qtest_add_func("/ia64-vpc/pci/460gx-sac-indexed-file",
+                   test_460gx_sac_indexed_file);
     qtest_add_func("/ia64-vpc/pci/460gx-sac-aperture", test_460gx_sac_aperture);
     qtest_add_func("/ia64-vpc/pci/460gx-smbus-hwmon", test_460gx_smbus_hwmon);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",
