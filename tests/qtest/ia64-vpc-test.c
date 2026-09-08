@@ -2829,6 +2829,32 @@ static void test_460gx_config_ports(void)
                     ==, 0x12161077);
 
     /*
+     * "On the bus that the chipset is mapped into (determined by the CBN
+     * register), Device Numbers 0-31 are reserved for the 460GX chipset
+     * components as shown in Table 2-1.  All other devices numbers are
+     * forwarded to the selected bus" (SSDM 2.3.1).  So point CBN at a bus a
+     * root really carries: the whole bus becomes chipset space, and the SCSI
+     * adapter that answered a moment ago must stop answering.  Looking an
+     * unpopulated chipset device number up on the PCI buses instead is what
+     * would alias a real device's config space into the chipset's window.
+     */
+    cf8_select(qts, 0, IA64_CBN_DEVICE, 0, IA64_CBN_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 IA64_460GX_WXB0_BUS);
+    /* The SCSI adapter's device number is the SAC's there now, not its own. */
+    g_assert_cmphex(cf8_readl(qts, IA64_460GX_WXB0_BUS,
+                              IA64_460GX_WXB0_SCSI_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x84e08086);
+    /* And a device number the chipset does not populate reads absent. */
+    g_assert_cmphex(cf8_readl(qts, IA64_460GX_WXB0_BUS, 0x0f, 0,
+                              PCI_VENDOR_ID), ==, 0xffffffff);
+    cf8_select(qts, 0, IA64_CBN_DEVICE, 0, IA64_CBN_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 IA64_CBN_BUS);
+
+    /*
      * Expander port 0 sits at device 10h on bus CBN and shares neither
      * storage nor meaning with the CBN window on bus 0: programming its
      * registers must not move the chipset.

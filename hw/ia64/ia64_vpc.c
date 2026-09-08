@@ -4289,6 +4289,18 @@ static uint64_t ia64_460gx_cfg_read(void *opaque, hwaddr addr, unsigned size)
         for (i = 0; i < size; i++) {
             val |= (uint64_t)cfg[(reg + i) & 0xff] << (i * 8);
         }
+    } else if (bus == ia64_460gx_cbn(s)) {
+        /*
+         * "On the bus that the chipset is mapped into (determined by the CBN
+         * register), Device Numbers 0-31 are reserved for the 460GX chipset
+         * components as shown in Table 2-1.  All other devices numbers are
+         * forwarded to the selected bus" (SSDM 2.3.1).  Every device number
+         * on bus CBN is therefore chipset space: one this board does not
+         * populate answers as absent rather than being looked for on a PCI
+         * bus, which is what keeps the two apart should CBN ever land on a
+         * bus number a root actually carries.
+         */
+        val = (1ULL << (size * 8)) - 1;
     } else {
         PCIDevice *pci_dev = ia64_460gx_cfg_find_device(s, bus,
                                                         PCI_DEVFN(dev, fn));
@@ -4350,6 +4362,9 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
             cfg[(reg + i) & 0xff] = data >> (i * 8);
         }
         return;
+    }
+    if (bus == ia64_460gx_cbn(s)) {
+        return;     /* an unpopulated chipset device number (SSDM 2.3.1) */
     }
     {
         PCIDevice *pci_dev = ia64_460gx_cfg_find_device(s, bus,
