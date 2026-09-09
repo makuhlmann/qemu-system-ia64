@@ -3007,6 +3007,40 @@ static void test_460gx_vgase_dropped(void)
 }
 
 /*
+ * The GXB AGP host bridge (dev 14h fn 1) holds the graphics aperture base in
+ * the 64-bit BAPBASE register (98h).  The vendor firmware programs it at 4 GiB
+ * (low dword 0, high dword 1); an above-4-GiB base makes Windows XP-64 fail the
+ * AGP root with Code 12, so the realfw config path clamps an above-4-GiB base
+ * below 4 GiB while leaving a legitimate below-4-GiB base as written.
+ */
+static void test_460gx_agp_aperture_rebased(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+
+    /* Firmware's 4 GiB BAPBASE (low 0, high 1) reads back clamped below 4 GiB. */
+    cf8_writel(qts, 0xff, 0x14, 1, 0x98, 0x00000000);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x9c, 0x00000001);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xd0000000);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x00000000);
+
+    /* A below-4-GiB base is legitimate (agp460 writes the aperture back once
+     * the OS owns it) and is stored verbatim -- only above-4-GiB is clamped. */
+    cf8_writel(qts, 0xff, 0x14, 1, 0x98, 0xc0000000);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x9c, 0x00000000);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xc0000000);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x00000000);
+
+    /* Scope: only dev 14h function 1's BAPBASE.  Function 0 (the SAC) is not
+     * clamped, and registers outside 98h-9fh are ordinary config storage. */
+    cf8_writel(qts, 0xff, 0x14, 0, 0x9c, 0x00000001);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 0, 0x9c), ==, 0x00000001);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x94, 0xdeadbeef);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x94), ==, 0xdeadbeef);
+
+    qtest_quit(qts);
+}
+
+/*
  * The SAC's function-0 indexed register file: 64h selects an entry, 70h-73h is
  * the window onto it.  Undocumented -- the SSDM publishes only the SAC's
  * error, monitor and interrupt registers -- but the vendor firmware walks it
@@ -6004,6 +6038,8 @@ int main(int argc, char **argv)
                    test_460gx_platform_identities);
     qtest_add_func("/ia64-vpc/pci/460gx-config-ports", test_460gx_config_ports);
     qtest_add_func("/ia64-vpc/pci/460gx-vgase-dropped", test_460gx_vgase_dropped);
+    qtest_add_func("/ia64-vpc/pci/460gx-agp-aperture-rebased",
+                   test_460gx_agp_aperture_rebased);
     qtest_add_func("/ia64-vpc/isa/460gx-superio", test_460gx_superio);
     qtest_add_func("/ia64-vpc/pci/460gx-sac-indexed-file",
                    test_460gx_sac_indexed_file);

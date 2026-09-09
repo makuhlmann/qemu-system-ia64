@@ -4247,6 +4247,45 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
 #define IA64_460GX_XXB_VGASE_BIT 0x01
 
 /*
+ * The GXB AGP host bridge (chipset device 14h, function 1 -- "BRI4") holds the
+ * AGP graphics aperture base.  AGPSIZ (reg A2h) bit 3 selects which register
+ * supplies it: the 32-bit APBASE (reg 10h) when clear, or the 64-bit BAPBASE
+ * (reg 98h) when set (460GX SSDM 7).  The vendor firmware programs AGPSIZ=09h
+ * (bit 3 set, bit 0 = 256 MiB) and BAPBASE=0x1_00000000, i.e. a 256 MiB
+ * aperture based at 4 GiB.
+ *
+ * That above-4-GiB base is what makes Windows XP 64-bit (build 2600) fail the
+ * GXB/AGP root with Code 12.  agp460.sys reads AGPSIZ then BAPBASE
+ * (WSRV03 base/busdrv/agp/agp460/gart.c AgpQueryAperture) and agplib appends a
+ * *pinned*, non-relocatable memory requirement [base, base+size-1] for the
+ * aperture -- on IA-64 PnP may not move the aperture base, so only that one
+ * "preferred" descriptor is offered (agplib/resource.c ~205, 262-271).  This
+ * build serialises the aperture as a 32-bit CmResourceTypeMemory descriptor,
+ * so a 4 GiB base truncates to [0, 0x0FFFFFFF]; that range lies inside RAM,
+ * the arbiter cannot grant it, and the root gets Code 12 and never enumerates
+ * its AGP child.  A below-4-GiB base is represented and placed intact.
+ *
+ * So when a write leaves BAPBASE naming an address at or above 4 GiB, re-base
+ * the aperture inside PCI3's producer window, below the graphics framebuffer.
+ * Only an above-4-GiB base is clamped -- a legitimate below-4-GiB base (agp460
+ * writes the aperture back once the OS owns it) is left as written.  AGPSIZ
+ * bit 3 stays set: it only selects the 64-bit register, not an above-4-GiB
+ * address (our own ia64_agp GART runs bit 3 set with a below-4-GiB base too).
+ * Realfw-only, like the VGASE drop below: own-firmware guests reach PCI config
+ * through ECAM and never write this chipset store, and the 460GX
+ * GART-translation device (ia64_agp, bus 0 dev 31) keeps its own aperture base
+ * (0xEE000000), so the Linux AGP-GART DMA path is unaffected.  agp460 now
+ * programs the aperture at a different base than ia64_agp decodes, so Windows
+ * AGP-texture DMA would need the two reconciled -- a known gap, not a
+ * regression (that path was dead while the root failed Code 12).
+ */
+#define IA64_460GX_GXB_DEV              0x14
+#define IA64_460GX_GXB_BRIDGE_FN       1
+#define IA64_460GX_GXB_BAPBASE_REG     0x98    /* 64-bit AGP aperture base */
+#define IA64_460GX_GXB_BAPBASE_LAST    0x9f
+#define IA64_460GX_GXB_AGP_APERTURE_BASE 0x00000000d0000000ULL
+
+/*
  * SPD EEPROM served through the MAC's I2C pass-through: firmware writes the
  * DIMM's I2C address (0x54..0x57, bit 7 = read) into the SAC IIADR register
  * (dev 00h fn 0 reg 0x68), then config reads of Memory Card fn 2/3 return
@@ -4635,6 +4674,26 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
             if (bus != 0 && fn == 0 && off == IA64_460GX_XXB_PCIS_REG &&
                 ia64_460gx_expander_port_root(dev) != IA64_460GX_ROOT_NONE) {
                 ia64_460gx_update_low_mmio_window(s);
+            }
+        }
+        /*
+         * Re-base an above-4-GiB GXB AGP aperture below 4 GiB (see
+         * IA64_460GX_GXB_BAPBASE_REG above).  Clamp only when the stored 64-bit
+         * BAPBASE actually names an address at or above 4 GiB, so the firmware's
+         * 0x1_00000000 is corrected while a legitimate below-4-GiB base -- such
+         * as agp460's own AgpSetAperture write-back -- is stored verbatim.  The
+         * check runs when this access touches the register (its high dword
+         * arrives as a separate size-4 write at 0x9c, per the POST trace).
+         */
+        if (bus != 0 && dev == IA64_460GX_GXB_DEV &&
+            fn == IA64_460GX_GXB_BRIDGE_FN &&
+            reg <= IA64_460GX_GXB_BAPBASE_LAST &&
+            reg + size > IA64_460GX_GXB_BAPBASE_REG) {
+            uint64_t bap = ldq_le_p(cfg + IA64_460GX_GXB_BAPBASE_REG);
+
+            if (bap >> 32) {
+                stq_le_p(cfg + IA64_460GX_GXB_BAPBASE_REG,
+                         IA64_460GX_GXB_AGP_APERTURE_BASE);
             }
         }
         return;
