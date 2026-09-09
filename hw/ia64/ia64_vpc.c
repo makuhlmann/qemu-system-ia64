@@ -565,6 +565,8 @@ struct IA64VpcMachineClass {
 #define IA64_460GX_SAC_IDX_REG      0x64
 #define IA64_460GX_SAC_IDX_DATA     0x70
 #define IA64_460GX_SAC_IDX_ENTRIES  256
+/* Expanders the SAC has ports for: Expander 0-3 at 10h-17h (Table 2-1). */
+#define IA64_460GX_EXPANDER_COUNT   4
 
 struct IA64VpcMachineState {
     MachineState parent_obj;
@@ -4337,6 +4339,54 @@ static const struct {
     { 0x13, IA64_460GX_ROOT_WXB1 },
     { 0x14, IA64_460GX_ROOT_GXB },
 };
+#define IA64_460GX_ROOT_NONE     (-2)
+
+static int ia64_460gx_expander_port_root(uint8_t dev)
+{
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(ia64_460gx_expander_ports); i++) {
+        if (ia64_460gx_expander_ports[i].dev == dev) {
+            return ia64_460gx_expander_ports[i].root;
+        }
+    }
+    return IA64_460GX_ROOT_NONE;
+}
+
+/*
+ * The variable gap below 4G - 32M is carved among the expander ports by
+ * their PCIS registers: each port decodes from PCIS x 32M up to the next
+ * port's PCIS, and the highest one up to the fixed ranges (SSDM 4.1.3.1,
+ * "PCIS[7] - FDFF_FFFFh -> PCIx").  The vendor DSDT hands those exact slices
+ * out as the root windows: PCI0 [PCIS(10h), FE000000), PCI1 [PCIS(12h),
+ * PCIS(10h)), PCI3 [PCIS(14h), PCIS(13h)).  All four roots share one PCI
+ * memory space here, so a single alias from the lowest programmed PCIS to
+ * the fixed aperture covers every window a guest can place a BAR in.  00h
+ * (reset) and FFh (what the firmware writes for an empty port) carry no
+ * window.
+ */
+static void ia64_460gx_update_low_mmio_window(IA64VpcMachineState *s)
+{
+    uint8_t cbn = ia64_460gx_cbn(s);
+    uint64_t base = ~0ULL;
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(ia64_460gx_expander_ports); i++) {
+        const uint8_t *cfg = ia64_460gx_chipset_cfg(
+            s, cbn, ia64_460gx_expander_ports[i].dev, 0);
+        uint8_t pcis;
+
+        if (cfg == NULL) {
+            continue;
+        }
+        pcis = cfg[IA64_460GX_XXB_PCIS_REG];
+        if (pcis == 0x00 || pcis == 0xff) {
+            continue;
+        }
+        base = MIN(base, (uint64_t)pcis << 25);
+    }
+    ia64_pci_host_set_low_mmio_window(s->pci_host_dev, base);
+}
 
 /*
  * Find the device a configuration address names.  "If the Bus Number is not
@@ -4551,10 +4601,9 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
             } else {
                 cfg[off] = data >> (i * 8);
             }
-            if (bus != 0 && dev == IA64_460GX_COMPAT_PORT && fn == 0 &&
-                off == IA64_460GX_XXB_PCIS_REG) {
-                ia64_pci_host_set_low_mmio_window(
-                    s->pci_host_dev, (uint64_t)cfg[off] << 25);
+            if (bus != 0 && fn == 0 && off == IA64_460GX_XXB_PCIS_REG &&
+                ia64_460gx_expander_port_root(dev) != IA64_460GX_ROOT_NONE) {
+                ia64_460gx_update_low_mmio_window(s);
             }
         }
         return;
@@ -4718,11 +4767,38 @@ static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
      * POST 0xF1.
      */
     /*
-     * The register file behind 64h/70h resets with the same open bus its
-     * window used to read, so an entry the firmware has not written answers
-     * exactly as it did when one cell stood in for all of them.
+     * The register file behind 64h/70h resets to the chipset's device-present
+     * word rather than to open bus.  The SSDM never lays the register out,
+     * but it names it and numbers its bits: "The DEVNPRES register is used
+     * to determine which chipset devices are present; see Table 2-1"
+     * (2.2.1), and the memory map keys the AGP GART range on "DEVNPRES[14]"
+     * -- "If the DEVNPRES bit for Device 14 is set (meaning that there is no
+     * xXB attached to the Expander bus)" (4.1.3.1).  So bit n is Table 2-1's
+     * device n, and a set bit means absent.
+     *
+     * The vendor firmware reads that word through this window, right after
+     * its walk over the entries (pciHost.c, link 0x4b0ca0 of SAL_B): bit 20
+     * set makes it record "GXB Status" = 1 under "/IO/Bus/PCI", set bits
+     * 20-23 itself, and later park expander ports 14h-18h onto the WXB's bus
+     * (link 0x4b0670) -- which is what left the vendor DSDT's PCI1 and PCI3
+     * roots on one bus number, and both of them Code 12 under Windows.  An
+     * all-ones seed says every expander port is missing, the GXB included.
+     * Seed every entry with the populated devices instead; writes still
+     * stick per entry.
      */
-    memset(s->sac_indexed, 0xff, sizeof(s->sac_indexed));
+    {
+        uint32_t devnpres = ~0u;
+        unsigned i, e;
+
+        for (i = 0; i < ARRAY_SIZE(ia64_460gx_chipset_devs); i++) {
+            devnpres &= ~(1u << ia64_460gx_chipset_devs[i]);
+        }
+        for (i = 0; i < ARRAY_SIZE(s->sac_indexed); i++) {
+            for (e = 0; e < IA64_460GX_SAC_IDX_ENTRIES; e++) {
+                stl_le_p(s->sac_indexed[i][e], devnpres);
+            }
+        }
+    }
 
     {
         unsigned i, fn;
@@ -4735,6 +4811,23 @@ static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
                 memset(s->chipset_cfg + i * IA64_460GX_CFG_DEV_SIZE +
                        fn * IA64_460GX_CFG_FN_SIZE + 0x40, 0xff, 0xc0);
             }
+            /*
+             * Function 0's 60h, read as a byte after the firmware writes 0
+             * to 78h, is the number of expanders the SAC has ports for
+             * (SSDM Table 2-1: Expander 0-3 at 10h-17h).  The vendor
+             * firmware loops that many times over devices 10h, 12h, 14h,
+             * ... testing each one's DEVNPRES bit, and hands the ports it
+             * finds to its bus-numbering loop.  Read as open bus the count
+             * is 255: the loop wraps through every device number, treats
+             * the wrapped ones as present, and numbers 16 rounds of phantom
+             * ports before the real ones, which leaves the compatibility
+             * bus at D0h/D6h instead of 0 and the GXB's bus off the 4 its
+             * IA-32 CSM addresses the VGA card at.  The firmware also
+             * read-modify-writes the dword to clear bit 0, so the count
+             * lives in the same cell and writes stick.
+             */
+            stl_le_p(s->chipset_cfg + i * IA64_460GX_CFG_DEV_SIZE + 0x60,
+                     IA64_460GX_EXPANDER_COUNT);
         }
     }
 

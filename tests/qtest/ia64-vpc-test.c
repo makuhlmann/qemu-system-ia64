@@ -3009,15 +3009,35 @@ static void test_460gx_sac_indexed_file(void)
     g_assert_cmphex(cf8_readl(qts, 0xff, 0x00, 0, IA64_SAC_IDX_REG) & 0xff,
                     ==, 0x13);
 
-    /* An entry nobody has written reads the open bus its window always did. */
-    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x14), ==, 0xffffffff);
+    /*
+     * An entry nobody has written reads the device-present word (SSDM 2.2.1
+     * DEVNPRES, bit n = Table 2-1 device n, set = absent): the two SACs, the
+     * SDC, Memory Card A and expander ports 10h, 12h, 13h and 14h are
+     * populated, everything else is not.  The vendor firmware takes bit 20
+     * (device 14h) as "no GXB" and parks the AGP root when it is set.
+     */
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x14), ==, 0xffe2ffcc);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0xfe) & (1u << 20), ==, 0);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0xfe) & (1u << 16), ==, 0);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0xfe) & (1u << 22), !=, 0);
+
+    /*
+     * Function 0's 60h, read as a byte after 78h is written 0, is the
+     * number of expanders (Table 2-1: four).  The firmware bounds its port
+     * loop with it; open bus there numbers 16 rounds of phantom ports.
+     */
+    cf8_select(qts, 0xff, 0x00, 0, 0x78);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 0x00);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x00, 0, 0x60) & 0xff, ==, 4);
 
     /* Entries keep their own values rather than sharing one cell. */
     sac_idx_write(qts, 0x00, 0x10, 0x11223344);
     sac_idx_write(qts, 0x00, 0x12, 0x55667788);
     g_assert_cmphex(sac_idx_read(qts, 0x00, 0x10), ==, 0x11223344);
     g_assert_cmphex(sac_idx_read(qts, 0x00, 0x12), ==, 0x55667788);
-    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x14), ==, 0xffffffff);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x14), ==, 0xffe2ffcc);
 
     /* And the second SAC has a file of its own. */
     sac_idx_write(qts, 0x01, 0x10, 0x99aabbcc);
@@ -3027,6 +3047,47 @@ static void test_460gx_sac_indexed_file(void)
     qtest_quit(qts);
 }
 
+
+/*
+ * The 460GX variable gap follows the expander ports' PCIS registers (SSDM
+ * 4.1.3.1: each port decodes from PCIS x 32M up to the next port's PCIS).
+ * The vendor DSDT hands those slices out as root windows -- PCI0 from
+ * PCIS(10h), PCI3 (the GXB) from PCIS(14h) below it -- so a BAR a guest puts
+ * in any of them has to decode, and one below every programmed PCIS must
+ * not.  FFh is what the firmware writes for an empty port.
+ */
+static void test_460gx_pcis_window(void)
+{
+    /* The OHCI at 00:02.0 on the compatibility bus; HcRevision reads 10h. */
+    const uint64_t cfg = IA64_PCI_CONFIG_BASE + (2ULL << 15);
+    const uint64_t bar = 0xa9000000ULL;
+    const uint64_t cfc = IA64_LEGACY_IO_BASE +
+                         ia64_sparse_io_offset(IA64_CFC_PORT);
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+
+    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_0, bar);
+    qtest_writew(qts, cfg + PCI_COMMAND, PCI_COMMAND_MEMORY);
+    g_assert_cmphex(qtest_readl(qts, bar), !=, 0x10);
+
+    /* The compatibility port alone opens the gap from B4000000. */
+    cf8_select(qts, 0xff, 0x10, 0, 0x84);
+    qtest_writeb(qts, cfc, 0x5a);
+    g_assert_cmphex(qtest_readl(qts, bar), !=, 0x10);
+    g_assert_cmphex(qtest_readl(qts, 0xb5000000ULL), !=, 0x10);
+    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_0, 0xb5000000);
+    g_assert_cmphex(qtest_readl(qts, 0xb5000000ULL), ==, 0x10);
+    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_0, bar);
+
+    /* The GXB's PCIS at A8000000 brings the lower window in. */
+    cf8_select(qts, 0xff, 0x14, 0, 0x84);
+    qtest_writeb(qts, cfc, 0x54);
+    g_assert_cmphex(qtest_readl(qts, bar), ==, 0x10);
+
+    /* An empty port does not extend it. */
+    qtest_writeb(qts, cfc, 0xff);
+    g_assert_cmphex(qtest_readl(qts, bar), !=, 0x10);
+    qtest_quit(qts);
+}
 
 static void test_460gx_root_window_containment(void)
 {
@@ -5901,6 +5962,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/460gx-sac-indexed-file",
                    test_460gx_sac_indexed_file);
     qtest_add_func("/ia64-vpc/pci/460gx-sac-aperture", test_460gx_sac_aperture);
+    qtest_add_func("/ia64-vpc/pci/460gx-pcis-window", test_460gx_pcis_window);
     qtest_add_func("/ia64-vpc/pci/460gx-smbus-hwmon", test_460gx_smbus_hwmon);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",
                    test_460gx_south_bridge_rtc_banks);
