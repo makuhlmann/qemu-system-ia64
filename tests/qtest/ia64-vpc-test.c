@@ -3255,6 +3255,48 @@ static void test_realfw_flash_window(void)
             }
             g_assert_cmphex(qtest_readb(qts, mark), ==, 0x21);
         }
+
+        /*
+         * The CdbDatabase directory-entry state byte, exactly as the vendor
+         * setup menu drives it when it saves settings (traced from a "Save
+         * New Settings" / "Load Factory Settings" write on bios130.BIN).  A
+         * fresh record's state advances 3F -> 2F -> 27 -> 23 as the copy is
+         * written and verified, and 23 is the "valid" state QuickBoot loads
+         * at POST 0x92.  To retire an old copy the firmware programs 25 over
+         * the 23 and then 21: on any bit-clearing part the 25 (which would
+         * set bit 2) collapses straight to 21, so the record ends "invalid".
+         * A model that overwrote would leave 25, an extra live record the
+         * loader would trip over.  This is the state machine the whole
+         * database-update sequence rests on.
+         */
+        {
+            const uint64_t st = blk + 0x300;
+            const uint8_t write_path[] = { 0x3f, 0x2f, 0x27, 0x23 };
+            unsigned k;
+
+            for (k = 0; k < ARRAY_SIZE(write_path); k++) {
+                qtest_writeb(qts, blk, 0x50);
+                qtest_writeb(qts, st, 0x40);
+                qtest_writeb(qts, st, write_path[k]);
+                qtest_writeb(qts, blk, 0xff);
+            }
+            /* Record is committed: the loadable "valid" state. */
+            g_assert_cmphex(qtest_readb(qts, st), ==, 0x23);
+
+            /* Invalidate: 25 over 23 collapses to 21 (bit 2 cannot be set). */
+            qtest_writeb(qts, blk, 0x50);
+            qtest_writeb(qts, st, 0x40);
+            qtest_writeb(qts, st, 0x25);
+            qtest_writeb(qts, blk, 0xff);
+            g_assert_cmphex(qtest_readb(qts, st), ==, 0x21);
+
+            /* Programming the final 21 leaves it 21, not below. */
+            qtest_writeb(qts, blk, 0x50);
+            qtest_writeb(qts, st, 0x40);
+            qtest_writeb(qts, st, 0x21);
+            qtest_writeb(qts, blk, 0xff);
+            g_assert_cmphex(qtest_readb(qts, st), ==, 0x21);
+        }
     }
 
     /*
