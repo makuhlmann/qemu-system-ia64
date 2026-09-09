@@ -782,8 +782,15 @@ static int uhci_handle_td(UHCIState *s, UHCIQueue *q, uint32_t qh_addr,
         /*
          * ehci11d spec page 22: "Even if the Active bit in the TD is already
          * cleared when the TD is fetched ... an IOC interrupt is generated"
+         *
+         * Real Intel UHCI (e.g. the 82468GX IFB) does not do this: it only
+         * raises IOC for a TD it actually completes, so a controller left with
+         * an inactive IOC anchor TD in its frame list (as the i2000 vendor
+         * firmware leaves at OS hand-off) does not assert its interrupt.  The
+         * ioc_on_inactive_td property (default true) keeps the historical
+         * behaviour for existing users; it is cleared for the IFB variant.
          */
-        if (td->ctrl & TD_CTRL_IOC) {
+        if ((td->ctrl & TD_CTRL_IOC) && s->ioc_on_inactive_td) {
                 *int_mask |= 0x01;
         }
         return TD_RESULT_NEXT_QH;
@@ -1247,12 +1254,21 @@ void usb_uhci_common_realize(PCIDevice *dev, Error **errp)
 
 static void ifb_uhci_realize(PCIDevice *dev, Error **errp)
 {
+    UHCIState *s = UHCI(dev);
     uint32_t bar_wmask;
 
     usb_uhci_common_realize(dev, errp);
     if (errp && *errp) {
         return;
     }
+
+    /*
+     * The real 82468GX IFB UHCI only raises IOC for a TD it completes, so the
+     * inactive IOC anchor TD the vendor firmware leaves in frame 0 at OS
+     * hand-off does not assert INTD.  Match that: without this the emulated
+     * controller storms IOSAPIC input 47 the moment XP connects the interrupt.
+     */
+    s->ioc_on_inactive_td = false;
 
     bar_wmask = pci_get_long(dev->wmask + PCI_BASE_ADDRESS_4);
     memset(dev->wmask, 0, pci_config_size(dev));
@@ -1298,10 +1314,12 @@ static const Property uhci_properties_companion[] = {
     DEFINE_PROP_UINT32("firstport", UHCIState, firstport, 0),
     DEFINE_PROP_UINT32("bandwidth", UHCIState, frame_bandwidth, 1280),
     DEFINE_PROP_UINT32("maxframes", UHCIState, maxframes, 128),
+    DEFINE_PROP_BOOL("ioc-on-inactive-td", UHCIState, ioc_on_inactive_td, true),
 };
 static const Property uhci_properties_standalone[] = {
     DEFINE_PROP_UINT32("bandwidth", UHCIState, frame_bandwidth, 1280),
     DEFINE_PROP_UINT32("maxframes", UHCIState, maxframes, 128),
+    DEFINE_PROP_BOOL("ioc-on-inactive-td", UHCIState, ioc_on_inactive_td, true),
 };
 
 static void uhci_class_init(ObjectClass *klass, const void *data)

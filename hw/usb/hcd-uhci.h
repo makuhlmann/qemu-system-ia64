@@ -72,6 +72,13 @@ typedef struct UHCIState {
     char *masterbus;
     uint32_t firstport;
     uint32_t maxframes;
+    /*
+     * When false, a TD that is fetched with its Active bit already clear does
+     * not raise its IOC interrupt.  Real Intel UHCI (e.g. the 82468GX IFB)
+     * only raises IOC on a TD it actually completes; the default (true) keeps
+     * QEMU's historical "IOC even on an inactive TD" behaviour for other users.
+     */
+    bool ioc_on_inactive_td;
 } UHCIState;
 
 #define TYPE_UHCI "pci-uhci-usb"
