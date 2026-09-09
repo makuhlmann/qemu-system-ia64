@@ -6,6 +6,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/intc/intc.h"
 #include "hw/core/qdev-properties.h"
 #include "qapi/error.h"
 #include "hw/ia64/ia64_iosapic.h"
@@ -27,6 +28,7 @@
 #define RTE_REMOTE_IRR       0x0000000000004000ULL
 #define RTE_MASKED           0x0000000000010000ULL
 #define RTE_TRIGGER_LEVEL    0x0000000000008000ULL
+#define RTE_POLARITY_LOW     0x0000000000002000ULL
 #define RTE_RO_BITS          (RTE_DELIVERY_STATUS | RTE_REMOTE_IRR)
 
 #define IOSAPIC_DELIVERY_FIXED  0
@@ -39,6 +41,7 @@ struct IA64IOSapicState {
     MemoryRegion mmio;
     uint64_t rte[IA64_IOSAPIC_MAX_PINS];
     uint8_t  irq_level[IA64_IOSAPIC_MAX_PINS];
+    uint64_t irq_count[IA64_IOSAPIC_MAX_PINS];
     uint32_t reg_select;
     uint32_t num_pins;
     uint32_t version;
@@ -95,6 +98,7 @@ static void iosapic_update(IA64IOSapicState *s, int pin)
         s->rte[pin] |= RTE_REMOTE_IRR;
     }
 
+    s->irq_count[pin]++;
     ia64_sapic_set_irq(cs, vector);
 }
 
@@ -287,6 +291,7 @@ static void iosapic_reset(DeviceState *dev)
 
     memset(s->rte, 0, sizeof(s->rte));
     memset(s->irq_level, 0, sizeof(s->irq_level));
+    memset(s->irq_count, 0, sizeof(s->irq_count));
     for (i = 0; i < IA64_IOSAPIC_MAX_PINS; i++) {
         s->rte[i] = RTE_MASKED;
     }
@@ -327,9 +332,47 @@ static const VMStateDescription vmstate_ia64_iosapic = {
     }
 };
 
+/* "info irq" / "info pic": deliveries per input, and each input's state. */
+static bool iosapic_get_statistics(InterruptStatsProvider *obj,
+                                   uint64_t **irq_counts, unsigned int *nb_irqs)
+{
+    IA64IOSapicState *s = IA64_IOSAPIC(obj);
+
+    *irq_counts = s->irq_count;
+    *nb_irqs = s->num_pins;
+    return true;
+}
+
+static void iosapic_print_info(InterruptStatsProvider *obj, GString *buf)
+{
+    IA64IOSapicState *s = IA64_IOSAPIC(obj);
+    unsigned pin;
+
+    g_string_append_printf(buf, "iosapic: %u inputs\n", s->num_pins);
+    for (pin = 0; pin < s->num_pins; pin++) {
+        uint64_t rte = s->rte[pin];
+
+        if (!(rte & RTE_MASKED) || s->irq_level[pin] || s->irq_count[pin]) {
+            g_string_append_printf(buf,
+                                   "  in %2u: vec=0x%02x %s%s%s%s level=%u "
+                                   "count=%" PRIu64 "\n",
+                                   pin, (unsigned)(rte & RTE_VECTOR_MASK),
+                                   (rte & RTE_MASKED) ? "masked " : "",
+                                   (rte & RTE_TRIGGER_LEVEL) ? "lvl " : "edge ",
+                                   (rte & RTE_POLARITY_LOW) ? "lo " : "hi ",
+                                   (rte & RTE_REMOTE_IRR) ? "rirr " : "",
+                                   s->irq_level[pin], s->irq_count[pin]);
+        }
+    }
+}
+
 static void iosapic_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    InterruptStatsProviderClass *ic = INTERRUPT_STATS_PROVIDER_CLASS(klass);
+
+    ic->get_statistics = iosapic_get_statistics;
+    ic->print_info = iosapic_print_info;
 
     dc->realize = iosapic_realize;
     device_class_set_legacy_reset(dc, iosapic_reset);
@@ -342,6 +385,10 @@ static const TypeInfo iosapic_info = {
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(IA64IOSapicState),
     .class_init    = iosapic_class_init,
+    .interfaces    = (const InterfaceInfo[]) {
+        { TYPE_INTERRUPT_STATS_PROVIDER },
+        { }
+    },
 };
 
 static void iosapic_register_types(void)
