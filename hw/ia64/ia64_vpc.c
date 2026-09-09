@@ -4235,6 +4235,16 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
  */
 #define IA64_460GX_XXB_PCIS_REG  0x84
 #define IA64_460GX_COMPAT_PORT   0x10
+/*
+ * VGASE: an expander SAC's fn0 register 80h bit 0 relocates the legacy VGA gap
+ * (A0000-BFFFF) and VGA I/O (3B0-3DF) to that expander's PCI segment (460GX
+ * SSDM 4.1.1.2, 4.1.2 "VGA Space Register", 4.3).  At power-on the gap is on
+ * the compatibility PCI bus, and the vendor DSDT hands the legacy VGA ranges to
+ * the PCI0 (compatibility) root unconditionally, so no expander segment must
+ * relocate them onto itself as a second producer -- see the write handler.
+ */
+#define IA64_460GX_XXB_VGASE_REG 0x80
+#define IA64_460GX_XXB_VGASE_BIT 0x01
 
 /*
  * SPD EEPROM served through the MAC's I2C pass-through: firmware writes the
@@ -4595,11 +4605,32 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
         for (i = 0; i < size; i++) {
             unsigned off = (reg + i) & 0xff;
             uint8_t *file = ia64_460gx_sac_indexed(s, dev, fn, cfg, off);
+            uint8_t byte = data >> (i * 8);
+
+            /*
+             * Drop VGASE on the expander SACs so legacy VGA keeps exactly one
+             * owner.  The vendor DSDT gives the legacy VGA ranges to the PCI0
+             * (compatibility) root unconditionally and gates every other root's
+             * VGA producers on its own SAC VGASE; if an expander SAC also
+             * reports VGASE set, that root produces the same fixed VGA ranges as
+             * PCI0 -- a second producer of one space, which SSDM 4.1.1.2/4.3
+             * forbid (legacy VGA is a single system-wide selection defaulting to
+             * the compatibility bus).  The graphics card decodes through its
+             * framebuffer BAR, not the legacy VGA aperture, so clearing VGASE
+             * loses nothing.  Scope is the expander ports only (dev 00h/01h reg
+             * 80h is SECTID/BIUITID, SSDM 2.4.1.1).  Why the firmware writes
+             * VGASE on the GXB at all is not established -- the vendor DSDT is
+             * compressed and unread.
+             */
+            if (bus != 0 && fn == 0 && off == IA64_460GX_XXB_VGASE_REG &&
+                ia64_460gx_expander_port_root(dev) != IA64_460GX_ROOT_NONE) {
+                byte &= ~IA64_460GX_XXB_VGASE_BIT;
+            }
 
             if (file != NULL) {
-                *file = data >> (i * 8);
+                *file = byte;
             } else {
-                cfg[off] = data >> (i * 8);
+                cfg[off] = byte;
             }
             if (bus != 0 && fn == 0 && off == IA64_460GX_XXB_PCIS_REG &&
                 ia64_460gx_expander_port_root(dev) != IA64_460GX_ROOT_NONE) {

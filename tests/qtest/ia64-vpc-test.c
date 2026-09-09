@@ -2735,6 +2735,14 @@ static uint32_t cf8_readl(QTestState *qts, uint8_t bus, uint8_t device,
                        ia64_sparse_io_offset(IA64_CFC_PORT));
 }
 
+static void cf8_writel(QTestState *qts, uint8_t bus, uint8_t device,
+                       uint8_t function, uint8_t reg, uint32_t value)
+{
+    cf8_select(qts, bus, device, function, reg);
+    qtest_writel(qts, IA64_LEGACY_IO_BASE +
+                 ia64_sparse_io_offset(IA64_CFC_PORT), value);
+}
+
 /*
  * The System Address Controller's register aperture and the platform's
  * diagnostic port.  The firmware arbitrates which processor boots through a
@@ -2958,6 +2966,43 @@ static void test_460gx_config_ports(void)
     /* zx1 is a different chipset and answers no configuration cycles here. */
     qts = qtest_init("-machine zx1 -m 256M -S");
     g_assert_cmphex(cf8_readl(qts, 0, 0x00, 0, PCI_VENDOR_ID), ==, 0xffffffff);
+    qtest_quit(qts);
+}
+
+/*
+ * VGASE, the VGA Space Enable in an expander SAC (function 0 register 80h bit
+ * 0), relocates the legacy VGA gap and VGA I/O onto that expander's PCI segment
+ * (SSDM 4.1.1.2, 4.1.2, 4.3).  The vendor firmware sets it on the GXB, but the
+ * vendor DSDT already gives the legacy VGA ranges to the compatibility root
+ * unconditionally; a second producer of the same fixed ranges fails the GXB
+ * root under Windows PnP with Code 12.  The machine drops the bit on every
+ * expander SAC so legacy VGA keeps exactly one owner.  Only bit 0 of register
+ * 80h goes, and only on the expander ports (10h/12h/13h/14h): the rest of the
+ * register and the non-expander SACs (dev 00h/01h, where 80h is SECTID/BIUITID,
+ * SSDM 2.4.1.1) are untouched.  Out of reset CBN is FFh, so the SACs answer
+ * there.
+ */
+static void test_460gx_vgase_dropped(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    static const uint8_t expander_devs[] = { 0x10, 0x12, 0x13, 0x14 };
+    size_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(expander_devs); i++) {
+        uint8_t dev = expander_devs[i];
+
+        /* Written set, VGASE reads back clear. */
+        cf8_writel(qts, 0xff, dev, 0, 0x80, 0x00000001);
+        g_assert_cmphex(cf8_readl(qts, 0xff, dev, 0, 0x80) & 0xff, ==, 0x00);
+        /* Only bit 0 is dropped; the rest of register 80h survives. */
+        cf8_writel(qts, 0xff, dev, 0, 0x80, 0x000000ff);
+        g_assert_cmphex(cf8_readl(qts, 0xff, dev, 0, 0x80) & 0xff, ==, 0xfe);
+    }
+
+    /* dev 00h is not an expander port: register 80h keeps bit 0. */
+    cf8_writel(qts, 0xff, 0x00, 0, 0x80, 0x000000ff);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x00, 0, 0x80) & 0xff, ==, 0xff);
+
     qtest_quit(qts);
 }
 
@@ -5958,6 +6003,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/460gx-platform-identities",
                    test_460gx_platform_identities);
     qtest_add_func("/ia64-vpc/pci/460gx-config-ports", test_460gx_config_ports);
+    qtest_add_func("/ia64-vpc/pci/460gx-vgase-dropped", test_460gx_vgase_dropped);
     qtest_add_func("/ia64-vpc/isa/460gx-superio", test_460gx_superio);
     qtest_add_func("/ia64-vpc/pci/460gx-sac-indexed-file",
                    test_460gx_sac_indexed_file);
