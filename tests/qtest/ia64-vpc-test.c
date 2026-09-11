@@ -46,7 +46,7 @@
  */
 #define IA64_INT10_ROM_SIZE          0x00000800U
 #define IA64_INT10_VECTOR_ADDR       0x00000040ULL
-#define IA64_INT10_ROM_PCIR_OFFSET   0x00e0U
+#define IA64_INT10_ROM_PCIR_OFFSET   0x0060U
 #define IA64_INT10_ROM_ATI_SIG_OFFSET 0x0030U
 #define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
 #define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
@@ -342,7 +342,13 @@ static void test_int10_rom(void)
                     ==, 0x1002);
     g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 6),
                     ==, 0x5046);
-    g_assert_cmpmem(rom + 0x60, 19, "QEMU IA64 VBE INT10", 19);
+    /* the marker string follows the 0xffff terminator of the mode list */
+    for (i = IA64_INT10_ROM_MODES_OFFSET; i + 2 <= sizeof(rom); i += 2) {
+        if (lduw_le_p(rom + i) == 0xffff) {
+            break;
+        }
+    }
+    g_assert_cmpmem(rom + i + 2, 19, "QEMU IA64 VBE INT10", 19);
     /*
      * ATI's drivers validate the ROM by its signature at 30h before following
      * the pointer chain at 48h; PCIR must therefore stay clear of both.
@@ -365,6 +371,17 @@ static void test_int10_rom(void)
     g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x10), ==, 65);
     g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x12), ==, 12500);
     g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x16), ==, 40000);
+    /*
+     * The Rage 128 miniport (ati2mpaa) reads 50 bytes of the PLL block and a
+     * 12-byte table through header+14h; the fields past +20h decide its
+     * memory clock, so they must be published, not left to whatever follows.
+     */
+    g_assert_cmphex(lduw_le_p(rom + ati_header + 0x14), ==, ati_header);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x0a), ==, 12000);
+    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x22), ==, 40000);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x2e), ==, 40000 & 0xffff);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x30), ==, 40000 >> 16);
+    g_assert_cmpint(ati_pll + 0x32, <=, IA64_INT10_ROM_HANDLER_OFFSET);
     g_assert_cmpmem(rom + IA64_INT10_ROM_OEM_OFFSET, 13,
                     "QEMU IA64 VBE", 13);
     g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET),
@@ -4981,6 +4998,25 @@ static void test_ati_rom_bar_tables(void)
         }
     }
     g_assert_cmpint(sig_at, ==, 0x30);
+
+    /*
+     * The ATI header and PLL block must sit inside the first 8 KB: the
+     * miniport maps the C0000h shadow of this image one page at a time.
+     */
+    {
+        uint32_t hdr = lduw_le_p(rom + 0x48);
+        uint32_t pll = lduw_le_p(rom + hdr + 0x30);
+
+        g_assert_cmpuint(hdr + 0x40, <=, 0x2000);
+        g_assert_cmpuint(pll + 0x32, <=, 0x2000);
+        g_assert_cmphex(lduw_le_p(rom + hdr + 0x14), ==, hdr);
+        g_assert_cmpuint(lduw_le_p(rom + pll + 0x08), ==, 12000);
+        g_assert_cmpuint(lduw_le_p(rom + pll + 0x0a), ==, 12000);
+        g_assert_cmpuint(lduw_le_p(rom + pll + 0x0e), ==, 2950);
+        g_assert_cmpuint(ldl_le_p(rom + pll + 0x16), ==, 40000);
+        g_assert_cmpuint(ldl_le_p(rom + pll + 0x22), ==, 40000);
+        g_assert_cmpuint(lduw_le_p(rom + pll + 0x2e), ==, 40000 & 0xffff);
+    }
 
     /* PCIR restated to this adapter (EFI 1.10 wants it to match the header) */
     pcir = lduw_le_p(rom + 0x18);

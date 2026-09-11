@@ -271,7 +271,7 @@
  * ATI BIOS pointer at 48h (verified against three retail Rage 128 Pro
  * dumps).  At 20h its 18h-byte data structure would straddle 30h.
  */
-#define IA64_INT10_ROM_PCIR_OFFSET    0x00e0U
+#define IA64_INT10_ROM_PCIR_OFFSET    0x0060U
 #define IA64_INT10_ROM_ATI_SIG_OFFSET 0x0030U
 #define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
 #define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
@@ -1496,6 +1496,42 @@ static const MemoryRegionOps ia64_int10_io_ops = {
     },
 };
 
+/*
+ * The ATI BIOS header and PLL info block as the Rage 128 miniport
+ * (ati2mpaa) consumes them.  Traced from the driver on both firmwares: it
+ * copies 82 bytes of header, follows header+14h to a 12-byte table and
+ * header+30h to the PLL block, and reads 50 (32h) bytes of the latter:
+ * +08h XCLK, +0Ah a second clock, +0Eh reference frequency, +10h reference
+ * divider, +12h/+16h the PLL range, +22h a 32-bit clock limit and +2Eh/+30h
+ * a 16-bit pair it recombines into another.  A block that stops at +20h
+ * leaves the last three as whatever follows it in the image - which is why
+ * the 2 KB synthetic image "worked" (its PCIR structure supplied non-zero
+ * bytes) while the CSM-shadowed PCI ROM did not (zero padding): the memory
+ * clock came out as 0 and every mode-set was refused.  Both builders now
+ * publish the full block; the table pointer at +14h aims at the zeroed
+ * header itself (12 bytes of zeros are all the driver needs from it).
+ * Values are in the 10 kHz units of the Rage 128 BIOS interface.
+ */
+#define IA64_ATI_HDR_SIZE  0x40U
+#define IA64_ATI_PLL_SIZE  0x32U
+
+static void ia64_ati_write_bios_tables(uint8_t *rom, uint32_t hdr, uint32_t pll)
+{
+    memset(rom + hdr, 0, IA64_ATI_HDR_SIZE);
+    memset(rom + pll, 0, IA64_ATI_PLL_SIZE);
+    stw_le_p(rom + hdr + 0x14, hdr);
+    stw_le_p(rom + hdr + 0x30, pll);
+    stw_le_p(rom + pll + 0x08, IA64_ATI_PLL_XCLK);
+    stw_le_p(rom + pll + 0x0a, IA64_ATI_PLL_XCLK);
+    stw_le_p(rom + pll + 0x0e, IA64_ATI_PLL_REFERENCE_FREQ);
+    stw_le_p(rom + pll + 0x10, IA64_ATI_PLL_REFERENCE_DIV);
+    stl_le_p(rom + pll + 0x12, IA64_ATI_PLL_MIN_FREQ);
+    stl_le_p(rom + pll + 0x16, IA64_ATI_PLL_MAX_FREQ);
+    stl_le_p(rom + pll + 0x22, IA64_ATI_PLL_MAX_FREQ);
+    stw_le_p(rom + pll + 0x2e, IA64_ATI_PLL_MAX_FREQ & 0xffffU);
+    stw_le_p(rom + pll + 0x30, IA64_ATI_PLL_MAX_FREQ >> 16);
+}
+
 static void ia64_int10_install_ati_bios_info(uint8_t *rom,
                                              uint16_t vendor,
                                              uint16_t device)
@@ -1545,18 +1581,8 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      * Rage128-compatible display model and its existing VGA BIOS.
      */
     stw_le_p(rom + 0x48, IA64_INT10_ROM_ATI_HEADER_OFFSET);
-    stw_le_p(rom + IA64_INT10_ROM_ATI_HEADER_OFFSET + 0x30,
-             IA64_INT10_ROM_ATI_PLL_OFFSET);
-    stw_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x08,
-             IA64_ATI_PLL_XCLK);
-    stw_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x0e,
-             IA64_ATI_PLL_REFERENCE_FREQ);
-    stw_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x10,
-             IA64_ATI_PLL_REFERENCE_DIV);
-    stl_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x12,
-             IA64_ATI_PLL_MIN_FREQ);
-    stl_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x16,
-             IA64_ATI_PLL_MAX_FREQ);
+    ia64_ati_write_bios_tables(rom, IA64_INT10_ROM_ATI_HEADER_OFFSET,
+                               IA64_INT10_ROM_ATI_PLL_OFFSET);
 }
 
 static void ia64_vpc_install_int10(IA64VpcMachineState *s)
@@ -1569,9 +1595,11 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
     size_t i;
 
     g_assert(IA64_INT10_ROM_ATI_SIG_OFFSET + 10 <= 0x48);
-    g_assert(IA64_INT10_ROM_ATI_PLL_OFFSET + 0x20 <=
-             IA64_INT10_ROM_PCIR_OFFSET);
     g_assert(IA64_INT10_ROM_PCIR_OFFSET + 0x18 <=
+             IA64_INT10_ROM_ATI_HEADER_OFFSET);
+    g_assert(IA64_INT10_ROM_ATI_HEADER_OFFSET + IA64_ATI_HDR_SIZE <=
+             IA64_INT10_ROM_ATI_PLL_OFFSET);
+    g_assert(IA64_INT10_ROM_ATI_PLL_OFFSET + IA64_ATI_PLL_SIZE <=
              IA64_INT10_ROM_HANDLER_OFFSET);
     g_assert(IA64_INT10_ROM_HANDLER_OFFSET +
              sizeof(ia64_int10_handler) <= IA64_INT10_ROM_OEM_OFFSET);
@@ -1610,7 +1638,6 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
     stw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 0x12, 0x0100);
     rom[IA64_INT10_ROM_PCIR_OFFSET + 0x14] = 0;
     rom[IA64_INT10_ROM_PCIR_OFFSET + 0x15] = 0x80;
-    memcpy(rom + 0x60, "QEMU IA64 VBE INT10", 20);
     ia64_int10_install_ati_bios_info(rom, vendor, device);
     memcpy(rom + IA64_INT10_ROM_HANDLER_OFFSET, ia64_int10_handler,
            sizeof(ia64_int10_handler));
@@ -1628,6 +1655,10 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
     }
     stw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET +
              G_N_ELEMENTS(ia64_vbe_modes) * 2, 0xffff);
+    g_assert(IA64_INT10_ROM_MODES_OFFSET + (G_N_ELEMENTS(ia64_vbe_modes) + 1) * 2 +
+             20 < sizeof(rom) - 1);
+    memcpy(rom + IA64_INT10_ROM_MODES_OFFSET + (G_N_ELEMENTS(ia64_vbe_modes) + 1) * 2,
+           "QEMU IA64 VBE INT10", 20);
 
     for (i = 0; i < sizeof(rom) - 1; i++) {
         checksum += rom[i];
@@ -3230,28 +3261,53 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
         }
     }
 
-    hdr = declared;
-    pll = hdr + 0x40U;
-    if (pll + 0x20U > rom_size) {
+    /*
+     * Keep the header and PLL block inside the first 8 KB of the image.  The
+     * Rage 128 miniport (ati2mpaa) maps the C0000h shadow with a single
+     * VideoPortGetDeviceBase(0xC0000, 256) call - one 8 KB IA-64 page - and
+     * then follows the 48h -> header -> header+30h -> PLL pointer chain
+     * through that mapping; tables appended past the page (the previous
+     * placement at the declared end, 9A00h for the shipped image) read as
+     * whatever the neighbouring system PTEs map: XCLK 0, every mode-set
+     * refused, VgaSave at 640x480x4.  The shipped SeaVGABIOS keeps a zero
+     * run at 144h-200h; take the first zero run below 2000h that holds the
+     * 40h-byte header plus the 32h-byte PLL block (72h), and
+     * only if none exists fall back to appending.
+     */
+    hdr = 0;
+    for (i = 0x50; i + IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE <= 0x2000U &&
+         i + IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE <= declared; i += 16) {
+        uint32_t z;
+
+        for (z = 0; z < IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE &&
+             rom[i + z] == 0; z++) {
+            continue;
+        }
+        if (z == IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE) {
+            hdr = i;
+            break;
+        }
+    }
+    if (hdr == 0) {
+        hdr = declared;
+    }
+    pll = hdr + IA64_ATI_HDR_SIZE;
+    if (pll + IA64_ATI_PLL_SIZE > rom_size) {
         return;
     }
 
     memcpy(rom + 0x30, ati_signature, sizeof(ati_signature) - 1);
     stw_le_p(rom + 0x48, hdr);
-    memset(rom + hdr, 0, 0x60);
-    stw_le_p(rom + hdr + 0x30, pll);
-    stw_le_p(rom + pll + 0x08, IA64_ATI_PLL_XCLK);
-    stw_le_p(rom + pll + 0x0e, IA64_ATI_PLL_REFERENCE_FREQ);
-    stw_le_p(rom + pll + 0x10, IA64_ATI_PLL_REFERENCE_DIV);
-    stl_le_p(rom + pll + 0x12, IA64_ATI_PLL_MIN_FREQ);
-    stl_le_p(rom + pll + 0x16, IA64_ATI_PLL_MAX_FREQ);
+    ia64_ati_write_bios_tables(rom, hdr, pll);
 
     /* Grow the declared image so a bounds-checking parser sees the tables. */
-    declared = ROUND_UP(pll + 0x20U, 512U);
-    if (declared > rom_size || declared / 512U > 0xffU) {
-        return;
+    if (pll + IA64_ATI_PLL_SIZE > declared) {
+        declared = ROUND_UP(pll + IA64_ATI_PLL_SIZE, 512U);
+        if (declared > rom_size || declared / 512U > 0xffU) {
+            return;
+        }
+        rom[2] = (uint8_t)(declared / 512U);
     }
-    rom[2] = (uint8_t)(declared / 512U);
     pcir = lduw_le_p(rom + 0x18);
     if (pcir != 0 && pcir + 0x18U <= declared &&
         memcmp(rom + pcir, "PCIR", 4) == 0) {
