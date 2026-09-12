@@ -642,10 +642,25 @@ static void rtc_get_time(MC146818RtcState *s, struct tm *tm)
 static void rtc_set_time(MC146818RtcState *s)
 {
     struct tm tm = {};
+    time_t base;
     g_autofree const char *qom_path = object_get_canonical_path(OBJECT(s));
 
     rtc_get_time(s, &tm);
-    s->base_rtc = mktimegm(&tm);
+    base = mktimegm(&tm);
+    /*
+     * A calendar the nanosecond clock cannot hold (|base| * 1e9 past
+     * INT64) must not become the base time: it wraps get_guest_rtc_ns()
+     * and the clock reads back as garbage and stops.  The HP i2000 firmware
+     * gets here from its century write-probe -- it stores 00 in CMOS 32h
+     * (year 0026) and reads it back before restoring 20h -- inside every
+     * EFI GetTime; on the real part the century byte is plain RAM and the
+     * time keeps running, so leave the base time alone for such a write.
+     */
+    if (base < -(INT64_MAX / NANOSECONDS_PER_SECOND) ||
+        base > INT64_MAX / NANOSECONDS_PER_SECOND) {
+        return;
+    }
+    s->base_rtc = base;
     s->last_update = qemu_clock_get_ns(rtc_clock);
 
     qapi_event_send_rtc_change(qemu_timedate_diff(&tm), qom_path);
