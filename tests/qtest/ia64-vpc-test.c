@@ -2778,12 +2778,18 @@ static void test_460gx_sac_aperture(void)
     const uint64_t post = IA64_LEGACY_IO_BASE +
         ia64_sparse_io_offset(IA64_POST_PORT);
 
-    /* The boot semaphore reads granted (bit 7) to holder id 0. */
-    g_assert_cmphex(qtest_readb(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM), ==,
+    /*
+     * The BSP-select word (SSDM 4.1.3: "a write once register in the SAC")
+     * is claimed by the first access that reaches it, and the claim names
+     * the first CPU (LID.id 0 here): SAL reads it once, checks bit 7 and
+     * compares the low seven bits with its own id.  Later stores are
+     * dropped.
+     */
+    g_assert_cmphex(qtest_readl(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM), ==,
                     0x80);
-    /* Clearing bit 7, as the firmware does, still reads back granted. */
+    qtest_writel(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM, 0x83);
     qtest_writeb(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM, 0x00);
-    g_assert_cmphex(qtest_readb(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM), ==,
+    g_assert_cmphex(qtest_readl(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM), ==,
                     0x80);
 
     /* The rest of the aperture is read/write scratch, not open bus. */

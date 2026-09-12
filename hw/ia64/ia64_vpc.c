@@ -3954,6 +3954,10 @@ static void ia64_vpc_reset(void *opaque)
      */
     if (!ia64_vpc_chipset_is_zx1(s)) {
         ia64_vpc_init_chipset_cfg(s);
+        /* The SAC's scratch block, the write-once BSP-select word included. */
+        if (s->sac_data != NULL) {
+            memset(s->sac_data, 0, IA64_460GX_SAC_SIZE);
+        }
     }
 
     acpi_pm1_evt_reset(&s->acpi_regs);
@@ -3992,13 +3996,28 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
     ia64_vpc_configure_platform_pci(s);
 
     if (s->realfw_entry != 0) {
+        /*
+         * The i2000/SDV is a two-socket board whose processors answer to
+         * bus-agent ids 0 and 3: the vendor firmware's MADT template
+         * declares exactly those two Local SAPIC slots (ids 0 and 3, the
+         * second enabled once its processor checks in), and the OS's
+         * AP wake-up IPI is addressed to that LID.  SAL_A derives the LID
+         * from the geographic id PAL hands it in GR33 ("dep r2=r33,r0,0,3;
+         * shl r2=r2,24; mov cr.lid=r2" at 0xFFFF3608), so the id has to
+         * travel there: a second CPU announced as id 1 checks in, is
+         * published as id 3, and never hears the IPI.  The configuration
+         * check caps realfw at two processors.
+         */
+        static const uint8_t socket_lid_id[] = { 0, 3 };
+
         CPU_FOREACH(cs) {
             IA64BootInfo info = {
                 .firmware_base = s->realfw_base,
                 .firmware_entry = s->realfw_entry,
                 .iva = IA64_REALFW_IVT_BASE,
                 .raw_entry = true,
-                .raw_proc_id = cs->cpu_index,
+                .raw_proc_id = socket_lid_id[MIN(cs->cpu_index,
+                                                 ARRAY_SIZE(socket_lid_id) - 1)],
                 /*
                  * SAL calls PAL procedures through the machine-planted stub
                  * (GR34; GR36's authentication procedure lands on the same
@@ -4008,7 +4027,16 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                  */
                 .raw_pal_proc = IA64_REALFW_PAL_STUB_BASE,
                 .raw_pal_auth = IA64_REALFW_PAL_STUB_BASE,
-                .powered_off = cs->cpu_index != 0,
+                /*
+                 * Every processor leaves reset together and runs SAL_A,
+                 * which arbitrates the BSP through the SAC's write-once
+                 * word at FEB0_0CC0h; the losers wait at FEB0_0CB0h for
+                 * the BSP's release, then park in SAL_B polling cr.irr for
+                 * the OS's wake-up IPI (SAL 3.2.3 step 4, "wake APs ...
+                 * return them to rendezvous").  Powering them off here
+                 * would leave the vendor MADT with one processor.
+                 */
+                .powered_off = false,
             };
 
             ia64_cpu_set_boot_info(IA64_CPU(cs), &info);
@@ -4063,6 +4091,12 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
     }
     if (s->realfw_path != NULL && machine->firmware != NULL) {
         error_setg(errp, "realfw= and -bios are mutually exclusive");
+        return false;
+    }
+    if (s->realfw_path != NULL && !ia64_vpc_chipset_is_zx1(s) &&
+        machine->smp.cpus > 2) {
+        error_setg(errp, "realfw supports at most 2 CPUs: the i2000/SDV "
+                   "firmware declares two processor sockets");
         return false;
     }
     if (s->realfw_path != NULL && !ia64_vpc_chipset_is_zx1(s)) {
@@ -4252,19 +4286,49 @@ static const MemoryRegionOps ia64_460gx_post_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+/*
+ * FEB0_0CC0h "is used for BSP selection.  It is a write once register in
+ * the SAC" (SSDM 4.1.3).  The vendor firmware's normal reset path never
+ * stores to it: SAL_B loads the word, polls until bit 7 is set and compares
+ * the low seven bits with its own LID.id (link 0x400A90; SAL_A's recovery
+ * path additionally stores 80h | id first, 0xFFFF32C2).  So the first
+ * processor whose access reaches the SAC claims it -- the system bus carries
+ * the requesting agent's id -- and every later access reads that claim.
+ * The poll is a single load: "ld4.acq r3=[r4]; tbit.z p7,p6=r3,7;;
+ * (p07) br.cond 0x400AA0" branches to its own bundle, so the word must
+ * already carry the claim when the first load returns -- the SAC decides on
+ * that access, it does not leave the processor to try again.
+ *
+ * Which processor's access arrives first is a bus-arbitration outcome, and
+ * with multi-threaded TCG it would be a coin toss; socket 3 won one boot in
+ * three, and that boot never reached the video POST (the IA-32 CSM runs on
+ * the machine's first CPU).  Real boards boot from socket 0 unless it is
+ * absent, so whichever access claims the word, the claim names the first
+ * CPU's LID.id; later stores are dropped.
+ */
+static void ia64_460gx_sac_claim_bsp(IA64VpcMachineState *s)
+{
+    if (!(s->sac_data[IA64_460GX_SAC_BOOT_SEM] & 0x80) && first_cpu != NULL) {
+        CPUIA64State *env = cpu_env(first_cpu);
+
+        s->sac_data[IA64_460GX_SAC_BOOT_SEM] =
+            0x80 | ((env->cr[IA64_CR_SAPIC_LID] >> IA64_SAPIC_LID_ID_SHIFT) &
+                    0x7f);
+    }
+}
+
 static uint64_t ia64_460gx_sac_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
     uint64_t val = 0;
     unsigned i;
 
-    for (i = 0; i < size; i++) {
-        val |= (uint64_t)s->sac_data[addr + i] << (i * 8);
-    }
     if (addr <= IA64_460GX_SAC_BOOT_SEM &&
         addr + size > IA64_460GX_SAC_BOOT_SEM) {
-        /* Boot semaphore: granted, holder id 0 (the BSP's LID.id). */
-        val |= 0x80ULL << ((IA64_460GX_SAC_BOOT_SEM - addr) * 8);
+        ia64_460gx_sac_claim_bsp(s);
+    }
+    for (i = 0; i < size; i++) {
+        val |= (uint64_t)s->sac_data[addr + i] << (i * 8);
     }
     qemu_log_mask(LOG_UNIMP, "ia64-460gx: SAC read  +%04x/%u = 0x%" PRIx64
                   "\n", (unsigned)addr, size, val);
@@ -4278,6 +4342,10 @@ static void ia64_460gx_sac_write(void *opaque, hwaddr addr, uint64_t val,
     unsigned i;
 
     for (i = 0; i < size; i++) {
+        if (addr + i == IA64_460GX_SAC_BOOT_SEM) {
+            ia64_460gx_sac_claim_bsp(s);
+            continue;
+        }
         s->sac_data[addr + i] = val >> (i * 8);
     }
     qemu_log_mask(LOG_UNIMP, "ia64-460gx: SAC write +%04x/%u = 0x%" PRIx64
