@@ -14,6 +14,7 @@
 #include "hw/isa/isa.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/rtc/mc146818rtc.h"
 #include "hw/timer/i8254.h"
 #include "hw/southbridge/intel_82468gx.h"
@@ -77,7 +78,23 @@ struct Intel82468GXIFBState {
     PICCommonState *master_pic;
     MemoryRegion acpi_pm;
     MemoryRegion acpi_gpe;
+    MemoryRegion acpi_glbctl;
+    MemoryRegion apm;
     ACPIREGS acpi_regs;
+    /* SSDM 11.2.8.1 Global Control and Enable, at ACPI block offset 1Ah. */
+    uint16_t glbctl;
+    /* SSDM 11.2.6 APM control and status ports, B2h/B3h. */
+    uint8_t apmc;
+    uint8_t apms;
+    qemu_irq apmc_irq;
+    /*
+     * The ACPI I/O base the board's firmware programs at POST, or 0 for the
+     * part's own reset state (block disabled).  The vendor i2000 firmware
+     * carries the register pokes in a chipset-init script this build never
+     * reaches, while its FADT, DSDT and PMI handler all assume the block at
+     * that base; the machine supplies the script's result through this.
+     */
+    uint16_t init_acpi_base;
     Notifier powerdown_notifier;
     ISADevice *pit;
     MC146818RtcState *rtc;
@@ -120,6 +137,24 @@ struct Intel82468GXIFBState {
 #define IFB_NMISC_REFRESH_NS   15000
 #define IFB_ACPI_GPE_OFFSET 0x0c
 #define IFB_ACPI_GPE_LENGTH 4
+/*
+ * Global Control and Enable (SSDM 11.2.8.1): "added to the end of the I/O
+ * register space defined by the ACPI block"; bit 3 defaults to 1, bit 10
+ * APMC_EN "enable SMIs based upon accesses to the APM control port at B2h".
+ */
+#define IFB_ACPI_GLBCTL_OFFSET  0x1a
+#define IFB_GLBCTL_DEFAULT      BIT(3)
+#define IFB_GLBCTL_APMC_EN      BIT(10)
+#define IFB_GLBCTL_WRITABLE     0x1fff
+/*
+ * APMC/APMS (SSDM 11.2.6): "located in normal I/O space", always decoded --
+ * "the APM power management ranges (B2/B3h) are always enabled and are not
+ * affected by" ACPI Enable (11.1.9).  "Writes to [APMC] store data ... In
+ * addition, writes generate an SMI, if the APMC_EN bit ... is set to 1.
+ * Reads do not generate an SMI."  The SMI leaves as the "apmc" output
+ * carrying the command; on this platform it is the processor's PMI.
+ */
+#define IFB_APM_IOPORT          0xb2
 
 static void ifb_acpi_update_sci(ACPIREGS *ar)
 {
@@ -292,6 +327,66 @@ static const MemoryRegionOps ifb_acpi_gpe_ops = {
     },
 };
 
+static uint64_t ifb_acpi_glbctl_read(void *opaque, hwaddr addr,
+                                     unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+
+    return (s->glbctl >> (addr * 8)) & ((1u << (size * 8)) - 1);
+}
+
+static void ifb_acpi_glbctl_write(void *opaque, hwaddr addr, uint64_t value,
+                                  unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+    uint16_t mask = ((1u << (size * 8)) - 1) << (addr * 8);
+
+    s->glbctl = ((s->glbctl & ~mask) | ((value << (addr * 8)) & mask)) &
+                IFB_GLBCTL_WRITABLE;
+}
+
+static const MemoryRegionOps ifb_acpi_glbctl_ops = {
+    .read = ifb_acpi_glbctl_read,
+    .write = ifb_acpi_glbctl_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 2,
+    },
+};
+
+static uint64_t ifb_apm_read(void *opaque, hwaddr addr, unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+
+    return addr == 0 ? s->apmc : s->apms;
+}
+
+static void ifb_apm_write(void *opaque, hwaddr addr, uint64_t value,
+                          unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+
+    if (addr == 0) {
+        s->apmc = value;
+        if (s->glbctl & IFB_GLBCTL_APMC_EN) {
+            qemu_set_irq(s->apmc_irq, s->apmc);
+        }
+    } else {
+        s->apms = value;
+    }
+}
+
+static const MemoryRegionOps ifb_apm_ops = {
+    .read = ifb_apm_read,
+    .write = ifb_apm_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 1,
+    },
+};
+
 static void ifb_acpi_io_update(Intel82468GXIFBState *s)
 {
     PCIDevice *pci = PCI_DEVICE(s);
@@ -348,6 +443,20 @@ static void ifb_lpc_reset(DeviceState *dev)
     acpi_pm_tmr_reset(&s->acpi_regs);
     acpi_gpe_reset(&s->acpi_regs);
     s->acpi_regs.gpe.sts[1] = BIT(3);
+    s->glbctl = IFB_GLBCTL_DEFAULT;
+    s->apmc = 0;
+    s->apms = 0;
+    if (s->init_acpi_base != 0) {
+        /*
+         * The board firmware's chipset-init pokes, in its order: ACPI Enable
+         * off, ACPI Base, ACPI Enable on (the vendor script at bios130.BIN
+         * 0x2c7a80: 00:03.0 @44h = 0, @40h = 0A00h, @44h = 1), and the APM
+         * SMI enable its PMI handler relies on.
+         */
+        pci_set_long(pci->config + 0x40, (s->init_acpi_base & 0xffc0U) | 1U);
+        pci->config[0x44] = BIT(0);
+        s->glbctl |= IFB_GLBCTL_APMC_EN;
+    }
     ifb_acpi_update_sci(&s->acpi_regs);
     ifb_acpi_io_update(s);
 }
@@ -545,6 +654,14 @@ static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
                           IFB_ACPI_GPE_LENGTH);
     memory_region_add_subregion(&s->acpi_pm, IFB_ACPI_GPE_OFFSET,
                                 &s->acpi_gpe);
+    memory_region_init_io(&s->acpi_glbctl, OBJECT(s), &ifb_acpi_glbctl_ops,
+                          s, TYPE_INTEL_82468GX_IFB ".acpi-glbctl", 2);
+    memory_region_add_subregion(&s->acpi_pm, IFB_ACPI_GLBCTL_OFFSET,
+                                &s->acpi_glbctl);
+    memory_region_init_io(&s->apm, OBJECT(s), &ifb_apm_ops, s,
+                          TYPE_INTEL_82468GX_IFB ".apm", 2);
+    memory_region_add_subregion(pci_address_space_io(pci), IFB_APM_IOPORT,
+                                &s->apm);
     s->powerdown_notifier.notify = ifb_acpi_powerdown;
     qemu_register_powerdown_notifier(&s->powerdown_notifier);
     ifb_lpc_reset(DEVICE(pci));
@@ -601,7 +718,7 @@ static int ifb_lpc_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ifb_lpc = {
     .name = TYPE_INTEL_82468GX_IFB,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = ifb_lpc_post_load,
     .fields = (const VMStateField[]) {
@@ -622,6 +739,9 @@ static const VMStateDescription vmstate_ifb_lpc = {
         VMSTATE_UINT8_ARRAY_V(rtc_ext_ram, Intel82468GXIFBState,
                               IFB_RTC_BANK_SIZE, 2),
         VMSTATE_UINT32_V(freq_mailbox, Intel82468GXIFBState, 2),
+        VMSTATE_UINT16_V(glbctl, Intel82468GXIFBState, 3),
+        VMSTATE_UINT8_V(apmc, Intel82468GXIFBState, 3),
+        VMSTATE_UINT8_V(apms, Intel82468GXIFBState, 3),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -642,7 +762,14 @@ static void ifb_lpc_init(Object *obj)
                              ISA_NUM_IRQS);
     qdev_init_gpio_out_named(DEVICE(obj), &s->sci,
                              INTEL_82468GX_IFB_GPIO_SCI, 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->apmc_irq,
+                             INTEL_82468GX_IFB_GPIO_APMC, 1);
 }
+
+static const Property ifb_lpc_properties[] = {
+    DEFINE_PROP_UINT16(INTEL_82468GX_IFB_PROP_INIT_ACPI_BASE,
+                       Intel82468GXIFBState, init_acpi_base, 0),
+};
 
 static void ifb_lpc_class_init(ObjectClass *klass, const void *data)
 {
@@ -661,6 +788,7 @@ static void ifb_lpc_class_init(ObjectClass *klass, const void *data)
     dc->user_creatable = false;
     dc->hotpluggable = false;
     dc->vmsd = &vmstate_ifb_lpc;
+    device_class_set_props(dc, ifb_lpc_properties);
     device_class_set_legacy_reset(dc, ifb_lpc_reset);
     set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
 }
@@ -800,6 +928,7 @@ static const TypeInfo intel_82468gx_ifb_types[] = {
 DEFINE_TYPES(intel_82468gx_ifb_types)
 
 Intel82468GXIFBState *intel_82468gx_ifb_create(PCIBus *bus, int devfn,
+                                               uint16_t init_acpi_base,
                                                Error **errp)
 {
     PCIDevice *pci;
@@ -814,6 +943,8 @@ Intel82468GXIFBState *intel_82468gx_ifb_create(PCIBus *bus, int devfn,
     }
 
     pci = pci_new_multifunction(devfn, TYPE_INTEL_82468GX_IFB);
+    qdev_prop_set_uint16(DEVICE(pci), INTEL_82468GX_IFB_PROP_INIT_ACPI_BASE,
+                         init_acpi_base);
     if (!pci_realize_and_unref(pci, bus, errp)) {
         return NULL;
     }
@@ -858,6 +989,24 @@ I2CBus *intel_82468gx_ifb_smbus(Intel82468GXIFBState *s)
 int intel_82468gx_ifb_pic_read_irq(Intel82468GXIFBState *s)
 {
     return s && s->master_pic ? pic_read_irq(s->master_pic) : -1;
+}
+
+/*
+ * What the platform's PMI handler does with the FADT's ACPI_ENABLE and
+ * ACPI_DISABLE commands (SMI_CMD B2h, A0h/A1h): the vendor i2000 firmware's
+ * handler (SAL_B, registered through PAL_PMI_ENTRYPOINT) answers A0h by
+ * clearing pending PM1/GPE status, enabling the power button in PM1_EN and
+ * setting SCI_EN in PM1_CNT, all through the block's ports at A00h.
+ */
+void intel_82468gx_ifb_acpi_sci_enable(Intel82468GXIFBState *s, bool enable)
+{
+    g_return_if_fail(s != NULL);
+    if (enable) {
+        s->acpi_regs.pm1.evt.sts = 0;
+        s->acpi_regs.pm1.evt.en |= ACPI_BITMASK_POWER_BUTTON_ENABLE;
+    }
+    acpi_pm1_cnt_update(&s->acpi_regs, enable, !enable);
+    ifb_acpi_update_sci(&s->acpi_regs);
 }
 
 void intel_82468gx_ifb_configure_acpi(Intel82468GXIFBState *s,

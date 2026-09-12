@@ -2541,6 +2541,28 @@ static void ia64_vpc_set_alat(Object *obj, const char *value, Error **errp)
     error_setg(errp, "alat must be 'zero' or 'full'");
 }
 
+/*
+ * The vendor firmware's FADT: PM1a_EVT_BLK A00h, PM1a_CNT_BLK A04h, PM_TMR
+ * A08h, GPE0 A0Ch, SMI_CMD B2h, ACPI_ENABLE A0h, ACPI_DISABLE A1h; its MADT
+ * routes the SCI (ISA IRQ 9) to GSI 49.
+ */
+#define IA64_460GX_IFB_ACPI_IO_BASE 0x0a00
+#define IA64_I2000_SCI_GSI          49
+#define IA64_460GX_ACPI_ENABLE_CMD  0xa0
+#define IA64_460GX_ACPI_DISABLE_CMD 0xa1
+
+static void ia64_vpc_realfw_apmc(void *opaque, int n, int level)
+{
+    IA64VpcMachineState *s = opaque;
+
+    (void)n;
+    if (level == IA64_460GX_ACPI_ENABLE_CMD) {
+        intel_82468gx_ifb_acpi_sci_enable(s->ifb, true);
+    } else if (level == IA64_460GX_ACPI_DISABLE_CMD) {
+        intel_82468gx_ifb_acpi_sci_enable(s->ifb, false);
+    }
+}
+
 static void ia64_vpc_acpi_update_sci(ACPIREGS *ar)
 {
     IA64VpcMachineState *s = container_of(ar, IA64VpcMachineState,
@@ -5907,11 +5929,43 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * that belongs to plans/phase5-real-firmware-boot.md rather than here.
      */
     if (ia64_vpc_has_south_bridge(s)) {
+        /*
+         * Under the vendor firmware the bridge comes up with its ACPI block
+         * at A00h, where the firmware's FADT (PM1a_EVT A00h, PM1a_CNT A04h,
+         * SMI_CMD B2h with ACPI_ENABLE A0h), its DSDT and its PMI handler
+         * all expect it.  The firmware's own pokes for that (00:03.0 @44h =
+         * 0, @40h = 0A00h, @44h = 1) sit in a chipset-init script this
+         * build never reaches (plans/phase5, session 23), so the machine
+         * supplies their result; the SSDM reset state (block disabled)
+         * stays for our own firmware, which programs what it uses.
+         */
         s->ifb = intel_82468gx_ifb_create(
             pci_bus, PCI_DEVFN(IA64_460GX_IFB_SLOT,
-                               IA64_460GX_IFB_LPC_FUNCTION), errp);
+                               IA64_460GX_IFB_LPC_FUNCTION),
+            s->realfw_path != NULL ? IA64_460GX_IFB_ACPI_IO_BASE : 0, errp);
         if (s->ifb == NULL) {
             return false;
+        }
+        /*
+         * The bridge's SCI reaches the platform interrupt controller on the
+         * i2000's input 49: the vendor MADT's interrupt source override maps
+         * ISA IRQ 9 (the FADT's SCI_INT) to GSI 49, active low, level.
+         */
+        qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_SCI,
+                                    0, qdev_get_gpio_in(iosapic,
+                                                        IA64_I2000_SCI_GSI));
+        if (s->realfw_path != NULL) {
+            /*
+             * The APM control port's SMI is the processor's PMI on this
+             * platform, and the vendor SAL's PMI handler answers the FADT's
+             * ACPI_ENABLE/ACPI_DISABLE commands by setting or clearing
+             * SCI_EN.  PMI delivery is not modelled; this stands in for
+             * that handler's effect (intel_82468gx_ifb_acpi_sci_enable).
+             */
+            qdev_connect_gpio_out_named(DEVICE(s->ifb),
+                                        INTEL_82468GX_IFB_GPIO_APMC, 0,
+                                        qemu_allocate_irq(
+                                            ia64_vpc_realfw_apmc, s, 0));
         }
         for (i = 0; i < INTEL_82468GX_IFB_FUNCTIONS; i++) {
             PCIDevice *fn = intel_82468gx_ifb_function(s->ifb, i);

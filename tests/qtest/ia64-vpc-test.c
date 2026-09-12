@@ -3390,6 +3390,87 @@ static void test_realfw_chipset_identity(void)
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
+/*
+ * Under the vendor firmware the south bridge's ACPI block sits at A00h --
+ * the FADT's PM1a_EVT/PM1a_CNT, the DSDT and SAL_B's PMI handler all assume
+ * it -- although this firmware build never reaches the chipset-init pokes
+ * that would program it (the machine supplies their result).  The FADT's
+ * SMI_CMD B2h with ACPI_ENABLE A0h reaches the PMI handler, which sets
+ * SCI_EN; ACPI_DISABLE A1h clears it.  The DSDT's _S5 is SLP_TYP 4, and
+ * Windows' HAL writes it with SLP_EN to power off: that must end the
+ * machine, not fall through to the HAL's 30-second EFI cold reset.
+ */
+static uint64_t realfw_port(uint16_t port)
+{
+    return IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port);
+}
+
+static void test_realfw_ifb_acpi_block(void)
+{
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *path = NULL;
+    g_autofree char *quoted_path = NULL;
+    g_autofree uint8_t *image = NULL;
+    const uint64_t image_size = 0x20000;
+    const uint64_t base = 0x100000000ULL - image_size;
+    const uint64_t fit_addr = base + 0x10000;
+    const uint64_t sale_addr = base + 0x8000;
+    g_autoptr(GError) error = NULL;
+    QTestState *qts;
+
+    tmpdir = g_dir_make_tmp("ia64-vpc-realfw-XXXXXX", &error);
+    g_assert_no_error(error);
+    path = g_build_filename(tmpdir, "flash.bin", NULL);
+    quoted_path = g_shell_quote(path);
+    image = g_malloc0(image_size);
+    memset(image, 0xff, image_size);
+    memcpy(image + (fit_addr - base), "_FIT_   ", 8);
+    stq_le_p(image + (fit_addr - base) + 8, 0x0100000000000010ULL);
+    stq_le_p(image + image_size - 32, (1ULL << 63) | fit_addr);
+    stq_le_p(image + image_size - 24, (1ULL << 63) | sale_addr);
+    g_assert_true(g_file_set_contents(path, (char *)image, image_size,
+                                      &error));
+
+    qts = qtest_initf("-machine 460gx,realfw=%s -m 256M -S", quoted_path);
+
+    /* The bridge's ACPI base and enable read as the init script leaves them. */
+    g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
+                                         0x40), ==, 0x00000a01);
+    g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
+                                         0x44) & 1, ==, 1);
+    /* PM1a_CNT decodes (not open bus), SCI_EN clear out of reset. */
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a04)), ==, 0);
+    /* Global Control at 1Ah: bit 3 by default, APMC_EN from the script. */
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a1a)) & 0x0408, ==,
+                    0x0408);
+
+    /* ACPI_ENABLE through SMI_CMD: SCI_EN and the power button enable. */
+    qtest_writeb(qts, realfw_port(0x00b2), 0xa0);
+    g_assert_cmphex(qtest_readb(qts, realfw_port(0x00b2)), ==, 0xa0);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a04)) & 1, ==, 1);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a02)) & 0x0100, ==,
+                    0x0100);
+    qtest_writeb(qts, realfw_port(0x00b2), 0xa1);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a04)) & 1, ==, 0);
+    /* APMS is plain storage. */
+    qtest_writeb(qts, realfw_port(0x00b3), 0x5a);
+    g_assert_cmphex(qtest_readb(qts, realfw_port(0x00b3)), ==, 0x5a);
+
+    /* The vendor _S5 (SLP_TYP 4) with SLP_EN powers the machine off. */
+    qtest_writeb(qts, realfw_port(0x00b2), 0xa0);
+    qtest_writew(qts, realfw_port(0x0a04), (4 << 10) | (1 << 13) | 1);
+    qtest_qmp_eventwait(qts, "SHUTDOWN");
+    qtest_quit(qts);
+
+    /* Without the vendor firmware the part keeps its reset state. */
+    qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
+                                         0x44) & 1, ==, 0);
+    qtest_quit(qts);
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
 static void test_realfw_flash_window(void)
 {
     g_autofree char *tmpdir = NULL;
@@ -6140,6 +6221,8 @@ int main(int argc, char **argv)
                    test_savevm_restores_platform_state);
     qtest_add_func("/ia64-vpc/agp/gxb", test_agp_gxb);
     qtest_add_func("/ia64-vpc/realfw/flash-window", test_realfw_flash_window);
+    qtest_add_func("/ia64-vpc/realfw/ifb-acpi-block",
+                   test_realfw_ifb_acpi_block);
     qtest_add_func("/ia64-vpc/agp/off", test_agp_off);
     qtest_add_func("/ia64-vpc/ati/config-ids", test_ati_config_ids);
     qtest_add_func("/ia64-vpc/ati/pll-regfile", test_ati_pll_regfile);
