@@ -3057,6 +3057,135 @@ static uint32_t sac_idx_read(QTestState *qts, uint8_t sac, uint8_t entry)
     return cf8_readl(qts, 0xff, sac, 0, IA64_SAC_IDX_DATA);
 }
 
+/*
+ * One byte of a Memory Card A DIMM's SPD EEPROM, read the way the vendor
+ * firmware's sizing loop does: raise bit 0 of register 48h in the MAC
+ * function (4-7) that selects the row within a stack, name the DIMM's I2C
+ * address (54h-57h = stack 0, 50h-53h = stack 1, bit 7 = read) in the SAC's
+ * IIADR register, then read the byte through the card's function 2.
+ */
+static uint8_t spd_read(QTestState *qts, unsigned row, unsigned off)
+{
+    unsigned fn;
+
+    for (fn = 4; fn < 8; fn++) {
+        cf8_writel(qts, 0xff, 0x05, fn, 0x48, fn - 4 == row % 4 ? 1 : 0);
+    }
+    cf8_writel(qts, 0xff, 0x00, 0, 0x68, row < 4 ? 0xd4 : 0xd0);
+    return cf8_readl(qts, 0xff, 0x05, 2, off & 0xfc) >> ((off & 3) * 8);
+}
+
+/*
+ * The SPD images follow -m: rows of four identical DIMMs are populated from
+ * the largest Table 5-2 geometry down, 64 MB row increments, eight rows.
+ * The sizing loop reads bytes 2, 3, 4, 5 and 17 and computes
+ * 2^(rows+columns) x banks x ranks x 8 bytes per DIMM.
+ */
+static void spd_assert_row(QTestState *qts, unsigned row, unsigned row_bits,
+                           unsigned col_bits, unsigned ranks, unsigned banks)
+{
+    g_assert_cmpuint(spd_read(qts, row, 2), ==, 4);
+    g_assert_cmpuint(spd_read(qts, row, 3), ==, row_bits);
+    g_assert_cmpuint(spd_read(qts, row, 4), ==, col_bits);
+    g_assert_cmpuint(spd_read(qts, row, 5), ==, ranks);
+    g_assert_cmpuint(spd_read(qts, row, 17), ==, banks);
+}
+
+static void spd_assert_empty(QTestState *qts, unsigned row)
+{
+    g_assert_cmpuint(spd_read(qts, row, 2), ==, 0);
+    g_assert_cmpuint(spd_read(qts, row, 3), ==, 0);
+}
+
+static void test_460gx_spd_follows_ram_size(void)
+{
+    QTestState *qts;
+    unsigned row, sum, i;
+
+    /* 1 GiB: one row of 32Mx72 (256 MB) DIMMs, the i2000's four slots. */
+    qts = qtest_init("-machine 460gx -cpu merced -m 1G -S");
+    spd_assert_row(qts, 0, 13, 10, 1, 4);
+    for (row = 1; row < 8; row++) {
+        spd_assert_empty(qts, row);
+    }
+    /* Identity bytes and the byte-63 checksum of that image. */
+    g_assert_cmpuint(spd_read(qts, 0, 6), ==, 72);
+    g_assert_cmpuint(spd_read(qts, 0, 11), ==, 2);
+    g_assert_cmpuint(spd_read(qts, 0, 31), ==, 0x40);
+    for (sum = 0, i = 0; i < 63; i++) {
+        sum += spd_read(qts, 0, i);
+    }
+    g_assert_cmpuint(spd_read(qts, 0, 63), ==, sum & 0xff);
+    /* Without a row selected, or with two, the tunnel answers nothing. */
+    for (i = 4; i < 8; i++) {
+        cf8_writel(qts, 0xff, 0x05, i, 0x48, i < 6 ? 1 : 0);
+    }
+    cf8_writel(qts, 0xff, 0x00, 0, 0x68, 0xd4);
+    g_assert_cmpuint(cf8_readl(qts, 0xff, 0x05, 2, 0) & 0xff0000, ==, 0);
+    qtest_quit(qts);
+
+    /*
+     * 6 GiB + 256 MB: a 4 GB row of 64Mx72x2 (1 GB) DIMMs, a 2 GB row of
+     * 64Mx72 (512 MB), then 256 MB as a row of 8Mx72 (64 MB) DIMMs -- the
+     * second stack's first row, reached through I2C address 50h.
+     */
+    qts = qtest_init("-machine 460gx -cpu merced -m 6400M -S");
+    spd_assert_row(qts, 0, 13, 11, 2, 4);
+    spd_assert_row(qts, 1, 13, 11, 1, 4);
+    spd_assert_row(qts, 2, 12, 9, 1, 4);
+    g_assert_cmpuint(spd_read(qts, 0, 31), ==, 0x80);
+    g_assert_cmpuint(spd_read(qts, 2, 13), ==, 8);
+    for (row = 3; row < 8; row++) {
+        spd_assert_empty(qts, row);
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * The low DRAM band ends at the lowest programmed PCIS: "10_0000h - PCIS[7]"
+ * decodes to DRAM, "PCIS[7] - FDFF_FFFFh" to PCI, and DRAM resumes at
+ * "1_0000_0000h to TOM" (SSDM Table 4-1) -- memory behind the gap "is moved
+ * so that it is addressed above 4 GB" (4.1.5).  The vendor firmware programs
+ * PCIS 40h (2 GB) once it has sized 4 GB of DIMMs and reports a TOM of 6 GB.
+ */
+static void test_460gx_pcis_moves_dram_gap(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 3G -S");
+    const uint64_t two_gb = 0x80000000ULL, four_gb = 0x100000000ULL;
+
+    /* Static layout first: 3 GiB contiguous from 0. */
+    qtest_writel(qts, two_gb - 0x10, 0x11111111);
+    qtest_writel(qts, two_gb, 0x22222222);
+    qtest_writel(qts, two_gb + 0x40000000 - 0x10, 0x33333333);
+    g_assert_cmphex(qtest_readl(qts, two_gb), ==, 0x22222222);
+
+    /* PCIS 40h on the compatibility port opens the gap at 2 GiB. */
+    cf8_writel(qts, 0xff, 0x10, 0, 0x84, 0x40);
+    g_assert_cmphex(qtest_readl(qts, two_gb - 0x10), ==, 0x11111111);
+    g_assert_cmphex(qtest_readl(qts, two_gb), !=, 0x22222222);
+    g_assert_cmphex(qtest_readl(qts, four_gb), ==, 0x22222222);
+    g_assert_cmphex(qtest_readl(qts, four_gb + 0x40000000 - 0x10), ==,
+                    0x33333333);
+    /* What is written above 4 GiB is the same DRAM the gap displaced. */
+    qtest_writel(qts, four_gb + 0x100, 0x44444444);
+
+    /* A lower PCIS on another port lowers the band with it. */
+    cf8_writel(qts, 0xff, 0x14, 0, 0x84, 0x20);
+    g_assert_cmphex(qtest_readl(qts, two_gb - 0x10), !=, 0x11111111);
+    g_assert_cmphex(qtest_readl(qts, four_gb + 0x40000000 - 0x10), ==,
+                    0x11111111);
+    g_assert_cmphex(qtest_readl(qts, four_gb + 0x40000000 + 0x100), ==,
+                    0x44444444);
+
+    /* FFh (empty port) and 00h (reset) carry no window: back to static. */
+    cf8_writel(qts, 0xff, 0x14, 0, 0x84, 0xff);
+    cf8_writel(qts, 0xff, 0x10, 0, 0x84, 0x00);
+    g_assert_cmphex(qtest_readl(qts, two_gb), ==, 0x22222222);
+    g_assert_cmphex(qtest_readl(qts, two_gb + 0x100), ==, 0x44444444);
+    g_assert_cmphex(qtest_readl(qts, two_gb - 0x10), ==, 0x11111111);
+    qtest_quit(qts);
+}
+
 static void test_460gx_sac_indexed_file(void)
 {
     QTestState *qts = ia64_vpc_start("");
@@ -6043,6 +6172,10 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/460gx-sac-indexed-file",
                    test_460gx_sac_indexed_file);
     qtest_add_func("/ia64-vpc/pci/460gx-sac-aperture", test_460gx_sac_aperture);
+    qtest_add_func("/ia64-vpc/pci/460gx-pcis-moves-dram-gap",
+                   test_460gx_pcis_moves_dram_gap);
+    qtest_add_func("/ia64-vpc/pci/460gx-spd-follows-ram-size",
+                   test_460gx_spd_follows_ram_size);
     qtest_add_func("/ia64-vpc/pci/460gx-pcis-window", test_460gx_pcis_window);
     qtest_add_func("/ia64-vpc/pci/460gx-smbus-hwmon", test_460gx_smbus_hwmon);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",

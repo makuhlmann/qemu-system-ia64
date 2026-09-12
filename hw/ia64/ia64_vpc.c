@@ -97,6 +97,13 @@
  */
 #define IA64_LOW_RAM_LIMIT IA64_PCI_MMIO_BASE
 /*
+ * 460GX Memory Card A: two stacks of four DIMM rows, each row four identical
+ * DIMMs (SSDM Table 5-1: "4 DIMMs per row which must be populated as a unit",
+ * "Up to 4 rows per stack", "2 stacks per card").  Memory Card B stays absent.
+ */
+#define IA64_460GX_MEM_ROWS 8
+#define IA64_460GX_MEM_ROW_MIN_MB 64
+/*
  * The firmware address space, RTC/watchdog/NVRAM devices, IVT, IOSAPIC,
  * local SAPIC and ACPI PM block addresses are shared with the firmware via
  * hw/ia64/ia64_vpc_abi.h.
@@ -601,6 +608,8 @@ struct IA64VpcMachineState {
     uint8_t *chipset_cfg;
     /* The SAC function-0 register file behind 64h/70h, one per SAC. */
     uint8_t sac_indexed[2][IA64_460GX_SAC_IDX_ENTRIES][4];
+    /* DIMM size per Memory Card A row, in MB; 0 = row not populated. */
+    uint32_t mem_row_dimm_mb[IA64_460GX_MEM_ROWS];
     PCIBus *host_pci_bus;
     char *vga_model;
     bool alat_full;
@@ -625,8 +634,10 @@ struct IA64VpcMachineState {
     PCIDevice *nic_devs[MAX_NICS];
     unsigned int nic_count;
 
-    MemoryRegion *ram_aliases[4];
+    MemoryRegion ram_aliases[4];
     unsigned int ram_alias_count;
+    /* Where the low DRAM band ends: the chipset's PCI gap base. */
+    uint64_t low_ram_limit;
     MemoryRegion *vga_fb_alias;
     MemoryRegion *vga_mmio_alias;
     MemoryRegion *vga_legacy_alias;
@@ -2845,8 +2856,7 @@ static uint64_t ia64_vpc_map_ram_alias(IA64VpcMachineState *s,
     }
 
     g_assert(s->ram_alias_count < ARRAY_SIZE(s->ram_aliases));
-    alias = g_new(MemoryRegion, 1);
-    s->ram_aliases[s->ram_alias_count++] = alias;
+    alias = &s->ram_aliases[s->ram_alias_count++];
     memory_region_init_alias(alias, OBJECT(s), name, machine->ram,
                              backing_offset, size);
     memory_region_add_subregion(get_system_memory(), guest_base, alias);
@@ -2892,6 +2902,9 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
      * Keep this in lockstep with fw_init_guest_high_ram_ranges() +
      * efi_add_low_ram_band() in roms/ia64-firmware/.
      */
+    if (s->low_ram_limit == 0) {
+        s->low_ram_limit = IA64_LOW_RAM_LIMIT;
+    }
     if (ia64_vpc_chipset_is_zx1(s) && remaining > IA64_LOW_RAM_LIMIT) {
         size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
                                       IA64_SBA_IOVA_BASE,
@@ -2905,7 +2918,7 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
         remaining -= size;
     } else {
         size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
-                                      IA64_LOW_RAM_LIMIT,
+                                      s->low_ram_limit,
                                       "ia64-vpc.low-ram");
         offset += size;
         remaining -= size;
@@ -2914,6 +2927,36 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
     ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_AFTER_FIRMWARE_BASE,
                            offset, remaining, remaining,
                            "ia64-vpc.high-ram-above-4g");
+}
+
+/*
+ * Move the top of the low DRAM band.  The 460GX decodes "10_0000h - PCIS[7]"
+ * to DRAM and "PCIS[7] - FDFF_FFFFh" to PCI, with DRAM again from
+ * "1_0000_0000h to TOM" (SSDM Table 4-1): memory behind the variable gap
+ * "is moved so that it is addressed above 4 GB" (4.1.5).  The vendor
+ * firmware sizes memory, then programs the ports' PCIS from what it found
+ * -- 2 GB for 4 GB of DIMMs, which its TOM of 6 GB confirms -- so the band
+ * follows the lowest PCIS rather than the static aperture our own firmware
+ * assumes.  Everything DRAM-backed is re-aliased in one transaction; the
+ * backing store is untouched, so the bytes stay where the guest wrote them
+ * in the DRAM's own address order.
+ */
+static void ia64_vpc_set_low_ram_limit(IA64VpcMachineState *s, uint64_t limit)
+{
+    unsigned i;
+
+    if (limit == s->low_ram_limit || MACHINE(s)->ram == NULL) {
+        return;
+    }
+    memory_region_transaction_begin();
+    for (i = 0; i < s->ram_alias_count; i++) {
+        memory_region_del_subregion(get_system_memory(), &s->ram_aliases[i]);
+        object_unparent(OBJECT(&s->ram_aliases[i]));
+    }
+    s->ram_alias_count = 0;
+    s->low_ram_limit = limit;
+    ia64_vpc_map_ram(s);
+    memory_region_transaction_commit();
 }
 
 static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
@@ -4022,6 +4065,24 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
         error_setg(errp, "realfw= and -bios are mutually exclusive");
         return false;
     }
+    if (s->realfw_path != NULL && !ia64_vpc_chipset_is_zx1(s)) {
+        /*
+         * The vendor firmware sizes memory from the DIMMs alone (SSDM
+         * 5.5.1), so RAM must be a population of Memory Card A: a multiple
+         * of the 64 MB row increment, at most eight rows of 4 GB.
+         */
+        uint64_t max = (uint64_t)IA64_460GX_MEM_ROWS * 4 * GiB;
+
+        if (machine->ram_size % (IA64_460GX_MEM_ROW_MIN_MB * MiB) != 0 ||
+            machine->ram_size > max) {
+            g_autofree char *inc = size_to_str(IA64_460GX_MEM_ROW_MIN_MB * MiB);
+            g_autofree char *top = size_to_str(max);
+
+            error_setg(errp, "Invalid RAM size for realfw: the 460GX memory "
+                       "card takes multiples of %s up to %s", inc, top);
+            return false;
+        }
+    }
     return true;
 }
 
@@ -4332,34 +4393,122 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
 #define IA64_460GX_GXB_AGP_APERTURE_BASE 0x00000000d0000000ULL
 
 /*
- * SPD EEPROM served through the MAC's I2C pass-through: firmware writes the
- * DIMM's I2C address (0x54..0x57, bit 7 = read) into the SAC IIADR register
- * (dev 00h fn 0 reg 0x68), then config reads of Memory Card fn 2/3 return
- * the addressed EEPROM's bytes at the register offset (observed protocol,
+ * SPD EEPROMs served through the MAC's I2C pass-through: firmware writes the
+ * DIMM's I2C address (bit 7 = read) into the SAC IIADR register (dev 00h fn 0
+ * reg 0x68), then config reads of Memory Card fn 2/3 return the addressed
+ * EEPROM's bytes at the register offset (observed protocol,
  * plans/phase5-real-firmware-boot.md sec 5.5; register naming per
- * plans/460gx-config-space-notes.md).  One image serves all four DIMMs:
- * 256 MB registered SDRAM (32Mx4 devices: 13 row / 10 column address bits,
- * 4 banks, 1 module rank, x72 ECC) - 4 x 256 MB = 1 GiB on Memory Card A.
+ * plans/460gx-config-space-notes.md).  The card's eight rows are addressed
+ * as two stacks of four: the stack by the I2C address (54h-57h and 50h-53h
+ * = DIMM 0-3 of a row in either stack), the row within the stack by which of
+ * the MAC's functions 4-7 has bit 0 of its register 48h set -- the firmware
+ * raises exactly one before it reads a row's four EEPROMs (POST F0 trace).
+ *
+ * The sizing loop reads bytes 2 (memory type, must say SDRAM), 3, 4, 5 and
+ * 17 (row and column address bits, ranks, banks per device) and requires
+ * the row's four DIMMs to match, so a row's size is
+ * 2^(rows+columns) x banks x ranks x 8 bytes per DIMM, times four.  The
+ * DIMM geometries below are Table 5-2's x72 SDRAM configurations, one per
+ * size from 2Mx72 (16 MB) to 64Mx72x2 (1 GB), so a row holds 64 MB to 4 GB
+ * -- "64 MB is the smallest increment" (Table 5-1).
  */
 #define IA64_460GX_SAC_IIADR_REG 0x68
-static const uint8_t ia64_460gx_spd[64] = {
-    [0] = 128,    /* bytes written by manufacturer */
-    [1] = 8,      /* log2 of EEPROM size (256 bytes) */
-    [2] = 4,      /* memory type: SDRAM */
-    [3] = 13,     /* row address bits */
-    [4] = 10,     /* column address bits */
-    [5] = 1,      /* module rows (ranks) */
-    [6] = 72,     /* module data width low */
-    [8] = 1,      /* interface level: LVTTL */
-    [9] = 0xa0,   /* cycle time 10 ns (PC100) */
-    [11] = 2,     /* ECC */
-    [12] = 0x82,  /* refresh: self-refresh, 15.6 us */
-    [13] = 4,     /* primary SDRAM device width x4 */
-    [17] = 4,     /* banks per SDRAM device */
-    [18] = 4,     /* CAS latencies supported */
-    [31] = 0x40,  /* module rank density: 256 MB */
+static const struct {
+    uint32_t dimm_mb;
+    uint8_t row_bits;
+    uint8_t col_bits;
+    uint8_t ranks;
+    uint8_t banks;
+    uint8_t width;      /* primary SDRAM device width, SPD byte 13 */
+} ia64_460gx_dimm_geometries[] = {
+    /* Table 5-2: 64M x 72 x 2, 256 Mbit 64Mx4, double sided */
+    { 1024, 13, 11, 2, 4, 4 },
+    /* 64M x 72, 256 Mbit 64Mx4 */
+    {  512, 13, 11, 1, 4, 4 },
+    /* 32M x 72, 128 Mbit 32Mx4 */
+    {  256, 13, 10, 1, 4, 4 },
+    /* 16M x 72, 64 Mbit 16Mx4 */
+    {  128, 12, 10, 1, 4, 4 },
+    /* 8M x 72, 64 Mbit 8Mx8 */
+    {   64, 12,  9, 1, 4, 8 },
+    /* 4M x 72, 16 Mbit 4Mx4 */
+    {   32, 11, 10, 1, 2, 4 },
+    /* 2M x 72, 16 Mbit 2Mx8 */
+    {   16, 11,  9, 1, 2, 8 },
 };
 
+/*
+ * Populate Memory Card A for the machine's RAM size: rows are filled from
+ * the largest DIMM down, so 1 GiB is one row of 32Mx72 (the i2000's four
+ * slots), and a size the card cannot hold exactly leaves the remainder
+ * unpopulated (the caller rejects that where it matters).  Rows may differ
+ * in DIMM type (SSDM 5.2.1: "Different rows may use different size DIMMs").
+ * Returns the size populated, in bytes.
+ */
+static uint64_t ia64_460gx_plan_memory_rows(IA64VpcMachineState *s,
+                                            uint64_t ram_size)
+{
+    uint64_t left_mb = ram_size / MiB;
+    unsigned row = 0, g;
+
+    memset(s->mem_row_dimm_mb, 0, sizeof(s->mem_row_dimm_mb));
+    for (g = 0; g < ARRAY_SIZE(ia64_460gx_dimm_geometries); g++) {
+        uint32_t row_mb = ia64_460gx_dimm_geometries[g].dimm_mb * 4;
+
+        while (row < IA64_460GX_MEM_ROWS && left_mb >= row_mb) {
+            s->mem_row_dimm_mb[row++] = ia64_460gx_dimm_geometries[g].dimm_mb;
+            left_mb -= row_mb;
+        }
+    }
+    return ram_size - left_mb * MiB;
+}
+
+/*
+ * One byte of the JEDEC SDRAM SPD image describing a DIMM of the given
+ * size: the geometry bytes the sizing loop reads, plus the PC100 x72 ECC
+ * identity bytes a stricter parser would check, and the byte-63 checksum.
+ */
+static uint8_t ia64_460gx_spd_byte(uint32_t dimm_mb, unsigned off)
+{
+    unsigned g;
+
+    for (g = 0; g < ARRAY_SIZE(ia64_460gx_dimm_geometries); g++) {
+        if (ia64_460gx_dimm_geometries[g].dimm_mb == dimm_mb) {
+            break;
+        }
+    }
+    if (g == ARRAY_SIZE(ia64_460gx_dimm_geometries) || off > 63) {
+        return 0;
+    }
+    switch (off) {
+    case 0:  return 128;    /* bytes written by manufacturer */
+    case 1:  return 8;      /* log2 of EEPROM size (256 bytes) */
+    case 2:  return 4;      /* memory type: SDRAM */
+    case 3:  return ia64_460gx_dimm_geometries[g].row_bits;
+    case 4:  return ia64_460gx_dimm_geometries[g].col_bits;
+    case 5:  return ia64_460gx_dimm_geometries[g].ranks;
+    case 6:  return 72;     /* module data width low */
+    case 8:  return 1;      /* interface level: LVTTL */
+    case 9:  return 0xa0;   /* cycle time 10 ns (PC100) */
+    case 11: return 2;      /* ECC */
+    case 12: return 0x82;   /* refresh: self-refresh, 15.6 us */
+    case 13: return ia64_460gx_dimm_geometries[g].width;
+    case 17: return ia64_460gx_dimm_geometries[g].banks;
+    case 18: return 4;      /* CAS latencies supported */
+    case 31:                /* rank density, 4 MB units, bit per size */
+        return (dimm_mb / ia64_460gx_dimm_geometries[g].ranks) / 4;
+    case 63: {
+        unsigned sum = 0, i;
+
+        for (i = 0; i < 63; i++) {
+            sum += ia64_460gx_spd_byte(dimm_mb, i);
+        }
+        return sum;
+    }
+    default:
+        return 0;
+    }
+}
 
 /* Bus 0 device 10h: the SAC face that carries the Chipset Bus Number. */
 static uint8_t *ia64_460gx_cbn_window(IA64VpcMachineState *s, uint8_t fn)
@@ -4481,6 +4630,7 @@ static void ia64_460gx_update_low_mmio_window(IA64VpcMachineState *s)
         base = MIN(base, (uint64_t)pcis << 25);
     }
     ia64_pci_host_set_low_mmio_window(s->pci_host_dev, base);
+    ia64_vpc_set_low_ram_limit(s, MIN(base, IA64_LOW_RAM_LIMIT));
 }
 
 /*
@@ -4548,6 +4698,47 @@ static PCIDevice *ia64_460gx_cfg_find_device(IA64VpcMachineState *s,
     return pci_dev;
 }
 
+/*
+ * The DIMM row the firmware's SPD access names, or -1: the IIADR address
+ * picks the stack, the one MAC function 4-7 whose register 48h bit 0 is
+ * raised picks the row in it.  The four DIMMs of a row are identical, so
+ * the address's DIMM number is not needed.
+ */
+static int ia64_460gx_spd_row(IA64VpcMachineState *s, uint8_t bus)
+{
+    const uint8_t *sac = ia64_460gx_chipset_cfg(s, bus, 0, 0);
+    int row = -1, stack;
+    unsigned fn;
+
+    if (sac == NULL) {
+        return -1;
+    }
+    switch (sac[IA64_460GX_SAC_IIADR_REG] & 0xfc) {
+    case 0xd4:
+        stack = 0;
+        break;
+    case 0xd0:
+        stack = 1;
+        break;
+    default:
+        return -1;
+    }
+    for (fn = 4; fn < 8; fn++) {
+        const uint8_t *r = ia64_460gx_chipset_cfg(s, bus, 0x05, fn);
+
+        if (r == NULL) {
+            return -1;
+        }
+        if (r[0x48] & 1) {
+            if (row >= 0) {
+                return -1;
+            }
+            row = stack * 4 + (fn - 4);
+        }
+    }
+    return row;
+}
+
 static uint64_t ia64_460gx_cfg_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
@@ -4567,36 +4758,19 @@ static uint64_t ia64_460gx_cfg_read(void *opaque, hwaddr addr, unsigned size)
     cfg = ia64_460gx_chipset_cfg(s, bus, dev, fn);
     if (cfg != NULL && dev == 0x05 && (fn == 2 || fn == 3)) {
         /*
-         * MAC I2C pass-through: serve the addressed DIMM's SPD EEPROM.
-         * The card carries 4 rows x 4 DIMMs (row select = one-hot in
-         * fn 4..7 reg 0x48); only row 0 is populated - 4 x 256 MB = 1 GiB.
-         *
-         * The SAC (dev 0) and the MAC's fn 4..7 sit on the same bus as the
-         * addressed dev 5 - i.e. the CBN bus, which the guest's own address
-         * decoded here as 'bus'.  Once the firmware has programmed CBN to a
-         * non-zero value (which happens late in POST) a hard-coded bus 0 no
-         * longer resolves these functions and the lookup returns NULL, so use
-         * 'bus' and guard defensively.
+         * MAC I2C pass-through: serve the addressed DIMM's SPD EEPROM.  An
+         * unpopulated row answers zeros, which the sizing loop takes as
+         * "no SDRAM here" from byte 2 and moves on.  The SAC and the MAC's
+         * row-select functions are looked up on the bus the firmware used
+         * (CBN, which it reprograms late in POST), not a fixed one.
          */
-        uint8_t *sac = ia64_460gx_chipset_cfg(s, bus, 0, 0);
-        uint8_t *r4 = ia64_460gx_chipset_cfg(s, bus, 0x05, 4);
-        uint8_t *r5 = ia64_460gx_chipset_cfg(s, bus, 0x05, 5);
-        uint8_t *r6 = ia64_460gx_chipset_cfg(s, bus, 0x05, 6);
-        uint8_t *r7 = ia64_460gx_chipset_cfg(s, bus, 0x05, 7);
+        int row = ia64_460gx_spd_row(s, bus);
 
-        if (sac != NULL && r4 != NULL && r5 != NULL && r6 != NULL &&
-            r7 != NULL) {
-            uint8_t iiadr = sac[IA64_460GX_SAC_IIADR_REG];
-            bool row0 = r4[0x48] == 1 && r5[0x48] == 0 &&
-                        r6[0x48] == 0 && r7[0x48] == 0;
-
-            if ((iiadr & 0xfc) == 0xd4 && row0) {
-                for (i = 0; i < size; i++) {
-                    unsigned off = (reg + i) & 0xff;
-
-                    val |= (uint64_t)(off < sizeof(ia64_460gx_spd)
-                                      ? ia64_460gx_spd[off] : 0) << (i * 8);
-                }
+        if (row >= 0 && s->mem_row_dimm_mb[row] != 0) {
+            for (i = 0; i < size; i++) {
+                val |= (uint64_t)ia64_460gx_spd_byte(s->mem_row_dimm_mb[row],
+                                                     (reg + i) & 0xff)
+                       << (i * 8);
             }
         }
     } else if (cfg != NULL && (reg & 0xfc) == 0x30) {
@@ -4957,6 +5131,7 @@ static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
     stw_le_p(mac_a + PCI_DEVICE_ID, 0x84e3);
     mac_a[PCI_REVISION_ID] = 0x03;
 
+    ia64_460gx_plan_memory_rows(s, MACHINE(s)->ram_size);
 }
 
 /*
