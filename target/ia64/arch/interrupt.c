@@ -176,7 +176,7 @@ void ia64_itc_advance_pending_itm(CPUIA64State *env)
         uint64_t ticks = env->interrupt.itm_last_match + 1 - env->ar_itc;
 
         env->ar_itc += ticks;
-        env->interrupt.itc_delta += (int64_t)ticks * IA64_ITC_NS_PER_TICK;
+        env->interrupt.itc_delta += ia64_itc_ticks_to_ns(env, ticks);
     }
 }
 
@@ -433,10 +433,10 @@ void ia64_itm_update(CPUIA64State *env, uint64_t itm_value)
         return;
     }
 
-    if (delta_ticks > INT64_MAX / IA64_ITC_NS_PER_TICK) {
+    if (delta_ticks > muldiv64(INT64_MAX, env->itc_hz, NANOSECONDS_PER_SECOND)) {
         delay_ns = INT64_MAX;
     } else {
-        delay_ns = delta_ticks * IA64_ITC_NS_PER_TICK;
+        delay_ns = ia64_itc_ticks_to_ns(env, delta_ticks);
     }
     env->interrupt.itm_armed = true;
     env->interrupt.itm_armed_value = itm_value;
@@ -453,11 +453,11 @@ void ia64_itc_sync(CPUIA64State *env)
     int64_t elapsed = now - env->interrupt.itc_delta;
 
     if (elapsed > 0) {
-        uint64_t ticks = (uint64_t)(elapsed / IA64_ITC_NS_PER_TICK);
+        uint64_t ticks = ia64_itc_ns_to_ticks(env, elapsed);
 
         if (ticks != 0) {
             env->ar_itc += ticks;
-            env->interrupt.itc_delta += (int64_t)ticks * IA64_ITC_NS_PER_TICK;
+            env->interrupt.itc_delta += ia64_itc_ticks_to_ns(env, ticks);
         }
     }
 }

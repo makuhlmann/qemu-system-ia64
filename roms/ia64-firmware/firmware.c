@@ -14836,8 +14836,24 @@ static void fw_phase_boot(void)
     while (1) {}
 }
 
+UINT64 fw_itc_ticks_per_100ns = 20ULL;
+
+void fw_init_itc_rate(void)
+{
+    UINT64 processor, bus, itc, num, den;
+
+    fw_pal_freq_ratios(&processor, &bus, &itc);
+    num = itc >> 32;
+    den = itc & 0xffffffffULL;
+    if (num != 0 && den != 0) {
+        /* SAL_FREQ_BASE platform clock is 100 MHz = 10 ticks per 100 ns. */
+        fw_itc_ticks_per_100ns = 10ULL * num / den;
+    }
+}
+
 void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 {
+    fw_init_itc_rate();
     fw_phase_platform_init(gp, stack_top, boot_b0);
     fw_phase_efi_core_init();
     fw_phase_storage_bringup();
