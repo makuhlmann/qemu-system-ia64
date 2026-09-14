@@ -15,9 +15,6 @@
      * with the C preprocessor); the per-CPU stride below (shl 17 = 128 KiB)
      * equals IA64_FW_CPU_STACK_SIZE, enforced by a static assert there.
      */
-    .equ FW_HANDOFF_ADDR, IA64_FW_HANDOFF_ADDR
-    .equ FW_HANDOFF_MAGIC, IA64_FW_HANDOFF_MAGIC
-    .equ FW_HANDOFF_RAMSIZE_OFFSET, IA64_FW_HANDOFF_RAMSIZE_OFFSET
     .equ FW_PCI_MMIO_BASE, IA64_PCI_MMIO_BASE
     .equ FW_LOW_RAM_MIN, IA64_FW_LOW_RAM_MIN
     .equ FW_LOW_RAM_ALIGN_MASK, (IA64_FW_LOW_RAM_ALIGN - 1)

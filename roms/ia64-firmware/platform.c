@@ -197,45 +197,50 @@ void fw_platform_set_probed(UINT64 RamSize, UINT64 Chipset)
 static FW_RAM_RANGE           mGuestHighRam[FW_HIGH_RAM_RANGE_MAX];
 static UINTN                  mGuestHighRamCount;
 
-typedef struct {
-    UINT64 Magic;
-    UINT64 Version;
-    UINT64 RamSize;
-} FW_HANDOFF_HEADER;
-
-typedef struct {
-    FW_HANDOFF_HEADER Header;
-    UINT64 TimeValid;
-    UINT64 Year;
-    UINT64 Month;
-    UINT64 Day;
-    UINT64 Hour;
-    UINT64 Minute;
-    UINT64 Second;
-    UINT64 ConsolePolicy;
-    UINT64 IdeDmaEnabled;
-    UINT64 DebugPortFlags;
-    UINT64 DebugPortBase;
-} FW_HANDOFF_LEGACY;
-
-FW_STATIC_ASSERT(sizeof(IA64VpcHandoff) == 128, fw_handoff_size);
-FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, ProcessorCount) == 64,
-                 fw_handoff_processor_count_offset);
-FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, NvramPersistent) == 72,
-                 fw_handoff_nvram_persistent_offset);
-FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, SocketCount) == 80,
-                 fw_handoff_socket_count_offset);
-FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, CoresPerSocket) == 88,
-                 fw_handoff_cores_per_socket_offset);
-FW_STATIC_ASSERT(__builtin_offsetof(IA64VpcHandoff, ThreadsPerCore) == 96,
-                 fw_handoff_threads_per_core_offset);
-
-static BOOLEAN fw_handoff_valid(const FW_HANDOFF_HEADER *Handoff)
+/* The firmware defaults record the machine seeds into the NVRAM store. */
+static const IA64NvramDefaults *fw_nvram_defaults(void)
 {
-    return Handoff->Magic == IA64_FW_HANDOFF_MAGIC &&
-           Handoff->Version >= 1 &&
-           Handoff->Version <= IA64_FW_HANDOFF_VERSION;
+    const IA64NvramDefaults *defaults =
+        (const IA64NvramDefaults *)(UINTN)(FW_NVRAM_BASE +
+                                           IA64_NVRAM_DEFAULTS_OFFSET);
+
+    if (defaults->Magic != IA64_NVRAM_DEFAULTS_MAGIC ||
+        defaults->Version == 0 ||
+        defaults->Version > IA64_NVRAM_DEFAULTS_VERSION) {
+        return 0;
+    }
+    return defaults;
 }
+
+BOOLEAN fw_handoff_vga_console_primary(void)
+{
+    const IA64NvramDefaults *defaults = fw_nvram_defaults();
+
+    return defaults != 0 && defaults->ConsolePolicy == IA64_FW_CONSOLE_VGA;
+}
+
+UINT64 fw_handoff_map_quirk_disable(void)
+{
+    const IA64NvramDefaults *defaults = fw_nvram_defaults();
+
+    return defaults != 0 ? (defaults->MapQuirkDisable & IA64_FW_QUIRK_ALL) : 0;
+}
+
+BOOLEAN fw_handoff_ide_dma_enabled(void)
+{
+    const IA64NvramDefaults *defaults = fw_nvram_defaults();
+
+    return defaults == 0 || defaults->IdeDmaEnabled != 0;
+}
+
+UINT16 fw_handoff_boot_timeout(void)
+{
+    const IA64NvramDefaults *defaults = fw_nvram_defaults();
+
+    return defaults != 0 ? (UINT16)defaults->BootTimeout
+                         : IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER;
+}
+
 
 UINT64 fw_guest_low_ram_end(void)
 {
@@ -368,71 +373,14 @@ UINT64 fw_boot_stack_top(void)
     return low_ram_end & ~(IA64_EFI_MEMORY_ALIGN - 1U);
 }
 
-BOOLEAN fw_handoff_vga_console_primary(void)
-{
-    FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
-
-    if (!fw_handoff_valid(header) || header->Version < 3) {
-        return 0;
-    }
-    if (header->Version >= 6) {
-        IA64VpcHandoff *handoff =
-            (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
-
-        return handoff->ConsolePolicy == IA64_FW_CONSOLE_VGA;
-    } else {
-        FW_HANDOFF_LEGACY *handoff =
-            (FW_HANDOFF_LEGACY *)(UINTN)IA64_FW_HANDOFF_ADDR;
-
-        return handoff->ConsolePolicy == IA64_FW_CONSOLE_VGA;
-    }
-}
 
 
 
 
 
-UINT64 fw_handoff_map_quirk_disable(void)
-{
-    const FW_HANDOFF_HEADER *header =
-        (const FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    const IA64VpcHandoff *handoff =
-        (const IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
-
-    if (!fw_handoff_valid(header) || header->Version < 11) {
-        return 0;
-    }
-    return handoff->MapQuirkDisable & IA64_FW_QUIRK_ALL;
-}
 
 /* IDE bus-master DMA policy; moves to the NVRAM defaults block next. */
-BOOLEAN fw_handoff_ide_dma_enabled(void)
-{
-    FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    IA64VpcHandoff *handoff;
 
-    if (!fw_handoff_valid(header) || header->Version < 6) {
-        return 1;
-    }
-    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    return handoff->IdeDmaEnabled != 0;
-}
-
-UINT16 fw_handoff_boot_timeout(void)
-{
-    const FW_HANDOFF_HEADER *header =
-        (const FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    const IA64VpcHandoff *handoff =
-        (const IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
-
-    if (!fw_handoff_valid(header) ||
-        header->Version < IA64_FW_HANDOFF_BOOT_TIMEOUT_VERSION) {
-        return IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER;
-    }
-    return (UINT16)handoff->BootTimeout;
-}
 
 /*
  * Release the application processors, which the flash stage parks until

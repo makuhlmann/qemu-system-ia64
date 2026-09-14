@@ -21,46 +21,31 @@
 #endif
 
 /*
- * The QEMU->firmware handoff block lives in the machine-RAM-backed firmware
- * address-space window [0xFF000000, 4 GiB), not in guest low RAM: its old
- * home at 0xFF000 sat inside the sub-1 MB compatibility area, which real
- * firmware hands to the OS (shadowed IA-32 BIOS DRAM), and which the Phase 2
- * map rework publishes accordingly.  The handoff page and the (guest-
- * invisible) watchdog assist page sit at 0xFF0FF000/0xFF0FE000, clear of
- * the 0xFFC00000+ flash range a future flash-resident firmware would claim;
- * the NVRAM window sits inside that range at the real SDV flash's
- * NVRAM-sector address.
+ * The firmware scratch page at 0xFF0FF000: inside the machine-RAM-backed
+ * firmware address-space window, clear of the flash range.  It holds the
+ * shadow mailbox below; nothing else.  Retired with the invented window.
  */
-#define IA64_FW_HANDOFF_ADDR          IA64_U64(0x00000000ff0ff000)
 /*
  * Where the boot processor's flash stage publishes the RAM-top shadow base
  * once the image is copied and fixed up: the application processors leave
  * reset together with it (PALE_RESET exit state, every processor at
  * SALE_ENTRY) and spin here until the shadow exists, then enter it.  Zero
  * (cleared by the machine on every reset) means "not yet".  Lives in the
- * handoff page; retired with the handoff block.
+ * firmware scratch page; retired with the invented firmware window.
  */
 #define IA64_FW_SHADOW_MAILBOX        IA64_U64(0x00000000ff0ff800)
 /* The firmware's link base; it executes from the RAM-top shadow. */
 #define IA64_FW_LINK_BASE             IA64_U64(0x0000000000100000)
-#define IA64_FW_HANDOFF_MAGIC         IA64_U64(0x4d41523436414951) /* "QIA64RAM" */
-#define IA64_FW_HANDOFF_VERSION       14ULL
-/* Handoff version that first carries IA64VpcHandoff.BootTimeout. */
-#define IA64_FW_HANDOFF_BOOT_TIMEOUT_VERSION 13ULL
-/* Handoff version that first carries IA64VpcHandoff.ChipsetProfile. */
-#define IA64_FW_HANDOFF_CHIPSET_VERSION 14ULL
 /*
- * Core-chipset personality (IA64VpcHandoff.ChipsetProfile, version 14+).  The
- * machine's -machine chipset= option overrides the CPU-family default the
- * firmware would otherwise derive (Merced => 460GX, else E8870).
+ * Core-chipset personality, as the firmware's flash stage probes it
+ * (roms/ia64-firmware/flash_probe.c): the 460GX SAC on bus 0 device 10h,
+ * else the zx1 mio's IOC function ID; DERIVE falls back to the CPU family.
  */
-#define IA64_FW_CHIPSET_DERIVE        0ULL  /* derive from CPU family (legacy) */
+#define IA64_FW_CHIPSET_DERIVE        0ULL
 #define IA64_FW_CHIPSET_460GX         1ULL
 #define IA64_FW_CHIPSET_ZX1           2ULL
 /* Default boot-manager Timeout: wait for the user forever (EFI sample). */
 #define IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER 0xffffU
-/* Offset of IA64VpcHandoff.RamSize, re-derived by entry.S. */
-#define IA64_FW_HANDOFF_RAMSIZE_OFFSET 16
 
 #define IA64_FW_CONSOLE_SERIAL        0ULL
 #define IA64_FW_CONSOLE_VGA           1ULL
@@ -69,8 +54,7 @@
 #define IA64_VPC_MAX_CPUS             8U
 
 /*
- * Memory-map quirk bits (IA64VpcHandoff.MapQuirkDisable, handoff version
- * 11+).  Each bit DISABLES one guest-specific map workaround the firmware
+ * Memory-map quirk bits (IA64NvramDefaults.MapQuirkDisable).  Each bit DISABLES one guest-specific map workaround the firmware
  * applies by default; all-zero keeps the validated default map.  The
  * motivating guest bug for each lives at the emission site in
  * roms/ia64-firmware/efi_memmap.c and in plans/firmware-rework-plan.md.
@@ -413,35 +397,31 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_ACPI_PM_RESET_VALUE      0x01U
 #define IA64_ACPI_SCI_IRQ             9
 
+/*
+ * The firmware defaults record: what a board's setup menu holds -- the
+ * console policy, the IDE DMA policy, the boot-manager timeout and the
+ * memory-map quirks.  It lives inside the NVRAM store, behind the variable
+ * store and the RTC state and ahead of the commit word, and the machine
+ * writes it from its options before the firmware runs, as a factory
+ * programs a board's configuration.  A store without it means the
+ * firmware's own defaults.
+ */
+#define IA64_NVRAM_DEFAULTS_OFFSET    0xf800U
+#define IA64_NVRAM_DEFAULTS_MAGIC     IA64_U64(0x544c464434364149) /* "IA64DFLT" */
+#define IA64_NVRAM_DEFAULTS_VERSION   1ULL
+
 #ifndef __ASSEMBLER__
-typedef struct __attribute__((packed)) IA64VpcHandoff {
+typedef struct __attribute__((packed)) IA64NvramDefaults {
     unsigned long long Magic;
     unsigned long long Version;
-    unsigned long long RamSize;
-    unsigned long long ConsolePolicy;
+    unsigned long long ConsolePolicy;     /* IA64_FW_CONSOLE_* */
     unsigned long long IdeDmaEnabled;
-    unsigned long long DebugPortFlags;
-    unsigned long long DebugPortBase;
-    unsigned long long I8042Enabled;
-    unsigned long long ProcessorCount;
-    unsigned long long NvramPersistent;
-    unsigned long long SocketCount;
-    unsigned long long CoresPerSocket;
-    unsigned long long ThreadsPerCore;
-    unsigned long long MapQuirkDisable;   /* version 11+ */
-    unsigned long long BootTimeout;       /* version 13+; default boot-manager
-                                           * Timeout (seconds) when no NVRAM
-                                           * Timeout variable exists.  0xFFFF
-                                           * (the default) waits for the user
-                                           * like the EFI sample; 0 boots the
-                                           * BootOrder immediately. */
-    unsigned long long ChipsetProfile;    /* version 14+; IA64_FW_CHIPSET_*.
-                                           * 0 = derive from CPU family. */
-} IA64VpcHandoff;
+    unsigned long long BootTimeout;       /* seconds; 0xFFFF waits forever */
+    unsigned long long MapQuirkDisable;   /* IA64_FW_QUIRK_* bits */
+} IA64NvramDefaults;
 
-_Static_assert(__builtin_offsetof(IA64VpcHandoff, RamSize) ==
-               IA64_FW_HANDOFF_RAMSIZE_OFFSET,
-               "entry.S reads RamSize at this offset");
+_Static_assert(sizeof(IA64NvramDefaults) == 48,
+               "the firmware defaults record is 48 bytes");
 #endif /* __ASSEMBLER__ */
 
 #endif /* HW_IA64_VPC_ABI_H */

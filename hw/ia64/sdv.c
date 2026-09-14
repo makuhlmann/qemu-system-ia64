@@ -428,7 +428,6 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
     (void)data;
     mc->desc = "Intel SDV / HP i2000 (460GX chipset, Merced)";
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("merced");
-    imc->chipset_profile = IA64_FW_CHIPSET_460GX;
     /*
      * On the i2000 the interrupt controller is the 460GX Programmable
      * Interrupt Device: 64 inputs reporting IOSAPIC version 2.1.  Its

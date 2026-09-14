@@ -682,94 +682,46 @@ static void test_acpi_reset_register(void)
     qtest_quit(qts);
 }
 
-static uint64_t read_handoff_i8042(QTestState *qts)
+/*
+ * The firmware defaults record the machine seeds into the NVRAM store from
+ * its options (console policy, IDE DMA, boot timeout, memory-map quirks);
+ * read back through the NVRAM window.
+ */
+static void assert_nvram_defaults(QTestState *qts, uint64_t console,
+                                  uint64_t ide_dma, uint64_t timeout,
+                                  uint64_t quirks)
 {
-    IA64VpcHandoff handoff;
+    IA64NvramDefaults defaults;
 
-    qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
-    g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
-    return le64_to_cpu(handoff.I8042Enabled);
+    g_assert_cmpuint(sizeof(defaults), ==, 48);
+    qtest_memread(qts, IA64_NVRAM_BASE + IA64_NVRAM_DEFAULTS_OFFSET,
+                  &defaults, sizeof(defaults));
+    g_assert_cmphex(le64_to_cpu(defaults.Magic), ==,
+                    IA64_NVRAM_DEFAULTS_MAGIC);
+    g_assert_cmphex(le64_to_cpu(defaults.Version), ==,
+                    IA64_NVRAM_DEFAULTS_VERSION);
+    g_assert_cmphex(le64_to_cpu(defaults.ConsolePolicy), ==, console);
+    g_assert_cmphex(le64_to_cpu(defaults.IdeDmaEnabled), ==, ide_dma);
+    g_assert_cmphex(le64_to_cpu(defaults.BootTimeout), ==, timeout);
+    g_assert_cmphex(le64_to_cpu(defaults.MapQuirkDisable), ==, quirks);
 }
 
-static void assert_firmware_handoff(QTestState *qts, uint64_t chipset,
-                                    uint64_t i8042, uint64_t cpus,
-                                    uint64_t nvram, uint64_t sockets,
-                                    uint64_t cores, uint64_t threads)
-{
-    IA64VpcHandoff handoff;
+#define IA64_TEST_QUIRKS_DEFAULT \
+    (IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G | \
+     IA64_FW_QUIRK_LOW_BOUNDARIES | IA64_FW_QUIRK_LOW_ANCHOR | \
+     IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF)
 
-    g_assert_cmpuint(sizeof(handoff), ==, 128);
-    qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
-    g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
-    g_assert_cmphex(le64_to_cpu(handoff.Version), ==,
-                    IA64_FW_HANDOFF_VERSION);
-    g_assert_cmphex(le64_to_cpu(handoff.RamSize), ==, IA64_TEST_RAM_SIZE);
-    g_assert_cmphex(le64_to_cpu(handoff.ConsolePolicy), ==,
-                    IA64_FW_CONSOLE_VGA);
-    g_assert_cmphex(le64_to_cpu(handoff.IdeDmaEnabled), ==, 1);
-    g_assert_cmphex(le64_to_cpu(handoff.DebugPortFlags), ==, 0);
-    g_assert_cmphex(le64_to_cpu(handoff.DebugPortBase), ==, 0);
-    g_assert_cmphex(le64_to_cpu(handoff.I8042Enabled), ==, i8042);
-    g_assert_cmphex(le64_to_cpu(handoff.ProcessorCount), ==, cpus);
-    g_assert_cmphex(le64_to_cpu(handoff.NvramPersistent), ==, nvram);
-    g_assert_cmphex(le64_to_cpu(handoff.SocketCount), ==, sockets);
-    g_assert_cmphex(le64_to_cpu(handoff.CoresPerSocket), ==, cores);
-    g_assert_cmphex(le64_to_cpu(handoff.ThreadsPerCore), ==, threads);
-    g_assert_cmphex(le64_to_cpu(handoff.MapQuirkDisable), ==,
-                    IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G |
-                    IA64_FW_QUIRK_LOW_BOUNDARIES | IA64_FW_QUIRK_LOW_ANCHOR |
-                    IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF);
-    g_assert_cmphex(le64_to_cpu(handoff.BootTimeout), ==,
-                    IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER);
-    /* The machine type fixes the chipset personality. */
-    g_assert_cmphex(le64_to_cpu(handoff.ChipsetProfile), ==, chipset);
-}
-
-static void test_firmware_handoff_defaults(void)
+static void test_nvram_defaults(void)
 {
-    static const uint8_t expected_v14[sizeof(IA64VpcHandoff)] = {
-        0x51, 0x49, 0x41, 0x36, 0x34, 0x52, 0x41, 0x4d,
-        0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x5e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* ChipsetProfile=460GX */
-    };
-    uint8_t actual[sizeof(IA64VpcHandoff)];
     QTestState *qts = ia64_vpc_start(NULL);
 
-    assert_firmware_handoff(qts, IA64_FW_CHIPSET_460GX, 1, 1, 0, 1, 1, 1);
-    qtest_memread(qts, IA64_FW_HANDOFF_ADDR, actual, sizeof(actual));
-    g_assert_cmpmem(actual, sizeof(actual),
-                    expected_v14, sizeof(expected_v14));
+    assert_nvram_defaults(qts, IA64_FW_CONSOLE_VGA, 1,
+                          IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER,
+                          IA64_TEST_QUIRKS_DEFAULT);
     qtest_quit(qts);
 }
 
 /* The zx1 machine writes the zx1 firmware personality. */
-static void test_firmware_handoff_zx1(void)
-{
-    IA64VpcHandoff handoff;
-    QTestState *qts = qtest_initf("-machine zx1 -m 256M -S");
-
-    g_assert_cmpuint(sizeof(handoff), ==, 128);
-    qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
-    g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
-    g_assert_cmphex(le64_to_cpu(handoff.Version), ==,
-                    IA64_FW_HANDOFF_VERSION);
-    g_assert_cmphex(le64_to_cpu(handoff.ChipsetProfile), ==,
-                    IA64_FW_CHIPSET_ZX1);
-    qtest_quit(qts);
-}
 
 /*
  * The zx1 LBA advertises an AGP capability exactly where Linux hp-agp
@@ -1612,9 +1564,6 @@ static void assert_cpu_model_type(const char *cpu_arg, const char *expect_type)
     QListEntry *entry;
     const char *qom_path = NULL;
 
-    /* The model instantiates and the firmware still hands off on ia64-vpc. */
-    assert_firmware_handoff(qts, IA64_FW_CHIPSET_460GX, 1, 1, 0, 1, 1, 1);
-
     cpus_resp = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
     g_assert(qdict_haskey(cpus_resp, "return"));
     cpus = qdict_get_qlist(cpus_resp, "return");
@@ -1648,27 +1597,18 @@ static void test_cpu_itanium_alias(void)
     assert_cpu_model_type("itanium", "itanium-ia64-cpu");
 }
 
-static void test_firmware_handoff_i8042_off(void)
+static void test_nvram_defaults_options(void)
 {
-    QTestState *qts = qtest_init("-machine 460gx,i8042=off "
-                                 "-m 256M -S");
+    /*
+     * A finite firmware-boot-timeout, a serial console and IDE DMA off all
+     * reach the firmware through the defaults record.
+     */
+    QTestState *qts = qtest_init("-machine 460gx,firmware-boot-timeout=5,"
+                                 "firmware-console=serial,"
+                                 "firmware-ide-dma=off -m 256M -S");
 
-    assert_firmware_handoff(qts, IA64_FW_CHIPSET_460GX, 0, 1, 0, 1, 1, 1);
-    qtest_quit(qts);
-}
-
-static void test_firmware_handoff_boot_timeout(void)
-{
-    IA64VpcHandoff handoff;
-    /* A finite firmware-boot-timeout overrides the wait-forever default and
-     * reaches the OS handoff verbatim, driving the boot manager's countdown. */
-    QTestState *qts = qtest_init("-machine 460gx,firmware-boot-timeout=5 "
-                                 "-m 256M -S");
-
-    qtest_memread(qts, IA64_FW_HANDOFF_ADDR, &handoff, sizeof(handoff));
-    g_assert_cmphex(le64_to_cpu(handoff.Magic), ==, IA64_FW_HANDOFF_MAGIC);
-    g_assert_cmphex(le64_to_cpu(handoff.Version), ==, IA64_FW_HANDOFF_VERSION);
-    g_assert_cmphex(le64_to_cpu(handoff.BootTimeout), ==, 5);
+    assert_nvram_defaults(qts, IA64_FW_CONSOLE_SERIAL, 0, 5,
+                          IA64_TEST_QUIRKS_DEFAULT);
     qtest_quit(qts);
 }
 
@@ -1680,8 +1620,6 @@ static void test_smp_topology(gconstpointer opaque)
     g_autoptr(QDict) response = NULL;
     QList *cpus;
 
-    assert_firmware_handoff(qts, IA64_FW_CHIPSET_ZX1, 0, count, 0, count, 1,
-                            1);
     response = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
     g_assert(qdict_haskey(response, "return"));
     cpus = qdict_get_qlist(response, "return");
@@ -1694,7 +1632,6 @@ static void test_smp_explicit_topology(void)
     QTestState *qts =
         ia64_vpc_start_zx1("-smp 4,sockets=1,cores=2,threads=2");
 
-    assert_firmware_handoff(qts, IA64_FW_CHIPSET_ZX1, 0, 4, 0, 1, 2, 2);
     qtest_quit(qts);
 }
 
@@ -1721,9 +1658,6 @@ static void test_smp_multicore_topology(gconstpointer opaque)
     g_autoptr(QDict) response = NULL;
     QList *cpus;
 
-    assert_firmware_handoff(qts, IA64_FW_CHIPSET_ZX1, 0, count, 0,
-                            topology->sockets,
-                            topology->cores, 1);
     response = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
     g_assert(qdict_haskey(response, "return"));
     cpus = qdict_get_qlist(response, "return");
@@ -2519,7 +2453,6 @@ static void test_460gx_pic_edge_withdrawal(void)
     qtest_quit(qts);
 }
 
-
 /*
  * The bridge's RTC is a 256-byte part in two 128-byte banks (SSDM 15.5.1).
  * Ports 0x70/0x71 reach the standard bank.  Ports 0x72/0x73 reach the
@@ -3003,7 +2936,6 @@ static void test_460gx_config_ports(void)
     qtest_quit(qts);
 }
 
-
 /*
  * The GXB AGP host bridge (dev 14h fn 1) holds the graphics aperture base in
  * the 64-bit BAPBASE register (98h).  The vendor firmware programs it at 4 GiB
@@ -3252,7 +3184,6 @@ static void test_460gx_sac_indexed_file(void)
 
     qtest_quit(qts);
 }
-
 
 /*
  * The 460GX variable gap follows the expander ports' PCIS registers (SSDM
@@ -3708,7 +3639,6 @@ static void test_realfw_flash_window(void)
     g_assert_cmpint(g_unlink(path), ==, 0);
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
-
 
 static void assert_pci_device(QPCIBus *bus, const ExpectedPCIDevice *expected)
 {
@@ -4504,7 +4434,7 @@ static unsigned count_unattached_children(QTestState *qts,
  * PS/2 follows the platform.  The 460GX workstations carry a Super-I/O
  * keyboard controller and used it, so 460gx keeps PS/2 and adds no USB HID.
  * The zx1 generation dropped PS/2, so zx1 has no i8042 and gets the USB
- * keyboard and tablet instead; the firmware is told which it has.
+ * keyboard and tablet instead; the firmware probes which it has.
  */
 static void test_default_input_per_machine(void)
 {
@@ -4513,21 +4443,18 @@ static void test_default_input_per_machine(void)
     g_assert_cmpuint(count_unattached_children(qts, "i8042"), ==, 1);
     g_assert_cmpuint(count_unattached_children(qts, "usb-kbd"), ==, 0);
     g_assert_cmpuint(count_unattached_children(qts, "usb-tablet"), ==, 0);
-    g_assert_cmpuint(read_handoff_i8042(qts), ==, 1);
     qtest_quit(qts);
 
     qts = qtest_init("-machine zx1 -m 256M -S");
     g_assert_cmpuint(count_unattached_children(qts, "i8042"), ==, 0);
     g_assert_cmpuint(count_unattached_children(qts, "usb-kbd"), ==, 1);
     g_assert_cmpuint(count_unattached_children(qts, "usb-tablet"), ==, 1);
-    g_assert_cmpuint(read_handoff_i8042(qts), ==, 0);
     qtest_quit(qts);
 
     /* Either default can still be overridden. */
     qts = qtest_init("-machine zx1,i8042=on -m 256M -S");
     g_assert_cmpuint(count_unattached_children(qts, "i8042"), ==, 1);
     g_assert_cmpuint(count_unattached_children(qts, "usb-kbd"), ==, 0);
-    g_assert_cmpuint(read_handoff_i8042(qts), ==, 1);
     qtest_quit(qts);
 }
 
@@ -6162,10 +6089,7 @@ int main(int argc, char **argv)
                    test_int10_legacy_std);
     qtest_add_func("/ia64-vpc/ram/high-remap-above-4g", test_ram_high_remap);
     qtest_add_func("/ia64-vpc/ram/hole-zx1", test_ram_hole_zx1);
-    qtest_add_func("/ia64-vpc/firmware-handoff/defaults",
-                   test_firmware_handoff_defaults);
-    qtest_add_func("/ia64-vpc/firmware-handoff/zx1",
-                   test_firmware_handoff_zx1);
+    qtest_add_func("/ia64-vpc/nvram/defaults", test_nvram_defaults);
     qtest_add_func("/ia64-vpc/lba/agp-capability", test_lba_agp_capability);
     qtest_add_func("/ia64-vpc/sba/ioc-identity", test_sba_ioc_identity);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",
@@ -6175,10 +6099,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ahci/on", test_ahci_on);
     qtest_add_func("/ia64-vpc/cpu/merced", test_cpu_merced);
     qtest_add_func("/ia64-vpc/cpu/itanium-alias", test_cpu_itanium_alias);
-    qtest_add_func("/ia64-vpc/firmware-handoff/i8042-off",
-                   test_firmware_handoff_i8042_off);
-    qtest_add_func("/ia64-vpc/firmware-handoff/boot-timeout",
-                   test_firmware_handoff_boot_timeout);
+    qtest_add_func("/ia64-vpc/nvram/defaults-options",
+                   test_nvram_defaults_options);
     for (cpus = 1; cpus <= 8; cpus++) {
         g_autofree char *path =
             g_strdup_printf("/ia64-vpc/smp/topology/%u", cpus);

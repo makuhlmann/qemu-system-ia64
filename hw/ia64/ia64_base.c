@@ -2742,63 +2742,39 @@ void ia64_vpc_set_low_ram_limit(IA64VpcMachineState *s, uint64_t limit)
     memory_region_transaction_commit();
 }
 
-static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
+/*
+ * The shadow mailbox: no shadow yet, so the flash stage's application
+ * processors wait for the boot processor.
+ */
+static void ia64_vpc_clear_shadow_mailbox(void)
 {
-    MachineState *machine = MACHINE(s);
-    IA64VpcHandoff handoff = { 0 };
-    bool debug_port_present = debug_port_get_chardev() != NULL;
+    uint64_t mailbox[2] = { 0, 0 };
 
-    _Static_assert(sizeof(IA64VpcHandoff) == 128,
-                   "IA-64 firmware handoff ABI size changed");
-    _Static_assert(offsetof(IA64VpcHandoff, ProcessorCount) == 64,
-                   "IA-64 firmware handoff CPU count offset changed");
-    _Static_assert(offsetof(IA64VpcHandoff, NvramPersistent) == 72,
-                   "IA-64 firmware handoff NVRAM offset changed");
-    _Static_assert(offsetof(IA64VpcHandoff, SocketCount) == 80,
-                   "IA-64 firmware handoff socket count offset changed");
-    _Static_assert(offsetof(IA64VpcHandoff, CoresPerSocket) == 88,
-                   "IA-64 firmware handoff core count offset changed");
-    _Static_assert(offsetof(IA64VpcHandoff, ThreadsPerCore) == 96,
-                   "IA-64 firmware handoff thread count offset changed");
+    cpu_physical_memory_write(IA64_FW_SHADOW_MAILBOX, mailbox,
+                              sizeof(mailbox));
+}
 
-    handoff.Magic = cpu_to_le64(IA64_FW_HANDOFF_MAGIC);
-    handoff.Version = cpu_to_le64(IA64_FW_HANDOFF_VERSION);
-    handoff.RamSize = cpu_to_le64(machine->ram_size);
-    handoff.ConsolePolicy = cpu_to_le64(s->firmware_console);
-    handoff.IdeDmaEnabled = cpu_to_le64(s->firmware_ide_dma);
-    handoff.DebugPortFlags = cpu_to_le64(
-        debug_port_present ? IA64_FW_DEBUG_PORT_PRESENT : 0);
-    handoff.DebugPortBase = cpu_to_le64(
-        debug_port_present ? IA64_DEBUG_UART_BASE : 0);
-    handoff.I8042Enabled = cpu_to_le64(s->i8042_enabled);
-    handoff.ProcessorCount = cpu_to_le64(machine->smp.cpus);
-    handoff.NvramPersistent = cpu_to_le64(
-        s->nvram_resolved_path != NULL);
-    handoff.SocketCount = cpu_to_le64(machine->smp.sockets);
-    handoff.CoresPerSocket = cpu_to_le64(machine->smp.cores);
-    handoff.ThreadsPerCore = cpu_to_le64(machine->smp.threads);
-    handoff.MapQuirkDisable = cpu_to_le64(s->fw_map_quirk_disable);
-    handoff.BootTimeout = cpu_to_le64(s->firmware_boot_timeout);
-    /*
-     * The machine type fixes the firmware personality, independent of the CPU
-     * model: the 460gx machine selects the Intel 460GX and the zx1 machine the
-     * HP zx1.  This retired the old CPU-keyed default (which gave the default
-     * Itanium 2 machine a half-modelled E8870 personality); users pair machine
-     * and CPU at their own risk (460GX suits Merced, zx1 suits Itanium 2).
-     * DERIVE remains only as the firmware's fallback for a pre-version-14
-     * handoff.
-     */
-    handoff.ChipsetProfile =
-        cpu_to_le64(IA64_VPC_MACHINE_GET_CLASS(s)->chipset_profile);
-    cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
-                              sizeof(handoff));
-    /* No shadow yet: the flash stage's application processors wait. */
-    {
-        uint64_t mailbox[2] = { 0, 0 };
+/*
+ * The firmware defaults record in the NVRAM store, written from the
+ * machine's options as a factory programs a board's configuration.  It sits
+ * behind the variable store and the RTC state, ahead of the commit word.
+ */
+static void ia64_vpc_seed_nvram_defaults(IA64VpcMachineState *s)
+{
+    IA64NvramDefaults defaults = {
+        .Magic = cpu_to_le64(IA64_NVRAM_DEFAULTS_MAGIC),
+        .Version = cpu_to_le64(IA64_NVRAM_DEFAULTS_VERSION),
+        .ConsolePolicy = cpu_to_le64(s->firmware_console),
+        .IdeDmaEnabled = cpu_to_le64(s->firmware_ide_dma),
+        .BootTimeout = cpu_to_le64(s->firmware_boot_timeout),
+        .MapQuirkDisable = cpu_to_le64(s->fw_map_quirk_disable),
+    };
 
-        cpu_physical_memory_write(IA64_FW_SHADOW_MAILBOX, mailbox,
-                                  sizeof(mailbox));
-    }
+    _Static_assert(IA64_NVRAM_DEFAULTS_OFFSET + sizeof(defaults) <=
+                   IA64_NVRAM_COMMIT_OFFSET,
+                   "the defaults record overlaps the NVRAM commit word");
+    memcpy(s->nvram_data + IA64_NVRAM_DEFAULTS_OFFSET, &defaults,
+           sizeof(defaults));
 }
 
 /*
@@ -3646,13 +3622,7 @@ static void ia64_vpc_reset(void *opaque)
     IA64VpcMachineState *s = opaque;
     CPUState *cs;
 
-    /*
-     * The handoff block lives in ordinary guest RAM; rom_reset() restores
-     * the firmware image but nothing restores the block, and entry.S reads
-     * it on every entry, so re-emit it or a guest that scribbled over it
-     * would warm-reset with a corrupt handoff.
-     */
-    ia64_vpc_write_firmware_handoff(s);
+    ia64_vpc_clear_shadow_mailbox();
 
     CPU_FOREACH(cs) {
         /* The CPUs are not children of the platform system bus. */
@@ -4114,7 +4084,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         return false;
     }
     ia64_vpc_init_nvram(s);
-    ia64_vpc_write_firmware_handoff(s);
+    if (!s->fw_flash_has_nvram) {
+        ia64_vpc_seed_nvram_defaults(s);
+    }
+    ia64_vpc_clear_shadow_mailbox();
 
     for (i = 0; i < machine->smp.cpus; i++) {
         uint32_t threads = MAX(machine->smp.threads, 1U);

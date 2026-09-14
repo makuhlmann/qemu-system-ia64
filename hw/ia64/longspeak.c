@@ -225,7 +225,6 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     (void)data;
     mc->desc = "HP rx2600 / zx2000 / zx6000 (zx1 chipset, Itanium 2)";
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("madison");
-    imc->chipset_profile = IA64_FW_CHIPSET_ZX1;
     /*
      * The zx1 generation dropped PS/2 entirely: an rx2600 or zx6000 has USB
      * keyboard and mouse only, so this machine defaults to the USB HID

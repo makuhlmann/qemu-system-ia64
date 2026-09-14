@@ -89,8 +89,6 @@ typedef enum IA64VpcSeat {
 
 struct IA64VpcMachineClass {
     MachineClass parent_class;
-    /* The chipset personality this machine type fixes: IA64_FW_CHIPSET_*. */
-    uint64_t chipset_profile;
     /* IOSAPIC inputs and version register; 0 keeps the device's defaults. */
     uint32_t iosapic_pins;
     uint32_t iosapic_version;
