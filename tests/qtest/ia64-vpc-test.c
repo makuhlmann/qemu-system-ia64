@@ -188,6 +188,16 @@ static QTestState *ia64_vpc_start(const char *extra_args)
 }
 
 /*
+ * The SDV is a two-socket board and its machine caps -smp accordingly;
+ * tests of the board-independent processor topology run on zx1.
+ */
+static QTestState *ia64_vpc_start_zx1(const char *extra_args)
+{
+    return qtest_initf("-machine zx1 -m 256M -S %s",
+                       extra_args ?: "");
+}
+
+/*
  * The LSI is opt-in now that the QLogic holds the platform's SCSI seat.
  * Turning the QLogic off puts the LSI back on that seat, so these tests see
  * the bus name and the register addresses the adapter has always had there.
@@ -681,10 +691,10 @@ static uint64_t read_handoff_i8042(QTestState *qts)
     return le64_to_cpu(handoff.I8042Enabled);
 }
 
-static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
-                                    uint64_t cpus, uint64_t nvram,
-                                    uint64_t sockets, uint64_t cores,
-                                    uint64_t threads)
+static void assert_firmware_handoff(QTestState *qts, uint64_t chipset,
+                                    uint64_t i8042, uint64_t cpus,
+                                    uint64_t nvram, uint64_t sockets,
+                                    uint64_t cores, uint64_t threads)
 {
     IA64VpcHandoff handoff;
 
@@ -711,9 +721,8 @@ static void assert_firmware_handoff(QTestState *qts, uint64_t i8042,
                     IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF);
     g_assert_cmphex(le64_to_cpu(handoff.BootTimeout), ==,
                     IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER);
-    /* This suite runs on the 460gx machine, which selects the 460GX personality. */
-    g_assert_cmphex(le64_to_cpu(handoff.ChipsetProfile), ==,
-                    IA64_FW_CHIPSET_460GX);
+    /* The machine type fixes the chipset personality. */
+    g_assert_cmphex(le64_to_cpu(handoff.ChipsetProfile), ==, chipset);
 }
 
 static void test_firmware_handoff_defaults(void)
@@ -739,7 +748,7 @@ static void test_firmware_handoff_defaults(void)
     uint8_t actual[sizeof(IA64VpcHandoff)];
     QTestState *qts = ia64_vpc_start(NULL);
 
-    assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1);
+    assert_firmware_handoff(qts, IA64_FW_CHIPSET_460GX, 1, 1, 0, 1, 1, 1);
     qtest_memread(qts, IA64_FW_HANDOFF_ADDR, actual, sizeof(actual));
     g_assert_cmpmem(actual, sizeof(actual),
                     expected_v14, sizeof(expected_v14));
@@ -1604,7 +1613,7 @@ static void assert_cpu_model_type(const char *cpu_arg, const char *expect_type)
     const char *qom_path = NULL;
 
     /* The model instantiates and the firmware still hands off on ia64-vpc. */
-    assert_firmware_handoff(qts, 1, 1, 0, 1, 1, 1);
+    assert_firmware_handoff(qts, IA64_FW_CHIPSET_460GX, 1, 1, 0, 1, 1, 1);
 
     cpus_resp = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
     g_assert(qdict_haskey(cpus_resp, "return"));
@@ -1644,7 +1653,7 @@ static void test_firmware_handoff_i8042_off(void)
     QTestState *qts = qtest_init("-machine 460gx,i8042=off "
                                  "-m 256M -S");
 
-    assert_firmware_handoff(qts, 0, 1, 0, 1, 1, 1);
+    assert_firmware_handoff(qts, IA64_FW_CHIPSET_460GX, 0, 1, 0, 1, 1, 1);
     qtest_quit(qts);
 }
 
@@ -1667,11 +1676,12 @@ static void test_smp_topology(gconstpointer opaque)
 {
     uint64_t count = GPOINTER_TO_UINT(opaque);
     g_autofree char *args = g_strdup_printf("-smp %" PRIu64, count);
-    QTestState *qts = ia64_vpc_start(args);
+    QTestState *qts = ia64_vpc_start_zx1(args);
     g_autoptr(QDict) response = NULL;
     QList *cpus;
 
-    assert_firmware_handoff(qts, 1, count, 0, count, 1, 1);
+    assert_firmware_handoff(qts, IA64_FW_CHIPSET_ZX1, 0, count, 0, count, 1,
+                            1);
     response = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
     g_assert(qdict_haskey(response, "return"));
     cpus = qdict_get_qlist(response, "return");
@@ -1682,9 +1692,9 @@ static void test_smp_topology(gconstpointer opaque)
 static void test_smp_explicit_topology(void)
 {
     QTestState *qts =
-        ia64_vpc_start("-smp 4,sockets=1,cores=2,threads=2");
+        ia64_vpc_start_zx1("-smp 4,sockets=1,cores=2,threads=2");
 
-    assert_firmware_handoff(qts, 1, 4, 0, 1, 2, 2);
+    assert_firmware_handoff(qts, IA64_FW_CHIPSET_ZX1, 0, 4, 0, 1, 2, 2);
     qtest_quit(qts);
 }
 
@@ -1707,11 +1717,12 @@ static void test_smp_multicore_topology(gconstpointer opaque)
     g_autofree char *args = g_strdup_printf(
         "-smp %u,sockets=%u,cores=%u,threads=1",
         count, topology->sockets, topology->cores);
-    QTestState *qts = ia64_vpc_start(args);
+    QTestState *qts = ia64_vpc_start_zx1(args);
     g_autoptr(QDict) response = NULL;
     QList *cpus;
 
-    assert_firmware_handoff(qts, 1, count, 0, topology->sockets,
+    assert_firmware_handoff(qts, IA64_FW_CHIPSET_ZX1, 0, count, 0,
+                            topology->sockets,
                             topology->cores, 1);
     response = qtest_qmp(qts, "{'execute':'query-cpus-fast'}");
     g_assert(qdict_haskey(response, "return"));
@@ -3342,7 +3353,7 @@ static void test_realfw_chipset_identity(void)
     g_assert_true(g_file_set_contents(path, (char *)image, image_size,
                                       &error));
 
-    qts = qtest_initf("-machine 460gx,realfw=%s -m 256M -S", quoted_path);
+    qts = qtest_initf("-machine 460gx -bios %s -m 256M -S", quoted_path);
 
     /* SAC at device 00h and 01h, SDC at 04h, Memory Card A at 05h. */
     g_assert_cmphex(realfw_cfg_readl(qts, 0x00, 0, PCI_VENDOR_ID), ==,
@@ -3431,7 +3442,7 @@ static void test_realfw_ifb_acpi_block(void)
     g_assert_true(g_file_set_contents(path, (char *)image, image_size,
                                       &error));
 
-    qts = qtest_initf("-machine 460gx,realfw=%s -m 256M -S", quoted_path);
+    qts = qtest_initf("-machine 460gx -bios %s -m 256M -S", quoted_path);
 
     /* The bridge's ACPI base and enable read as the init script leaves them. */
     g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
@@ -3462,10 +3473,16 @@ static void test_realfw_ifb_acpi_block(void)
     qtest_qmp_eventwait(qts, "SHUTDOWN");
     qtest_quit(qts);
 
-    /* Without the vendor firmware the part keeps its reset state. */
+    /*
+     * The block is board state, not a firmware mode: with no firmware at
+     * all it still comes up enabled at A00h (plans/one-hardware-model-plan.md
+     * F4 makes the project firmware use it).
+     */
     qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
     g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
-                                         0x44) & 1, ==, 0);
+                                         0x44) & 1, ==, 1);
+    g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
+                                         0x40) & 0xfffe, ==, 0x0a00);
     qtest_quit(qts);
     g_assert_cmpint(g_unlink(path), ==, 0);
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
@@ -3499,7 +3516,7 @@ static void test_realfw_flash_window(void)
     g_assert_true(g_file_set_contents(path, (char *)image, image_size,
                                       &error));
 
-    qts = qtest_initf("-machine 460gx,realfw=%s -m 256M -S", quoted_path);
+    qts = qtest_initf("-machine 460gx -bios %s -m 256M -S", quoted_path);
     /* Flash content is visible at its physical home. */
     g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
     g_assert_cmphex(qtest_readq(qts, fit_addr) & 0xffffffffffffULL, ==,

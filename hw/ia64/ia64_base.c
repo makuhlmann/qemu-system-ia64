@@ -63,7 +63,6 @@
 #include "hw/timer/i8254.h"
 #include "hw/usb/hcd-uhci.h"
 #include "hw/usb/usb.h"
-#include "hw/ia64/ia64_loader.h"
 #include "hw/ia64/ia64_pci.h"
 #include "hw/ia64/ia64_iosapic.h"
 #include "hw/ia64/ia64_agp.h"
@@ -492,11 +491,6 @@ static const uint8_t ia64_int10_rom_init[] = {
 };
 #endif
 
-static uint64_t ia64_vpc_fw_base(IA64VpcMachineState *s, uint64_t ram_size)
-{
-    return s->fw_relocate ? IA64_FW_IMAGE_BASE_FOR(ram_size)
-                          : IA64_FW_LINK_BASE;
-}
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 static const IA64VbeMode *ia64_vbe_find_mode(uint16_t number)
@@ -1668,24 +1662,7 @@ static void ia64_vpc_init_watchdog(IA64VpcMachineState *s)
     qemu_register_reset(ia64_vpc_watchdog_reset, s);
 }
 
-static char *ia64_vpc_get_realfw(Object *obj, Error **errp)
-{
-    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
-    (void)errp;
-
-    return g_strdup(s->realfw_path ?: "");
-}
-
-static void ia64_vpc_set_realfw(Object *obj, const char *value, Error **errp)
-{
-    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
-
-    (void)errp;
-
-    g_free(s->realfw_path);
-    s->realfw_path = value[0] != '\0' ? g_strdup(value) : NULL;
-}
 
 static char *ia64_vpc_get_realfw_vga_rom(Object *obj, Error **errp)
 {
@@ -1919,6 +1896,14 @@ void ia64_vpc_add_compat_defaults(MachineClass *mc)
         property->value = value->value;
         g_ptr_array_add(mc->compat_props, property);
     }
+}
+
+
+
+static uint64_t ia64_vpc_fw_base(IA64VpcMachineState *s, uint64_t ram_size)
+{
+    return s->fw_relocate ? IA64_FW_IMAGE_BASE_FOR(ram_size)
+                          : IA64_FW_LINK_BASE;
 }
 
 static bool ia64_vpc_get_fw_relocate(Object *obj, Error **errp)
@@ -3643,35 +3628,6 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
 }
 #endif
 
-static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
-                                       uint64_t firmware_base,
-                                       unsigned int cpu_index,
-                                       uint64_t entry,
-                                       uint64_t global_pointer)
-{
-    /*
-     * The firmware's CPU-assist region (SAL re-entry slots, debug
-     * contexts/stacks, early RSE backing stores, boot memory stacks) sits at
-     * the top of installed low RAM, as real IA-64 firmware places its SAL
-     * scratch; entry.S re-derives the same base from the handoff block.
-     */
-    uint64_t assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(machine->ram_size);
-    IA64BootInfo info = {
-        .firmware_base = firmware_base,
-        .firmware_entry = entry,
-        .global_pointer = global_pointer,
-        .iva = firmware_base + IA64_FW_IVT_OFFSET,
-        .bsp = assist_base + IA64_FW_EARLY_RSE_OFFSET +
-            cpu_index * IA64_FW_EARLY_RSE_SIZE,
-        .stack_pointer = assist_base + IA64_FW_CPU_ASSIST_SIZE - 16 -
-            cpu_index * IA64_FW_CPU_STACK_SIZE,
-        .rsc = IA64_RSC_MODE,
-        .fw_cpu_assist_base = assist_base,
-        .powered_off = cpu_index != 0,
-    };
-
-    return info;
-}
 
 /*
  * CPU state initialization — called on every reset.
@@ -3725,18 +3681,72 @@ static void ia64_vpc_reset(void *opaque)
  * so ROM content is guaranteed to be in guest memory.  Parse a firmware
  * plabel only when the firmware image is a valid IA-64 PE32+ binary.
  */
+static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
+                                       uint64_t firmware_base,
+                                       unsigned int cpu_index,
+                                       uint64_t entry,
+                                       uint64_t global_pointer)
+{
+    /*
+     * The firmware's CPU-assist region (SAL re-entry slots, debug
+     * contexts/stacks, early RSE backing stores, boot memory stacks) sits at
+     * the top of installed low RAM, as real IA-64 firmware places its SAL
+     * scratch; the firmware derives the same base from the handoff block.
+     */
+    uint64_t assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(machine->ram_size);
+    IA64BootInfo info = {
+        .firmware_base = firmware_base,
+        .firmware_entry = entry,
+        .global_pointer = global_pointer,
+        .iva = firmware_base + IA64_FW_IVT_OFFSET,
+        .bsp = assist_base + IA64_FW_EARLY_RSE_OFFSET +
+            cpu_index * IA64_FW_EARLY_RSE_SIZE,
+        .stack_pointer = assist_base + IA64_FW_CPU_ASSIST_SIZE - 16 -
+            cpu_index * IA64_FW_CPU_STACK_SIZE,
+        .rsc = IA64_RSC_MODE,
+        .fw_cpu_assist_base = assist_base,
+        .powered_off = cpu_index != 0,
+    };
+
+    return info;
+}
+
 static void ia64_vpc_machine_done(Notifier *notifier, void *data)
 {
     IA64VpcMachineState *s = container_of(notifier, IA64VpcMachineState,
                                           done_notifier);
-    g_autofree uint8_t *image = NULL;
-    IA64FirmwareEntrypoint entrypoint;
     CPUState *cs;
 
     (void)data;
     ia64_vpc_configure_platform_pci(s);
 
-    if (s->realfw_entry != 0) {
+    /*
+     * With no firmware at all, every processor comes up as the flat image
+     * used to be entered: at the image base with a stack, a backing store
+     * and cr.iva inside the image window, the boot processor running and
+     * the others powered off.  That is what the microprogram battery and
+     * the qtests build on; a guest never sees it.
+     */
+    if (s->realfw_entry == 0) {
+        uint64_t fw_base = ia64_vpc_fw_base(s, current_machine->ram_size);
+
+        CPU_FOREACH(cs) {
+            IA64BootInfo info = ia64_vpc_boot_info(MACHINE(s), fw_base,
+                                                   cs->cpu_index, fw_base,
+                                                   fw_base);
+
+            ia64_cpu_set_boot_info(IA64_CPU(cs), &info);
+            ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
+        }
+        return;
+    }
+
+    /*
+     * Every processor leaves reset at SALE_ENTRY with the PALE_RESET exit
+     * state (SDM vol. 2 11.2.2), the machine playing PAL.
+     */
+    {
+        uint64_t entry = s->realfw_entry;
         /*
          * The i2000/SDV is a two-socket board whose processors answer to
          * bus-agent ids 0 and 3: the vendor firmware's MADT template
@@ -3747,14 +3757,14 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
          * shl r2=r2,24; mov cr.lid=r2" at 0xFFFF3608), so the id has to
          * travel there: a second CPU announced as id 1 checks in, is
          * published as id 3, and never hears the IPI.  The configuration
-         * check caps realfw at two processors.
+         * check caps the board at two processors.
          */
         static const uint8_t socket_lid_id[] = { 0, 3 };
 
         CPU_FOREACH(cs) {
             IA64BootInfo info = {
                 .firmware_base = s->realfw_base,
-                .firmware_entry = s->realfw_entry,
+                .firmware_entry = entry,
                 .iva = IA64_REALFW_IVT_BASE,
                 .raw_entry = true,
                 .raw_proc_id = socket_lid_id[MIN(cs->cpu_index,
@@ -3783,36 +3793,6 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
             ia64_cpu_set_boot_info(IA64_CPU(cs), &info);
             ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
         }
-        return;
-    }
-
-    if (s->firmware_size == 0) {
-        return;
-    }
-
-    /*
-     * The project firmware is a flat raw binary (no DOS+PE header).
-     * Without a strict PE signature gate, random bytes can be mistaken
-     * for PE metadata and clobber startup registers (including gp).
-     */
-    image = g_malloc(s->firmware_size);
-    cpu_physical_memory_read(ia64_vpc_fw_base(s, current_machine->ram_size),
-                             image, s->firmware_size);
-    if (!ia64_loader_parse_pe_plabel(image, s->firmware_size,
-                                     &entrypoint)) {
-        return;
-    }
-
-    CPU_FOREACH(cs) {
-        IA64BootInfo info = ia64_vpc_boot_info(MACHINE(s),
-                                               ia64_vpc_fw_base(s,
-                                                   current_machine->ram_size),
-                                               cs->cpu_index,
-                                               entrypoint.entry,
-                                               entrypoint.global_pointer);
-
-        ia64_cpu_set_boot_info(IA64_CPU(cs), &info);
-        ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
     }
 }
 
@@ -3832,125 +3812,12 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
         error_setg(errp, "full ALAT emulation is not SMP-safe");
         return false;
     }
-    if (s->realfw_path != NULL && machine->firmware != NULL) {
-        error_setg(errp, "realfw= and -bios are mutually exclusive");
-        return false;
-    }
     if (imc->validate != NULL && !imc->validate(s, errp)) {
         return false;
     }
     return true;
 }
 
-/*
- * Firmware self-relocation (rework phase 2.2).  The image links at 1 MB but
- * executes from the RAM-top shadow (IA64_FW_IMAGE_BASE_FOR); the build embeds
- * a machine-checked fixup table (fw-fixups.py) and a trailing footer
- * { "IA64FXUP", table file offset }.  QEMU plays SAL_A here: it applies the
- * fixups while placing the shadow, exactly as real firmware fixes up SAL_B
- * when shadowing it near the top of memory.
- */
-#define IA64_FW_FIXUP_FOOTER_MAGIC 0x5055584634364149ULL /* "IA64FXUP" */
-#define IA64_FW_FIXUP_MAGIC        0x50555846u           /* "FXUP" */
-
-static uint64_t ia64_fw_bundle_imm64_get(const uint8_t *bundle)
-{
-    uint64_t lo = ldq_le_p(bundle);
-    uint64_t hi = ldq_le_p(bundle + 8);
-    uint64_t slot1 = ((lo >> 46) | (hi << 18)) & ((1ULL << 41) - 1);
-    uint64_t slot2 = (hi >> 23) & ((1ULL << 41) - 1);
-    uint64_t imm7b = (slot2 >> 6) & 0x7f;
-    uint64_t imm9d = (slot2 >> 27) & 0x1ff;
-    uint64_t imm5c = (slot2 >> 22) & 0x1f;
-    uint64_t ic = (slot2 >> 21) & 0x1;
-    uint64_t i = (slot2 >> 36) & 0x1;
-
-    return (i << 63) | (slot1 << 22) | (ic << 21) | (imm5c << 16) |
-           (imm9d << 7) | imm7b;
-}
-
-static void ia64_fw_bundle_imm64_set(uint8_t *bundle, uint64_t imm64)
-{
-    uint64_t lo = ldq_le_p(bundle);
-    uint64_t hi = ldq_le_p(bundle + 8);
-    uint64_t slot2 = (hi >> 23) & ((1ULL << 41) - 1);
-    uint64_t slot1 = (imm64 >> 22) & ((1ULL << 41) - 1);
-
-    slot2 &= ~((1ULL << 36) | (0x1ffULL << 27) | (0x1fULL << 22) |
-               (1ULL << 21) | (0x7fULL << 6));
-    slot2 |= (((imm64 >> 63) & 1) << 36) | (((imm64 >> 7) & 0x1ff) << 27) |
-             (((imm64 >> 16) & 0x1f) << 22) | (((imm64 >> 21) & 1) << 21) |
-             ((imm64 & 0x7f) << 6);
-    lo = (lo & ((1ULL << 46) - 1)) | (slot1 << 46);
-    hi = (slot1 >> 18) | (slot2 << 23);
-    stq_le_p(bundle, lo);
-    stq_le_p(bundle + 8, hi);
-}
-
-static bool ia64_vpc_relocate_firmware(uint8_t *image, int64_t size,
-                                       uint64_t delta, Error **errp)
-{
-    uint64_t fixups_off;
-    uint32_t n64, n32, nimm, i;
-    const uint8_t *table;
-    uint64_t entries;
-
-    if (size < 16 ||
-        ldq_le_p(image + size - 16) != IA64_FW_FIXUP_FOOTER_MAGIC) {
-        error_setg(errp, "firmware image carries no relocation footer "
-                   "(rebuilt with fw-fixups.py?)");
-        return false;
-    }
-    fixups_off = ldq_le_p(image + size - 8);
-    if (fixups_off > (uint64_t)size - 32) {
-        error_setg(errp, "firmware relocation table offset out of range");
-        return false;
-    }
-    table = image + fixups_off;
-    if (ldl_le_p(table) != IA64_FW_FIXUP_MAGIC || ldl_le_p(table + 4) != 1) {
-        error_setg(errp, "firmware relocation table has a bad header");
-        return false;
-    }
-    n64 = ldl_le_p(table + 8);
-    n32 = ldl_le_p(table + 12);
-    nimm = ldl_le_p(table + 16);
-    entries = (uint64_t)n64 + n32 + nimm;
-    if (fixups_off + 32 + entries * 8 > (uint64_t)size) {
-        error_setg(errp, "firmware relocation table truncated");
-        return false;
-    }
-    table += 32;
-    for (i = 0; i < n64; i++, table += 8) {
-        uint64_t off = ldq_le_p(table);
-
-        if (off > (uint64_t)size - 8) {
-            error_setg(errp, "firmware DIR64 fixup out of range");
-            return false;
-        }
-        stq_le_p(image + off, ldq_le_p(image + off) + delta);
-    }
-    for (i = 0; i < n32; i++, table += 8) {
-        uint64_t off = ldq_le_p(table);
-
-        if (off > (uint64_t)size - 4) {
-            error_setg(errp, "firmware DIR32 fixup out of range");
-            return false;
-        }
-        stl_le_p(image + off, ldl_le_p(image + off) + (uint32_t)delta);
-    }
-    for (i = 0; i < nimm; i++, table += 8) {
-        uint64_t off = ldq_le_p(table);
-
-        if (off > (uint64_t)size - 16) {
-            error_setg(errp, "firmware IMM64 fixup out of range");
-            return false;
-        }
-        ia64_fw_bundle_imm64_set(image + off,
-                                 ia64_fw_bundle_imm64_get(image + off) +
-                                 delta);
-    }
-    return true;
-}
 
 /*
  * Load a real vendor flash image (machine option realfw=) so that its end
@@ -4016,8 +3883,8 @@ static BlockBackend *ia64_realfw_open_nvram(const char *path,
 }
 
 /*
- * Read the firmware file: the realfw= image, else -bios, else the shipped
- * default beside the binary.  Not finding the default is not an error:
+ * Read the firmware file: -bios, else the shipped default beside the
+ * binary.  Not finding the default is not an error:
  * qtest brings this machine up with no firmware at all.  The file is
  * classified here, before the platform is built, because what it is
  * decides what the platform provides (a flash image carrying its own
@@ -4031,10 +3898,7 @@ static bool ia64_vpc_read_firmware(IA64VpcMachineState *s,
     GError *gerr = NULL;
     gsize size = 0;
 
-    if (s->realfw_path != NULL) {
-        name = s->realfw_path;
-        path = g_strdup(name);
-    } else if (machine->firmware != NULL) {
+    if (machine->firmware != NULL) {
         name = machine->firmware;
         path = qemu_find_file(QEMU_FILE_TYPE_BIOS, name);
         if (path == NULL) {
@@ -4061,8 +3925,7 @@ static bool ia64_vpc_read_firmware(IA64VpcMachineState *s,
      * with the architected reset pointer block in its last 48 bytes (SAL
      * sec 2.5): the FIT pointer at 4 GiB-32 and the SALE_ENTRY pointer at
      * 4 GiB-24 both point into it, and the FIT carries its signature.
-     * Anything else is the flat relocatable image the project firmware
-     * used to be.
+     * Nothing else is a firmware image for this machine.
      */
     if (size != 0 && size <= IA64_REALFW_MAX_SIZE && (size & 0xffff) == 0) {
         uint64_t base = IA64_REALFW_WINDOW_END - size;
@@ -4095,14 +3958,10 @@ static bool ia64_vpc_read_firmware(IA64VpcMachineState *s,
             }
         }
     }
-    if (s->realfw_path != NULL && !s->fw_is_flash) {
-        error_setg(errp, "realfw image '%s' is not a flash image: a whole "
+    if (!s->fw_is_flash) {
+        error_setg(errp, "firmware '%s' is not a flash image: a whole "
                    "number of 64 KiB blocks, at most 8 MiB, with a reset "
                    "pointer block and a _FIT_ table", name);
-        return false;
-    }
-    if (!s->fw_is_flash && size > IA64_FW_IMAGE_SPAN) {
-        error_setg(errp, "invalid firmware image size for '%s'", name);
         return false;
     }
     return true;
@@ -4210,36 +4069,16 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
 
     s->realfw_base = base;
     s->realfw_entry = s->fw_sale_ptr;
-    /* No flat image: machine_done must not parse a PE plabel. */
-    s->firmware_size = 0;
     return true;
 }
 
-/* The flat relocatable image: shadowed at the RAM top, fixups applied here. */
-static bool ia64_vpc_load_flat(IA64VpcMachineState *s, MachineState *machine,
-                               Error **errp)
-{
-    uint64_t fw_base = ia64_vpc_fw_base(s, machine->ram_size);
 
-    if (fw_base != IA64_FW_LINK_BASE &&
-        !ia64_vpc_relocate_firmware(s->fw_image, s->fw_image_size,
-                                    fw_base - IA64_FW_LINK_BASE, errp)) {
-        return false;
-    }
-    rom_add_blob_fixed("ia64-firmware", s->fw_image, s->fw_image_size,
-                       fw_base);
-    s->firmware_size = s->fw_image_size;
-    return true;
-}
-
-static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
-                                   MachineState *machine, Error **errp)
+static bool ia64_vpc_load_firmware(IA64VpcMachineState *s, Error **errp)
 {
     if (s->fw_image == NULL) {
         return true;
     }
-    return s->fw_is_flash ? ia64_vpc_load_flash(s, errp)
-                          : ia64_vpc_load_flat(s, machine, errp);
+    return ia64_vpc_load_flash(s, errp);
 }
 
 static bool ia64_vpc_build(MachineState *machine, Error **errp)
@@ -4278,13 +4117,14 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         uint32_t cores = MAX(machine->smp.cores, 1U);
         uint32_t per_socket = threads * cores;
         uint32_t package_base = (i / per_socket) * per_socket;
-        uint64_t fw_base = ia64_vpc_fw_base(s, machine->ram_size);
-        IA64BootInfo boot_info = ia64_vpc_boot_info(machine, fw_base, i,
-                                                    fw_base, fw_base);
-
         cpu = IA64_CPU(object_new(machine->cpu_type));
         cpu->alat_full = s->alat_full;
-        cpu->fw_image_base = fw_base;
+        /*
+         * Where the project firmware shadows itself (IA64_FW_IMAGE_BASE_FOR):
+         * the CPU recognises the image's PAL and SAL stubs by this base.
+         * A coupling to one firmware's layout, retired with the handoff.
+         */
+        cpu->fw_image_base = ia64_vpc_fw_base(s, machine->ram_size);
         cpu->socket_id = i / per_socket;
         cpu->core_id = (i / threads) % cores;
         cpu->thread_id = i % threads;
@@ -4293,7 +4133,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         cpu->package_base = package_base;
         cpu->package_cpus = MIN(per_socket,
                                 machine->smp.cpus - package_base);
-        ia64_cpu_set_boot_info(cpu, &boot_info);
         if (!qdev_realize_and_unref(DEVICE(cpu), NULL, errp)) {
             return false;
         }
@@ -4322,7 +4161,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
                                        DEVICE_LITTLE_ENDIAN);
     }
 
-    if (!ia64_vpc_load_firmware(s, machine, errp)) {
+    if (!ia64_vpc_load_firmware(s, errp)) {
         return false;
     }
 
@@ -4705,9 +4544,9 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
     s->fw_map_quirk_disable = IA64_VPC_FW_QUIRK_DEFAULT_DISABLE;
+    s->fw_relocate = true;
 
     s->i8042_enabled = IA64_VPC_MACHINE_GET_CLASS(s)->i8042_default;
-    s->fw_relocate = true;
 #ifdef CONFIG_IA64_VPC_STORAGE
     /*
      * Default the SATA controller off: Windows XP/2003 IA-64 ship no inbox
@@ -4758,7 +4597,6 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
     g_free(s->nvram_path);
     g_free(s->nvram_resolved_path);
     g_free(s->vga_model);
-    g_free(s->realfw_path);
     g_free(s->fw_image);
     g_free(s->fw_image_name);
 }
@@ -4821,9 +4659,10 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_get_fw_relocate,
                                    ia64_vpc_set_fw_relocate);
     object_class_property_set_description(oc, "fw-relocate",
-        "Shadow the firmware image at the top of low RAM (default on; "
-        "off keeps the historical 1 MB execution home - the A/B lever "
-        "for plans/firmware-rework-plan.md phase 2.2)");
+        "Where the CPU expects the firmware image: at the top of low RAM "
+        "(default on, where the shipped firmware shadows itself) or at the "
+        "historical 1 MB home (off; the microprogram battery loads code "
+        "there with no firmware present)");
     object_class_property_add_bool(oc, "i8042",
                                    ia64_vpc_get_i8042,
                                    ia64_vpc_set_i8042);
@@ -4907,30 +4746,22 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Default boot-manager Timeout in seconds when no NVRAM 'Timeout' "
         "variable exists: 0 boots the BootOrder immediately, 0xFFFF (the "
         "default) waits for the user like the EFI sample.");
-    object_class_property_add_str(oc, "realfw",
-                                  ia64_vpc_get_realfw,
-                                  ia64_vpc_set_realfw);
-    object_class_property_set_description(oc, "realfw",
-        "Path to a real vendor flash image (e.g. the HP i2000 bios130.BIN) "
-        "to map ending at 4 GiB and enter at its architected SALE_ENTRY "
-        "pointer with synthesized PALE_RESET exit state, instead of the "
-        "project firmware (plans/phase5-real-firmware-boot.md)");
     object_class_property_add_str(oc, "realfw-vga-rom",
                                   ia64_vpc_get_realfw_vga_rom,
                                   ia64_vpc_set_realfw_vga_rom);
     object_class_property_set_description(oc, "realfw-vga-rom",
         "Path to a real video-card option ROM to shadow at 0xC0000 for the "
-        "realfw video POST, instead of the emulated card's own vgabios.  Used "
-        "to run the vendor firmware against an authentic card BIOS (e.g. the "
-        "ATI Rage 128 Pro the SDV shipped with); realfw mode only.");
+        "firmware's video POST, instead of the emulated card's own vgabios.  "
+        "Used to run the vendor firmware against an authentic card BIOS "
+        "(e.g. the ATI Rage 128 Pro the SDV shipped with).");
     object_class_property_add_str(oc, "realfw-nvram",
                                   ia64_vpc_get_realfw_nvram,
                                   ia64_vpc_set_realfw_nvram);
     object_class_property_set_description(oc, "realfw-nvram",
-        "Path to a writable file that persists the realfw flash (the firmware's "
-        "NVRAM/EFI-variable store) across runs.  Created from the realfw image "
-        "on first use; thereafter the flash is loaded from and written back to "
-        "it.  realfw mode only.");
+        "Path to a writable file that persists the firmware flash (the "
+        "firmware's NVRAM/EFI-variable store) across runs.  Created from the "
+        "-bios image on first use; thereafter the flash is loaded from and "
+        "written back to it.");
     object_class_property_add_str(oc, "nvram",
                                   ia64_vpc_get_nvram,
                                   ia64_vpc_set_nvram);

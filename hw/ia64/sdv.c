@@ -124,16 +124,17 @@ static bool sdv_validate(IA64VpcMachineState *s, Error **errp)
 {
     MachineState *machine = MACHINE(s);
 
-    if (s->realfw_path != NULL && machine->smp.cpus > 2) {
-        error_setg(errp, "realfw supports at most 2 CPUs: the i2000/SDV "
-                   "firmware declares two processor sockets");
+    /* The i2000 is a two-socket board: its firmware declares two LSAPICs. */
+    if (machine->smp.cpus > 2) {
+        error_setg(errp, "the 460gx machine has at most 2 CPUs: the i2000/SDV "
+                   "is a two-socket board");
         return false;
     }
-    if (s->realfw_path != NULL) {
+    {
         /*
-         * The vendor firmware sizes memory from the DIMMs alone (SSDM
-         * 5.5.1), so RAM must be a population of Memory Card A: a multiple
-         * of the 64 MB row increment, at most eight rows of 4 GB.
+         * Firmware sizes memory from the DIMMs (SSDM 5.5.1), so RAM must be
+         * a population of Memory Card A: a multiple of the 64 MB row
+         * increment, at most eight rows of 4 GB.
          */
         uint64_t max = (uint64_t)IA64_460GX_MEM_ROWS * 4 * GiB;
 
@@ -142,8 +143,8 @@ static bool sdv_validate(IA64VpcMachineState *s, Error **errp)
             g_autofree char *inc = size_to_str(IA64_460GX_MEM_ROW_MIN_MB * MiB);
             g_autofree char *top = size_to_str(max);
 
-            error_setg(errp, "Invalid RAM size for realfw: the 460GX memory "
-                       "card takes multiples of %s up to %s", inc, top);
+            error_setg(errp, "Invalid RAM size: the 460GX memory card takes "
+                       "multiples of %s up to %s", inc, top);
             return false;
         }
     }
@@ -290,19 +291,19 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
     int i;
 
     /*
-     * Under the vendor firmware the bridge comes up with its ACPI block
-     * at A00h, where the firmware's FADT (PM1a_EVT A00h, PM1a_CNT A04h,
-     * SMI_CMD B2h with ACPI_ENABLE A0h), its DSDT and its PMI handler
-     * all expect it.  The firmware's own pokes for that (00:03.0 @44h =
-     * 0, @40h = 0A00h, @44h = 1) sit in a chipset-init script this
-     * build never reaches (plans/phase5, session 23), so the machine
-     * supplies their result; the SSDM reset state (block disabled)
-     * stays for our own firmware, which programs what it uses.
+     * The bridge comes up with its ACPI block at A00h, where the vendor
+     * firmware's FADT (PM1a_EVT A00h, PM1a_CNT A04h, SMI_CMD B2h with
+     * ACPI_ENABLE A0h), its DSDT and its PMI handler all expect it.  That
+     * firmware's own pokes for it (00:03.0 @44h = 0, @40h = 0A00h,
+     * @44h = 1) sit in a chipset-init script this build never reaches
+     * (plans/phase5, session 23), so the machine supplies their result.
+     * Our own firmware still publishes the machine's PM block at 2000h
+     * and leaves this one alone (plans/one-hardware-model-plan.md F4).
      */
     s->ifb = intel_82468gx_ifb_create(
         pci_bus, PCI_DEVFN(IA64_460GX_IFB_SLOT,
                            IA64_460GX_IFB_LPC_FUNCTION),
-        s->realfw_path != NULL ? IA64_460GX_IFB_ACPI_IO_BASE : 0, errp);
+        IA64_460GX_IFB_ACPI_IO_BASE, errp);
     if (s->ifb == NULL) {
         return NULL;
     }
@@ -314,19 +315,16 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
     qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_SCI,
                                 0, qdev_get_gpio_in(iosapic,
                                                     IA64_I2000_SCI_GSI));
-    if (s->realfw_path != NULL) {
-        /*
-         * The APM control port's SMI is the processor's PMI on this
-         * platform, and the vendor SAL's PMI handler answers the FADT's
-         * ACPI_ENABLE/ACPI_DISABLE commands by setting or clearing
-         * SCI_EN.  PMI delivery is not modelled; this stands in for
-         * that handler's effect (intel_82468gx_ifb_acpi_sci_enable).
-         */
-        qdev_connect_gpio_out_named(DEVICE(s->ifb),
-                                    INTEL_82468GX_IFB_GPIO_APMC, 0,
-                                    qemu_allocate_irq(
-                                        ia64_vpc_realfw_apmc, s, 0));
-    }
+    /*
+     * The APM control port's SMI is the processor's PMI on this platform,
+     * and the vendor SAL's PMI handler answers the FADT's ACPI_ENABLE and
+     * ACPI_DISABLE commands by setting or clearing SCI_EN.  PMI delivery is
+     * not modelled; this stands in for that handler's effect
+     * (intel_82468gx_ifb_acpi_sci_enable).
+     */
+    qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_APMC,
+                                0, qemu_allocate_irq(ia64_vpc_realfw_apmc,
+                                                     s, 0));
     for (i = 0; i < INTEL_82468GX_IFB_FUNCTIONS; i++) {
         PCIDevice *fn = intel_82468gx_ifb_function(s->ifb, i);
 

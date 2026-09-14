@@ -145,6 +145,11 @@ struct IA64VpcMachineState {
     bool audio_enabled;
     bool isp_enabled;
     bool lsi_enabled;
+    /*
+     * Where the CPU's firmware identity window sits: the RAM-top shadow
+     * (on) or the historical 1 MB home (off).  Off is the microprogram
+     * battery's lever: it loads code at 1 MB with no firmware present.
+     */
     bool fw_relocate;
     uint64_t fw_map_quirk_disable;
     bool ide_enabled;
@@ -153,7 +158,6 @@ struct IA64VpcMachineState {
     uint64_t firmware_console;
     uint16_t firmware_boot_timeout;
     char *nvram_path;
-    char *realfw_path;
     char *realfw_vga_rom_path;
     char *realfw_nvram_path;
     uint64_t realfw_entry;
@@ -233,7 +237,6 @@ struct IA64VpcMachineState {
     uint64_t watchdog_timeout;
     uint64_t watchdog_code;
     uint8_t nvram_data[IA64_NVRAM_SIZE];
-    size_t firmware_size;
     char *nvram_resolved_path;
     bool nvram_write_warning;
     ACPIREGS acpi_regs;
