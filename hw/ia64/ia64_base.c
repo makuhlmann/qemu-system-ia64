@@ -3631,10 +3631,12 @@ static void ia64_vpc_reset(void *opaque)
 
     /* The 460GX chipset re-seeds its configuration store in its own reset. */
 
-    acpi_pm1_evt_reset(&s->acpi_regs);
-    acpi_pm1_cnt_reset(&s->acpi_regs);
-    acpi_pm_tmr_reset(&s->acpi_regs);
-    acpi_gpe_reset(&s->acpi_regs);
+    if (!IA64_VPC_MACHINE_GET_CLASS(s)->has_south_bridge) {
+        acpi_pm1_evt_reset(&s->acpi_regs);
+        acpi_pm1_cnt_reset(&s->acpi_regs);
+        acpi_pm_tmr_reset(&s->acpi_regs);
+        acpi_gpe_reset(&s->acpi_regs);
+    }
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     /*
      * The synthetic INT10 ROM: a passive 2 KiB image at the legacy video-ROM
@@ -4180,7 +4182,14 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      */
     pci_bus_set_slot_reserved_mask(pci_bus, 1U << 0);
     pci_io = pci_bus->address_space_io;
-    ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
+    /*
+     * A board with a south bridge carries its ACPI block there (the 460GX's
+     * 82468GX IFB at A00h); the others get the stand-in block at 2000h until
+     * their firmware work shows the real one.
+     */
+    if (!imc->has_south_bridge) {
+        ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
+    }
     s->host_pci_bus = pci_bus;
 
     /*
@@ -4492,8 +4501,11 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
 #endif
 
-    s->powerdown_notifier.notify = ia64_vpc_powerdown_req;
-    qemu_register_powerdown_notifier(&s->powerdown_notifier);
+    /* The south bridge's ACPI block, where there is one, takes the button. */
+    if (!imc->has_south_bridge) {
+        s->powerdown_notifier.notify = ia64_vpc_powerdown_req;
+        qemu_register_powerdown_notifier(&s->powerdown_notifier);
+    }
 
     qemu_register_reset(ia64_vpc_reset, s);
     s->pci_fixup_reset = object_new(TYPE_IA64_PCI_FIXUP_RESET);

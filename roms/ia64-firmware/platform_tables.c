@@ -598,6 +598,12 @@ static void efi_init_acpi_tables(void)
                          (debug_port_present ? 1U : 0U);
     UINT32 xsdt_length = 36 + (UINT32)acpi_entries * 8U;
     UINT32 rsdt_length = 36 + (UINT32)acpi_entries * 4U;
+    UINT64 pm_base = fw_acpi_pm_io_base();
+    UINT32 sci_gsi = 0;
+    UINT16 sci_flags = 0;
+    BOOLEAN sci_override = fw_acpi_sci_override(&sci_gsi, &sci_flags);
+    UINT32 madt_length = (UINT32)sizeof(mMadt) -
+                         (sci_override ? 0U : (UINT32)sizeof(mMadt.Iso));
 
     mFacs.Signature = EFI_SIGNATURE_32('F', 'A', 'C', 'S');
     mFacs.Length = sizeof(mFacs);
@@ -640,24 +646,31 @@ static void efi_init_acpi_tables(void)
     mFadt.Model = 0;
     mFadt.PreferredProfile = 4;
     mFadt.SciInterrupt = ACPI_SCI_IRQ;
-    mFadt.SmiCommand = 0;
-    mFadt.AcpiEnable = 0;
-    mFadt.AcpiDisable = 0;
+    /*
+     * The 460GX board's FADT follows the vendor's: the OS enters ACPI mode
+     * through the IFB's SMI command port (the platform's PMI handler sets
+     * SCI_EN), and the IFB's GPE0 block is published.  The zx1 stand-in
+     * block has neither, so ACPI mode is already on there.
+     */
+    mFadt.SmiCommand = is_460gx ? IA64_460GX_SMI_CMD_PORT : 0;
+    mFadt.AcpiEnable = is_460gx ? IA64_460GX_ACPI_ENABLE_CMD : 0;
+    mFadt.AcpiDisable = is_460gx ? IA64_460GX_ACPI_DISABLE_CMD : 0;
     mFadt.S4BiosRequest = 0;
     mFadt.PStateControl = 0;
-    mFadt.Pm1aEventBlock = ACPI_PM_IO_BASE + ACPI_PM1_EVT_OFFSET;
+    mFadt.Pm1aEventBlock = (UINT32)(pm_base + ACPI_PM1_EVT_OFFSET);
     mFadt.Pm1bEventBlock = 0;
-    mFadt.Pm1aControlBlock = ACPI_PM_IO_BASE + ACPI_PM1_CNT_OFFSET;
+    mFadt.Pm1aControlBlock = (UINT32)(pm_base + ACPI_PM1_CNT_OFFSET);
     mFadt.Pm1bControlBlock = 0;
     mFadt.Pm2ControlBlock = 0;
-    mFadt.PmTimerBlock = ACPI_PM_IO_BASE + ACPI_PM_TMR_OFFSET;
-    mFadt.Gpe0Block = 0;
+    mFadt.PmTimerBlock = (UINT32)(pm_base + ACPI_PM_TMR_OFFSET);
+    mFadt.Gpe0Block = is_460gx ?
+        (UINT32)(pm_base + IA64_460GX_ACPI_GPE0_OFFSET) : 0;
     mFadt.Gpe1Block = 0;
     mFadt.Pm1EventLength = 4;
     mFadt.Pm1ControlLength = 2;
     mFadt.Pm2ControlLength = 0;
     mFadt.PmTimerLength = 4;
-    mFadt.Gpe0BlockLength = 0;
+    mFadt.Gpe0BlockLength = is_460gx ? IA64_460GX_ACPI_GPE0_LENGTH : 0;
     mFadt.Gpe1BlockLength = 0;
     mFadt.Gpe1Base = 0;
     mFadt.CstControl = 0;
@@ -680,25 +693,26 @@ static void efi_init_acpi_tables(void)
     mFadt.ResetRegister.BitWidth = 8;
     mFadt.ResetRegister.BitOffset = 0;
     mFadt.ResetRegister.Reserved = 0;
-    mFadt.ResetRegister.AddressLow =
-        ACPI_PM_IO_BASE + ACPI_PM_RESET_OFFSET;
+    mFadt.ResetRegister.AddressLow = (UINT32)fw_acpi_reset_port();
     mFadt.ResetRegister.AddressHigh = 0;
-    mFadt.ResetValue = ACPI_PM_RESET_VALUE;
+    mFadt.ResetValue = fw_acpi_reset_value();
     for (i = 0; i < sizeof(mFadt.Reserved1); i++) {
         mFadt.Reserved1[i] = 0;
     }
     mFadt.XFirmwareCtrl = (UINT64)(UINTN)mAcpiFacs;
     mFadt.XDsdt = (UINT64)(UINTN)mAcpiDsdt;
     mFadt.XPm1aEventBlock =
-        acpi_system_io_gas(32, ACPI_PM_IO_BASE + ACPI_PM1_EVT_OFFSET);
+        acpi_system_io_gas(32, pm_base + ACPI_PM1_EVT_OFFSET);
     mFadt.XPm1bEventBlock = acpi_system_memory_gas(0, 0);
     mFadt.XPm1aControlBlock =
-        acpi_system_io_gas(16, ACPI_PM_IO_BASE + ACPI_PM1_CNT_OFFSET);
+        acpi_system_io_gas(16, pm_base + ACPI_PM1_CNT_OFFSET);
     mFadt.XPm1bControlBlock = acpi_system_memory_gas(0, 0);
     mFadt.XPm2ControlBlock = acpi_system_memory_gas(0, 0);
     mFadt.XPmTimerBlock =
-        acpi_system_io_gas(32, ACPI_PM_IO_BASE + ACPI_PM_TMR_OFFSET);
-    mFadt.XGpe0Block = acpi_system_memory_gas(0, 0);
+        acpi_system_io_gas(32, pm_base + ACPI_PM_TMR_OFFSET);
+    mFadt.XGpe0Block = is_460gx ?
+        acpi_system_io_gas(32, pm_base + IA64_460GX_ACPI_GPE0_OFFSET) :
+        acpi_system_memory_gas(0, 0);
     mFadt.XGpe1Block = acpi_system_memory_gas(0, 0);
     mFadt.Hdr.Checksum = table_checksum8(&mFadt, sizeof(mFadt));
 
@@ -790,7 +804,8 @@ static void efi_init_acpi_tables(void)
     mMcfg.Allocation[0].Reserved = 0;
     mMcfg.Hdr.Checksum = table_checksum8(&mMcfg, sizeof(mMcfg));
 
-    init_sdt_header(&mMadt.Hdr, EFI_SIGNATURE_32('A', 'P', 'I', 'C'), sizeof(mMadt));
+    init_sdt_header(&mMadt.Hdr, EFI_SIGNATURE_32('A', 'P', 'I', 'C'),
+                    madt_length);
     mMadt.Hdr.Revision = 2;
     mMadt.LocalApicAddr = (UINT32)FW_LOCAL_SAPIC_BASE;
     /*
@@ -835,7 +850,14 @@ static void efi_init_acpi_tables(void)
     mMadt.Iosapic.Reserved = 0;
     mMadt.Iosapic.GsiBase = 0;
     mMadt.Iosapic.Address = IOSAPIC_BASE;
-    mMadt.Hdr.Checksum = table_checksum8(&mMadt, sizeof(mMadt));
+    /* The SCI's ISA IRQ is not identity-mapped on the 460GX board. */
+    mMadt.Iso.Type = 2;
+    mMadt.Iso.Length = sizeof(mMadt.Iso);
+    mMadt.Iso.Bus = 0;
+    mMadt.Iso.Source = (UINT8)ACPI_SCI_IRQ;
+    mMadt.Iso.GlobalInterrupt = sci_gsi;
+    mMadt.Iso.Flags = sci_flags;
+    mMadt.Hdr.Checksum = table_checksum8(&mMadt, madt_length);
 
     init_sdt_header(&mSrat.Hdr, EFI_SIGNATURE_32('S', 'R', 'A', 'T'),
                     sizeof(mSrat));
@@ -1099,6 +1121,12 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
                          (debug_port_present ? 1U : 0U);
     UINT32 xsdt_length = 36 + (UINT32)acpi_entries * 8U;
     UINT32 rsdt_length = 36 + (UINT32)acpi_entries * 4U;
+    UINT64 pm_base = fw_acpi_pm_io_base();
+    UINT32 sci_gsi = 0;
+    UINT16 sci_flags = 0;
+    BOOLEAN sci_override = fw_acpi_sci_override(&sci_gsi, &sci_flags);
+    UINT32 madt_length = (UINT32)sizeof(mMadt) -
+                         (sci_override ? 0U : (UINT32)sizeof(mMadt.Iso));
 
     if (mSalSystemTable.Signature != EFI_SIGNATURE_32('S', 'S', 'T', '_') ||
         mSalSystemTable.Length != sizeof(mSalSystemTable) ||
@@ -1180,7 +1208,7 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
                                   mAcpiSsdtLength) ||
         !acpi_sdt_integrity_valid(&mAcpiMadt->Hdr,
                                   EFI_SIGNATURE_32('A', 'P', 'I', 'C'),
-                                  sizeof(*mAcpiMadt)) ||
+                                  madt_length) ||
         !acpi_sdt_integrity_valid(&mAcpiSrat->Hdr,
                                   EFI_SIGNATURE_32('S', 'R', 'A', 'T'),
                                   sizeof(*mAcpiSrat)) ||
@@ -1239,24 +1267,33 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiFadt->XFirmwareCtrl != (UINT64)(UINTN)mAcpiFacs ||
         mAcpiFadt->XDsdt != (UINT64)(UINTN)mAcpiDsdt ||
         mAcpiFadt->SciInterrupt != ACPI_SCI_IRQ ||
-        mAcpiFadt->Pm1aEventBlock !=
-            ACPI_PM_IO_BASE + ACPI_PM1_EVT_OFFSET ||
-        mAcpiFadt->Pm1aControlBlock !=
-            ACPI_PM_IO_BASE + ACPI_PM1_CNT_OFFSET ||
-        mAcpiFadt->PmTimerBlock !=
-            ACPI_PM_IO_BASE + ACPI_PM_TMR_OFFSET ||
+        mAcpiFadt->SmiCommand !=
+            (is_460gx ? IA64_460GX_SMI_CMD_PORT : 0U) ||
+        mAcpiFadt->AcpiEnable !=
+            (is_460gx ? IA64_460GX_ACPI_ENABLE_CMD : 0U) ||
+        mAcpiFadt->AcpiDisable !=
+            (is_460gx ? IA64_460GX_ACPI_DISABLE_CMD : 0U) ||
+        mAcpiFadt->Pm1aEventBlock != pm_base + ACPI_PM1_EVT_OFFSET ||
+        mAcpiFadt->Pm1aControlBlock != pm_base + ACPI_PM1_CNT_OFFSET ||
+        mAcpiFadt->PmTimerBlock != pm_base + ACPI_PM_TMR_OFFSET ||
+        mAcpiFadt->Gpe0Block !=
+            (is_460gx ? pm_base + IA64_460GX_ACPI_GPE0_OFFSET : 0U) ||
+        mAcpiFadt->Gpe0BlockLength !=
+            (is_460gx ? IA64_460GX_ACPI_GPE0_LENGTH : 0U) ||
         !acpi_gas_matches(&mAcpiFadt->XPm1aEventBlock,
-                          ACPI_GAS_SYSTEM_IO, 32, ACPI_PM_IO_BASE) ||
+                          ACPI_GAS_SYSTEM_IO, 32, pm_base) ||
         !acpi_gas_matches(&mAcpiFadt->XPm1aControlBlock,
                           ACPI_GAS_SYSTEM_IO, 16,
-                          ACPI_PM_IO_BASE + ACPI_PM1_CNT_OFFSET) ||
+                          pm_base + ACPI_PM1_CNT_OFFSET) ||
         !acpi_gas_matches(&mAcpiFadt->XPmTimerBlock,
                           ACPI_GAS_SYSTEM_IO, 32,
-                          ACPI_PM_IO_BASE + ACPI_PM_TMR_OFFSET) ||
+                          pm_base + ACPI_PM_TMR_OFFSET) ||
+        (is_460gx &&
+         !acpi_gas_matches(&mAcpiFadt->XGpe0Block, ACPI_GAS_SYSTEM_IO, 32,
+                           pm_base + IA64_460GX_ACPI_GPE0_OFFSET)) ||
         !acpi_gas_matches(&mAcpiFadt->ResetRegister,
-                          ACPI_GAS_SYSTEM_IO, 8,
-                          ACPI_PM_IO_BASE + ACPI_PM_RESET_OFFSET) ||
-        mAcpiFadt->ResetValue != ACPI_PM_RESET_VALUE ||
+                          ACPI_GAS_SYSTEM_IO, 8, fw_acpi_reset_port()) ||
+        mAcpiFadt->ResetValue != fw_acpi_reset_value() ||
         (mAcpiFadt->Flags & ACPI_FADT_FLAG_PWR_BUTTON) != 0 ||
         (mAcpiFadt->Flags & ACPI_FADT_FLAG_RESET_REG_SUP) == 0 ||
         (mAcpiFadt->Flags & ACPI_FADT_FLAG_SW_CPU_SLP) == 0) {
@@ -1328,6 +1365,13 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
     if (mAcpiMadt->Iosapic.Type != 6 ||
         mAcpiMadt->Iosapic.Length != 16 ||
         mAcpiMadt->Iosapic.Address != IOSAPIC_BASE ||
+        (sci_override &&
+         (mAcpiMadt->Iso.Type != 2 ||
+          mAcpiMadt->Iso.Length != sizeof(mAcpiMadt->Iso) ||
+          mAcpiMadt->Iso.Bus != 0 ||
+          mAcpiMadt->Iso.Source != ACPI_SCI_IRQ ||
+          mAcpiMadt->Iso.GlobalInterrupt != sci_gsi ||
+          mAcpiMadt->Iso.Flags != sci_flags)) ||
         mAcpiSlit->Localities != 1 ||
         mAcpiSlit->Entry[0] != 10 ||
         mAcpiHcdp->EntryCount != 1 ||

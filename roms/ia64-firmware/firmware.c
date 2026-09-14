@@ -412,10 +412,10 @@ EFI_PHYSICAL_ADDRESS          mNextPageAddr = 0x01000000ULL;
 BOOLEAN                       mBootServicesExited;
 static BOOLEAN                mBeforeExitBootServicesSignaled;
 static BOOLEAN                mExitBootServicesEventsSignaled;
-static UINTN                  mRuntimeAcpiPm1Cnt =
-    LEGACY_IO_BASE + ACPI_PM_IO_BASE + ACPI_PM1_CNT_OFFSET;
-static UINTN                  mRuntimeResetControl =
-    LEGACY_IO_BASE + ACPI_PM_IO_BASE + ACPI_PM_RESET_OFFSET;
+/* Set from the board's ACPI block once the platform is known. */
+static UINTN                  mRuntimeAcpiPm1Cnt;
+static UINTN                  mRuntimeResetControl;
+static UINT8                  mRuntimeResetValue;
 UINTN                         mRuntimePciConfigEcam =
     PCI_CONFIG_ECAM_BASE;
 /* MC146818 CMOS RTC index port; the data port is index + 1 (rework D8). */
@@ -10245,7 +10245,7 @@ static BOOLEAN __attribute__((noinline)) pci_poll_timer_selftest(void)
 static BOOLEAN __attribute__((noinline)) pci_root_poll_selftest(void)
 {
     const UINT64 mem_address = VGA_FB_BASE;
-    const UINT64 io_address = ACPI_PM_IO_BASE + ACPI_PM_TMR_OFFSET;
+    const UINT64 io_address = fw_acpi_pm_io_base() + ACPI_PM_TMR_OFFSET;
     EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_WIDTH width;
     FW_PCI_POLL_SELFTEST_CLOCK test_clock;
     UINT64 expected = pci_mmio_read(mem_address, sizeof(UINT32));
@@ -10450,7 +10450,7 @@ static BOOLEAN __attribute__((noinline)) pci_io_transfer_selftest(void)
 static BOOLEAN __attribute__((noinline)) pci_io_poll_selftest(void)
 {
     const UINT64 mem_address = VGA_FB_BASE;
-    const UINT64 io_address = ACPI_PM_IO_BASE + ACPI_PM_TMR_OFFSET;
+    const UINT64 io_address = fw_acpi_pm_io_base() + ACPI_PM_TMR_OFFSET;
     EFI_PCI_IO_PROTOCOL *protocol = &mPciVgaIoProto;
     EFI_PCI_IO_PROTOCOL_WIDTH width;
     UINT64 expected = pci_mmio_read(mem_address, sizeof(UINT32));
@@ -13633,7 +13633,7 @@ VOID rs_reset_system(UINTN ResetType, EFI_STATUS ResetStatus,
         volatile UINT8 *reset_control =
             (volatile UINT8 *)mRuntimeResetControl;
 
-        *reset_control = ACPI_PM_RESET_VALUE;
+        *reset_control = mRuntimeResetValue;
     }
 
     while (1) {}
@@ -13925,6 +13925,11 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     fw_platform()->DecodeTopology();
     fw_mask_legacy_pics();
     fw_program_chipset_bus_number();
+    fw_platform_init_south_bridge();
+    mRuntimeAcpiPm1Cnt = LEGACY_IO_BASE + fw_acpi_pm_io_base() +
+                         ACPI_PM1_CNT_OFFSET;
+    mRuntimeResetControl = LEGACY_IO_BASE + fw_acpi_reset_port();
+    mRuntimeResetValue = fw_acpi_reset_value();
     mResetFloatingPointDisableBits =
         fw_read_psr() & (IA64_PSR_DFL | IA64_PSR_DFH);
 

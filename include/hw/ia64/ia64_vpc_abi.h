@@ -390,12 +390,34 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_NVRAM_SIZE               IA64_U64(0x0000000000010000)
 #define IA64_NVRAM_COMMIT_OFFSET      (IA64_NVRAM_SIZE - 8U)
 #define IA64_NVRAM_COMMIT_MAGIC       IA64_U64(0x54494d4d4f43564e) /* "NVCOMMIT" */
-/* ACPI PM block in PCI I/O port space, and the SCI it raises. */
+/*
+ * The zx1 machine's ACPI PM block in PCI I/O port space, and the SCI it
+ * raises.  A stand-in until the zx1 firmware work shows the real block.
+ */
 #define IA64_ACPI_PM_IO_BASE          0x00002000U
 #define IA64_ACPI_PM_IO_SIZE          0x00000010U
 #define IA64_ACPI_PM_RESET_OFFSET     0x0000000cU
 #define IA64_ACPI_PM_RESET_VALUE      0x01U
 #define IA64_ACPI_SCI_IRQ             9
+/*
+ * The 460GX board's ACPI block is the 82468GX IFB's, which its firmware
+ * programs to A00h (00:03.0 @44h = 0, @40h = 0A00h, @44h = 1): PM1a_EVT
+ * A00h, PM1a_CNT A04h, PM_TMR A08h, GPE0 A0Ch.  The vendor FADT names SMI_CMD
+ * B2h with ACPI_ENABLE A0h / ACPI_DISABLE A1h, the reset register at CF9h
+ * (RST_CNT, value 06h), and SCI_INT 9; its MADT overrides ISA IRQ 9 to
+ * GSI 49, active high, level (bios130.BIN FADT/MADT templates at 0x1001D0
+ * and 0x100070).
+ */
+#define IA64_460GX_ACPI_PM_IO_BASE    0x00000a00U
+#define IA64_460GX_ACPI_GPE0_OFFSET   0x0000000cU
+#define IA64_460GX_ACPI_GPE0_LENGTH   4U
+#define IA64_460GX_SMI_CMD_PORT       0x000000b2U
+#define IA64_460GX_ACPI_ENABLE_CMD    0xa0U
+#define IA64_460GX_ACPI_DISABLE_CMD   0xa1U
+#define IA64_460GX_RESET_CONTROL_PORT 0x00000cf9U
+#define IA64_460GX_RESET_CONTROL_VALUE 0x06U
+#define IA64_460GX_SCI_GSI            49
+#define IA64_460GX_SCI_ISO_FLAGS      0x000dU
 
 /*
  * The firmware defaults record: what a board's setup menu holds -- the

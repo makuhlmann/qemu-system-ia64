@@ -670,9 +670,13 @@ static void test_int10_legacy_std(void)
     test_int10_legacy_for_device("-vga std");
 }
 
+/*
+ * The zx1 machine's stand-in PM block carries its reset register; the 460gx
+ * board resets through the chipset's RST_CNT port (test_460gx_no_chipset_bus).
+ */
 static void test_acpi_reset_register(void)
 {
-    QTestState *qts = ia64_vpc_start(NULL);
+    QTestState *qts = ia64_vpc_start_zx1(NULL);
 
     qtest_writeb(qts,
                  IA64_LEGACY_IO_BASE + IA64_ACPI_PM_IO_BASE +
@@ -3406,8 +3410,8 @@ static void test_realfw_ifb_acpi_block(void)
 
     /*
      * The block is board state, not a firmware mode: with no firmware at
-     * all it still comes up enabled at A00h (plans/one-hardware-model-plan.md
-     * F4 makes the project firmware use it).
+     * all it still comes up enabled at A00h, and the project firmware
+     * publishes this block in its FADT (the board has no other).
      */
     qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
     g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
@@ -4613,15 +4617,17 @@ static void test_iosapic_lowest_priority(void)
     qtest_quit(qts);
 }
 
+/* The 460gx board's PM block is the IFB's at A00h; PM1a_CNT is A04h. */
 static void test_sparse_io_pm_register(void)
 {
-    const uint32_t port = IA64_ACPI_PM_IO_BASE + IA64_ACPI_PM1_CNT_OFFSET;
+    const uint32_t port = IA64_460GX_ACPI_PM_IO_BASE +
+                          IA64_ACPI_PM1_CNT_OFFSET;
     const uint64_t dense = IA64_LEGACY_IO_BASE + port;
     const uint64_t sparse = IA64_LEGACY_IO_BASE +
                             ia64_sparse_io_offset(port);
     QTestState *qts = ia64_vpc_start(NULL);
 
-    g_assert_cmphex(sparse, ==, 0x00000ffffc801004ULL);
+    g_assert_cmphex(sparse, ==, 0x00000ffffc281a04ULL);
 
     qtest_writew(qts, dense, 0);
     g_assert_cmphex(qtest_readw(qts, sparse) & 1, ==, 0);
@@ -4649,7 +4655,8 @@ static void test_openbus_io_port(void)
      */
     const uint64_t sio2f = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x4f);
     const uint64_t sio2e = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x4e);
-    const uint32_t pm_port = IA64_ACPI_PM_IO_BASE + IA64_ACPI_PM1_CNT_OFFSET;
+    const uint32_t pm_port = IA64_460GX_ACPI_PM_IO_BASE +
+                             IA64_ACPI_PM1_CNT_OFFSET;
     const uint64_t pm = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(pm_port);
     QTestState *qts = ia64_vpc_start(NULL);
 

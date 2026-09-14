@@ -133,6 +133,64 @@ extern char __fw_image_start[];
  */
 static UINT8 mI8042Present = 2;
 
+/*
+ * The ACPI fixed-hardware block.  On the 460GX board it is the 82468GX
+ * IFB's, which this firmware programs to A00h below, and the FADT names the
+ * IFB's SMI command port and the RST_CNT reset register at CF9h as the
+ * vendor FADT does; the SCI (ISA IRQ 9) reaches the PID on input 49, hence
+ * the MADT override.  The zx1 machine keeps its stand-in block at 2000h with
+ * a reset register inside it until the zx1 firmware work shows the real
+ * one.
+ */
+UINT64 fw_acpi_pm_io_base(void)
+{
+    return fw_platform_is_460gx() ? IA64_460GX_ACPI_PM_IO_BASE
+                                  : IA64_ACPI_PM_IO_BASE;
+}
+
+UINT64 fw_acpi_reset_port(void)
+{
+    return fw_platform_is_460gx()
+        ? IA64_460GX_RESET_CONTROL_PORT
+        : IA64_ACPI_PM_IO_BASE + IA64_ACPI_PM_RESET_OFFSET;
+}
+
+UINT8 fw_acpi_reset_value(void)
+{
+    return fw_platform_is_460gx() ? IA64_460GX_RESET_CONTROL_VALUE
+                                  : IA64_ACPI_PM_RESET_VALUE;
+}
+
+BOOLEAN fw_acpi_sci_override(UINT32 *Gsi, UINT16 *Flags)
+{
+    if (!fw_platform_is_460gx()) {
+        return 0;
+    }
+    *Gsi = IA64_460GX_SCI_GSI;
+    *Flags = IA64_460GX_SCI_ISO_FLAGS;
+    return 1;
+}
+
+/*
+ * The vendor firmware's chipset-init pokes for the IFB's ACPI block, in its
+ * order (bios130.BIN 0x2c7a80): ACPI Enable off, ACPI Base A00h, ACPI Enable
+ * on.  The block's SCI_EN stays clear: the OS raises it through the SMI
+ * command port, as on the real board.
+ */
+void fw_platform_init_south_bridge(void)
+{
+    if (!fw_platform_is_460gx()) {
+        return;
+    }
+    pci_config_write_value(0, 0, IA64_460GX_IFB_SLOT,
+                           IA64_460GX_IFB_LPC_FUNCTION, 0x44, 1, 0);
+    pci_config_write_value(0, 0, IA64_460GX_IFB_SLOT,
+                           IA64_460GX_IFB_LPC_FUNCTION, 0x40, 4,
+                           IA64_460GX_ACPI_PM_IO_BASE);
+    pci_config_write_value(0, 0, IA64_460GX_IFB_SLOT,
+                           IA64_460GX_IFB_LPC_FUNCTION, 0x44, 1, 1);
+}
+
 BOOLEAN fw_handoff_i8042_enabled(void)
 {
     if (mI8042Present == 2) {

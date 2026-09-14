@@ -105,6 +105,11 @@ UINT64 fw_read_ivr(void);
 void fw_write_eoi(void);
 void fw_flush_instruction_cache(VOID *start, UINTN bytes);
 UINT64 fw_handoff_debug_port_base(void);
+UINT64 fw_acpi_pm_io_base(void);
+UINT64 fw_acpi_reset_port(void);
+UINT8 fw_acpi_reset_value(void);
+BOOLEAN fw_acpi_sci_override(UINT32 *Gsi, UINT16 *Flags);
+void fw_platform_init_south_bridge(void);
 BOOLEAN fw_handoff_i8042_enabled(void);
 VOID *fw_system_table(VOID);
 

@@ -31,16 +31,6 @@
 /* The 82557 seat on the compatibility bus. */
 #define IA64_460GX_NIC_SLOT         5
 
-/*
- * The vendor firmware's FADT: PM1a_EVT_BLK A00h, PM1a_CNT_BLK A04h, PM_TMR
- * A08h, GPE0 A0Ch, SMI_CMD B2h, ACPI_ENABLE A0h, ACPI_DISABLE A1h; its MADT
- * routes the SCI (ISA IRQ 9) to GSI 49.
- */
-#define IA64_460GX_IFB_ACPI_IO_BASE 0x0a00
-#define IA64_I2000_SCI_GSI          49
-#define IA64_460GX_ACPI_ENABLE_CMD  0xa0
-#define IA64_460GX_ACPI_DISABLE_CMD 0xa1
-
 static void ia64_vpc_realfw_apmc(void *opaque, int n, int level)
 {
     IA64VpcMachineState *s = opaque;
@@ -297,13 +287,13 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
      * firmware's own pokes for it (00:03.0 @44h = 0, @40h = 0A00h,
      * @44h = 1) sit in a chipset-init script this build never reaches
      * (plans/phase5, session 23), so the machine supplies their result.
-     * Our own firmware still publishes the machine's PM block at 2000h
-     * and leaves this one alone (plans/one-hardware-model-plan.md F4).
+     * The project firmware makes the same pokes itself and publishes this
+     * block; the board has no other PM block.
      */
     s->ifb = intel_82468gx_ifb_create(
         pci_bus, PCI_DEVFN(IA64_460GX_IFB_SLOT,
                            IA64_460GX_IFB_LPC_FUNCTION),
-        IA64_460GX_IFB_ACPI_IO_BASE, errp);
+        IA64_460GX_ACPI_PM_IO_BASE, errp);
     if (s->ifb == NULL) {
         return NULL;
     }
@@ -314,7 +304,7 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
      */
     qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_SCI,
                                 0, qdev_get_gpio_in(iosapic,
-                                                    IA64_I2000_SCI_GSI));
+                                                    IA64_460GX_SCI_GSI));
     /*
      * The APM control port's SMI is the processor's PMI on this platform,
      * and the vendor SAL's PMI handler answers the FADT's ACPI_ENABLE and

@@ -297,6 +297,16 @@ typedef struct {
     UINT64 Address;
 } __attribute__((packed)) ACPI_MADT_IOSAPIC;
 
+/* Interrupt Source Override: an ISA IRQ that is not identity-mapped. */
+typedef struct {
+    UINT8  Type;
+    UINT8  Length;
+    UINT8  Bus;
+    UINT8  Source;
+    UINT32 GlobalInterrupt;
+    UINT16 Flags;
+} __attribute__((packed)) ACPI_MADT_ISO;
+
 typedef struct {
     ACPI_SDT_HEADER Hdr;
     UINT32 LocalApicAddr;
@@ -304,6 +314,11 @@ typedef struct {
     /* ACPI 2.0 Errata C entries omit the later UID extension fields. */
     ACPI_MADT_LSAPIC Lsapic[FW_MAX_CPUS];
     ACPI_MADT_IOSAPIC Iosapic;
+    /*
+     * The SCI override, last so a platform whose SCI is identity-mapped
+     * publishes a table that ends before it (Hdr.Length excludes it).
+     */
+    ACPI_MADT_ISO Iso;
 } __attribute__((packed)) ACPI_MADT;
 
 typedef struct {
@@ -702,7 +717,7 @@ FW_STATIC_ASSERT(sizeof(ACPI_MCFG_ALLOCATION) == 16,
 FW_STATIC_ASSERT(sizeof(ACPI_MCFG) == 60, acpi_mcfg_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MADT_LSAPIC) == 12, acpi_madt_lsapic_size);
 FW_STATIC_ASSERT(sizeof(ACPI_MADT_IOSAPIC) == 16, acpi_madt_iosapic_size);
-FW_STATIC_ASSERT(sizeof(ACPI_MADT) == 156, acpi_madt_size);
+FW_STATIC_ASSERT(sizeof(ACPI_MADT) == 166, acpi_madt_size);
 FW_STATIC_ASSERT(sizeof(ACPI_SRAT_PROCESSOR_AFFINITY) == 16,
                  acpi_srat_processor_affinity_size);
 FW_STATIC_ASSERT(sizeof(ACPI_SRAT_MEMORY_AFFINITY) == 40,
