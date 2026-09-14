@@ -46,9 +46,20 @@ static BOOLEAN                mTextWrapPending;
 
 /* --- UART helpers --------------------------------------------------------- */
 
+/*
+ * The console UART: the 460GX board's COM1 in legacy I/O space, the zx1
+ * machine's memory-mapped stand-in otherwise.
+ */
+UINT64 fw_console_uart_base(void)
+{
+    return fw_platform_is_460gx()
+        ? LEGACY_IO_BASE + IA64_460GX_COM1_IO_BASE
+        : IA64_UART_BASE;
+}
+
 volatile UINT8 *fw_uart_reg(UINTN offset)
 {
-    return (volatile UINT8 *)(IA64_UART_BASE + offset);
+    return (volatile UINT8 *)(UINTN)(fw_console_uart_base() + offset);
 }
 
 UINT64 fw_read_psr(void)

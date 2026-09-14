@@ -418,6 +418,16 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_460GX_RESET_CONTROL_VALUE 0x06U
 #define IA64_460GX_SCI_GSI            49
 #define IA64_460GX_SCI_ISO_FLAGS      0x000dU
+/*
+ * The board's Super I/O UARTs (LPC47B27x LDN 4 and 5): COM1 at 3F8h on ISA
+ * IRQ 4 is the console, COM2 at 2F8h on IRQ 3 the debug port when one is
+ * configured.  Both ports are what kdcom's fixed table expects.
+ */
+#define IA64_460GX_COM1_IO_BASE       0x000003f8U
+#define IA64_460GX_COM1_IRQ           4
+#define IA64_460GX_COM2_IO_BASE       0x000002f8U
+#define IA64_460GX_COM2_IRQ           3
+#define IA64_460GX_COM_IO_SIZE        8U
 
 /*
  * The firmware defaults record: what a board's setup menu holds -- the

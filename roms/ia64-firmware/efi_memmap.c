@@ -740,9 +740,15 @@ void efi_init_memory_map(void)
                          FW_NVRAM_BASE + FW_NVRAM_SIZE,
                          FW_FIRMWARE_ADDRESS_SPACE_END, EFI_MEMORY_UC);
 
-    /* Reserve both platform UART pages described by HCDP and DBGP. */
-    efi_add_memory_range(&index, EfiMemoryMappedIO, IA64_UART_BASE,
-                         IA64_UART_BASE + IA64_UART_MMIO_SIZE, EFI_MEMORY_UC);
+    /*
+     * The zx1 machine's memory-mapped UART pages (HCDP and DBGP).  The 460GX
+     * board's COM ports live in legacy I/O space, described above.
+     */
+    if (!fw_platform_is_460gx()) {
+        efi_add_memory_range(&index, EfiMemoryMappedIO, IA64_UART_BASE,
+                             IA64_UART_BASE + IA64_UART_MMIO_SIZE,
+                             EFI_MEMORY_UC);
+    }
 
     mMemoryMapEntries = index;
 }

@@ -87,7 +87,9 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
     Scope (\_SB.PCI0.ISA)
     {
         Name (P2EN, 0x0F)
+        Name (U2EN, 0x0F)
 
+        // The Super I/O's UART1: COM1 at 3F8h on ISA IRQ 4, the console.
         Device (UAR0)
         {
             Name (_HID, "PNP0501")
@@ -99,15 +101,25 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
             Name (_UID, Zero)
             Name (_CRS, ResourceTemplate ()
             {
-                QWordMemory (ResourceConsumer, PosDecode, MinFixed,
-                    MaxFixed, NonCacheable, ReadWrite,
-                    0, 0x00000047F0000000, 0x00000047F0000007,
-                    0, 8)
-                // The UART is wired to IOSAPIC GSI 4, not a legacy PIC IRQ.
-                Interrupt (ResourceConsumer, Level, ActiveLow, Shared, ,,)
-                {
-                    4
-                }
+                IO (Decode16, 0x03F8, 0x03F8, 8, 8)
+                IRQNoFlags () {4}
+            })
+        }
+
+        // UART2: COM2 at 2F8h on IRQ 3, fitted when the board has a debug
+        // port (U2EN is patched by the firmware).
+        Device (UAR1)
+        {
+            Name (_HID, "PNP0501")
+            Name (_UID, One)
+            Method (_STA, 0, NotSerialized)
+            {
+                Return (U2EN)
+            }
+            Name (_CRS, ResourceTemplate ()
+            {
+                IO (Decode16, 0x02F8, 0x02F8, 8, 8)
+                IRQNoFlags () {3}
             })
         }
 

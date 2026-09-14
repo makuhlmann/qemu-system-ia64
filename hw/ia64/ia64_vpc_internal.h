@@ -99,7 +99,7 @@ struct IA64VpcMachineClass {
     bool has_south_bridge;
     /* Default of the i8042 option. */
     bool i8042_default;
-    /* Alias the console UART at legacy COM1 (3F8h) when no debug port is. */
+    /* The console is COM1 (3F8h, IRQ 4); a debug port is COM2 (2F8h, IRQ 3). */
     bool legacy_com1_console;
 
     /* Board-specific configuration checks; NULL = none. */
@@ -211,9 +211,7 @@ struct IA64VpcMachineState {
     MemoryRegion nvram_mmio;
     MemoryRegion acpi_pm;
     MemoryRegion acpi_reset;
-    MemoryRegion debug_uart_legacy_io;
     SerialMM *debug_uart;
-    MemoryRegion console_uart_legacy_io;
     SerialMM *console_uart;
     DeviceState *pci_host_dev;
 #ifdef CONFIG_IA64_VPC_GRAPHICS

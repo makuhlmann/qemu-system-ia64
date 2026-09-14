@@ -292,8 +292,6 @@
 #define IA64_ATI_PLL_MIN_FREQ     12500U
 #define IA64_ATI_PLL_MAX_FREQ     40000U
 #endif
-#define IA64_LEGACY_COM1_IO_BASE 0x000003f8U
-#define IA64_LEGACY_COM1_IO_SIZE 0x00000008U
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
@@ -4128,16 +4126,23 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(iosapic), 0, IA64_IOSAPIC_BASE);
 
-    s->console_uart = serial_mm_init(get_system_memory(), IA64_UART_BASE, 0,
-                                     qdev_get_gpio_in(iosapic, 4),
-                                     115200, serial_hd(0),
-                                     DEVICE_LITTLE_ENDIAN);
-    if (debug_port_get_chardev()) {
-        s->debug_uart = serial_mm_init(get_system_memory(),
-                                       IA64_DEBUG_UART_BASE, 0,
-                                       qdev_get_gpio_in(iosapic, 3),
-                                       115200, debug_port_get_chardev(),
-                                       DEVICE_LITTLE_ENDIAN);
+    /*
+     * The zx1 machine's UARTs are memory-mapped stand-ins until the zx1
+     * firmware work shows the real ones.  A board with legacy COM ports
+     * gets them in PCI I/O space below, once that space exists.
+     */
+    if (!imc->legacy_com1_console) {
+        s->console_uart = serial_mm_init(get_system_memory(), IA64_UART_BASE,
+                                         0, qdev_get_gpio_in(iosapic, 4),
+                                         115200, serial_hd(0),
+                                         DEVICE_LITTLE_ENDIAN);
+        if (debug_port_get_chardev()) {
+            s->debug_uart = serial_mm_init(get_system_memory(),
+                                           IA64_DEBUG_UART_BASE, 0,
+                                           qdev_get_gpio_in(iosapic, 3),
+                                           115200, debug_port_get_chardev(),
+                                           DEVICE_LITTLE_ENDIAN);
+        }
     }
 
     if (!ia64_vpc_load_firmware(s, errp)) {
@@ -4193,35 +4198,30 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     s->host_pci_bus = pci_bus;
 
     /*
-     * Early IA-64 kernel debuggers predate the ACPI DBGP table and drive a
-     * fixed legacy COM1 at I/O port 0x3f8 (Windows Whistler build 2462's
-     * kdcom.dll hardcodes 0x3f8/0x2f8/0x3e8/0x2e8 and reaches them through
-     * HAL's READ_PORT_UCHAR/WRITE_PORT_UCHAR).  Real Merced platforms carry a
-     * Super I/O UART there, so alias the debug port's register window into
-     * the legacy I/O range as well.  Aliasing rather than instantiating a
-     * second UART keeps one device, one chardev and one interrupt line.
+     * The i2000's COM ports: the Super I/O's UART1 at 3F8h on IRQ 4 is the
+     * console, which is what the vendor DSDT reports for it (UAR1, LDN 4)
+     * and what its firmware talks to; a debug port, when configured, is
+     * UART2 at 2F8h on IRQ 3.  Early IA-64 kernel debuggers predate the
+     * ACPI DBGP table and drive these fixed ports directly (Windows
+     * Whistler build 2462's kdcom.dll hardcodes 0x3f8/0x2f8/0x3e8/0x2e8
+     * through HAL's READ_PORT_UCHAR/WRITE_PORT_UCHAR), so /debugport=com2
+     * reaches the debug chardev and com1 the console.  ISA IRQs 0..15 are
+     * the platform interrupt controller's first inputs.
      */
-    if (s->debug_uart != NULL) {
-        memory_region_init_alias(&s->debug_uart_legacy_io, OBJECT(s),
-                                 "ia64-vpc.debug-uart-legacy-io",
-                                 &s->debug_uart->serial.io, 0,
-                                 IA64_LEGACY_COM1_IO_SIZE);
-        memory_region_add_subregion(pci_io, IA64_LEGACY_COM1_IO_BASE,
-                                    &s->debug_uart_legacy_io);
-    } else if (imc->legacy_com1_console && s->console_uart != NULL) {
-        /*
-         * Otherwise the i2000's COM1 is the console: the Super I/O's UART1
-         * at 3F8h on IRQ 4, which is what the vendor DSDT reports for it
-         * (UAR1, LDN 4) and what its firmware talks to.  The console UART
-         * already sits on PID input 4, so the same device serves both the
-         * memory-mapped window this firmware uses and the legacy one.
-         */
-        memory_region_init_alias(&s->console_uart_legacy_io, OBJECT(s),
-                                 "ia64-vpc.console-uart-legacy-io",
-                                 &s->console_uart->serial.io, 0,
-                                 IA64_LEGACY_COM1_IO_SIZE);
-        memory_region_add_subregion(pci_io, IA64_LEGACY_COM1_IO_BASE,
-                                    &s->console_uart_legacy_io);
+    if (imc->legacy_com1_console) {
+        s->console_uart = serial_mm_init(pci_io, IA64_460GX_COM1_IO_BASE, 0,
+                                         qdev_get_gpio_in(iosapic,
+                                                          IA64_460GX_COM1_IRQ),
+                                         115200, serial_hd(0),
+                                         DEVICE_LITTLE_ENDIAN);
+        if (debug_port_get_chardev()) {
+            s->debug_uart = serial_mm_init(pci_io, IA64_460GX_COM2_IO_BASE,
+                                           0,
+                                           qdev_get_gpio_in(
+                                               iosapic, IA64_460GX_COM2_IRQ),
+                                           115200, debug_port_get_chardev(),
+                                           DEVICE_LITTLE_ENDIAN);
+        }
     }
     /*
      * Leave ISA/SCI lines in the legacy range and route PCI INTx above 15.

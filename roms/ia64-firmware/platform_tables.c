@@ -54,7 +54,8 @@ static ACPI_SSDT               mSsdt = {
          *
          * Scope (\_SB) contains CPU0..CPU7 with patchable CxEN _STA values.
          * Scope (\_SB.PCI0.ISA) -- the south bridge's LPC/ISA function --
-         * carries P2EN, UAR0 (PNP0501, GSI 4), PS2K and PS2M gated on P2EN,
+         * carries P2EN and U2EN, UAR0 (PNP0501, COM1 3F8h IRQ 4), UAR1
+         * (COM2 2F8h IRQ 3) gated on U2EN, PS2K and PS2M gated on P2EN,
          * which is where firmware for a board with an LPC bridge declares
          * them.
          */
@@ -101,6 +102,7 @@ static const UINT8 mSsdtCpuEnabledNames[IA64_VPC_MAX_CPUS][4] = {
     { 'C', '7', 'E', 'N' },
 };
 static const UINT8 mSsdtPs2EnabledName[4] = { 'P', '2', 'E', 'N' };
+static const UINT8 mSsdtCom2EnabledName[4] = { 'U', '2', 'E', 'N' };
 
 static UINT8 *acpi_ssdt_named_byte(ACPI_SSDT *Ssdt, const UINT8 Name[4])
 {
@@ -604,6 +606,16 @@ static void efi_init_acpi_tables(void)
     BOOLEAN sci_override = fw_acpi_sci_override(&sci_gsi, &sci_flags);
     UINT32 madt_length = (UINT32)sizeof(mMadt) -
                          (sci_override ? 0U : (UINT32)sizeof(mMadt.Iso));
+    UINT64 console_port = 0;
+    UINT64 debug_port = 0;
+    ACPI_GENERIC_ADDRESS console_uart_gas =
+        fw_console_uart_io_port(&console_port) ?
+        acpi_system_io_gas(8, console_port) :
+        acpi_system_memory_gas(8, IA64_UART_BASE);
+    ACPI_GENERIC_ADDRESS debug_port_gas =
+        fw_debug_port_io_port(&debug_port) ?
+        acpi_system_io_gas(8, debug_port) :
+        acpi_system_memory_gas(8, debug_port_base);
 
     mFacs.Signature = EFI_SIGNATURE_32('F', 'A', 'C', 'S');
     mFacs.Length = sizeof(mFacs);
@@ -740,6 +752,9 @@ static void efi_init_acpi_tables(void)
     }
     acpi_ssdt_set_named_byte(&mSsdt, mSsdtPs2EnabledName,
                              fw_handoff_i8042_enabled() ? 0x0fU : 0);
+    /* COM2 exists on the 460gx board when a debug port is configured. */
+    acpi_ssdt_set_named_byte(&mSsdt, mSsdtCom2EnabledName,
+                             debug_port_present ? 0x0fU : 0);
     init_sdt_header(&mSsdt.Hdr, EFI_SIGNATURE_32('S', 'S', 'D', 'T'),
                     mAcpiSsdtLength);
     mSsdt.Hdr.Revision = 2;
@@ -910,19 +925,13 @@ static void efi_init_acpi_tables(void)
     mHcdp.Uart[0].PciDevice = 0;
     mHcdp.Uart[0].PciFunction = 0;
     mHcdp.Uart[0].Baud = 115200;
-    mHcdp.Uart[0].BaseAddress.SpaceId = 0;
-    mHcdp.Uart[0].BaseAddress.BitWidth = 8;
-    mHcdp.Uart[0].BaseAddress.BitOffset = 0;
-    mHcdp.Uart[0].BaseAddress.Reserved = 0;
-    mHcdp.Uart[0].BaseAddress.AddressLow = (UINT32)IA64_UART_BASE;
-    mHcdp.Uart[0].BaseAddress.AddressHigh =
-        (UINT32)(IA64_UART_BASE >> 32);
+    mHcdp.Uart[0].BaseAddress = console_uart_gas;
     /* With the PCI flag clear, these fields carry ACPI _HID and _UID. */
     mHcdp.Uart[0].PciDeviceId =
         (UINT16)HCDP_UART_ACPI_HID_PNP0501;
     mHcdp.Uart[0].PciVendorId =
         (UINT16)(HCDP_UART_ACPI_HID_PNP0501 >> 16);
-    mHcdp.Uart[0].GlobalInterrupt = 4;
+    mHcdp.Uart[0].GlobalInterrupt = IA64_460GX_COM1_IRQ;
     mHcdp.Uart[0].ClockRate = HCDP_UART_PSEUDO_CLOCK_RATE;
     mHcdp.Uart[0].PciProgrammingInterface = 0x02;
     mHcdp.Uart[0].Flags =
@@ -958,7 +967,7 @@ static void efi_init_acpi_tables(void)
     mDbgp.Reserved[0] = 0;
     mDbgp.Reserved[1] = 0;
     mDbgp.Reserved[2] = 0;
-    mDbgp.BaseAddress = acpi_system_memory_gas(8, debug_port_base);
+    mDbgp.BaseAddress = debug_port_gas;
     mDbgp.Hdr.Checksum = table_checksum8(&mDbgp, sizeof(mDbgp));
 
     for (i = 0; i < 8; i++) {
@@ -1127,6 +1136,16 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
     BOOLEAN sci_override = fw_acpi_sci_override(&sci_gsi, &sci_flags);
     UINT32 madt_length = (UINT32)sizeof(mMadt) -
                          (sci_override ? 0U : (UINT32)sizeof(mMadt.Iso));
+    UINT64 console_port = 0;
+    UINT64 debug_port = 0;
+    ACPI_GENERIC_ADDRESS console_uart_gas =
+        fw_console_uart_io_port(&console_port) ?
+        acpi_system_io_gas(8, console_port) :
+        acpi_system_memory_gas(8, IA64_UART_BASE);
+    ACPI_GENERIC_ADDRESS debug_port_gas =
+        fw_debug_port_io_port(&debug_port) ?
+        acpi_system_io_gas(8, debug_port) :
+        acpi_system_memory_gas(8, debug_port_base);
 
     if (mSalSystemTable.Signature != EFI_SIGNATURE_32('S', 'S', 'T', '_') ||
         mSalSystemTable.Length != sizeof(mSalSystemTable) ||
@@ -1249,6 +1268,9 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         !acpi_ssdt_has_bytes(sta_name, sizeof(sta_name)) ||
         !acpi_ssdt_named_byte_is(mAcpiSsdt, mSsdtPs2EnabledName,
                                  fw_handoff_i8042_enabled() ? 0x0fU : 0) ||
+        (is_460gx &&
+         !acpi_ssdt_named_byte_is(mAcpiSsdt, mSsdtCom2EnabledName,
+                                  debug_port_present ? 0x0fU : 0)) ||
         !acpi_ssdt_has_bytes(crs_name, sizeof(crs_name))) {
         return 0;
     }
@@ -1347,8 +1369,8 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiDbgp->Reserved[1] != 0 ||
         mAcpiDbgp->Reserved[2] != 0 ||
         (debug_port_present &&
-         !acpi_gas_matches(&mAcpiDbgp->BaseAddress,
-                           ACPI_GAS_SYSTEM_MEMORY, 8, debug_port_base))) {
+         !acpi_gas_matches(&mAcpiDbgp->BaseAddress, debug_port_gas.SpaceId,
+                           8, acpi_gas_address(&debug_port_gas)))) {
         return 0;
     }
 
@@ -1385,12 +1407,13 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiHcdp->Uart[0].PciFunction != 0 ||
         mAcpiHcdp->Uart[0].Baud != 115200 ||
         !acpi_gas_matches(&mAcpiHcdp->Uart[0].BaseAddress,
-                          ACPI_GAS_SYSTEM_MEMORY, 8, IA64_UART_BASE) ||
+                          console_uart_gas.SpaceId, 8,
+                          acpi_gas_address(&console_uart_gas)) ||
         mAcpiHcdp->Uart[0].PciDeviceId !=
             (UINT16)HCDP_UART_ACPI_HID_PNP0501 ||
         mAcpiHcdp->Uart[0].PciVendorId !=
             (UINT16)(HCDP_UART_ACPI_HID_PNP0501 >> 16) ||
-        mAcpiHcdp->Uart[0].GlobalInterrupt != 4 ||
+        mAcpiHcdp->Uart[0].GlobalInterrupt != IA64_460GX_COM1_IRQ ||
         mAcpiHcdp->Uart[0].ClockRate != HCDP_UART_PSEUDO_CLOCK_RATE ||
         mAcpiHcdp->Uart[0].PciProgrammingInterface != 0x02 ||
         mAcpiHcdp->Uart[0].Flags != hcdp_uart_flags ||

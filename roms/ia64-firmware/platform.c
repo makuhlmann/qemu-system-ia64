@@ -219,26 +219,52 @@ BOOLEAN fw_handoff_i8042_enabled(void)
 }
 
 /*
- * The debug UART: a 16550 at the machine's debug window keeps what is
- * written to its scratch register (offset 7); open bus keeps nothing.
- * Zero means no debug port.
+ * The debug UART: a 16550 at the board's debug port (COM2 on the 460GX
+ * board, the machine's memory-mapped window on zx1) keeps what is written
+ * to its scratch register (offset 7); open bus keeps nothing.  Zero means
+ * no debug port.
  */
 UINT64 fw_handoff_debug_port_base(void)
 {
     static UINT64 base = ~0ULL;
 
     if (base == ~0ULL) {
-        volatile UINT8 *scratch =
-            (volatile UINT8 *)(UINTN)(IA64_DEBUG_UART_BASE + 7);
+        UINT64 window = fw_platform_is_460gx()
+            ? LEGACY_IO_BASE + IA64_460GX_COM2_IO_BASE
+            : IA64_DEBUG_UART_BASE;
+        volatile UINT8 *scratch = (volatile UINT8 *)(UINTN)(window + 7);
 
         *scratch = 0xa5;
-        base = *scratch == 0xa5 ? IA64_DEBUG_UART_BASE : 0;
+        base = *scratch == 0xa5 ? window : 0;
         if (base != 0) {
             *scratch = 0x5a;
-            base = *scratch == 0x5a ? IA64_DEBUG_UART_BASE : 0;
+            base = *scratch == 0x5a ? window : 0;
         }
     }
     return base;
+}
+
+/*
+ * The console UART and the debug port as ACPI describes them: the 460GX
+ * board's are legacy I/O ports (System I/O GAS, the port number); the zx1
+ * machine's are memory-mapped (System Memory GAS, the address).
+ */
+BOOLEAN fw_console_uart_io_port(UINT64 *Port)
+{
+    if (!fw_platform_is_460gx()) {
+        return 0;
+    }
+    *Port = IA64_460GX_COM1_IO_BASE;
+    return 1;
+}
+
+BOOLEAN fw_debug_port_io_port(UINT64 *Port)
+{
+    if (!fw_platform_is_460gx() || fw_handoff_debug_port_base() == 0) {
+        return 0;
+    }
+    *Port = IA64_460GX_COM2_IO_BASE;
+    return 1;
 }
 
 void fw_platform_set_probed(UINT64 RamSize, UINT64 Chipset)

@@ -367,9 +367,19 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
     /*
      * The board's Super I/O behind the bridge, as far as its
      * configuration space: the vendor DSDT finds COM1 and the keyboard
-     * controller through it (see hw/isa/smsc_lpc47b27x.c).
+     * controller through it (see hw/isa/smsc_lpc47b27x.c).  Its UART2 is
+     * fitted when the machine has a debug port, which the base machine
+     * then decodes at COM2.
      */
-    isa_create_simple(isa_bus, TYPE_SMSC_LPC47B27X);
+    {
+        ISADevice *sio = isa_new(TYPE_SMSC_LPC47B27X);
+
+        qdev_prop_set_bit(DEVICE(sio), SMSC_LPC47B27X_PROP_UART2,
+                          s->debug_uart != NULL);
+        if (!isa_realize_and_unref(sio, isa_bus, errp)) {
+            return NULL;
+        }
+    }
     return isa_bus;
 }
 

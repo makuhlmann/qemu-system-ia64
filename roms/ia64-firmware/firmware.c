@@ -326,7 +326,7 @@ struct _EFI_UGA_DRAW_PROTOCOL {
 /* SAL + ACPI table scaffolds live in fw-acpi.h. */
 
 FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE == 2695u, dsdt_generated_aml_size);
-FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_AML_SIZE == 519u,
+FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_AML_SIZE == 542u,
                  ssdt_generated_aml_size);
 /* The nested zx1-profile DSDT/SSDT; the larger sets ACPI_DSDT/SSDT Aml[]. */
 FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_ZX1_AML_SIZE == 1182u,
@@ -6261,9 +6261,10 @@ BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                        IA64_PCI_MMIO_BASE +
                                            IA64_PCI_MMIO_SIZE,
                                        EFI_MEMORY_UC) ||
-        !efi_memory_map_has_descriptor(EfiMemoryMappedIO, IA64_UART_BASE,
-                                       IA64_UART_BASE + IA64_UART_MMIO_SIZE,
-                                       EFI_MEMORY_UC) ||
+        (!fw_platform_is_460gx() &&
+         !efi_memory_map_has_descriptor(EfiMemoryMappedIO, IA64_UART_BASE,
+                                        IA64_UART_BASE + IA64_UART_MMIO_SIZE,
+                                        EFI_MEMORY_UC)) ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIOPortSpace,
                                        LEGACY_IO_BASE,
                                        LEGACY_IO_SPARSE_LIMIT,
@@ -13943,7 +13944,9 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 
     uart_puts("CPU Architecture:     IA-64\r\n");
     uart_puts("Boot ROM Address:     0x0000000000000000\r\n");
-    uart_puts("UART Base:            0x47F0000000\r\n");
+    uart_puts("UART Base:            0x");
+    uart_put_hex64(fw_console_uart_base());
+    uart_puts("\r\n");
     uart_puts("Firmware Entry:       0x0000000000000000\r\n\r\n");
 
     uart_puts("GP check: OK\r\n");

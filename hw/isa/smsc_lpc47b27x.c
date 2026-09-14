@@ -25,6 +25,7 @@
 #include "qemu/osdep.h"
 #include "hw/isa/isa.h"
 #include "hw/isa/smsc_lpc47b27x.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
 
@@ -63,6 +64,8 @@ struct SMSCLPC47B27xState {
     uint8_t global[SIO_GLOBAL_REGS];
     uint8_t ldn[SIO_LDN_COUNT][SIO_LDN_REGS];
     uint8_t runtime[SIO_RUNTIME_SIZE];
+    /* UART2 (LDN 5) is fitted: the board wired a debug port to COM2. */
+    bool uart2_active;
 };
 
 static void sio_ldn_set(SMSCLPC47B27xState *s, unsigned ldn, bool active,
@@ -179,7 +182,7 @@ static void sio_reset(DeviceState *dev)
     s->ldn[LDN_LPT][0xf0] = 0x3c;
     sio_ldn_set(s, LDN_UART1, true, 0x3f8, 4, 4);
     s->ldn[LDN_UART1][0xf0] = 0x02;
-    sio_ldn_set(s, LDN_UART2, false, 0x2f8, 3, 4);
+    sio_ldn_set(s, LDN_UART2, s->uart2_active, 0x2f8, 3, 4);
     s->ldn[LDN_UART2][0xf0] = 0x02;
     sio_ldn_set(s, LDN_KBD, true, 0x60, 1, 4);
     s->ldn[LDN_KBD][0x72] = 12;
@@ -216,10 +219,16 @@ static const VMStateDescription vmstate_sio = {
     },
 };
 
+static const Property sio_properties[] = {
+    DEFINE_PROP_BOOL(SMSC_LPC47B27X_PROP_UART2, SMSCLPC47B27xState,
+                     uart2_active, false),
+};
+
 static void sio_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
+    device_class_set_props(dc, sio_properties);
     dc->realize = sio_realize;
     device_class_set_legacy_reset(dc, sio_reset);
     dc->vmsd = &vmstate_sio;
