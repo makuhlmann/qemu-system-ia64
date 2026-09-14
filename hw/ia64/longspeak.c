@@ -230,6 +230,7 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
      * keyboard and mouse only, so this machine defaults to the USB HID
      * devices instead (see ia64_vpc_init_usb).  Override with i8042=on.
      */
+    imc->pci_config_ecam = true;
     imc->i8042_default = false;
     imc->map_low_ram = longspeak_map_low_ram;
     imc->build_chipset = longspeak_build_chipset;

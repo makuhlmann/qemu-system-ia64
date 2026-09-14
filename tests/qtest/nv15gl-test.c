@@ -54,6 +54,70 @@ static void nv15_smoke(void)
     qtest_quit(qts);
 }
 
+/*
+ * The 460GX has only the CF8/CFC pair for configuration space (no ECAM
+ * window), reached through the sparse I/O view of the legacy port space.
+ * These accessors point the one-bus libqos helper at the GXB root, where
+ * the adapter lives.
+ */
+static uint64_t nv15_port_addr(uint32_t port)
+{
+    return IA64_PCI_IO_BASE + (((uint64_t)(port >> 2) << 12) | (port & 0xfff));
+}
+
+static uint64_t nv15_cf8_select(QTestState *qts, int devfn, uint8_t offset)
+{
+    qtest_writel(qts, nv15_port_addr(0xcf8),
+                 0x80000000U | ((uint32_t)IA64_460GX_GXB_BUS << 16) |
+                 ((uint32_t)devfn << 8) | (offset & 0xfc));
+    return nv15_port_addr(0xcfc + (offset & 3));
+}
+
+static uint8_t nv15_config_readb(QPCIBus *bus, int devfn, uint8_t offset)
+{
+    return qtest_readb(bus->qts, nv15_cf8_select(bus->qts, devfn, offset));
+}
+
+static uint16_t nv15_config_readw(QPCIBus *bus, int devfn, uint8_t offset)
+{
+    return qtest_readw(bus->qts, nv15_cf8_select(bus->qts, devfn, offset));
+}
+
+static uint32_t nv15_config_readl(QPCIBus *bus, int devfn, uint8_t offset)
+{
+    return qtest_readl(bus->qts, nv15_cf8_select(bus->qts, devfn, offset));
+}
+
+static void nv15_config_writeb(QPCIBus *bus, int devfn, uint8_t offset,
+                               uint8_t value)
+{
+    qtest_writeb(bus->qts, nv15_cf8_select(bus->qts, devfn, offset), value);
+}
+
+static void nv15_config_writew(QPCIBus *bus, int devfn, uint8_t offset,
+                               uint16_t value)
+{
+    qtest_writew(bus->qts, nv15_cf8_select(bus->qts, devfn, offset), value);
+}
+
+static void nv15_config_writel(QPCIBus *bus, int devfn, uint8_t offset,
+                               uint32_t value)
+{
+    qtest_writel(bus->qts, nv15_cf8_select(bus->qts, devfn, offset), value);
+}
+
+static void nv15_qpci_init(QGenericPCIBus *gbus, QTestState *qts)
+{
+    qpci_init_generic(gbus, qts, NULL, false);
+    gbus->gpex_pio_base = IA64_PCI_IO_BASE;
+    gbus->bus.config_readb = nv15_config_readb;
+    gbus->bus.config_readw = nv15_config_readw;
+    gbus->bus.config_readl = nv15_config_readl;
+    gbus->bus.config_writeb = nv15_config_writeb;
+    gbus->bus.config_writew = nv15_config_writew;
+    gbus->bus.config_writel = nv15_config_writel;
+}
+
 /* PCI identity, class, subsystem id and fixed BAR geometry. */
 static void nv15_pci_contract(void)
 {
@@ -61,14 +125,7 @@ static void nv15_pci_contract(void)
     QGenericPCIBus gbus;
     QPCIDevice *dev;
 
-    qpci_init_generic(&gbus, qts, NULL, false);
-    /*
-     * Offsetting the ECAM base by the bus number points this one-bus helper
-     * at the GXB root, where the adapter lives.
-     */
-    gbus.ecam_alloc_ptr = IA64_PCI_CONFIG_BASE +
-                          ((uint64_t)IA64_460GX_GXB_BUS << 20);
-    gbus.gpex_pio_base = IA64_PCI_IO_BASE;
+    nv15_qpci_init(&gbus, qts);
 
     dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(IA64_460GX_GXB_VGA_SLOT, 0));
     g_assert_nonnull(dev);

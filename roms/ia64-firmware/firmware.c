@@ -416,8 +416,8 @@ static BOOLEAN                mExitBootServicesEventsSignaled;
 static UINTN                  mRuntimeAcpiPm1Cnt;
 static UINTN                  mRuntimeResetControl;
 static UINT8                  mRuntimeResetValue;
-UINTN                         mRuntimePciConfigEcam =
-    PCI_CONFIG_ECAM_BASE;
+/* The configuration window (ECAM, or the I/O ports); set with the board. */
+UINTN                         mRuntimePciConfigEcam;
 /* MC146818 CMOS RTC index port; the data port is index + 1 (rework D8). */
 static UINTN                  mRuntimeRtc = LEGACY_IO_BASE + 0x70U;
 static UINTN                  mRuntimeRtcState =
@@ -6252,10 +6252,11 @@ BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
                                        FW_LOCAL_SAPIC_BASE +
                                            FW_LOCAL_SAPIC_SIZE,
                                        EFI_MEMORY_UC) ||
-        !efi_memory_map_has_descriptor(
-            EfiMemoryMappedIO, PCI_CONFIG_ECAM_BASE,
-            PCI_CONFIG_ECAM_BASE + PCI_CONFIG_ECAM_SIZE,
-            EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) ||
+        (!fw_pci_config_by_ports() &&
+         !efi_memory_map_has_descriptor(
+             EfiMemoryMappedIO, PCI_CONFIG_ECAM_BASE,
+             PCI_CONFIG_ECAM_BASE + PCI_CONFIG_ECAM_SIZE,
+             EFI_MEMORY_UC | EFI_MEMORY_RUNTIME)) ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIO,
                                        IA64_PCI_MMIO_BASE,
                                        IA64_PCI_MMIO_BASE +
@@ -13891,11 +13892,10 @@ static void fw_mask_legacy_pics(void)
  * reached at bus 0 device 10h, which is reserved for exactly this and is
  * never forwarded.
  *
- * Nothing here needs the chipset's registers -- this firmware enumerates
- * through ECAM -- but leaving CBN at 0 would leave CF8/CFC answering for
- * the chipset at addresses that belong to real devices.
+ * This runs before the expander ports are numbered, so it goes through the
+ * port pair directly rather than pci_config_write_value.
  */
-#define FW_460GX_CBN_BUS      0xee
+#define FW_460GX_CBN_BUS      IA64_460GX_CBN_BUS
 #define FW_460GX_CBN_DEVICE   0x10
 #define FW_460GX_CBN_REGISTER 0x40
 
@@ -13925,7 +13925,9 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     mCpuAssistBase = stack_top - IA64_FW_CPU_ASSIST_SIZE;
     fw_platform()->DecodeTopology();
     fw_mask_legacy_pics();
+    mRuntimePciConfigEcam = fw_pci_config_window_base();
     fw_program_chipset_bus_number();
+    fw_platform_init_expander_ports();
     fw_platform_init_south_bridge();
     mRuntimeAcpiPm1Cnt = LEGACY_IO_BASE + fw_acpi_pm_io_base() +
                          ACPI_PM1_CNT_OFFSET;

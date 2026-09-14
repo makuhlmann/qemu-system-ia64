@@ -223,8 +223,8 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
  * writes the aperture back once the OS owns it) is left as written.  AGPSIZ
  * bit 3 stays set: it only selects the 64-bit register, not an above-4-GiB
  * address (our own ia64_agp GART runs bit 3 set with a below-4-GiB base too).
- * Realfw-only: own-firmware guests reach PCI config
- * through ECAM and never write this chipset store, and the 460GX
+ * Vendor-firmware-only: the project firmware never writes this register,
+ * guests reach PCI config through SAL, and the 460GX
  * GART-translation device (ia64_agp, bus 0 dev 31) keeps its own aperture base
  * (0xEE000000), so the Linux AGP-GART DMA path is unaffected.  agp460 now
  * programs the aperture at a different base than ia64_agp decodes, so Windows
@@ -491,9 +491,9 @@ static void ia64_460gx_update_low_mmio_window(IA64460GXState *s)
  * the numbers the same firmware gave them.  Bus 0 is the compatibility bus
  * (Table 2-1) whatever its port's pair says, and is never looked up.
  *
- * A bus no port claims falls back to the board's fixed numbering -- the one
- * ECAM uses and this machine's own firmware and guests enumerate by -- so a
- * cycle to those buses keeps working with the ports unprogrammed.
+ * A bus no port claims falls back to the board's fixed numbering -- the
+ * numbers both firmwares give the ports -- so a cycle to those buses keeps
+ * working before POST has programmed them.
  */
 static PCIDevice *ia64_460gx_cfg_find_device(IA64460GXState *s,
                                              uint8_t bus, uint8_t devfn)
@@ -985,10 +985,9 @@ static void ia64_460gx_reset_cfg(IA64460GXState *s)
  * function and register, and a CFC access reads or writes the addressed
  * config space.  Device numbers on the bus the CBN register maps the chipset
  * into are the chipset's own functions (Table 2-1); everything else forwards
- * to the PCI bus.  This is the mechanism the vendor firmware enumerates
- * through, and it is real hardware, so the machine carries it whichever
- * firmware runs -- ECAM, which is what our firmware and guests use, reaches
- * the four expander buses and stays the only way a guest sees the machine.
+ * to the PCI bus.  This is the only configuration mechanism the chipset
+ * has: both firmwares enumerate through it, and guests reach it through
+ * SAL_PCI_CONFIG (the 460gx machine maps no ECAM window).
  */
 static void ia64_460gx_realize(DeviceState *dev, Error **errp)
 {

@@ -4160,6 +4160,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 
     pci_host = qdev_new(TYPE_IA64_PCI_HOST_BRIDGE);
     s->pci_host_dev = pci_host;
+    qdev_prop_set_bit(pci_host, "ecam", imc->pci_config_ecam);
     if (imc->pci0_intx != NULL) {
         ia64_pci_host_set_intx_routes(pci_host, imc->pci0_intx,
                                       imc->pci0_nintx,

@@ -113,6 +113,9 @@ UINT64 fw_acpi_reset_port(void);
 UINT8 fw_acpi_reset_value(void);
 BOOLEAN fw_acpi_sci_override(UINT32 *Gsi, UINT16 *Flags);
 void fw_platform_init_south_bridge(void);
+void fw_platform_init_expander_ports(void);
+BOOLEAN fw_pci_config_by_ports(void);
+UINT64 fw_pci_config_window_base(void);
 BOOLEAN fw_handoff_i8042_enabled(void);
 VOID *fw_system_table(VOID);
 

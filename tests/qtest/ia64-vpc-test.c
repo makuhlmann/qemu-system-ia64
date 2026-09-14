@@ -213,6 +213,24 @@ static uint64_t ia64_sparse_io_offset(uint32_t port)
     return ((uint64_t)(port >> 2) << 12) | (port & 0xfff);
 }
 
+/*
+ * Configuration space by the machine's own mechanism: CF8/CFC on 460gx (the
+ * chipset has nothing else, SSDM 2.3.1), the segment-0 ECAM window on zx1.
+ */
+static bool ia64_cfg_by_ports(QTestState *qts);
+static uint32_t ia64_cfg_readl(QTestState *qts, uint8_t bus, uint8_t dev,
+                               uint8_t fn, uint8_t reg);
+static uint16_t ia64_cfg_readw(QTestState *qts, uint8_t bus, uint8_t dev,
+                               uint8_t fn, uint8_t reg);
+static uint8_t ia64_cfg_readb(QTestState *qts, uint8_t bus, uint8_t dev,
+                              uint8_t fn, uint8_t reg);
+static void ia64_cfg_writel(QTestState *qts, uint8_t bus, uint8_t dev,
+                            uint8_t fn, uint8_t reg, uint32_t value);
+static void ia64_cfg_writew(QTestState *qts, uint8_t bus, uint8_t dev,
+                            uint8_t fn, uint8_t reg, uint16_t value);
+static void ia64_cfg_writeb(QTestState *qts, uint8_t bus, uint8_t dev,
+                            uint8_t fn, uint8_t reg, uint8_t value);
+
 static void int10_outw(QTestState *qts, uint16_t port, uint16_t value)
 {
     qtest_writew(qts, IA64_LEGACY_IO_BASE +
@@ -854,15 +872,13 @@ static void test_sba_ioc_identity(void)
 
 static void test_isp12160_mailbox(void)
 {
-    const uint64_t cfg = IA64_PCI_CONFIG_BASE +
-                         ((uint64_t)IA64_ISP_BUS << 20) +
-                         ((uint64_t)IA64_ISP_SLOT << 15);
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
     unsigned int i;
 
-    g_assert_cmphex(qtest_readl(qts, cfg), ==, 0x12161077);
-    g_assert_cmphex(qtest_readl(qts, cfg + PCI_SUBSYSTEM_VENDOR_ID), ==,
-                    0x00071077);
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_ISP_BUS, IA64_ISP_SLOT, 0, 0),
+                    ==, 0x12161077);
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_ISP_BUS, IA64_ISP_SLOT, 0,
+                                   PCI_SUBSYSTEM_VENDOR_ID), ==, 0x00071077);
 
     /* A NOP through the mailbox completes and raises the RISC interrupt. */
     qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_MAILBOX0,
@@ -991,14 +1007,11 @@ static void isp_build_firmware(uint16_t *image)
 
 static void test_isp12160_firmware_checksum(void)
 {
-    const uint64_t cfg = IA64_PCI_CONFIG_BASE +
-                         ((uint64_t)IA64_ISP_BUS << 20) +
-                         ((uint64_t)IA64_ISP_SLOT << 15);
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
     uint16_t image[IA64_ISP_FW_SENT];
 
-    qtest_writew(qts, cfg + PCI_COMMAND,
-                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+    ia64_cfg_writew(qts, IA64_ISP_BUS, IA64_ISP_SLOT, 0, PCI_COMMAND,
+                    PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
 
     isp_build_firmware(image);
     g_assert_cmphex(isp_load_and_verify(qts, image), ==,
@@ -1007,8 +1020,8 @@ static void test_isp12160_firmware_checksum(void)
 
     /* Corrupting a word inside the declared image must still be caught. */
     qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
-    qtest_writew(qts, cfg + PCI_COMMAND,
-                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+    ia64_cfg_writew(qts, IA64_ISP_BUS, IA64_ISP_SLOT, 0, PCI_COMMAND,
+                    PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
     isp_build_firmware(image);
     image[5] ^= 0x0001;
     g_assert_cmphex(isp_load_and_verify(qts, image), !=,
@@ -1836,9 +1849,9 @@ static uint32_t realfw_cfg_readl(QTestState *qts, uint8_t dev, uint8_t fn,
 /*
  * The i2000 reaches its PCI buses through expander bridges: the PXB carries
  * the compatibility bus 0, the two WXBs carry buses 1 and 2, and the GXB
- * carries the AGP bus 3.  Each is a root in its own right, reachable through
- * the same segment-0 ECAM window by its own bus number, and each owns its own
- * block of four interrupt inputs instead of sharing bus 0's.
+ * carries the AGP bus 3.  Each is a root in its own right, reachable by its
+ * own bus number, and each owns its own block of four interrupt inputs
+ * instead of sharing bus 0's.
  */
 static void test_460gx_expander_roots(void)
 {
@@ -1849,20 +1862,15 @@ static void test_460gx_expander_roots(void)
     unsigned int bus;
 
     for (bus = 1; bus <= 3; bus++) {
-        uint64_t cfg = IA64_PCI_CONFIG_BASE + ((uint64_t)bus << 20) +
-                       (1ULL << 15);
-
-        g_assert_cmphex(qtest_readl(qts, cfg), ==, 0x12298086);
+        g_assert_cmphex(ia64_cfg_readl(qts, bus, 1, 0, 0), ==, 0x12298086);
         /* An empty slot on the same root still decodes as open bus. */
-        g_assert_cmphex(qtest_readl(qts, cfg + (1ULL << 15)), ==,
-                        0xffffffff);
+        g_assert_cmphex(ia64_cfg_readl(qts, bus, 2, 0, 0), ==, 0xffffffff);
     }
 
     /* zx1 has no expander roots; its second root is Mercury's bus 0x10. */
     qtest_quit(qts);
     qts = qtest_init("-machine zx1 -m 256M -S");
-    g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE + (1ULL << 20)),
-                    ==, 0xffffffff);
+    g_assert_cmphex(ia64_cfg_readl(qts, 1, 0, 0, 0), ==, 0xffffffff);
     qtest_quit(qts);
 }
 
@@ -1936,17 +1944,15 @@ static void check_root_window_containment(const char *args)
         unsigned int slot;
 
         for (slot = 0; slot < 32; slot++) {
-            uint64_t cfg = IA64_PCI_CONFIG_BASE +
-                           ((uint64_t)rw->bus << 20) +
-                           ((uint64_t)slot << 15);
             unsigned int bar;
 
-            if (qtest_readl(qts, cfg) == 0xffffffff) {
+            if (ia64_cfg_readl(qts, rw->bus, slot, 0, 0) == 0xffffffff) {
                 continue;
             }
 
             for (bar = 0; bar < 6; bar++) {
-                uint32_t value = qtest_readl(qts, cfg + 0x10 + bar * 4);
+                uint32_t value = ia64_cfg_readl(qts, rw->bus, slot, 0,
+                                                0x10 + bar * 4);
                 uint64_t address;
 
                 if (value == 0) {
@@ -2003,10 +2009,10 @@ static void check_root_window_containment(const char *args)
  * does reads those registers: an OS takes its resource map from ACPI, and
  * the one driver that touches 460GX chipset config, Linux's i460-agp, binds
  * to the AGP bridge by device ID, which the machine presents at 00:1f.0.
- * The software that does read them is the real SDV firmware, which has them
- * on the realfw path at the bus number it programs itself (CBN, 0xEE) -- a
- * number this machine could not present anyway, because a config address
- * for it falls outside the 64 MB ECAM window and into the I/O block above.
+ * The software that does read them is firmware, which has them through
+ * CF8/CFC on the bus number it programs itself (CBN, FFh out of reset,
+ * EEh once POST is done) -- test_460gx_no_chipset_bus below stops short of
+ * that bus.
  */
 static void test_460gx_no_chipset_bus(void)
 {
@@ -2026,20 +2032,17 @@ static void test_460gx_no_chipset_bus(void)
     size_t i;
 
     for (i = 0; i < G_N_ELEMENTS(occupied); i++) {
-        g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
-                                    ((uint64_t)occupied[i].bus << 20) +
-                                    ((uint64_t)occupied[i].slot << 15)),
+        g_assert_cmphex(ia64_cfg_readl(qts, occupied[i].bus,
+                                       occupied[i].slot, 0, 0),
                         !=, 0xffffffff);
     }
-    /* ...and every bus above them is empty, chipset bus included. */
+    /* ...and every bus above them is empty up to the chipset's own. */
     for (bus = IA64_460GX_GXB_BUS + 1; bus < 0x40; bus++) {
         unsigned int slot;
 
         for (slot = 0; slot < 32; slot++) {
-            g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
-                                        ((uint64_t)bus << 20) +
-                                        ((uint64_t)slot << 15)),
-                            ==, 0xffffffff);
+            g_assert_cmphex(ia64_cfg_readl(qts, bus, slot, 0, 0), ==,
+                            0xffffffff);
         }
     }
 
@@ -2049,9 +2052,8 @@ static void test_460gx_no_chipset_bus(void)
      * 00:1f.0, which is where Linux finds it ("Found an AGP 0.0 compliant
      * device at 0000:00:1f.0") and where >4 GB graphics DMA was validated.
      */
-    g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
-                                ((uint64_t)IA64_AGP_SLOT << 15)),
-                    ==, 0x84ea8086);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_AGP_SLOT, 0, 0), ==,
+                    0x84ea8086);
     qtest_quit(qts);
 }
 
@@ -2076,35 +2078,35 @@ static void test_460gx_platform_identities(void)
     size_t i;
 
     for (i = 0; i < G_N_ELEMENTS(identities); i++) {
-        uint64_t cfg = IA64_PCI_CONFIG_BASE +
-                       ((uint64_t)identities[i].bus << 20) +
-                       ((uint64_t)identities[i].slot << 15);
+        uint8_t b = identities[i].bus, d = identities[i].slot;
         unsigned int bar;
 
-        g_assert_cmphex(qtest_readl(qts, cfg), ==,
+        g_assert_cmphex(ia64_cfg_readl(qts, b, d, 0, 0), ==,
                         ((uint32_t)identities[i].device << 16) |
                         PCI_VENDOR_ID_INTEL);
-        g_assert_cmphex(qtest_readw(qts, cfg + PCI_CLASS_DEVICE), ==,
+        g_assert_cmphex(ia64_cfg_readw(qts, b, d, 0, PCI_CLASS_DEVICE), ==,
                         identities[i].class_id);
-        g_assert_cmphex(qtest_readb(qts, cfg + PCI_CLASS_PROG), ==,
+        g_assert_cmphex(ia64_cfg_readb(qts, b, d, 0, PCI_CLASS_PROG), ==,
                         identities[i].prog_if);
-        g_assert_cmphex(qtest_readw(qts, cfg + PCI_SUBSYSTEM_VENDOR_ID),
+        g_assert_cmphex(ia64_cfg_readw(qts, b, d, 0,
+                                       PCI_SUBSYSTEM_VENDOR_ID),
                         ==, identities[i].subsystem_vendor);
-        g_assert_cmphex(qtest_readw(qts, cfg + PCI_SUBSYSTEM_ID), ==,
+        g_assert_cmphex(ia64_cfg_readw(qts, b, d, 0, PCI_SUBSYSTEM_ID), ==,
                         identities[i].subsystem);
-        g_assert_cmphex(qtest_readb(qts, cfg + PCI_INTERRUPT_PIN), ==, 0);
+        g_assert_cmphex(ia64_cfg_readb(qts, b, d, 0, PCI_INTERRUPT_PIN), ==,
+                        0);
         for (bar = 0; bar < 6; bar++) {
-            g_assert_cmphex(qtest_readl(qts, cfg + PCI_BASE_ADDRESS_0 +
-                                        bar * 4), ==, 0);
+            g_assert_cmphex(ia64_cfg_readl(qts, b, d, 0,
+                                           PCI_BASE_ADDRESS_0 + bar * 4),
+                            ==, 0);
         }
     }
     qtest_quit(qts);
 
     /* zx1 is a different platform and carries none of them. */
     qts = qtest_init("-machine zx1 -m 256M -S");
-    g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
-                                ((uint64_t)IA64_460GX_PID_SLOT << 15)),
-                    ==, 0xffffffff);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_460GX_PID_SLOT, 0, 0), ==,
+                    0xffffffff);
     qtest_quit(qts);
 }
 
@@ -2292,11 +2294,62 @@ static void pit_counter0_program(QTestState *qts, uint8_t mode, uint16_t count)
     qtest_writeb(qts, counter0, count >> 8);
 }
 
+static uint8_t ia64_qpci_bus_number(QPCIBus *bus)
+{
+    QGenericPCIBus *gbus = container_of(bus, QGenericPCIBus, bus);
+
+    return (gbus->ecam_alloc_ptr - IA64_PCI_CONFIG_BASE) >> 20;
+}
+
+static uint8_t ia64_qpci_ports_config_readb(QPCIBus *bus, int devfn,
+                                            uint8_t offset)
+{
+    return ia64_cfg_readb(bus->qts, ia64_qpci_bus_number(bus), devfn >> 3,
+                          devfn & 7, offset);
+}
+
+static uint16_t ia64_qpci_ports_config_readw(QPCIBus *bus, int devfn,
+                                             uint8_t offset)
+{
+    return ia64_cfg_readw(bus->qts, ia64_qpci_bus_number(bus), devfn >> 3,
+                          devfn & 7, offset);
+}
+
+static uint32_t ia64_qpci_ports_config_readl(QPCIBus *bus, int devfn,
+                                             uint8_t offset)
+{
+    return ia64_cfg_readl(bus->qts, ia64_qpci_bus_number(bus), devfn >> 3,
+                          devfn & 7, offset);
+}
+
+static void ia64_qpci_ports_config_writeb(QPCIBus *bus, int devfn,
+                                          uint8_t offset, uint8_t value)
+{
+    ia64_cfg_writeb(bus->qts, ia64_qpci_bus_number(bus), devfn >> 3,
+                    devfn & 7, offset, value);
+}
+
+static void ia64_qpci_ports_config_writew(QPCIBus *bus, int devfn,
+                                          uint8_t offset, uint16_t value)
+{
+    ia64_cfg_writew(bus->qts, ia64_qpci_bus_number(bus), devfn >> 3,
+                    devfn & 7, offset, value);
+}
+
+static void ia64_qpci_ports_config_writel(QPCIBus *bus, int devfn,
+                                          uint8_t offset, uint32_t value)
+{
+    ia64_cfg_writel(bus->qts, ia64_qpci_bus_number(bus), devfn >> 3,
+                    devfn & 7, offset, value);
+}
+
 /*
- * The generic host helper addresses one bus: it builds config addresses as
- * ecam_alloc_ptr + (devfn << 12) + offset.  Offsetting the base by the bus
- * number therefore points the whole QPCIBus at that bus, which is how the
- * tests reach devices behind the 460GX expander roots.
+ * The generic host helper addresses one bus through ECAM: it builds config
+ * addresses as ecam_alloc_ptr + (devfn << 12) + offset, so offsetting the
+ * base by the bus number points the whole QPCIBus at that bus.  On 460gx the
+ * same field carries the bus number and the config accessors go through
+ * CF8/CFC instead, which is how the tests reach devices behind the
+ * expander roots on both machines.
  */
 static void ia64_qpci_init_on_bus(QGenericPCIBus *gbus, QTestState *qts,
                                   unsigned int bus)
@@ -2304,6 +2357,14 @@ static void ia64_qpci_init_on_bus(QGenericPCIBus *gbus, QTestState *qts,
     qpci_init_generic(gbus, qts, NULL, false);
     gbus->ecam_alloc_ptr = IA64_PCI_CONFIG_BASE + ((uint64_t)bus << 20);
     gbus->gpex_pio_base = IA64_LEGACY_IO_BASE;
+    if (ia64_cfg_by_ports(qts)) {
+        gbus->bus.config_readb = ia64_qpci_ports_config_readb;
+        gbus->bus.config_readw = ia64_qpci_ports_config_readw;
+        gbus->bus.config_readl = ia64_qpci_ports_config_readl;
+        gbus->bus.config_writeb = ia64_qpci_ports_config_writeb;
+        gbus->bus.config_writew = ia64_qpci_ports_config_writew;
+        gbus->bus.config_writel = ia64_qpci_ports_config_writel;
+    }
 }
 
 static void ia64_qpci_init(QGenericPCIBus *gbus, QTestState *qts)
@@ -2498,8 +2559,6 @@ static uint8_t rtc_bank_read(QTestState *qts, uint16_t index_port,
 
 static void test_460gx_south_bridge_rtc_banks(void)
 {
-    const uint64_t ifb_cfg = IA64_PCI_CONFIG_BASE +
-                             ((uint64_t)IA64_460GX_IFB_SLOT << 15);
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
 
     /*
@@ -2509,7 +2568,7 @@ static void test_460gx_south_bridge_rtc_banks(void)
      * extended bytes 08h-1Fh during POST, which through the alias would halt
      * the clock).  So a write through 0x70/0x71 must not show up at 0x72/0x73.
      */
-    g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG), ==,
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_RTCCFG), ==,
                     IA64_RTCCFG_UPPER_EN);
     rtc_bank_write(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH, 0x5a);
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
@@ -2521,13 +2580,13 @@ static void test_460gx_south_bridge_rtc_banks(void)
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x0b) & 0x80, ==, 0x00);
 
     /* Clearing the bit makes 0x72/0x73 alias the standard bank. */
-    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, 0x00);
+    ia64_cfg_writeb(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_RTCCFG, 0x00);
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
                     ==, 0x5a);
 
     /* With Upper RAM Enable set again they reach their own bank. */
-    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
-    g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG) &
+    ia64_cfg_writeb(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_RTCCFG) &
                     IA64_RTCCFG_UPPER_EN, ==, IA64_RTCCFG_UPPER_EN);
     rtc_bank_write(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH, 0xa5);
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
@@ -2537,7 +2596,7 @@ static void test_460gx_south_bridge_rtc_banks(void)
                     ==, 0x5a);
 
     /* Clearing the bit puts the alias back, and the standard byte reappears. */
-    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, 0x00);
+    ia64_cfg_writeb(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_RTCCFG, 0x00);
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
                     ==, 0x5a);
 
@@ -2545,15 +2604,14 @@ static void test_460gx_south_bridge_rtc_banks(void)
      * Lock Upper RAM Bytes: 38h-3Fh of the extended bank stop reading and
      * writing, and the bit is write-once -- clearing it must not unlock.
      */
-    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
+    ia64_cfg_writeb(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
     rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x38, 0x3c);
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x38), ==, 0x3c);
-    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG,
-                 IA64_RTCCFG_UPPER_EN | IA64_RTCCFG_LOCK_UPPER);
+    ia64_cfg_writeb(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_RTCCFG, IA64_RTCCFG_UPPER_EN | IA64_RTCCFG_LOCK_UPPER);
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x38), ==, 0xff);
     rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x38, 0x11);
-    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
-    g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG) &
+    ia64_cfg_writeb(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_RTCCFG) &
                     IA64_RTCCFG_LOCK_UPPER, ==, IA64_RTCCFG_LOCK_UPPER);
     /* Byte 40h is outside the locked range and still answers. */
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
@@ -2706,6 +2764,91 @@ static void cf8_writel(QTestState *qts, uint8_t bus, uint8_t device,
     cf8_select(qts, bus, device, function, reg);
     qtest_writel(qts, IA64_LEGACY_IO_BASE +
                  ia64_sparse_io_offset(IA64_CFC_PORT), value);
+}
+
+static bool ia64_cfg_by_ports(QTestState *qts)
+{
+    QDict *resp = qtest_qmp(qts, "{ 'execute': 'qom-get', 'arguments': "
+                            "{ 'path': '/machine', 'property': 'type' } }");
+    bool ports = g_str_has_prefix(qdict_get_str(resp, "return"), "460gx");
+
+    qobject_unref(resp);
+    return ports;
+}
+
+static uint64_t ia64_cfg_ecam_addr(uint8_t bus, uint8_t dev, uint8_t fn,
+                                   uint8_t reg)
+{
+    return IA64_PCI_CONFIG_BASE + ((uint64_t)bus << 20) +
+           ((uint64_t)dev << 15) + ((uint64_t)fn << 12) + reg;
+}
+
+/* The data port's byte lanes: CFCh..CFFh in the sparse I/O view. */
+static uint64_t ia64_cfg_cfc_addr(uint8_t reg)
+{
+    return IA64_LEGACY_IO_BASE +
+           ia64_sparse_io_offset(IA64_CFC_PORT + (reg & 3));
+}
+
+static uint32_t ia64_cfg_readl(QTestState *qts, uint8_t bus, uint8_t dev,
+                               uint8_t fn, uint8_t reg)
+{
+    if (ia64_cfg_by_ports(qts)) {
+        return cf8_readl(qts, bus, dev, fn, reg);
+    }
+    return qtest_readl(qts, ia64_cfg_ecam_addr(bus, dev, fn, reg));
+}
+
+static uint16_t ia64_cfg_readw(QTestState *qts, uint8_t bus, uint8_t dev,
+                               uint8_t fn, uint8_t reg)
+{
+    if (ia64_cfg_by_ports(qts)) {
+        cf8_select(qts, bus, dev, fn, reg);
+        return qtest_readw(qts, ia64_cfg_cfc_addr(reg));
+    }
+    return qtest_readw(qts, ia64_cfg_ecam_addr(bus, dev, fn, reg));
+}
+
+static uint8_t ia64_cfg_readb(QTestState *qts, uint8_t bus, uint8_t dev,
+                              uint8_t fn, uint8_t reg)
+{
+    if (ia64_cfg_by_ports(qts)) {
+        cf8_select(qts, bus, dev, fn, reg);
+        return qtest_readb(qts, ia64_cfg_cfc_addr(reg));
+    }
+    return qtest_readb(qts, ia64_cfg_ecam_addr(bus, dev, fn, reg));
+}
+
+static void ia64_cfg_writel(QTestState *qts, uint8_t bus, uint8_t dev,
+                            uint8_t fn, uint8_t reg, uint32_t value)
+{
+    if (ia64_cfg_by_ports(qts)) {
+        cf8_writel(qts, bus, dev, fn, reg, value);
+        return;
+    }
+    qtest_writel(qts, ia64_cfg_ecam_addr(bus, dev, fn, reg), value);
+}
+
+static void ia64_cfg_writew(QTestState *qts, uint8_t bus, uint8_t dev,
+                            uint8_t fn, uint8_t reg, uint16_t value)
+{
+    if (ia64_cfg_by_ports(qts)) {
+        cf8_select(qts, bus, dev, fn, reg);
+        qtest_writew(qts, ia64_cfg_cfc_addr(reg), value);
+        return;
+    }
+    qtest_writew(qts, ia64_cfg_ecam_addr(bus, dev, fn, reg), value);
+}
+
+static void ia64_cfg_writeb(QTestState *qts, uint8_t bus, uint8_t dev,
+                            uint8_t fn, uint8_t reg, uint8_t value)
+{
+    if (ia64_cfg_by_ports(qts)) {
+        cf8_select(qts, bus, dev, fn, reg);
+        qtest_writeb(qts, ia64_cfg_cfc_addr(reg), value);
+        return;
+    }
+    qtest_writeb(qts, ia64_cfg_ecam_addr(bus, dev, fn, reg), value);
 }
 
 /*
@@ -3200,14 +3343,13 @@ static void test_460gx_sac_indexed_file(void)
 static void test_460gx_pcis_window(void)
 {
     /* The OHCI at 00:02.0 on the compatibility bus; HcRevision reads 10h. */
-    const uint64_t cfg = IA64_PCI_CONFIG_BASE + (2ULL << 15);
     const uint64_t bar = 0xa9000000ULL;
     const uint64_t cfc = IA64_LEGACY_IO_BASE +
                          ia64_sparse_io_offset(IA64_CFC_PORT);
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
 
-    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_0, bar);
-    qtest_writew(qts, cfg + PCI_COMMAND, PCI_COMMAND_MEMORY);
+    ia64_cfg_writel(qts, 0, 2, 0, PCI_BASE_ADDRESS_0, bar);
+    ia64_cfg_writew(qts, 0, 2, 0, PCI_COMMAND, PCI_COMMAND_MEMORY);
     g_assert_cmphex(qtest_readl(qts, bar), !=, 0x10);
 
     /* The compatibility port alone opens the gap from B4000000. */
@@ -3215,9 +3357,9 @@ static void test_460gx_pcis_window(void)
     qtest_writeb(qts, cfc, 0x5a);
     g_assert_cmphex(qtest_readl(qts, bar), !=, 0x10);
     g_assert_cmphex(qtest_readl(qts, 0xb5000000ULL), !=, 0x10);
-    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_0, 0xb5000000);
+    ia64_cfg_writel(qts, 0, 2, 0, PCI_BASE_ADDRESS_0, 0xb5000000);
     g_assert_cmphex(qtest_readl(qts, 0xb5000000ULL), ==, 0x10);
-    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_0, bar);
+    ia64_cfg_writel(qts, 0, 2, 0, PCI_BASE_ADDRESS_0, bar);
 
     /* The GXB's PCIS at A8000000 brings the lower window in. */
     cf8_select(qts, 0xff, 0x14, 0, 0x84);
@@ -3816,17 +3958,13 @@ static void test_pci_default_layout(void)
         assert_pci_device(&gbus.bus, &devices[i]);
     }
     for (i = 0; i < ARRAY_SIZE(gxb_vga); i++) {
-        uint64_t cfg = IA64_PCI_CONFIG_BASE +
-                       ((uint64_t)IA64_460GX_GXB_BUS << 20);
-
-        g_assert_cmphex(qtest_readl(qts, cfg + gxb_vga[i].reg), ==,
+        g_assert_cmphex(ia64_cfg_readl(qts, IA64_460GX_GXB_BUS, 0, 0,
+                                       gxb_vga[i].reg), ==,
                         gxb_vga[i].value);
     }
     for (i = 0; i < ARRAY_SIZE(wxb0_scsi); i++) {
-        uint64_t cfg = IA64_PCI_CONFIG_BASE +
-                       ((uint64_t)IA64_460GX_WXB0_BUS << 20);
-
-        g_assert_cmphex(qtest_readl(qts, cfg + wxb0_scsi[i].reg), ==,
+        g_assert_cmphex(ia64_cfg_readl(qts, IA64_460GX_WXB0_BUS, 0, 0,
+                                       wxb0_scsi[i].reg), ==,
                         wxb0_scsi[i].value);
     }
     for (i = 0; i < G_N_ELEMENTS(ifb_functions); i++) {

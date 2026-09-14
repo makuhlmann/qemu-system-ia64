@@ -439,6 +439,7 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
     imc->pci0_intx = ia64_i2000_pci0_intx;
     imc->pci0_nintx = ARRAY_SIZE(ia64_i2000_pci0_intx);
     imc->has_south_bridge = true;
+    imc->pci_config_ecam = false;
     /*
      * The i2000 and the other 460GX workstations carry a Super-I/O PS/2
      * controller, and PS/2 was the input of choice on them, so 460gx keeps

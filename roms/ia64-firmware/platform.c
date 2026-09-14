@@ -177,6 +177,39 @@ BOOLEAN fw_acpi_sci_override(UINT32 *Gsi, UINT16 *Flags)
  * on.  The block's SCI_EN stays clear: the OS raises it through the SMI
  * command port, as on the real board.
  */
+/*
+ * Give the 460GX's expander ports their bus numbers, as POST does before it
+ * scans them: each port claims configuration cycles for the bus range
+ * [BUSNO, SUBNO] (SSDM 2.3.1).  The ports sit on bus CBN (programmed to EEh
+ * before this runs) at the device numbers of Table 2-1: 12h and 13h are
+ * the two WXBs, 14h the GXB.  Port 10h is the compatibility bus, bus 0
+ * whatever its pair says.  The numbers are the ones this firmware's DSDT
+ * reports for the roots; the chipset's PCIS windows stay unprogrammed so
+ * the DRAM band keeps the layout the memory map describes.
+ */
+void fw_platform_init_expander_ports(void)
+{
+    static const struct {
+        UINT8 Device;
+        UINT8 Bus;
+    } ports[] = {
+        { 0x12, IA64_460GX_WXB0_BUS },
+        { 0x13, IA64_460GX_WXB1_BUS },
+        { 0x14, IA64_460GX_GXB_BUS },
+    };
+    UINTN i;
+
+    if (!fw_platform_is_460gx()) {
+        return;
+    }
+    for (i = 0; i < FW_ARRAY_SIZE(ports); i++) {
+        pci_config_write_value(0, IA64_460GX_CBN_BUS, ports[i].Device, 0,
+                               0x48, 1, ports[i].Bus);
+        pci_config_write_value(0, IA64_460GX_CBN_BUS, ports[i].Device, 0,
+                               0x49, 1, ports[i].Bus);
+    }
+}
+
 void fw_platform_init_south_bridge(void)
 {
     if (!fw_platform_is_460gx()) {
@@ -1203,15 +1236,33 @@ BOOLEAN __attribute__((noinline)) sal_update_pal_selftest(void)
            readonly.Value1 == 0 && readonly.Value2 == 0;
 }
 
+/*
+ * The configuration mechanism follows the chipset.  The 460GX has only the
+ * CF8/CFC pair in legacy I/O space (SSDM 2.3.1), so its window is the I/O
+ * port space; the zx1 machine keeps the segment-0 ECAM window until its
+ * firmware work settles the mechanism.  Either window is described RUNTIME
+ * and reached through the SetVirtualAddressMap-converted pointer
+ * (mRuntimePciConfigEcam) once the OS has switched to virtual mode.
+ */
+BOOLEAN fw_pci_config_by_ports(void)
+{
+    return fw_platform_is_460gx();
+}
+
+UINT64 fw_pci_config_window_base(void)
+{
+    return fw_pci_config_by_ports() ? LEGACY_IO_BASE : PCI_CONFIG_ECAM_BASE;
+}
+
 static UINT64 pci_config_cpu_base_for_mode(BOOLEAN Translated)
 {
     if (!Translated) {
-        return PCI_CONFIG_ECAM_BASE;
+        return fw_pci_config_window_base();
     }
     if (mVirtualAddressMapApplied) {
         return mRuntimePciConfigEcam;
     }
-    return IA64_REGION6_BASE | PCI_CONFIG_ECAM_BASE;
+    return IA64_REGION6_BASE | fw_pci_config_window_base();
 }
 
 static UINT64 pci_config_cpu_base(void)
@@ -1249,6 +1300,28 @@ pci_config_ecam_addr(UINT64 Segment, UINT64 Bus, UINT64 Device,
                                           Device, Function, Offset);
 }
 
+/*
+ * CF8/CFC: the address register takes the type 1 form (enable, bus,
+ * device, function, dword register); the data port answers the dword's
+ * bytes at CFCh..CFFh.  Only the 256-byte header is reachable this way.
+ */
+static BOOLEAN pci_config_ports_select(UINT64 Segment, UINT64 Bus,
+                                       UINT64 Device, UINT64 Function,
+                                       UINT64 Offset, volatile UINT8 **Data)
+{
+    UINT64 base = pci_config_cpu_base();
+    volatile UINT32 *address = (volatile UINT32 *)(UINTN)(base + 0xcf8U);
+
+    if (Segment != 0 || Bus > 0xff || Device > 0x1f || Function > 7 ||
+        Offset >= 0x100) {
+        return 0;
+    }
+    *address = 0x80000000U | ((UINT32)Bus << 16) | ((UINT32)Device << 11) |
+               ((UINT32)Function << 8) | ((UINT32)Offset & 0xfcU);
+    *Data = (volatile UINT8 *)(UINTN)(base + 0xcfcU + (Offset & 3U));
+    return 1;
+}
+
 UINT64 pci_config_read_value(UINT64 Segment, UINT64 Bus, UINT64 Device,
                                     UINT64 Function, UINT64 Offset,
                                     UINTN Size)
@@ -1256,10 +1329,21 @@ UINT64 pci_config_read_value(UINT64 Segment, UINT64 Bus, UINT64 Device,
     volatile UINT8 *p8;
     volatile UINT16 *p16;
     volatile UINT32 *p32;
-    UINT64 addr = pci_config_ecam_addr(Segment, Bus, Device, Function, Offset);
+    UINT64 addr;
 
-    if (addr == 0) {
-        return pci_config_all_ones(Size);
+    if (fw_pci_config_by_ports()) {
+        volatile UINT8 *data;
+
+        if (!pci_config_ports_select(Segment, Bus, Device, Function, Offset,
+                                     &data)) {
+            return pci_config_all_ones(Size);
+        }
+        addr = (UINT64)(UINTN)data;
+    } else {
+        addr = pci_config_ecam_addr(Segment, Bus, Device, Function, Offset);
+        if (addr == 0) {
+            return pci_config_all_ones(Size);
+        }
     }
 
     switch (Size) {
@@ -1282,10 +1366,21 @@ void pci_config_write_value(UINT64 Segment, UINT64 Bus, UINT64 Device,
     volatile UINT8 *p8;
     volatile UINT16 *p16;
     volatile UINT32 *p32;
-    UINT64 addr = pci_config_ecam_addr(Segment, Bus, Device, Function, Offset);
+    UINT64 addr;
 
-    if (addr == 0) {
-        return;
+    if (fw_pci_config_by_ports()) {
+        volatile UINT8 *data;
+
+        if (!pci_config_ports_select(Segment, Bus, Device, Function, Offset,
+                                     &data)) {
+            return;
+        }
+        addr = (UINT64)(UINTN)data;
+    } else {
+        addr = pci_config_ecam_addr(Segment, Bus, Device, Function, Offset);
+        if (addr == 0) {
+            return;
+        }
     }
 
     switch (Size) {
@@ -1398,9 +1493,9 @@ BOOLEAN __attribute__((noinline)) sal_pci_config_selftest(void)
     UINTN virtual_ecam = 0xe0000000d0018000ULL;
 
     mVirtualAddressMapApplied = 0;
-    if (pci_config_cpu_base_for_mode(0) != PCI_CONFIG_ECAM_BASE ||
+    if (pci_config_cpu_base_for_mode(0) != fw_pci_config_window_base() ||
         pci_config_cpu_base_for_mode(1) !=
-            (IA64_REGION6_BASE | PCI_CONFIG_ECAM_BASE)) {
+            (IA64_REGION6_BASE | fw_pci_config_window_base())) {
         mRuntimePciConfigEcam = saved_runtime_ecam;
         mVirtualAddressMapApplied = saved_virtual_map_applied;
         return 0;

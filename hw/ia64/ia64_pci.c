@@ -13,6 +13,7 @@
 #include "hw/pci/pci_bus.h"
 #include "system/address-spaces.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "qom/object.h"
 
 OBJECT_DECLARE_SIMPLE_TYPE(IA64PCIState, IA64_PCI_HOST_BRIDGE)
@@ -27,6 +28,8 @@ struct IA64PCIState {
     MemoryRegion pci_io;
     MemoryRegion pci_io_sparse;
     MemoryRegion pci_config;
+    /* Map the segment-0 ECAM window; a chipset with CF8/CFC only has none. */
+    bool ecam;
     AddressSpace pci_io_as;
     qemu_irq irq[IA64_PCI_INTX_MAX_OUTPUTS];
     const IA64IntxRoute *intx_routes;
@@ -366,8 +369,10 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
                                         IA64_PCI_IO_BASE +
                                         IA64_PCI_IO_SPARSE_SKIP,
                                         &s->pci_io_sparse, 1);
-    memory_region_add_subregion(get_system_memory(), IA64_PCI_CONFIG_BASE,
-                                &s->pci_config);
+    if (s->ecam) {
+        memory_region_add_subregion(get_system_memory(),
+                                    IA64_PCI_CONFIG_BASE, &s->pci_config);
+    }
 }
 
 void ia64_pci_host_set_low_mmio_window(DeviceState *pci_host, uint64_t base)
@@ -414,10 +419,15 @@ void ia64_pci_host_set_mercury_bus(DeviceState *pci_host, PCIBus *bus)
     ia64_pci_host_add_secondary_bus(pci_host, bus);
 }
 
+static const Property ia64_pci_properties[] = {
+    DEFINE_PROP_BOOL("ecam", IA64PCIState, ecam, true),
+};
+
 static void ia64_pci_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
+    device_class_set_props(dc, ia64_pci_properties);
     dc->realize = ia64_pci_realize;
 }
 

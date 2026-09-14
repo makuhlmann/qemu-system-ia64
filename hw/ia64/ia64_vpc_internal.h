@@ -97,6 +97,12 @@ struct IA64VpcMachineClass {
     unsigned int pci0_nintx;
     /* The board carries the 82468GX south bridge (and its IDE function). */
     bool has_south_bridge;
+    /*
+     * Configuration space is reached through a segment-0 ECAM window.  The
+     * 460GX has only CF8/CFC (SSDM 2.3.1); zx1 keeps the window until its
+     * firmware work settles the mechanism.
+     */
+    bool pci_config_ecam;
     /* Default of the i8042 option. */
     bool i8042_default;
     /* The console is COM1 (3F8h, IRQ 4); a debug port is COM2 (2F8h, IRQ 3). */

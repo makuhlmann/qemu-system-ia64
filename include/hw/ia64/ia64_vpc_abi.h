@@ -325,6 +325,8 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_460GX_WXB0_BUS           0x01
 #define IA64_460GX_WXB1_BUS           0x02
 #define IA64_460GX_GXB_BUS            0x03
+/* Where the vendor firmware parks the chipset's own bus (SSDM 2.3.2). */
+#define IA64_460GX_CBN_BUS            0xee
 /* Stable indices into the machine's expander arrays, not creation order. */
 #define IA64_460GX_ROOT_WXB0          0
 #define IA64_460GX_ROOT_WXB1          1
