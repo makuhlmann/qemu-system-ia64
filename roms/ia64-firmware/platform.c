@@ -318,8 +318,8 @@ static UINTN                  mGuestHighRamCount;
 static const IA64NvramDefaults *fw_nvram_defaults(void)
 {
     const IA64NvramDefaults *defaults =
-        (const IA64NvramDefaults *)(UINTN)(FW_NVRAM_BASE +
-                                           IA64_NVRAM_DEFAULTS_OFFSET);
+        (const IA64NvramDefaults *)(fw_nvram_image() +
+                                    IA64_NVRAM_DEFAULTS_OFFSET);
 
     if (defaults->Magic != IA64_NVRAM_DEFAULTS_MAGIC ||
         defaults->Version == 0 ||

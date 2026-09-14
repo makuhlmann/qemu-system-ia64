@@ -383,15 +383,14 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_WATCHDOG_TIMEOUT_OFFSET  0x00U
 #define IA64_WATCHDOG_CODE_OFFSET     0x08U
 /*
- * EFI variable store, standing in for the flash variable sector.  The real
- * i2000/SDV flash keeps its NVRAM/variable scratch block at 0xFFF90000
- * (FIT type 0x1E, 128 KB - plans/sdv-i2000-firmware-reference.md sec 11),
- * so the window sits at that address.
+ * The flash's NVRAM sector, the EFI variable store.  The real i2000/SDV
+ * flash keeps its NVRAM/variable scratch block at 0xFFF90000 (FIT type
+ * 0x1E - plans/sdv-i2000-firmware-reference.md sec 11); the project
+ * firmware's image declares one 64 KiB block there and programs it through
+ * the flash's command interface.
  */
 #define IA64_NVRAM_BASE               IA64_U64(0x00000000fff90000)
 #define IA64_NVRAM_SIZE               IA64_U64(0x0000000000010000)
-#define IA64_NVRAM_COMMIT_OFFSET      (IA64_NVRAM_SIZE - 8U)
-#define IA64_NVRAM_COMMIT_MAGIC       IA64_U64(0x54494d4d4f43564e) /* "NVCOMMIT" */
 /*
  * The zx1 machine's ACPI PM block in PCI I/O port space, and the SCI it
  * raises.  A stand-in until the zx1 firmware work shows the real block.

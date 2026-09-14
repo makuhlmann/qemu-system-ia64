@@ -52,6 +52,7 @@
 #include "migration/vmstate.h"
 #include "system/blockdev.h"
 #include "system/runstate.h"
+#include "qemu/timer.h"
 #include "trace.h"
 
 #define PFLASH_BE          0
@@ -94,6 +95,16 @@ struct PFlashCFI01 {
     void *storage;
     uint8_t *block_lock;        /* one lock register per block, or NULL */
     VMChangeStateEntry *vmstate;
+    /*
+     * Backing-file writes the part owes, merged into one range and written
+     * shortly after the last program or erase (and whenever the VM stops).
+     * The array itself is always current; only the host file lags, so a
+     * byte-at-a-time program sequence costs one host write, not one each.
+     */
+    uint64_t dirty_start;
+    uint64_t dirty_end;         /* 0 = nothing pending */
+    QEMUTimer *flush_timer;
+    VMChangeStateEntry *flush_vmstate;
 
     /* block update buffer */
     unsigned char *blk_bytes;
@@ -433,22 +444,61 @@ static uint32_t pflash_read(PFlashCFI01 *pfl, hwaddr offset,
 }
 
 /* update flash content on disk */
+#define PFLASH_FLUSH_DELAY_MS 50
+
+static void pflash_flush(PFlashCFI01 *pfl)
+{
+    uint64_t offset, offset_end;
+    int ret;
+
+    if (pfl->blk == NULL || pfl->dirty_end == 0) {
+        return;
+    }
+    /* widen to sector boundaries */
+    offset = QEMU_ALIGN_DOWN(pfl->dirty_start, BDRV_SECTOR_SIZE);
+    offset_end = QEMU_ALIGN_UP(pfl->dirty_end, BDRV_SECTOR_SIZE);
+    pfl->dirty_start = 0;
+    pfl->dirty_end = 0;
+    ret = blk_pwrite(pfl->blk, offset, offset_end - offset,
+                     pfl->storage + offset, 0);
+    if (ret < 0) {
+        /* TODO set error bit in status */
+        error_report("Could not update PFLASH: %s", strerror(-ret));
+    }
+}
+
+static void pflash_flush_timer_cb(void *opaque)
+{
+    pflash_flush(opaque);
+}
+
+static void pflash_flush_vm_state_cb(void *opaque, bool running,
+                                     RunState state)
+{
+    if (!running) {
+        pflash_flush(opaque);
+    }
+}
+
 static void pflash_update(PFlashCFI01 *pfl, int offset,
                           int size)
 {
-    int offset_end;
-    int ret;
-    if (pfl->blk) {
-        offset_end = offset + size;
-        /* widen to sector boundaries */
-        offset = QEMU_ALIGN_DOWN(offset, BDRV_SECTOR_SIZE);
-        offset_end = QEMU_ALIGN_UP(offset_end, BDRV_SECTOR_SIZE);
-        ret = blk_pwrite(pfl->blk, offset, offset_end - offset,
-                         pfl->storage + offset, 0);
-        if (ret < 0) {
-            /* TODO set error bit in status */
-            error_report("Could not update PFLASH: %s", strerror(-ret));
-        }
+    if (pfl->blk == NULL || size <= 0) {
+        return;
+    }
+    if (pfl->dirty_end == 0) {
+        pfl->dirty_start = offset;
+        pfl->dirty_end = (uint64_t)offset + size;
+    } else {
+        pfl->dirty_start = MIN(pfl->dirty_start, (uint64_t)offset);
+        pfl->dirty_end = MAX(pfl->dirty_end, (uint64_t)offset + size);
+    }
+    if (pfl->flush_timer != NULL) {
+        timer_mod(pfl->flush_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                  PFLASH_FLUSH_DELAY_MS);
+    } else {
+        pflash_flush(pfl);
     }
 }
 
@@ -752,6 +802,8 @@ static void pflash_write(PFlashCFI01 *pfl, hwaddr offset,
  mode_read_array:
     trace_pflash_mode_read_array(pfl->name);
     memory_region_rom_device_set_romd(&pfl->mem, true);
+    /* A program or erase sequence ends here: bring the host file up to date. */
+    pflash_flush(pfl);
     pfl->wcycle = 0;
     pfl->cmd = 0x00; /* This model reset value for READ_ARRAY (not CFI) */
 }
@@ -968,6 +1020,13 @@ static void pflash_cfi01_realize(DeviceState *dev, Error **errp)
 
     pfl->blk_bytes = g_malloc(pfl->writeblock_size);
     pfl->blk_offset = -1;
+
+    if (pfl->blk && !pfl->ro) {
+        pfl->flush_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                        pflash_flush_timer_cb, pfl);
+        pfl->flush_vmstate =
+            qemu_add_vm_change_state_handler(pflash_flush_vm_state_cb, pfl);
+    }
 }
 
 static void pflash_cfi01_system_reset(DeviceState *dev)
@@ -1132,6 +1191,7 @@ static void postload_update_cb(void *opaque, bool running, RunState state)
 
     trace_pflash_postload_cb(pfl->name);
     pflash_update(pfl, 0, pfl->sector_len * pfl->nb_blocs);
+    pflash_flush(pfl);
 }
 
 static int pflash_post_load(void *opaque, int version_id)

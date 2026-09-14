@@ -707,7 +707,7 @@ static void test_acpi_reset_register(void)
 /*
  * The firmware defaults record the machine seeds into the NVRAM store from
  * its options (console policy, IDE DMA, boot timeout, memory-map quirks);
- * read back through the NVRAM window.
+ * read back from the flash's NVRAM sector.
  */
 static void assert_nvram_defaults(QTestState *qts, uint64_t console,
                                   uint64_t ide_dma, uint64_t timeout,
@@ -733,14 +733,101 @@ static void assert_nvram_defaults(QTestState *qts, uint64_t console,
      IA64_FW_QUIRK_LOW_BOUNDARIES | IA64_FW_QUIRK_LOW_ANCHOR | \
      IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF)
 
+/*
+ * A synthetic flash image large enough to carry the NVRAM sector at
+ * 0xFFF90000: 512 KiB ending at 4 GiB, with a reset pointer block and a
+ * FIT header, all erased otherwise but for the defaults record's magic.
+ */
+static char *ia64_make_nvram_flash_image(const char *tmpdir)
+{
+    const uint64_t image_size = 0x80000;
+    const uint64_t base = 0x100000000ULL - image_size;
+    const uint64_t fit_addr = 0x100000000ULL - 0x10000;   /* clear of the sector */
+    const uint64_t sale_addr = base + 0x8000;
+    g_autofree uint8_t *image = g_malloc(image_size);
+    g_autoptr(GError) error = NULL;
+    char *path = g_build_filename(tmpdir, "flash.bin", NULL);
+    uint8_t *fit;
+
+    memset(image, 0xff, image_size);
+    fit = image + (fit_addr - base);
+    /* Header, a 64 KiB code component at the base, the NVRAM block, unused. */
+    memcpy(fit, "_FIT_   ", 8);
+    stq_le_p(fit + 8, 0x0100000000000004ULL);
+    stq_le_p(fit + 16, base);
+    stq_le_p(fit + 24, 0x0190010000001000ULL);
+    stq_le_p(fit + 32, IA64_NVRAM_BASE);
+    stq_le_p(fit + 40, 0x019e010000001000ULL);
+    stq_le_p(fit + 48, 0);
+    stq_le_p(fit + 56, 0x00ff000000000000ULL);
+    stq_le_p(image, 0x0123456789abcdefULL);            /* component content */
+    stq_le_p(image + image_size - 32, (1ULL << 63) | fit_addr);
+    stq_le_p(image + image_size - 24, (1ULL << 63) | sale_addr);
+    /* The defaults record's magic: the machine refreshes the record. */
+    stq_le_p(image + (IA64_NVRAM_BASE - base) + IA64_NVRAM_DEFAULTS_OFFSET,
+             IA64_NVRAM_DEFAULTS_MAGIC);
+    stq_le_p(image + (IA64_NVRAM_BASE - base) + IA64_NVRAM_DEFAULTS_OFFSET +
+             8, IA64_NVRAM_DEFAULTS_VERSION);
+    g_assert_true(g_file_set_contents(path, (char *)image, image_size,
+                                      &error));
+    return path;
+}
+
+/*
+ * The 82802AC's block lock register: command 91h at the block base, then
+ * the lock value at base+2 (00h unlocked).  Blocks are locked out of reset.
+ */
+static void ia64_flash_unlock_block(QTestState *qts, uint64_t block)
+{
+    qtest_writeb(qts, block, 0x91);
+    qtest_writeb(qts, block + 2, 0x00);
+}
+
+/* Program one byte through the flash's command interface (40h, data). */
+static void ia64_flash_program_byte(QTestState *qts, uint64_t addr,
+                                    uint8_t value)
+{
+    qtest_writeb(qts, addr, 0x40);
+    qtest_writeb(qts, addr, value);
+}
+
+/* Start 460gx on a synthetic flash image that carries the record's magic. */
+static QTestState *ia64_vpc_start_with_nvram_flash(const char *machine_opts,
+                                                   char **tmpdir_out,
+                                                   char **flash_out)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *quoted = NULL;
+    char *tmpdir = g_dir_make_tmp("ia64-vpc-flash-XXXXXX", &error);
+    char *flash;
+
+    g_assert_no_error(error);
+    flash = ia64_make_nvram_flash_image(tmpdir);
+    quoted = g_shell_quote(flash);
+    *tmpdir_out = tmpdir;
+    *flash_out = flash;
+    return qtest_initf("-machine 460gx,nvram=none%s -bios %s -m 256M -S",
+                       machine_opts, quoted);
+}
+
+static void ia64_vpc_drop_nvram_flash(char *tmpdir, char *flash)
+{
+    g_assert_cmpint(g_unlink(flash), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+    g_free(flash);
+    g_free(tmpdir);
+}
+
 static void test_nvram_defaults(void)
 {
-    QTestState *qts = ia64_vpc_start(NULL);
+    char *tmpdir, *flash;
+    QTestState *qts = ia64_vpc_start_with_nvram_flash("", &tmpdir, &flash);
 
     assert_nvram_defaults(qts, IA64_FW_CONSOLE_VGA, 1,
                           IA64_FW_BOOT_TIMEOUT_WAIT_FOREVER,
                           IA64_TEST_QUIRKS_DEFAULT);
     qtest_quit(qts);
+    ia64_vpc_drop_nvram_flash(tmpdir, flash);
 }
 
 /* The zx1 machine writes the zx1 firmware personality. */
@@ -1620,13 +1707,15 @@ static void test_nvram_defaults_options(void)
      * A finite firmware-boot-timeout, a serial console and IDE DMA off all
      * reach the firmware through the defaults record.
      */
-    QTestState *qts = qtest_init("-machine 460gx,firmware-boot-timeout=5,"
-                                 "firmware-console=serial,"
-                                 "firmware-ide-dma=off -m 256M -S");
+    char *tmpdir, *flash;
+    QTestState *qts = ia64_vpc_start_with_nvram_flash(
+        ",firmware-boot-timeout=5,firmware-console=serial,"
+        "firmware-ide-dma=off", &tmpdir, &flash);
 
     assert_nvram_defaults(qts, IA64_FW_CONSOLE_SERIAL, 0, 5,
                           IA64_TEST_QUIRKS_DEFAULT);
     qtest_quit(qts);
+    ia64_vpc_drop_nvram_flash(tmpdir, flash);
 }
 
 static void test_smp_topology(gconstpointer opaque)
@@ -1766,41 +1855,99 @@ static void test_rtc_aligned_read(void)
     qtest_quit(qts);
 }
 
+/*
+ * The NVRAM sector is flash: bytes programmed through the command interface
+ * reach the persistence file and come back on the next run, while a rebuilt
+ * image's components replace the old ones.  A file holding only the 64 KiB
+ * variable store of the earlier NVRAM window is imported.
+ */
 static void test_nvram_commit_and_restart(void)
 {
     const uint64_t test_value = 0x1122334455667788ULL;
+    const uint64_t legacy_value = 0xa5a5a5a55a5a5a5aULL;
+    const uint64_t image_size = 0x80000;
+    const uint64_t sector = IA64_NVRAM_BASE - (0x100000000ULL - image_size);
     g_autofree char *tmpdir = NULL;
+    g_autofree char *flash = NULL;
+    g_autofree char *quoted_flash = NULL;
     g_autofree char *path = NULL;
     g_autofree char *quoted_path = NULL;
     g_autofree char *contents = NULL;
     g_autoptr(GError) error = NULL;
     gsize length = 0;
     QTestState *qts;
+    unsigned int i;
 
     tmpdir = g_dir_make_tmp("ia64-vpc-nvram-XXXXXX", &error);
     g_assert_no_error(error);
     g_assert_nonnull(tmpdir);
+    flash = ia64_make_nvram_flash_image(tmpdir);
+    quoted_flash = g_shell_quote(flash);
     path = g_build_filename(tmpdir, "nvram.bin", NULL);
     quoted_path = g_shell_quote(path);
 
-    qts = qtest_initf("-machine 460gx,nvram=%s -m 256M -S",
-                      quoted_path);
-    qtest_writeq(qts, IA64_NVRAM_BASE, test_value);
-    qtest_writeq(qts, IA64_NVRAM_BASE + IA64_NVRAM_COMMIT_OFFSET,
-                 IA64_NVRAM_COMMIT_MAGIC);
+    qts = qtest_initf("-machine 460gx,nvram=%s -bios %s -m 256M -S",
+                      quoted_path, quoted_flash);
+    g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, ~0ULL);
+    /* A locked block refuses the program and leaves the array alone. */
+    ia64_flash_program_byte(qts, IA64_NVRAM_BASE, 0x00);
+    qtest_writeb(qts, IA64_NVRAM_BASE, 0xff);        /* read array */
+    g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, ~0ULL);
+    ia64_flash_unlock_block(qts, IA64_NVRAM_BASE);
+    for (i = 0; i < 8; i++) {
+        ia64_flash_program_byte(qts, IA64_NVRAM_BASE + i,
+                                (test_value >> (i * 8)) & 0xff);
+    }
+    qtest_writeb(qts, IA64_NVRAM_BASE, 0xff);        /* read array */
+    g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, test_value);
     qtest_quit(qts);
 
     g_assert_true(g_file_get_contents(path, &contents, &length, &error));
     g_assert_no_error(error);
-    g_assert_cmpuint(length, ==, IA64_NVRAM_SIZE);
-    g_assert_cmphex(ldq_le_p(contents), ==, test_value);
+    g_assert_cmpuint(length, ==, image_size);
+    g_assert_cmphex(ldq_le_p(contents + sector), ==, test_value);
 
-    qts = qtest_initf("-machine 460gx,nvram=%s -m 256M -S",
-                      quoted_path);
+    qts = qtest_initf("-machine 460gx,nvram=%s -bios %s -m 256M -S",
+                      quoted_path, quoted_flash);
     g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, test_value);
     qtest_quit(qts);
 
+    /*
+     * A rebuilt image: its FIT-declared component comes from -bios, the
+     * NVRAM sector from the file.
+     */
+    {
+        g_autofree char *image = NULL;
+        gsize image_len = 0;
+
+        g_assert_true(g_file_get_contents(flash, &image, &image_len,
+                                          &error));
+        stq_le_p((uint8_t *)image, 0xfedcba9876543210ULL);
+        g_assert_true(g_file_set_contents(flash, image, image_len, &error));
+    }
+    qts = qtest_initf("-machine 460gx,nvram=%s -bios %s -m 256M -S",
+                      quoted_path, quoted_flash);
+    g_assert_cmphex(qtest_readq(qts, 0x100000000ULL - image_size), ==,
+                    0xfedcba9876543210ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, test_value);
+    qtest_quit(qts);
     g_assert_cmpint(g_unlink(path), ==, 0);
+
+    /* The earlier window's 64 KiB store lands in the sector. */
+    {
+        g_autofree uint8_t *legacy = g_malloc0(IA64_NVRAM_SIZE);
+
+        stq_le_p(legacy, legacy_value);
+        g_assert_true(g_file_set_contents(path, (char *)legacy,
+                                          IA64_NVRAM_SIZE, &error));
+    }
+    qts = qtest_initf("-machine 460gx,nvram=%s -bios %s -m 256M -S",
+                      quoted_path, quoted_flash);
+    g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, legacy_value);
+    qtest_quit(qts);
+
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_unlink(flash), ==, 0);
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 

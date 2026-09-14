@@ -106,6 +106,7 @@ void fw_write_eoi(void);
 void fw_flush_instruction_cache(VOID *start, UINTN bytes);
 UINT64 fw_handoff_debug_port_base(void);
 UINT64 fw_console_uart_base(void);
+const UINT8 *fw_nvram_image(void);
 BOOLEAN fw_console_uart_io_port(UINT64 *Port);
 BOOLEAN fw_debug_port_io_port(UINT64 *Port);
 UINT64 fw_acpi_pm_io_base(void);

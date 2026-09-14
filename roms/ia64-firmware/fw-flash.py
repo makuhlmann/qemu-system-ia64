@@ -12,9 +12,12 @@ image so that it ends at 4 GiB and enters every processor at SALE_ENTRY
 with the PALE_RESET exit state; nothing in the image is position-dependent
 on the flash address, since fw_flash_entry finds its own base from ip.
 
-The 128 KiB block at 4 GiB-448 KiB (0xFFF90000, the SDV's NVRAM sector)
-is left erased and, for now, undeclared: the machine's synthetic variable
-store overlays it until the firmware writes the flash itself.
+The 64 KiB block at 4 GiB-448 KiB (0xFFF90000, where the SDV keeps its
+NVRAM sector) is the firmware's variable store, declared as the FIT's OEM
+NVRAM entry (type 1Eh) and left erased except for the machine's defaults
+record at its 0xF800 (IA64NvramDefaults: console, IDE DMA, boot timeout
+and memory-map policies), which the machine refreshes from its options at
+every boot -- a factory-programmed setup block.
 
 usage: fw-flash.py BODY ELF OUT [SIZE]
 """
@@ -26,9 +29,15 @@ import sys
 FLASH_END = 0x100000000
 UC = 1 << 63
 FIT_HEADER, FIT_PAL_B, FIT_PAL_A, FIT_BODY, FIT_UNUSED = 0x00, 0x01, 0x0f, 0x10, 0x7f
+FIT_NVRAM = 0x1e
 FIT_OFFSET_FROM_END = 0x10000       # the FIT sits in the last 64 KiB block
 NVRAM_OFFSET_FROM_END = 0x70000     # 0xFFF90000 for a 4 MiB image
-NVRAM_SIZE = 0x20000
+NVRAM_SIZE = 0x10000
+# IA64NvramDefaults (hw/ia64/ia64_vpc_abi.h): magic, version, console
+# policy (1 = VGA), IDE DMA on, boot timeout (0xFFFF = wait), quirk mask.
+DEFAULTS_OFFSET = 0xf800
+DEFAULTS_MAGIC = 0x544c464434364149
+DEFAULTS = struct.pack('<6Q', DEFAULTS_MAGIC, 1, 1, 1, 0xffff, 0)
 
 
 def symbol(elf, name):
@@ -74,6 +83,7 @@ def main():
         fit_entry(UC | (base + pal_stub), 32, 0x0100, FIT_PAL_B),
         fit_entry(UC | (base + pal_stub), 32, 0x0100, FIT_PAL_A),
         fit_entry(base, len(body), 0x0100, FIT_BODY),
+        fit_entry(base + nvram_off, NVRAM_SIZE, 0x0100, FIT_NVRAM),
         fit_entry(0, 0, 0, FIT_UNUSED),
     ]
     count = len(entries) + 1
@@ -85,6 +95,8 @@ def main():
     image = bytearray(b'\xff' * size)
     image[:len(body)] = body
     image[fit_off:fit_off + len(fit)] = fit
+    image[nvram_off + DEFAULTS_OFFSET:
+          nvram_off + DEFAULTS_OFFSET + len(DEFAULTS)] = DEFAULTS
     image[size - 48:size - 32] = fit_entry(UC | (base + pal_stub), 32,
                                            0x0100, FIT_PAL_A)
     struct.pack_into('<Q', image, size - 32, UC | (base + fit_off))

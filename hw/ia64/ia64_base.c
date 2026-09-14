@@ -124,13 +124,14 @@
  */
 #define IA64_REALFW_IVT_BASE      IA64_U64(0x00000000ff300000)
 #define IA64_REALFW_IVT_SIZE      0x8000
-/* FIT entry type of the OEM NVRAM/variable block (SDV FIT, type 1Eh). */
-#define IA64_FIT_TYPE_NVRAM       0x1e
 #define IA64_REALFW_PTR_FIT       (IA64_REALFW_WINDOW_END - 32)
 #define IA64_REALFW_PTR_SALE      (IA64_REALFW_WINDOW_END - 24)
 /* Bit 63 in firmware pointers is the uncacheable-attribute flag, not
  * part of the physical address (SAL sec 2.5). */
 #define IA64_REALFW_PTR_ADDR_MASK (~(IA64_U64(1) << 63))
+/* FIT entry types: the OEM NVRAM block (SDV FIT, 1Eh) and an unused slot. */
+#define IA64_FIT_TYPE_NVRAM       0x1e
+#define IA64_FIT_TYPE_UNUSED      0x7f
 #define IA64_HIGH_RAM_AFTER_FIRMWARE_BASE IA64_FW_ADDRESS_SPACE_END
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
 #define IA64_UHCI_IO_BASE       0x0000c120U
@@ -1682,35 +1683,16 @@ static void ia64_vpc_set_realfw_vga_rom(Object *obj, const char *value,
     s->realfw_vga_rom_path = value[0] != '\0' ? g_strdup(value) : NULL;
 }
 
-static char *ia64_vpc_get_realfw_nvram(Object *obj, Error **errp)
-{
-    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
-
-    (void)errp;
-
-    return g_strdup(s->realfw_nvram_path ?: "");
-}
-
-static void ia64_vpc_set_realfw_nvram(Object *obj, const char *value,
-                                      Error **errp)
-{
-    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
-
-    (void)errp;
-
-    g_free(s->realfw_nvram_path);
-    s->realfw_nvram_path = value[0] != '\0' ? g_strdup(value) : NULL;
-}
-
 static char *ia64_vpc_get_nvram(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
     (void)errp;
 
-    return g_strdup(s->nvram_path ?: "auto");
+    return g_strdup(s->nvram_path ?: "none");
 }
 
+/* nvram=<file> persists the flash; none (or auto, accepted) keeps it volatile. */
 static void ia64_vpc_set_nvram(Object *obj, const char *value, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -1718,137 +1700,9 @@ static void ia64_vpc_set_nvram(Object *obj, const char *value, Error **errp)
     (void)errp;
 
     g_free(s->nvram_path);
-    s->nvram_path = g_strcmp0(value, "auto") == 0 ?
+    s->nvram_path = g_strcmp0(value, "auto") == 0 ||
+                    g_strcmp0(value, "none") == 0 || value[0] == '\0' ?
                     NULL : g_strdup(value);
-}
-
-static uint64_t ia64_vpc_nvram_read(void *opaque, hwaddr addr,
-                                    unsigned size)
-{
-    IA64VpcMachineState *s = opaque;
-    uint64_t value = 0;
-    unsigned i;
-
-    for (i = 0; i < size; i++) {
-        value |= (uint64_t)s->nvram_data[addr + i] << (i * 8);
-    }
-    return value;
-}
-
-static void ia64_vpc_nvram_commit(IA64VpcMachineState *s)
-{
-    g_autoptr(GError) err = NULL;
-
-    if (!s->nvram_resolved_path) {
-        return;
-    }
-    if (!g_file_set_contents(s->nvram_resolved_path,
-                             (const char *)s->nvram_data,
-                             sizeof(s->nvram_data), &err) &&
-        !s->nvram_write_warning) {
-        warn_report("failed to save IA-64 NVRAM '%s': %s",
-                    s->nvram_resolved_path,
-                    err ? err->message : "unknown error");
-        s->nvram_write_warning = true;
-    }
-}
-
-static void ia64_vpc_nvram_write(void *opaque, hwaddr addr,
-                                 uint64_t value, unsigned size)
-{
-    IA64VpcMachineState *s = opaque;
-    unsigned i;
-
-    if (addr == IA64_NVRAM_COMMIT_OFFSET && size == 8 &&
-        value == IA64_NVRAM_COMMIT_MAGIC) {
-        ia64_vpc_nvram_commit(s);
-        return;
-    }
-    for (i = 0; i < size; i++) {
-        s->nvram_data[addr + i] = value >> (i * 8);
-    }
-}
-
-static const MemoryRegionOps ia64_vpc_nvram_ops = {
-    .read = ia64_vpc_nvram_read,
-    .write = ia64_vpc_nvram_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = {
-        .min_access_size = 1,
-        .max_access_size = 8,
-        .unaligned = true,
-    },
-    .impl = {
-        .min_access_size = 1,
-        .max_access_size = 8,
-        .unaligned = true,
-    },
-};
-
-static void ia64_vpc_init_nvram(IA64VpcMachineState *s)
-{
-    MachineState *machine = MACHINE(s);
-    g_autofree char *firmware_path = NULL;
-    g_autofree char *directory = NULL;
-    g_autofree char *contents = NULL;
-    g_autoptr(GError) err = NULL;
-    gsize length = 0;
-
-    /*
-     * In realfw mode the FIT-0x1E NVRAM sector is part of the vendor flash
-     * image, which is modelled by the pflash device (writable, in the flash
-     * itself); the synthetic NVRAM MMIO would shadow it, so skip it here.
-     */
-    if (s->fw_flash_has_nvram) {
-        return;
-    }
-
-    memset(s->nvram_data, 0, sizeof(s->nvram_data));
-    g_clear_pointer(&s->nvram_resolved_path, g_free);
-    s->nvram_write_warning = false;
-
-    if (g_strcmp0(s->nvram_path, "none") != 0) {
-        if (s->nvram_path) {
-            s->nvram_resolved_path = g_strdup(s->nvram_path);
-        } else if (machine->firmware) {
-            firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS,
-                                           machine->firmware);
-            if (!firmware_path) {
-                firmware_path = g_strdup(machine->firmware);
-            }
-            directory = g_path_get_dirname(firmware_path);
-            s->nvram_resolved_path =
-                g_build_filename(directory, "nvram", NULL);
-        }
-    }
-
-    if (s->nvram_resolved_path &&
-        g_file_get_contents(s->nvram_resolved_path, &contents,
-                            &length, &err)) {
-        if (length == sizeof(s->nvram_data)) {
-            memcpy(s->nvram_data, contents, length);
-        } else {
-            warn_report("ignoring IA-64 NVRAM '%s': expected %zu bytes, "
-                        "found %zu",
-                        s->nvram_resolved_path,
-                        sizeof(s->nvram_data), (size_t)length);
-        }
-    } else if (err && !g_error_matches(err, G_FILE_ERROR,
-                                       G_FILE_ERROR_NOENT)) {
-        warn_report("failed to load IA-64 NVRAM '%s': %s",
-                    s->nvram_resolved_path, err->message);
-    }
-
-    memory_region_init_io(&s->nvram_mmio, OBJECT(s),
-                          &ia64_vpc_nvram_ops, s, "ia64-vpc.nvram",
-                          IA64_NVRAM_SIZE);
-    /*
-     * Above the flash window (priority 2): the project firmware's flash
-     * image does not yet declare an NVRAM block, so its variable store is
-     * still this window, over the erased sector the image leaves there.
-     */
-    memory_region_add_subregion_overlap(get_system_memory(), IA64_NVRAM_BASE,
-                                        &s->nvram_mmio, 3);
 }
 
 typedef struct IA64VpcCompatDefault {
@@ -2462,8 +2316,6 @@ static const VMStateDescription vmstate_ia64_vpc = {
         VMSTATE_UINT64(watchdog_timeout, IA64VpcMachineState),
         VMSTATE_UINT64(watchdog_code, IA64VpcMachineState),
         VMSTATE_TIMER_PTR(watchdog_timer, IA64VpcMachineState),
-        VMSTATE_UINT8_ARRAY(nvram_data, IA64VpcMachineState,
-                            IA64_NVRAM_SIZE),
 
         VMSTATE_UINT16(acpi_regs.pm1.evt.sts, IA64VpcMachineState),
         VMSTATE_UINT16(acpi_regs.pm1.evt.en, IA64VpcMachineState),
@@ -2757,7 +2609,16 @@ static void ia64_vpc_clear_shadow_mailbox(void)
  * machine's options as a factory programs a board's configuration.  It sits
  * behind the variable store and the RTC state, ahead of the commit word.
  */
-static void ia64_vpc_seed_nvram_defaults(IA64VpcMachineState *s)
+/*
+ * The firmware defaults record: a factory-programmed setup block in the
+ * flash's NVRAM sector that carries the machine's console, IDE DMA, boot
+ * timeout and memory-map policies to the project firmware.  Only an image
+ * that ships the record (its magic in the -bios file) gets it refreshed
+ * from the options, whatever the persisted sector holds; the vendor
+ * image's own NVRAM sector is left alone.
+ */
+static void ia64_vpc_seed_nvram_defaults(IA64VpcMachineState *s,
+                                         uint8_t *flash, uint64_t flash_base)
 {
     IA64NvramDefaults defaults = {
         .Magic = cpu_to_le64(IA64_NVRAM_DEFAULTS_MAGIC),
@@ -2767,12 +2628,15 @@ static void ia64_vpc_seed_nvram_defaults(IA64VpcMachineState *s)
         .BootTimeout = cpu_to_le64(s->firmware_boot_timeout),
         .MapQuirkDisable = cpu_to_le64(s->fw_map_quirk_disable),
     };
+    uint64_t record = IA64_NVRAM_BASE + IA64_NVRAM_DEFAULTS_OFFSET;
 
-    _Static_assert(IA64_NVRAM_DEFAULTS_OFFSET + sizeof(defaults) <=
-                   IA64_NVRAM_COMMIT_OFFSET,
-                   "the defaults record overlaps the NVRAM commit word");
-    memcpy(s->nvram_data + IA64_NVRAM_DEFAULTS_OFFSET, &defaults,
-           sizeof(defaults));
+    if (record < flash_base ||
+        record + sizeof(defaults) > IA64_REALFW_WINDOW_END ||
+        ldq_le_p(s->fw_image + (record - flash_base)) !=
+            IA64_NVRAM_DEFAULTS_MAGIC) {
+        return;
+    }
+    memcpy(flash + (record - flash_base), &defaults, sizeof(defaults));
 }
 
 /*
@@ -3794,16 +3658,6 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
 
 
 /*
- * Load a real vendor flash image (machine option realfw=) so that its end
- * lands exactly at 4 GiB, and derive the boot entry from the architected
- * SALE_ENTRY pointer at 4 GiB-24.  The flash window lies inside the
- * ia64-firmware-address-space RAM region, so rom_add_blob_fixed() both
- * installs the content and restores it on reset.  The blob is split around
- * the NVRAM MMIO window (which deliberately overlays the image's FIT-0x1E
- * scratch sector at priority 2): a rom_reset() write through the NVRAM ops
- * would wipe the guest's stored variables with erased-flash bytes.
- */
-/*
  * The same two-bundle PAL procedure entry stub the project firmware carries
  * at IA64_FW_PAL_PROC_ENTRY_OFF (roms/ia64-firmware/entry.S pal_proc_entry):
  *   break.m 0x100000 ;;  br.many b0 ;;
@@ -3820,38 +3674,108 @@ static const uint8_t ia64_realfw_pal_stub[32] = {
 };
 
 /*
- * Open the realfw-nvram persistence file as a raw, writable block backend for
- * the flash device.  On first use (or if the file is the wrong size, e.g. the
- * realfw image changed) it is created from the vendor image; the pflash device
- * requires the backing file to be exactly the flash size.  Once attached, the
- * flash loads its contents from the file and writes back to it, so the
- * firmware's one-time NVRAM reprogram survives across runs.
+ * The flash's persistence file (machine option nvram=): a raw, writable
+ * block backend the flash device loads from and writes back to, so what the
+ * firmware keeps in its flash -- its NVRAM sector, and any other block it
+ * programs -- survives across runs.  The pflash device requires the file to
+ * be exactly the flash size.
+ *
+ * -bios names the firmware.  At power-on the machine programs the image's
+ * FIT-declared components (every FIT entry other than NVRAM blocks and
+ * unused slots), the FIT itself and the reset pointer block into the flash,
+ * as a firmware update tool would, and leaves every other block as the
+ * file holds it.  A rebuilt image therefore runs at once, and the blocks a
+ * firmware writes at run time persist: the vendor SDV firmware programs its
+ * FIT-1Eh NVRAM block and five undeclared blocks, never a component.
+ *
+ * A missing file, or one of another size, is created from the image; a
+ * file holding just the 64 KiB variable store of the earlier NVRAM window
+ * is imported into the NVRAM sector.
  */
-static BlockBackend *ia64_realfw_open_nvram(const char *path,
-                                            const uint8_t *image,
-                                            uint64_t image_size, Error **errp)
+static void ia64_vpc_flash_refresh_components(uint8_t *contents,
+                                              const uint8_t *image,
+                                              uint64_t image_size,
+                                              uint64_t fit_ptr)
 {
+    uint64_t base = IA64_REALFW_WINDOW_END - image_size;
+    const uint8_t *fit = image + (fit_ptr - base);
+    uint32_t entries = ldl_le_p(fit + 8) & 0xffffff;
+    g_autofree uint8_t *kept = g_memdup2(contents, image_size);
+    int pass;
+    uint32_t i;
+
+    entries = MIN(entries, (IA64_REALFW_WINDOW_END - fit_ptr) / 16);
+    /*
+     * Components first, then the NVRAM blocks back from the file: a
+     * component's declared size may run into an NVRAM block (the SDV's
+     * SAL_B entry ends 0x2E0 bytes inside its 1Eh block), and what the
+     * firmware keeps there wins.
+     */
+    for (pass = 0; pass < 2; pass++) {
+        for (i = 1; i < entries; i++) {
+            const uint8_t *e = fit + i * 16;
+            uint64_t addr = ldq_le_p(e) & IA64_REALFW_PTR_ADDR_MASK;
+            uint64_t size = (uint64_t)(ldl_le_p(e + 8) & 0xffffff) * 16;
+            uint8_t type = e[14] & 0x7f;
+
+            if (type == IA64_FIT_TYPE_UNUSED || addr < base || size == 0 ||
+                size > IA64_REALFW_WINDOW_END - addr) {
+                continue;
+            }
+            if (pass == 0 && type != IA64_FIT_TYPE_NVRAM) {
+                memcpy(contents + (addr - base), image + (addr - base), size);
+            } else if (pass == 1 && type == IA64_FIT_TYPE_NVRAM) {
+                memcpy(contents + (addr - base), kept + (addr - base), size);
+            }
+        }
+        if (pass == 0) {
+            memcpy(contents + (fit_ptr - base), fit, (uint64_t)entries * 16);
+            memcpy(contents + image_size - 48, image + image_size - 48, 48);
+        }
+    }
+}
+
+static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
+                                                 const char *path,
+                                                 Error **errp)
+{
+    const uint8_t *image = s->fw_image;
+    uint64_t image_size = s->fw_image_size;
+    uint64_t sector = IA64_NVRAM_BASE - (IA64_REALFW_WINDOW_END - image_size);
+    g_autofree uint8_t *contents = NULL;
+    g_autofree char *existing = NULL;
+    gsize existing_size = 0;
+    GError *gerr = NULL;
     QDict *options;
     BlockBackend *blk;
-    struct stat st;
 
-    if (stat(path, &st) != 0 || (uint64_t)st.st_size != image_size) {
-        GError *gerr = NULL;
-
-        if (!g_file_set_contents(path, (const gchar *)image, image_size,
-                                 &gerr)) {
-            error_setg(errp, "realfw-nvram '%s': cannot initialise: %s",
-                       path, gerr->message);
-            g_error_free(gerr);
-            return NULL;
+    if (!g_file_get_contents(path, &existing, &existing_size, NULL)) {
+        existing_size = 0;
+    }
+    if (existing_size == image_size) {
+        contents = (uint8_t *)g_steal_pointer(&existing);
+        ia64_vpc_flash_refresh_components(contents, image, image_size,
+                                          s->fw_fit_ptr);
+    } else {
+        contents = g_memdup2(image, image_size);
+        if (existing_size == IA64_NVRAM_SIZE &&
+            sector + IA64_NVRAM_SIZE <= image_size) {
+            memcpy(contents + sector, existing, IA64_NVRAM_SIZE);
         }
+    }
+    if (!g_file_set_contents(path, (const gchar *)contents, image_size,
+                             &gerr)) {
+        error_setg(errp, "nvram '%s': cannot write: %s", path,
+                   gerr->message);
+        g_error_free(gerr);
+        return NULL;
     }
 
     options = qdict_new();
     qdict_put_str(options, "driver", "raw");
     blk = blk_new_open(path, NULL, options, BDRV_O_RDWR, errp);
     if (blk == NULL) {
-        error_prepend(errp, "realfw-nvram '%s': ", path);
+        error_prepend(errp, "nvram '%s': ", path);
     }
     return blk;
 }
@@ -3912,24 +3836,9 @@ static bool ia64_vpc_read_firmware(IA64VpcMachineState *s,
         if (fit_ptr >= base && fit_ptr + 16 <= IA64_REALFW_WINDOW_END &&
             sale_ptr >= base && sale_ptr < IA64_REALFW_WINDOW_END &&
             memcmp(s->fw_image + (fit_ptr - base), "_FIT_   ", 8) == 0) {
-            /*
-             * The FIT header's size field counts its entries (16 bytes
-             * each, the header included); walk them for an NVRAM block.
-             */
-            const uint8_t *fit = s->fw_image + (fit_ptr - base);
-            uint32_t entries = ldl_le_p(fit + 8) & 0xffffff;
-            uint32_t i;
-
             s->fw_is_flash = true;
             s->fw_fit_ptr = fit_ptr;
             s->fw_sale_ptr = sale_ptr;
-            for (i = 1; i < entries &&
-                        fit_ptr + (uint64_t)(i + 1) * 16 <=
-                        IA64_REALFW_WINDOW_END; i++) {
-                if ((fit[i * 16 + 14] & 0x7f) == IA64_FIT_TYPE_NVRAM) {
-                    s->fw_flash_has_nvram = true;
-                }
-            }
         }
     }
     if (!s->fw_is_flash) {
@@ -3968,9 +3877,8 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
         MemoryRegion *flash_mr;
         BlockBackend *flash_blk = NULL;
 
-        if (s->realfw_nvram_path != NULL) {
-            flash_blk = ia64_realfw_open_nvram(s->realfw_nvram_path, s->fw_image,
-                                               s->fw_image_size, errp);
+        if (s->nvram_path != NULL) {
+            flash_blk = ia64_vpc_open_flash_backing(s, s->nvram_path, errp);
             if (flash_blk == NULL) {
                 return false;
             }
@@ -4019,6 +3927,8 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
         if (flash_blk == NULL) {
             memcpy(memory_region_get_ram_ptr(flash_mr), s->fw_image, s->fw_image_size);
         }
+        ia64_vpc_seed_nvram_defaults(s, memory_region_get_ram_ptr(flash_mr),
+                                     base);
     }
 
     rom_add_blob_fixed("ia64-realfw-palstub", ia64_realfw_pal_stub,
@@ -4082,10 +3992,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     ia64_vpc_init_watchdog(s);
     if (!ia64_vpc_read_firmware(s, machine, errp)) {
         return false;
-    }
-    ia64_vpc_init_nvram(s);
-    if (!s->fw_flash_has_nvram) {
-        ia64_vpc_seed_nvram_defaults(s);
     }
     ia64_vpc_clear_shadow_mailbox();
 
@@ -4585,7 +4491,6 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
         vmstate_unregister(NULL, &vmstate_ia64_vpc, s);
     }
     g_free(s->nvram_path);
-    g_free(s->nvram_resolved_path);
     g_free(s->vga_model);
     g_free(s->fw_image);
     g_free(s->fw_image_name);
@@ -4744,19 +4649,16 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "firmware's video POST, instead of the emulated card's own vgabios.  "
         "Used to run the vendor firmware against an authentic card BIOS "
         "(e.g. the ATI Rage 128 Pro the SDV shipped with).");
-    object_class_property_add_str(oc, "realfw-nvram",
-                                  ia64_vpc_get_realfw_nvram,
-                                  ia64_vpc_set_realfw_nvram);
-    object_class_property_set_description(oc, "realfw-nvram",
-        "Path to a writable file that persists the firmware flash (the "
-        "firmware's NVRAM/EFI-variable store) across runs.  Created from the "
-        "-bios image on first use; thereafter the flash is loaded from and "
-        "written back to it.");
     object_class_property_add_str(oc, "nvram",
                                   ia64_vpc_get_nvram,
                                   ia64_vpc_set_nvram);
     object_class_property_set_description(oc, "nvram",
-        "Set the IA-64 EFI NVRAM file path, 'auto', or 'none'");
+        "Path to a writable file that persists the firmware flash across "
+        "runs (its NVRAM sector is the EFI variable store), or 'none' (the "
+        "default; 'auto' is accepted too) for a flash that starts from the "
+        "-bios image every run.  The image's FIT-declared components are "
+        "programmed from -bios at every start; the other blocks persist.  "
+        "A 64 KiB variable store from the earlier NVRAM window is imported.");
     object_class_property_add_str(oc, "alat",
                                   ia64_vpc_get_alat,
                                   ia64_vpc_set_alat);

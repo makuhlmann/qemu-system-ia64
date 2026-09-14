@@ -420,8 +420,19 @@ static UINT8                  mRuntimeResetValue;
 UINTN                         mRuntimePciConfigEcam;
 /* MC146818 CMOS RTC index port; the data port is index + 1 (rework D8). */
 static UINTN                  mRuntimeRtc = LEGACY_IO_BASE + 0x70U;
+/*
+ * The NVRAM sector's contents, kept in RAM: the variable store, the RTC
+ * state and the machine's defaults record.  Read from the flash at init and
+ * programmed back through the flash's command interface on every commit
+ * (mRuntimeNvramFlash is the sector itself, converted with the rest of the
+ * runtime pointers).
+ */
+static UINT8                  mNvramImage[FW_NVRAM_SIZE]
+    __attribute__((aligned(16)));
 static UINTN                  mRuntimeRtcState =
-    FW_NVRAM_BASE + FW_NVRAM_RTC_OFFSET;
+    (UINTN)mNvramImage + FW_NVRAM_RTC_OFFSET;
+static UINTN                  mRuntimeNvramFlash = FW_NVRAM_BASE;
+static BOOLEAN                mNvramImageLoaded;
 
 void fw_copy_mem(VOID *Destination, const VOID *Source, UINTN Length);
 void fw_set_mem(VOID *Buffer, UINTN Size, UINT8 Value);
@@ -5590,7 +5601,7 @@ typedef struct {
 
 FW_STATIC_ASSERT(sizeof(FW_RTC_STATE) == 32U, rtc_state_format_size);
 FW_STATIC_ASSERT(FW_NVRAM_RTC_OFFSET + sizeof(FW_RTC_STATE) <=
-                 FW_NVRAM_COMMIT_OFFSET, rtc_state_fits_nvram);
+                 FW_NVRAM_DEFAULTS_OFFSET, rtc_state_fits_nvram);
 
 static BOOLEAN mRtcSelftestActive;
 static EFI_TIME mWakeupTime;
@@ -8245,7 +8256,7 @@ FW_STATIC_ASSERT(sizeof(NVRAM_STORE) == 38160U,
 FW_STATIC_ASSERT(sizeof(NVRAM_STORE) <= FW_NVRAM_RTC_OFFSET,
                  nvram_store_fits_mmio_window);
 
-static NVRAM_STORE *mNvramStore = (NVRAM_STORE *)(UINTN)FW_NVRAM_BASE;
+static NVRAM_STORE *mNvramStore = (NVRAM_STORE *)mNvramImage;
 static BOOLEAN mNvramSelftestActive;
 
 #define mNvramVars (mNvramStore->vars)
@@ -8357,18 +8368,106 @@ static BOOLEAN rs_firmware_variable_enabled(const FW_FIRMWARE_VARIABLE *Var)
     return 1;
 }
 
+/*
+ * Program the NVRAM sector from its RAM image.  The flash is an Intel
+ * 82802AC Firmware Hub: every block comes out of reset write-locked, and
+ * its lock bits live in a per-block register that command 91h at the block
+ * base selects and a write at base+2 sets (00h unlocked, 01h write-locked),
+ * as the vendor firmware does it.  Programming (40h, then the byte) can
+ * only clear bits, so an erase (20h/D0h) is needed only when some byte has
+ * to gain one; otherwise just the bytes that differ are programmed, and an
+ * unchanged image costs nothing.  Each operation waits for the WSM (70h,
+ * status bit 7), and the part is left in read-array mode (FFh), locked.
+ */
+#define FW_FLASH_CMD_READ_STATUS   0x70U
+#define FW_FLASH_CMD_CLEAR_STATUS  0x50U
+#define FW_FLASH_CMD_PROGRAM       0x40U
+#define FW_FLASH_CMD_ERASE         0x20U
+#define FW_FLASH_CMD_CONFIRM       0xd0U
+#define FW_FLASH_CMD_LOCK_REGISTER 0x91U
+#define FW_FLASH_CMD_READ_ARRAY    0xffU
+#define FW_FLASH_STATUS_READY      0x80U
+#define FW_FLASH_LOCK_REGISTER     2U
+#define FW_FLASH_LOCK_WRITE        0x01U
+
+static void fw_flash_wait_ready(volatile UINT8 *flash)
+{
+    UINTN spins;
+
+    flash[0] = FW_FLASH_CMD_READ_STATUS;
+    for (spins = 0; spins < 1000000U; spins++) {
+        if (flash[0] & FW_FLASH_STATUS_READY) {
+            break;
+        }
+    }
+}
+
+static void fw_flash_set_block_lock(volatile UINT8 *flash, UINT8 value)
+{
+    flash[0] = FW_FLASH_CMD_LOCK_REGISTER;
+    flash[FW_FLASH_LOCK_REGISTER] = value;
+}
+
+/*
+ * What the sector held before this commit, read once in read-array mode:
+ * every return to read-array mode remaps the part, so the program loop
+ * works from this copy and stays in command mode until it is done.
+ */
+static UINT8 mNvramFlashCopy[FW_NVRAM_SIZE] __attribute__((aligned(16)));
+
+static void fw_flash_program_sector(volatile UINT8 *flash, const UINT8 *data,
+                                    UINTN size)
+{
+    BOOLEAN dirty = 0;
+    BOOLEAN erase = 0;
+    UINTN i;
+
+    for (i = 0; i < size; i++) {
+        mNvramFlashCopy[i] = flash[i];
+        if (mNvramFlashCopy[i] != data[i]) {
+            dirty = 1;
+            erase |= (data[i] & (UINT8)~mNvramFlashCopy[i]) != 0;
+        }
+    }
+    if (!dirty) {
+        return;
+    }
+
+    flash[0] = FW_FLASH_CMD_CLEAR_STATUS;
+    fw_flash_set_block_lock(flash, 0);
+    if (erase) {
+        flash[0] = FW_FLASH_CMD_ERASE;
+        flash[0] = FW_FLASH_CMD_CONFIRM;
+        fw_flash_wait_ready(flash);
+        fw_set_mem(mNvramFlashCopy, size, 0xff);
+    }
+    for (i = 0; i < size; i++) {
+        if (data[i] == mNvramFlashCopy[i]) {
+            continue;
+        }
+        flash[i] = FW_FLASH_CMD_PROGRAM;
+        flash[i] = data[i];
+        fw_flash_wait_ready(flash);
+    }
+    flash[0] = FW_FLASH_CMD_CLEAR_STATUS;
+    fw_flash_set_block_lock(flash, FW_FLASH_LOCK_WRITE);
+    flash[0] = FW_FLASH_CMD_READ_ARRAY;
+}
+
 static void nvram_commit(void)
 {
-    /* The commit register is MMIO, so the store must not be optimized away. */
-    volatile UINT64 *commit;
-
     if (mNvramSelftestActive) {
         return;
     }
-    /* This volatile cast targets the host-backed NVRAM MMIO register. */
-    commit = (volatile UINT64 *)(UINTN)(
-        (UINTN)mNvramStore + FW_NVRAM_COMMIT_OFFSET);
-    *commit = FW_NVRAM_COMMIT_MAGIC;
+    fw_flash_program_sector((volatile UINT8 *)mRuntimeNvramFlash,
+                            mNvramImage, sizeof(mNvramImage));
+}
+
+/* The sector's image once loaded, the flash itself before (early boot). */
+const UINT8 *fw_nvram_image(void)
+{
+    return mNvramImageLoaded ? mNvramImage
+                             : (const UINT8 *)(UINTN)FW_NVRAM_BASE;
 }
 
 static BOOLEAN nvram_store_valid(void)
@@ -8408,6 +8507,9 @@ static void nvram_init(void)
     UINTN i;
 
     mNvramSelftestActive = 0;
+    fw_copy_mem(mNvramImage, (const VOID *)(UINTN)FW_NVRAM_BASE,
+                sizeof(mNvramImage));
+    mNvramImageLoaded = 1;
     if (!nvram_store_valid()) {
         fw_set_mem(mNvramStore, sizeof(*mNvramStore), 0);
         mNvramStore->magic = NVRAM_STORE_MAGIC;
@@ -12561,6 +12663,7 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     UINTN runtime_rtc = mRuntimeRtc;
     UINTN runtime_rtc_state = mRuntimeRtcState;
     UINTN nvram_store = (UINTN)mNvramStore;
+    UINTN nvram_flash = mRuntimeNvramFlash;
     /* Physical-only virtual-memory services are deliberately excluded. */
     UINTN function_descriptors[] = {
         mRuntimeServices.GetTime,
@@ -12656,6 +12759,10 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     if (st != EFI_SUCCESS) {
         return st;
     }
+    st = rs_convert_required_uintn(&nvram_flash);
+    if (st != EFI_SUCCESS) {
+        return st;
+    }
 
     for (i = 0; i < FW_ARRAY_SIZE(function_descriptors); i++) {
         st = rs_convert_function_descriptor(function_descriptors[i], 0);
@@ -12695,6 +12802,7 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     mRuntimeRtc = runtime_rtc;
     mRuntimeRtcState = runtime_rtc_state;
     mNvramStore = (NVRAM_STORE *)nvram_store;
+    mRuntimeNvramFlash = nvram_flash;
     return EFI_SUCCESS;
 }
 

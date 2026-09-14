@@ -163,7 +163,6 @@ struct IA64VpcMachineState {
     uint16_t firmware_boot_timeout;
     char *nvram_path;
     char *realfw_vga_rom_path;
-    char *realfw_nvram_path;
     uint64_t realfw_entry;
     uint64_t realfw_base;
     PFlashCFI01 *realfw_flash;
@@ -174,7 +173,6 @@ struct IA64VpcMachineState {
     /* A flash image: reset pointer block, FIT, mapped to end at 4 GiB. */
     bool fw_is_flash;
     /* The flash image's FIT declares an NVRAM block (type 1Eh). */
-    bool fw_flash_has_nvram;
     uint64_t fw_fit_ptr;
     uint64_t fw_sale_ptr;
     qemu_irq extint;
@@ -214,7 +212,6 @@ struct IA64VpcMachineState {
     MemoryRegion *lsapic_mmio;
     MemoryRegion firmware_space;
     MemoryRegion watchdog_mmio;
-    MemoryRegion nvram_mmio;
     MemoryRegion acpi_pm;
     MemoryRegion acpi_reset;
     SerialMM *debug_uart;
@@ -238,9 +235,6 @@ struct IA64VpcMachineState {
     QEMUTimer *watchdog_timer;
     uint64_t watchdog_timeout;
     uint64_t watchdog_code;
-    uint8_t nvram_data[IA64_NVRAM_SIZE];
-    char *nvram_resolved_path;
-    bool nvram_write_warning;
     ACPIREGS acpi_regs;
     qemu_irq acpi_sci_irq;
     qemu_irq isa_irqs[ISA_NUM_IRQS];
