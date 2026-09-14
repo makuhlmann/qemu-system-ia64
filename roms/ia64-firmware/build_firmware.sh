@@ -2,17 +2,18 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 set -eu
 
-if [ "$#" -ne 6 ]; then
-    echo "usage: $0 BIN ELF MAP SECTIONS SOURCE_DIR DEPFILE" >&2
+if [ "$#" -ne 7 ]; then
+    echo "usage: $0 BIN RAW ELF MAP SECTIONS SOURCE_DIR DEPFILE" >&2
     exit 2
 fi
 
 OUT_BIN="$1"
-FW_ELF="$2"
-FW_MAP="$3"
-FW_SECTIONS="$4"
-SRC_DIR="$5"
-DEPFILE="$6"
+OUT_RAW="$2"
+FW_ELF="$3"
+FW_MAP="$4"
+FW_SECTIONS="$5"
+SRC_DIR="$6"
+DEPFILE="$7"
 OUT_DIR="$(dirname "$OUT_BIN")"
 INCLUDE_DIR="${SRC_DIR}/../../include"
 MANIFEST="${SRC_DIR}/firmware.sources"
@@ -144,14 +145,18 @@ fi
 python3 "${SRC_DIR}/fw-fixups.py" "${OUT_BIN}.raw" \
     "${OUT_BIN}.alt1" "$FW_ALT1_DELTA" \
     "${OUT_BIN}.alt2" "$FW_ALT2_DELTA" \
-    "$(( FIXUPS_VA - 0x100000 ))" "$OUT_BIN"
+    "$(( FIXUPS_VA - 0x100000 ))" "$OUT_RAW"
 rm -f "${OUT_BIN}.raw" "${OUT_BIN}.alt1" "${OUT_BIN}.alt2" \
     "${FW_ELF}.alt1" "${FW_ELF}.alt2"
+
+# The shipped image is a flash image: the flat body plus a FIT and the reset
+# pointer block, mapped by the machine to end at 4 GiB (see fw-flash.py).
+python3 "${SRC_DIR}/fw-flash.py" "$OUT_RAW" "$FW_ELF" "$OUT_BIN"
 
 {
     for dependency in $DEPFILES; do
         command cat "$dependency"
     done
     echo "$OUT_BIN: $MANIFEST $LINKER_SCRIPT $SRC_DIR/build_firmware.sh" \
-        "$SRC_DIR/fw-fixups.py" "$ASL_SOURCES"
+        "$SRC_DIR/fw-fixups.py" "$SRC_DIR/fw-flash.py" "$ASL_SOURCES"
 } > "$DEPFILE"

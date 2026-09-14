@@ -21,6 +21,16 @@
     .equ FW_PCI_MMIO_BASE, IA64_PCI_MMIO_BASE
     .equ FW_LOW_RAM_MIN, IA64_FW_LOW_RAM_MIN
     .equ FW_LOW_RAM_ALIGN_MASK, (IA64_FW_LOW_RAM_ALIGN - 1)
+    .equ FW_SHADOW_MAILBOX, IA64_FW_SHADOW_MAILBOX
+    .equ FW_LINK_BASE, IA64_FW_LINK_BASE
+    /* The shadow sits this far below low_ram_end (IA64_FW_IMAGE_BASE_FOR). */
+    .equ FW_SHADOW_BELOW_END, (IA64_FW_CPU_ASSIST_SIZE + \
+                               IA64_FW_ACPI_REGION_SIZE + IA64_FW_IMAGE_SPAN)
+    .equ FW_EARLY_RSE_BELOW_END, (IA64_FW_CPU_ASSIST_SIZE - \
+                                  IA64_FW_EARLY_RSE_OFFSET)
+    .equ FW_EARLY_RSE_SIZE, IA64_FW_EARLY_RSE_SIZE
+    /* cr.dcr at the shadow entry: defer data and page-not-present faults. */
+    .equ FW_DCR_BOOT, 0x300
     .global _start
     .type _start, @function
     .proc _start
@@ -53,6 +63,185 @@ pal_proc_entry:
     ;;
     .endp pal_proc_entry
     .size pal_proc_entry, . - pal_proc_entry
+
+    /*
+     * SALE_ENTRY (the flash image's reset pointer block names this): the
+     * firmware's SAL_A stage, executing in place from the flash window at
+     * the top of 4 GiB with the architected PALE_RESET exit state (SDM
+     * vol. 2 11.2.2): bank 1 selected, CFM.sof = 96, no stack, no RSE
+     * backing store, cr.iva pointing at PAL's capture table, GR33 the
+     * geographic processor id.  Every processor arrives here together.
+     *
+     * The boot processor copies the image body to its RAM-top shadow
+     * (IA64_FW_IMAGE_BASE_FOR), applies the self-relocation fixup table
+     * there, publishes the shadow through the mailbox and enters it at
+     * start_after_pal.  The others wait for the mailbox and enter the
+     * shadow's _start, which sends them down start_secondary.  Nothing
+     * here reaches for an absolute address of its own: link-time values
+     * are turned into flash offsets against the link base.
+     */
+    .section .text.flash_entry, "ax"
+    .global fw_flash_entry
+    .type fw_flash_entry, @function
+    .proc fw_flash_entry
+    .explicit
+fw_flash_entry:
+    bsw.0
+    ;;
+1:
+    mov r14 = ip
+    ;;
+    movl r15 = 1b
+    ;;
+    movl r16 = FW_LINK_BASE
+    ;;
+    sub r15 = r15, r16
+    ;;
+    sub r7 = r14, r15           /* r7 = flash base of the image body */
+    ;;
+
+    /* low_ram_end from the handoff, as start_after_pal derives it. */
+    movl r14 = FW_HANDOFF_ADDR
+    ;;
+    ld8 r15 = [r14]
+    adds r18 = FW_HANDOFF_RAMSIZE_OFFSET, r14
+    ;;
+    ld8 r17 = [r18]
+    movl r18 = FW_HANDOFF_MAGIC
+    ;;
+    cmp.eq p6, p7 = r15, r18
+    movl r19 = FW_PCI_MMIO_BASE
+    ;;
+(p7) movl r17 = FW_LOW_RAM_MIN
+    movl r22 = FW_LOW_RAM_ALIGN_MASK
+    ;;
+    cmp.ltu p8, p9 = r19, r17
+    ;;
+(p8) mov r17 = r19
+    ;;
+    andcm r17 = r17, r22        /* r17 = low_ram_end */
+    ;;
+
+    /*
+     * This processor's early RSE backing store, before the first alloc
+     * can spill: the per-CPU slots of the CPU-assist region, indexed by
+     * LID.id as the machine numbers its processors.
+     */
+    mov r14 = cr.lid
+    movl r23 = FW_EARLY_RSE_BELOW_END
+    ;;
+    extr.u r21 = r14, 24, 8     /* r21 = processor index */
+    sub r26 = r17, r23
+    ;;
+    shl r25 = r21, 15           /* FW_EARLY_RSE_SIZE = 32 KiB per CPU */
+    ;;
+    add r26 = r26, r25
+    mov ar.rsc = r0
+    ;;
+    mov ar.bspstore = r26
+    ;;
+    mov ar.rnat = r0
+    movl r27 = 3
+    ;;
+    mov ar.rsc = r27
+    cmp.ne p6, p7 = r21, r0
+    ;;
+(p6) br.cond.sptk.few flash_wait_shadow
+    ;;
+
+    /*
+     * Boot processor: the shadow base, and a memory stack for this stage.
+     * The bases live in preserved registers (r5-r7) across the relocator
+     * call, which is free to clobber r14-r31.
+     */
+    movl r23 = FW_SHADOW_BELOW_END
+    ;;
+    sub r24 = r17, r23
+    movl r25 = 0xfffff
+    ;;
+    andcm r5 = r24, r25         /* r5 = shadow base */
+    adds r12 = -16, r17
+    ;;
+    sub r6 = r5, r16            /* r6 = shadow base - link base */
+    ;;
+
+    /* Copy the body: its byte length is patched in by fw-flash.py. */
+    movl r15 = fw_flash_body_size
+    ;;
+    sub r15 = r15, r16
+    ;;
+    add r15 = r15, r7
+    ;;
+    ld8 r28 = [r15]
+    mov r29 = r7
+    mov r30 = r5
+    ;;
+    mov r4 = r28                /* the body length, for the relocator */
+2:
+    cmp.eq p6, p7 = r28, r0
+    ;;
+(p6) br.cond.dpnt.few 3f
+    ;;
+    ld8 r31 = [r29], 8
+    ;;
+    st8 [r30] = r31, 8
+    adds r28 = -8, r28
+    ;;
+    br.cond.sptk.few 2b
+    ;;
+3:
+    /* fw_flash_relocate(shadow, shadow - link base, body length). */
+    alloc r2 = ar.pfs, 0, 0, 3, 0
+    ;;
+    mov r32 = r5
+    mov r33 = r6
+    mov r34 = r4
+    ;;
+    br.call.sptk.many b0 = fw_flash_relocate
+    ;;
+    sync.i
+    ;;
+    srlz.i
+    ;;
+
+    /* Publish the shadow, then enter it as the flat image was entered. */
+    movl r14 = FW_SHADOW_MAILBOX
+    ;;
+    mf
+    ;;
+    st8.rel [r14] = r5
+    movl r15 = start_after_pal
+    ;;
+    add r15 = r15, r6
+    ;;
+    mov b6 = r15
+    mov b0 = r0
+    ;;
+    br.sptk.many b6
+    ;;
+
+flash_wait_shadow:
+    movl r14 = FW_SHADOW_MAILBOX
+    ;;
+4:
+    ld8.acq r15 = [r14]
+    ;;
+    cmp.eq p6, p7 = r15, r0
+    ;;
+(p6) br.cond.sptk.few 4b
+    ;;
+    mov b6 = r15                /* the shadow's _start */
+    ;;
+    br.sptk.many b6
+    ;;
+    .endp fw_flash_entry
+    .size fw_flash_entry, . - fw_flash_entry
+
+    /* Byte length of the image body to shadow; fw-flash.py fills it in. */
+    .align 8
+    .global fw_flash_body_size
+fw_flash_body_size:
+    .quad 0
 
     /*
      * The SAL runtime stub trio lives in its own section, placed first in
@@ -235,10 +424,12 @@ start_after_pal:
     ;;
 
     /*
-     * Preserve the reset return pointer across the ABI call, then move the
+     * Preserve the reset return pointer across the ABI calls, then move the
      * firmware stack to the top of installed low RAM.
      */
     mov r4 = b0
+    ;;
+    br.call.sptk.many b0 = fw_shadow_control_registers
     ;;
     br.call.sptk.many b0 = fw_boot_stack_top
     ;;
@@ -271,12 +462,47 @@ start_after_pal:
     .endp start_after_pal
     .size start_after_pal, . - start_after_pal
 
+    /*
+     * The control registers a processor holds while it runs this image:
+     * cr.iva at the image's own IVT, cr.dcr deferring speculative faults,
+     * ar.k0 naming the image base for the SAL runtime.  PAL leaves them at
+     * its own values (the machine's capture IVT, zero); the flat-image
+     * loader used to seed them.  Leaf, clobbers r14 only.
+     */
+    .section .text.fw_shadow_control_registers, "ax"
+    .type fw_shadow_control_registers, @function
+    .proc fw_shadow_control_registers
+    .explicit
+fw_shadow_control_registers:
+    movl r14 = __fw_ivt
+    ;;
+    mov cr.iva = r14
+    movl r14 = FW_DCR_BOOT
+    ;;
+    mov cr.dcr = r14
+    movl r14 = __fw_image_start
+    ;;
+    mov ar.k0 = r14
+    ;;
+    srlz.i
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp fw_shadow_control_registers
+    .size fw_shadow_control_registers, . - fw_shadow_control_registers
+
     .section .text.start_secondary, "ax"
     .type start_secondary, @function
     .proc start_secondary
     .explicit
 start_secondary:
     movl r1 = __gp
+    ;;
+    mov r4 = b0
+    ;;
+    br.call.sptk.many b0 = fw_shadow_control_registers
+    ;;
+    mov b0 = r4
     ;;
     mov r14 = cr.lid
     ;;

@@ -20,6 +20,7 @@ SECTIONS
     .text.boot : {
         *(.text._start)
         *(.text.pal_proc_entry)
+        *(.text.flash_entry)
         *(.text.start_after_pal)
         *(.text.start_secondary)
         *(.text.fw_pal_halt_light)

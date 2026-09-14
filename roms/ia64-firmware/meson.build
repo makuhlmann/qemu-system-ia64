@@ -10,6 +10,7 @@ ia64_firmware_bin = custom_target(
   'ia64-firmware.bin',
   output: [
     'ia64-firmware.bin',
+    'ia64-firmware.raw',
     'ia64-firmware.elf',
     'ia64-firmware.map',
     'ia64-firmware.sections',
@@ -22,6 +23,7 @@ ia64_firmware_bin = custom_target(
     '@OUTPUT1@',
     '@OUTPUT2@',
     '@OUTPUT3@',
+    '@OUTPUT4@',
     meson.current_source_dir(),
     '@DEPFILE@',
   ],

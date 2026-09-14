@@ -1,4 +1,5 @@
 entry.S
+flash_entry.c
 firmware.c
 unicode_collation.c
 smbios.c

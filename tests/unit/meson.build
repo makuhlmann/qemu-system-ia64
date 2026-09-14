@@ -269,7 +269,7 @@ if 'ia64-softmmu' in target_dirs
        depends: ia64_firmware_bin,
        args: [
          files('test-ia64-firmware-layout.py'),
-         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.bin',
+         meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.raw',
          meson.project_build_root() / 'roms/ia64-firmware/ia64-firmware.elf',
        ],
        protocol: 'tap',
