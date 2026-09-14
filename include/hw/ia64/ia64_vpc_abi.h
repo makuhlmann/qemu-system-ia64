@@ -318,6 +318,58 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * chipset profile creates it; keep in lockstep with LBA0 in dsdt-pci-root-zx1.asl.
  */
 #define IA64_MERCURY_BUS              0x10
+
+/*
+ * 460GX expander roots.  The i2000 reaches its PCI buses through expander
+ * bridges on the System Address Controller: the PXB carries the
+ * compatibility bus 0, the two WXBs carry buses 1 and 2, and the GXB carries
+ * the AGP bus 3.  Each root owns its own block of four INTx inputs on the
+ * Programmable Interrupt Device, starting at IA64_PCI_INTX_GSI_BASE.
+ */
+#define IA64_460GX_EXPANDER_ROOTS     3
+#define IA64_460GX_WXB0_BUS           0x01
+#define IA64_460GX_WXB1_BUS           0x02
+#define IA64_460GX_GXB_BUS            0x03
+/* Stable indices into the machine's expander arrays, not creation order. */
+#define IA64_460GX_ROOT_WXB0          0
+#define IA64_460GX_ROOT_WXB1          1
+#define IA64_460GX_ROOT_GXB           2
+/* The AGP graphics adapter sits at device 0 of the GXB root bus. */
+#define IA64_460GX_GXB_VGA_SLOT       0x00
+/*
+ * The i2000's SCSI host bus adapter sits at device 0 of the first WXB
+ * expander bus.  That seat belongs to the QLogic ISP12160, the adapter the
+ * real board carries and the machine's default.  The LSI 53c895a is opt-in
+ * (lsi=on) for images installed before the swap; it takes the seat when the
+ * QLogic is turned off, and otherwise parks at device 0 of the second WXB
+ * bus, which is the layout an image is migrated between the two on.
+ */
+#define IA64_460GX_WXB0_SCSI_SLOT     0x00
+#define IA64_460GX_WXB1_SCSI_SLOT     0x00
+/*
+ * The Intel 82468GX I/O and Firmware Bridge, the platform south bridge: a
+ * four-function device carrying the LPC/ISA bridge, the IDE controller, the
+ * UHCI host controller and the SMBus controller.  Device 3 is where the real
+ * SDV firmware expects it -- it pokes the south bridge's config register
+ * 0xd0 at 00:03.0 for its CPU-frequency mailbox (plans/phase5 SESSION 17).
+ */
+/*
+ * The Programmable Interrupt Device's seat on the compatibility bus, and the
+ * Integrated Hot-Plug Controller's on each WXB bus.  Unlike the south
+ * bridge's device number, these are reconstructions: the chipset
+ * documentation places the PID on the compatibility bus (SSDM 1.7.2) without
+ * naming a device number, and nothing in the real firmware pins them down.
+ * They follow upstream's i2000 machine.
+ */
+#define IA64_460GX_PID_SLOT           0x00
+#define IA64_460GX_IHPC_SLOT          0x0f
+#define IA64_460GX_IFB_SLOT           0x03
+#define IA64_460GX_IFB_LPC_FUNCTION   0
+#define IA64_460GX_IFB_IDE_FUNCTION   1
+#define IA64_460GX_IFB_USB_FUNCTION   2
+#define IA64_460GX_IFB_SMBUS_FUNCTION 3
+/* The Cirrus Logic CS4281 on the i2000's I/O board. */
+#define IA64_460GX_AUDIO_SLOT         0x04
 #define IA64_MERCURY_VGA_SLOT        0x00
 /* 16 MiB PAL/SAL firmware address space below 4 GiB. */
 #define IA64_FW_ADDRESS_SPACE_BASE    IA64_U64(0x00000000ff000000)

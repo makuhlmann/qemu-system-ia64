@@ -2306,6 +2306,18 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
     VGACommonState *vga = &s->vga;
     I2CBus *i2cbus;
 
+    /*
+     * The Rage 128 answers expansion-ROM reads as soon as the ROM BAR's
+     * enable bit is set, memory decode or not.  The Intel SDV / HP i2000
+     * firmware relies on that: its PCI enumeration leaves the card's command
+     * register at bus-master-only (it treats the card as a second VGA and
+     * disables decode) and its CSM then reads the BIOS through the ROM BAR
+     * with Memory Space Enable still clear; the BIOS's own POST enables the
+     * card.  Without this the CSM reads zeros, skips the video POST and the
+     * console never comes up.
+     */
+    dev->rom_decodes_without_memory_enable = true;
+
 #ifndef CONFIG_PIXMAN
     if (s->use_pixman != 0) {
         warn_report("x-pixman != 0, not effective without PIXMAN");
@@ -2423,6 +2435,22 @@ static void ati_vga_reset(DeviceState *dev)
 
     timer_del(&s->vblank_timer);
     ati_vga_update_irq(s);
+
+    /*
+     * Every register goes back to its power-up value.  That includes
+     * CRTC_GEN_CNTL, whose enables were surviving a reset and kept the last
+     * frame on screen until the BIOS re-initialised the card; a reset turns
+     * the display off until then, as it does on the real part.
+     */
+    memset(&s->regs, 0, sizeof(s->regs));
+    /*
+     * CRTC2_CUR_EN is gone with the registers, so the sprite the console
+     * still shows for the host-side cursor must go too; a guest-rendered
+     * cursor lives in VRAM and needs nothing here.
+     */
+    if (!s->cursor_guest_mode && s->vga.con != NULL) {
+        dpy_mouse_set(s->vga.con, 0, 0, false);
+    }
 
     /*
      * PLL and init-register power-up values from the RAGE 128 PRO Register

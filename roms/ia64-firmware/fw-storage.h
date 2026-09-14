@@ -114,6 +114,7 @@ BOOLEAN storage_reset(const FW_STORAGE_DEVICE *Device,
 void storage_invalidate_cache(const FW_STORAGE_DEVICE *Device);
 void ahci_probe_devices(void);
 void scsi_probe_devices(void);
+const CHAR8 *scsi_transport_name(void);
 void ahci_stop_all_ports(void);
 
 typedef struct {
@@ -131,6 +132,8 @@ typedef struct {
     UINT8  present;      /* 1=channel I/O bases configured */
 } IDE_CONFIG;
 #define PCI_CLASS_REVISION_OFFSET     0x08U
+/* Programming interface; for IDE, bits 0 and 2 select native-mode channels. */
+#define PCI_CFG_CLASS_PROG_OFFSET     0x09U
 #define PCI_CFG_COMMAND_OFFSET        0x04U
 #define PCI_CFG_COMMAND_IO_SPACE      0x0001U
 #define PCI_CFG_COMMAND_MEMORY_SPACE  0x0002U
@@ -139,6 +142,15 @@ typedef struct {
 #define PCI_HEADER_TYPE_MULTI_FUNC    0x80U
 #define PCI_BASE_CLASS_MASS_STORAGE   0x01U
 #define PCI_SUB_CLASS_IDE             0x01U
+/*
+ * The 82468GX IFB's IDE function and its IDE Timing register (SSDM 12.2.10):
+ * one 16-bit register per channel, whose bit 15 enables the channel's ATA
+ * register-block decode.  Reset value 0, so firmware has to set it.
+ */
+#define IFB_IDE_VENDOR_DEVICE         0x76018086U
+#define IFB_IDE_IDETIM_OFFSET         0x40U
+#define IFB_IDE_IDETIM_DECODE_ENABLE  0x8000U
+
 #define PCI_IDE_BAR0_OFFSET           0x10U
 #define PCI_IDE_BAR1_OFFSET           0x14U
 #define PCI_IDE_BAR2_OFFSET           0x18U

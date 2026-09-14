@@ -22,6 +22,7 @@
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_regs.h"
 #include "hw/ia64/ia64_vpc_abi.h"
+#include "hw/southbridge/intel_82468gx.h"
 #include "hw/net/e1000_regs.h"
 
 /* Platform addresses come from hw/ia64/ia64_vpc_abi.h; test-only register
@@ -45,7 +46,7 @@
  */
 #define IA64_INT10_ROM_SIZE          0x00000800U
 #define IA64_INT10_VECTOR_ADDR       0x00000040ULL
-#define IA64_INT10_ROM_PCIR_OFFSET   0x00e0U
+#define IA64_INT10_ROM_PCIR_OFFSET   0x0060U
 #define IA64_INT10_ROM_ATI_SIG_OFFSET 0x0030U
 #define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
 #define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
@@ -90,7 +91,8 @@ typedef struct TestInt10Registers {
     uint32_t input_signature;
 } TestInt10Registers;
 
-#define IA64_LSI_MMIO_BASE           0x00000000ee030000ULL
+/* The SCSI HBA's register BAR, inside the WXB0 root's 32 MB aperture. */
+#define IA64_LSI_MMIO_BASE           0x00000000fa000000ULL
 #define IA64_LSI_SCRIPT_ADDR         0x00100000U
 #define IA64_LSI_MSGOUT_ADDR         0x00110000U
 #define IA64_LSI_CDB_ADDR            0x00110010U
@@ -116,8 +118,13 @@ typedef struct TestInt10Registers {
 
 #define IA64_E1000_MMIO_BASE         0x00000000ee040000ULL
 #define IA64_E1000_IO_BASE           0x0000c400U
-#define IA64_E1000_SLOT              6U
-#define IA64_E1000_GSI               18U
+/*
+ * The i2000 carries its Ethernet at 00:05.0, the slot the graphics adapter
+ * vacated when it moved to the GXB root.  INTA on slot 5 swizzles to
+ * IA64_PCI_INTX_GSI_BASE + (5 + 0) % 4 = 17.
+ */
+#define IA64_E1000_SLOT              5U
+#define IA64_E1000_GSI               44U   /* i2000: bus-0 slot 5 INTA */
 #define IA64_E1000_TX_DESC_ADDR      0x00120000U
 #define IA64_E1000_TX_BUFFER_ADDR    0x00121000U
 #define IA64_E1000_RX_DESC_ADDR      0x00122000U
@@ -177,6 +184,17 @@ static void iosapic_write(QTestState *qts, uint32_t reg, uint32_t value);
 static QTestState *ia64_vpc_start(const char *extra_args)
 {
     return qtest_initf("-machine 460gx -m 256M -S %s",
+                       extra_args ?: "");
+}
+
+/*
+ * The LSI is opt-in now that the QLogic holds the platform's SCSI seat.
+ * Turning the QLogic off puts the LSI back on that seat, so these tests see
+ * the bus name and the register addresses the adapter has always had there.
+ */
+static QTestState *ia64_vpc_start_lsi(const char *extra_args)
+{
+    return qtest_initf("-machine 460gx,lsi=on,isp=off -m 256M -S %s",
                        extra_args ?: "");
 }
 
@@ -324,7 +342,13 @@ static void test_int10_rom(void)
                     ==, 0x1002);
     g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 6),
                     ==, 0x5046);
-    g_assert_cmpmem(rom + 0x60, 19, "QEMU IA64 VBE INT10", 19);
+    /* the marker string follows the 0xffff terminator of the mode list */
+    for (i = IA64_INT10_ROM_MODES_OFFSET; i + 2 <= sizeof(rom); i += 2) {
+        if (lduw_le_p(rom + i) == 0xffff) {
+            break;
+        }
+    }
+    g_assert_cmpmem(rom + i + 2, 19, "QEMU IA64 VBE INT10", 19);
     /*
      * ATI's drivers validate the ROM by its signature at 30h before following
      * the pointer chain at 48h; PCIR must therefore stay clear of both.
@@ -347,6 +371,17 @@ static void test_int10_rom(void)
     g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x10), ==, 65);
     g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x12), ==, 12500);
     g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x16), ==, 40000);
+    /*
+     * The Rage 128 miniport (ati2mpaa) reads 50 bytes of the PLL block and a
+     * 12-byte table through header+14h; the fields past +20h decide its
+     * memory clock, so they must be published, not left to whatever follows.
+     */
+    g_assert_cmphex(lduw_le_p(rom + ati_header + 0x14), ==, ati_header);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x0a), ==, 12000);
+    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x22), ==, 40000);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x2e), ==, 40000 & 0xffff);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x30), ==, 40000 >> 16);
+    g_assert_cmpint(ati_pll + 0x32, <=, IA64_INT10_ROM_HANDLER_OFFSET);
     g_assert_cmpmem(rom + IA64_INT10_ROM_OEM_OFFSET, 13,
                     "QEMU IA64 VBE", 13);
     g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET),
@@ -833,8 +868,14 @@ static void test_sba_ioc_identity(void)
  * on PCI\VEN_1077&DEV_1216&SUBSYS_00071077, so the identity has to be
  * exact.  The mailbox handshake is the first thing that driver does.
  */
-#define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x01820000ULL)
-#define IA64_ISP_SLOT           7U
+/*
+ * The QLogic holds the board's SCSI seat at 01:00.0 on the first WXB root
+ * (see plans/460gx-i2000-fidelity-plan.md), so its BARs come out of that
+ * root's aperture, and it is there by default.
+ */
+#define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x0c000000ULL)
+#define IA64_ISP_SLOT           IA64_460GX_WXB0_SCSI_SLOT
+#define IA64_ISP_BUS            IA64_460GX_WXB0_BUS
 #define IA64_ISP_REG_ISTATUS    0x0aU
 #define IA64_ISP_REG_SEMAPHORE  0x0cU
 #define IA64_ISP_REG_MAILBOX0   0x70U
@@ -849,9 +890,9 @@ static void test_sba_ioc_identity(void)
 static void test_isp12160_mailbox(void)
 {
     const uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                         ((uint64_t)IA64_ISP_BUS << 20) +
                          ((uint64_t)IA64_ISP_SLOT << 15);
-    QTestState *qts = qtest_init("-machine 460gx,isp=on -cpu merced "
-                                 "-m 256M -S");
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
     unsigned int i;
 
     g_assert_cmphex(qtest_readl(qts, cfg), ==, 0x12161077);
@@ -887,6 +928,126 @@ static void test_isp12160_mailbox(void)
     g_assert_cmphex(qtest_readw(qts, IA64_ISP_MMIO_BASE +
                                 IA64_ISP_REG_ISTATUS) &
                     IA64_ISP_ISTATUS_RISC_INT, ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * A QLogic RISC image records its own length, in words, at image word 3, and
+ * the words up to that length sum to zero.  ql12160.sys rounds its download
+ * up to whole transfer chunks, so the adapter also receives whatever the
+ * driver's bounce buffer held past the image end; MBC_VERIFY_CHECKSUM must
+ * ignore that tail.  Summing it instead made the checksum fail, and the
+ * driver's failure path then bugchecked Server 2003 with a STOP 0xD1.
+ */
+#define IA64_ISP_FW_DMA_ADDR    0x00130000U
+#define IA64_ISP_FW_RISC_ADDR   0x1000U
+#define IA64_ISP_FW_WORDS       12U     /* declared image length */
+#define IA64_ISP_FW_CHUNK       8U      /* words per LOAD RAM, as a driver */
+#define IA64_ISP_FW_SENT        (2U * IA64_ISP_FW_CHUNK)
+#define IA64_ISP_MBC_VERIFY_CHECKSUM  0x0007U
+#define IA64_ISP_MBC_LOAD_RAM_A64     0x0009U
+
+static uint16_t isp_mailbox(QTestState *qts, const uint16_t *in,
+                            unsigned int count)
+{
+    uint16_t status = 0;
+    unsigned int i;
+
+    /*
+     * Mailbox 0 goes first: until the command word is staged, writes to
+     * mailboxes 4 and 5 are queue doorbells rather than command words.
+     */
+    for (i = 0; i < count; i++) {
+        qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_MAILBOX0 + i * 2,
+                     in[i]);
+    }
+    qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_HOST_CMD,
+                 IA64_ISP_HC_SET_HOST_INT);
+    for (i = 0; i < 1000; i++) {
+        if (qtest_readw(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_SEMAPHORE) &
+            IA64_ISP_SEMAPHORE_LOCK) {
+            break;
+        }
+    }
+    status = qtest_readw(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_MAILBOX0);
+    qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_SEMAPHORE, 0);
+    qtest_writew(qts, IA64_ISP_MMIO_BASE + IA64_ISP_REG_HOST_CMD,
+                 IA64_ISP_HC_CLEAR_RISC_INT);
+    return status;
+}
+
+/* Download the image in chunks, exactly as a driver does, and verify it. */
+static uint16_t isp_load_and_verify(QTestState *qts, const uint16_t *image)
+{
+    uint16_t mb[8];
+    unsigned int chunk;
+
+    for (chunk = 0; chunk * IA64_ISP_FW_CHUNK < IA64_ISP_FW_SENT; chunk++) {
+        uint32_t offset = chunk * IA64_ISP_FW_CHUNK;
+        uint32_t dma = IA64_ISP_FW_DMA_ADDR + offset * 2;
+
+        qtest_memwrite(qts, dma, image + offset, IA64_ISP_FW_CHUNK * 2);
+        memset(mb, 0, sizeof(mb));
+        mb[0] = IA64_ISP_MBC_LOAD_RAM_A64;
+        mb[1] = IA64_ISP_FW_RISC_ADDR + offset;
+        mb[2] = dma >> 16;
+        mb[3] = dma & 0xffffu;
+        mb[4] = IA64_ISP_FW_CHUNK;
+        g_assert_cmphex(isp_mailbox(qts, mb, 8), ==,
+                        IA64_ISP_MBS_COMMAND_COMPLETE);
+    }
+
+    memset(mb, 0, sizeof(mb));
+    mb[0] = IA64_ISP_MBC_VERIFY_CHECKSUM;
+    mb[1] = IA64_ISP_FW_RISC_ADDR;
+    return isp_mailbox(qts, mb, 2);
+}
+
+static void isp_build_firmware(uint16_t *image)
+{
+    uint16_t sum = 0;
+    unsigned int i;
+
+    memset(image, 0, IA64_ISP_FW_SENT * sizeof(*image));
+    image[0] = 0x0804;                      /* entry branch, as a real image */
+    image[3] = IA64_ISP_FW_WORDS;           /* the declared length */
+    for (i = 4; i < IA64_ISP_FW_WORDS - 1; i++) {
+        image[i] = 0x1000 + i;
+    }
+    for (i = 0; i < IA64_ISP_FW_WORDS - 1; i++) {
+        sum += image[i];
+    }
+    image[IA64_ISP_FW_WORDS - 1] = -sum;    /* image words sum to zero */
+    /* The tail past the declared length is bounce-buffer residue. */
+    for (i = IA64_ISP_FW_WORDS; i < IA64_ISP_FW_SENT; i++) {
+        image[i] = 0xdead;
+    }
+}
+
+static void test_isp12160_firmware_checksum(void)
+{
+    const uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                         ((uint64_t)IA64_ISP_BUS << 20) +
+                         ((uint64_t)IA64_ISP_SLOT << 15);
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    uint16_t image[IA64_ISP_FW_SENT];
+
+    qtest_writew(qts, cfg + PCI_COMMAND,
+                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+
+    isp_build_firmware(image);
+    g_assert_cmphex(isp_load_and_verify(qts, image), ==,
+                    IA64_ISP_MBS_COMMAND_COMPLETE);
+    qtest_quit(qts);
+
+    /* Corrupting a word inside the declared image must still be caught. */
+    qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    qtest_writew(qts, cfg + PCI_COMMAND,
+                 PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+    isp_build_firmware(image);
+    image[5] ^= 0x0001;
+    g_assert_cmphex(isp_load_and_verify(qts, image), !=,
+                    IA64_ISP_MBS_COMMAND_COMPLETE);
     qtest_quit(qts);
 }
 
@@ -1691,22 +1852,1468 @@ static void test_nvram_commit_and_restart(void)
  */
 /*
  * In realfw mode the 460GX chipset answers CF8/CFC configuration cycles for
- * its own functions on bus CBN.  Each one must report its real identity:
+ * its own functions on bus CBN -- FFh out of reset.  Each one must report its
+ * real identity:
  * a zero vendor id is neither "present" nor the architected "absent"
  * 0xffff, so firmware probing the chipset cannot tell what it found.
  */
 #define IA64_REALFW_CF8         0x0cf8U
 #define IA64_REALFW_CFC         0x0cfcU
 
-static uint32_t realfw_cfg_readl(QTestState *qts, uint8_t dev, uint8_t fn,
-                                 uint8_t reg)
+static uint32_t realfw_cfg_readl_bus(QTestState *qts, uint8_t bus,
+                                     uint8_t dev, uint8_t fn, uint8_t reg)
 {
     qtest_writel(qts, IA64_LEGACY_IO_BASE +
                  ia64_sparse_io_offset(IA64_REALFW_CF8),
-                 0x80000000U | ((uint32_t)dev << 11) |
+                 0x80000000U | ((uint32_t)bus << 16) | ((uint32_t)dev << 11) |
                  ((uint32_t)fn << 8) | reg);
     return qtest_readl(qts, IA64_LEGACY_IO_BASE +
                        ia64_sparse_io_offset(IA64_REALFW_CFC));
+}
+
+/* The chipset's own functions, on bus CBN -- FFh out of reset. */
+static uint32_t realfw_cfg_readl(QTestState *qts, uint8_t dev, uint8_t fn,
+                                 uint8_t reg)
+{
+    return realfw_cfg_readl_bus(qts, 0xff, dev, fn, reg);
+}
+
+/*
+ * The interrupt controller follows the platform.  On the i2000 it is the
+ * 460GX Programmable Interrupt Device: 64 inputs reporting IOSAPIC version
+ * 2.1, which is what gives each PCI root its own block of four INTx lines.
+ * zx1 keeps the narrower controller it had.
+ */
+/*
+ * The i2000 reaches its PCI buses through expander bridges: the PXB carries
+ * the compatibility bus 0, the two WXBs carry buses 1 and 2, and the GXB
+ * carries the AGP bus 3.  Each is a root in its own right, reachable through
+ * the same segment-0 ECAM window by its own bus number, and each owns its own
+ * block of four interrupt inputs instead of sharing bus 0's.
+ */
+static void test_460gx_expander_roots(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S "
+                                 "-device i82559c,bus=wxb0,addr=1,romfile= "
+                                 "-device i82559c,bus=wxb1,addr=1,romfile= "
+                                 "-device i82559c,bus=gxb,addr=1,romfile=");
+    unsigned int bus;
+
+    for (bus = 1; bus <= 3; bus++) {
+        uint64_t cfg = IA64_PCI_CONFIG_BASE + ((uint64_t)bus << 20) +
+                       (1ULL << 15);
+
+        g_assert_cmphex(qtest_readl(qts, cfg), ==, 0x12298086);
+        /* An empty slot on the same root still decodes as open bus. */
+        g_assert_cmphex(qtest_readl(qts, cfg + (1ULL << 15)), ==,
+                        0xffffffff);
+    }
+
+    /* zx1 has no expander roots; its second root is Mercury's bus 0x10. */
+    qtest_quit(qts);
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE + (1ULL << 20)),
+                    ==, 0xffffffff);
+    qtest_quit(qts);
+}
+
+/*
+ * Every BAR must fall inside a producer window of the root the device sits
+ * behind.  A device moved onto an expander root whose _CRS does not cover its
+ * BARs gets no resources from the guest's PnP arbiter: when that device is the
+ * boot controller, Windows bugchecks with STOP 0x7B long before the disk is
+ * touched, and nothing in the firmware or the machine notices.  The window
+ * table below mirrors roms/ia64-firmware/dsdt-pci-root.asl; the two must be
+ * changed together.
+ */
+typedef struct {
+    uint64_t first;
+    uint64_t last;
+} PCIWindow;
+
+typedef struct {
+    unsigned int bus;
+    const PCIWindow *mem;
+    size_t mem_count;
+    const PCIWindow *io;
+    size_t io_count;
+} PCIRootWindows;
+
+static const PCIWindow pci0_mem[] = { { 0xEE000000, 0xEFFFFFFF } };
+static const PCIWindow pci0_io[] = {
+    { 0x0000, 0x03AF }, { 0x03E0, 0xAFFF }, { 0xC000, 0xCFFF },
+    { 0xF000, 0xFFFF },
+};
+static const PCIWindow wxb0_mem[] = { { 0xFA000000, 0xFBFFFFFF } };
+static const PCIWindow wxb0_io[] = { { 0xB000, 0xBFFF } };
+static const PCIWindow wxb1_mem[] = { { 0xFC000000, 0xFDFFFFFF } };
+static const PCIWindow wxb1_io[] = { { 0xE000, 0xEFFF } };
+static const PCIWindow gxb_mem[] = {
+    { 0x000A0000, 0x000BFFFF }, { 0x000C0000, 0x000DFFFF },
+    { 0xF0000000, 0xF9FFFFFF },
+};
+static const PCIWindow gxb_io[] = { { 0x03B0, 0x03DF }, { 0xD000, 0xDFFF } };
+
+static const PCIRootWindows root_windows[] = {
+    { 0, pci0_mem, G_N_ELEMENTS(pci0_mem), pci0_io, G_N_ELEMENTS(pci0_io) },
+    { IA64_460GX_WXB0_BUS, wxb0_mem, G_N_ELEMENTS(wxb0_mem),
+      wxb0_io, G_N_ELEMENTS(wxb0_io) },
+    { IA64_460GX_WXB1_BUS, wxb1_mem, G_N_ELEMENTS(wxb1_mem),
+      wxb1_io, G_N_ELEMENTS(wxb1_io) },
+    { IA64_460GX_GXB_BUS, gxb_mem, G_N_ELEMENTS(gxb_mem),
+      gxb_io, G_N_ELEMENTS(gxb_io) },
+};
+
+static bool pci_window_contains(const PCIWindow *windows, size_t count,
+                                uint64_t address)
+{
+    size_t i;
+
+    for (i = 0; i < count; i++) {
+        if (address >= windows[i].first && address <= windows[i].last) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void check_root_window_containment(const char *args)
+{
+    QTestState *qts = qtest_init(args);
+    size_t root;
+
+    for (root = 0; root < G_N_ELEMENTS(root_windows); root++) {
+        const PCIRootWindows *rw = &root_windows[root];
+        unsigned int slot;
+
+        for (slot = 0; slot < 32; slot++) {
+            uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                           ((uint64_t)rw->bus << 20) +
+                           ((uint64_t)slot << 15);
+            unsigned int bar;
+
+            if (qtest_readl(qts, cfg) == 0xffffffff) {
+                continue;
+            }
+
+            for (bar = 0; bar < 6; bar++) {
+                uint32_t value = qtest_readl(qts, cfg + 0x10 + bar * 4);
+                uint64_t address;
+
+                if (value == 0) {
+                    continue;
+                }
+                if (value & PCI_BASE_ADDRESS_SPACE_IO) {
+                    address = value & PCI_BASE_ADDRESS_IO_MASK;
+                    g_assert_true(pci_window_contains(rw->io, rw->io_count,
+                                                      address));
+                    continue;
+                }
+                address = value & PCI_BASE_ADDRESS_MEM_MASK;
+                g_assert_true(pci_window_contains(rw->mem, rw->mem_count,
+                                                  address));
+                if ((value & PCI_BASE_ADDRESS_MEM_TYPE_MASK) ==
+                    PCI_BASE_ADDRESS_MEM_TYPE_64) {
+                    bar++;
+                }
+            }
+        }
+    }
+
+    qtest_quit(qts);
+}
+
+/*
+ * The south bridge carries an 8259 pair, as the real 82468GX does, and the
+ * processor reaches it through the interrupt-acknowledge byte in the
+ * Processor Interrupt Block.  An IA-64 guest runs the SAPIC and never uses
+ * it, but the real SDV firmware does, and the MADT already claims a
+ * PC/AT-compatible interrupt space.  With the pair initialized and no
+ * interrupt pending, the INTA cycle returns the master's spurious vector.
+ *
+ * The pair belongs to the bridge, not to the machine: it must answer without
+ * realfw mode, and zx1 -- which models no south bridge yet -- must not
+ * answer at all.
+ */
+/*
+ * The platform devices that exist only in configuration space: the
+ * Programmable Interrupt Device, whose function is the IOSAPIC every
+ * interrupt is delivered through, and one Integrated Hot-Plug Controller per
+ * WXB bus.  A guest enumerating the buses must find them where the i2000 has
+ * them, with no BARs and no interrupt to arbitrate.
+ */
+/* The AGP bridge's own seat: the host bridge at the top of bus 0. */
+#define IA64_AGP_SLOT           31U
+
+/*
+ * The machine presents the four PCI buses the i2000's expander bridges carry
+ * and no fifth: the chipset's own configuration space -- the SAC, the SDC,
+ * the memory cards and the expander ports -- stays firmware-facing.
+ *
+ * That is a decision, not an omission, and this pins it.  Nothing a guest
+ * does reads those registers: an OS takes its resource map from ACPI, and
+ * the one driver that touches 460GX chipset config, Linux's i460-agp, binds
+ * to the AGP bridge by device ID, which the machine presents at 00:1f.0.
+ * The software that does read them is the real SDV firmware, which has them
+ * on the realfw path at the bus number it programs itself (CBN, 0xEE) -- a
+ * number this machine could not present anyway, because a config address
+ * for it falls outside the 64 MB ECAM window and into the I/O block above.
+ */
+static void test_460gx_no_chipset_bus(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    unsigned int bus;
+
+    /* The four buses the expander bridges carry are all there... */
+    static const struct {
+        unsigned int bus;
+        unsigned int slot;
+    } occupied[] = {
+        { 0, IA64_460GX_PID_SLOT },
+        { IA64_460GX_WXB0_BUS, IA64_460GX_WXB0_SCSI_SLOT },
+        { IA64_460GX_WXB1_BUS, IA64_460GX_IHPC_SLOT },
+        { IA64_460GX_GXB_BUS, IA64_460GX_GXB_VGA_SLOT },
+    };
+    size_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(occupied); i++) {
+        g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
+                                    ((uint64_t)occupied[i].bus << 20) +
+                                    ((uint64_t)occupied[i].slot << 15)),
+                        !=, 0xffffffff);
+    }
+    /* ...and every bus above them is empty, chipset bus included. */
+    for (bus = IA64_460GX_GXB_BUS + 1; bus < 0x40; bus++) {
+        unsigned int slot;
+
+        for (slot = 0; slot < 32; slot++) {
+            g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
+                                        ((uint64_t)bus << 20) +
+                                        ((uint64_t)slot << 15)),
+                            ==, 0xffffffff);
+        }
+    }
+
+    /*
+     * The AGP bridge the GART path binds to keeps its seat.  On the board it
+     * is an expander port on the chipset bus; here it is the host bridge at
+     * 00:1f.0, which is where Linux finds it ("Found an AGP 0.0 compliant
+     * device at 0000:00:1f.0") and where >4 GB graphics DMA was validated.
+     */
+    g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
+                                ((uint64_t)IA64_AGP_SLOT << 15)),
+                    ==, 0x84ea8086);
+    qtest_quit(qts);
+}
+
+static void test_460gx_platform_identities(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    static const struct {
+        unsigned int bus;
+        unsigned int slot;
+        uint16_t device;
+        uint16_t class_id;
+        uint8_t prog_if;
+        uint16_t subsystem_vendor;
+        uint16_t subsystem;
+    } identities[] = {
+        { 0, IA64_460GX_PID_SLOT, 0x123d, PCI_CLASS_SYSTEM_PIC, 0x20, 0, 0 },
+        { IA64_460GX_WXB0_BUS, IA64_460GX_IHPC_SLOT, 0x123f,
+          PCI_CLASS_SYSTEM_PCI_HOTPLUG, 0, PCI_VENDOR_ID_INTEL, 0x123f },
+        { IA64_460GX_WXB1_BUS, IA64_460GX_IHPC_SLOT, 0x123f,
+          PCI_CLASS_SYSTEM_PCI_HOTPLUG, 0, PCI_VENDOR_ID_INTEL, 0x123f },
+    };
+    size_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(identities); i++) {
+        uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                       ((uint64_t)identities[i].bus << 20) +
+                       ((uint64_t)identities[i].slot << 15);
+        unsigned int bar;
+
+        g_assert_cmphex(qtest_readl(qts, cfg), ==,
+                        ((uint32_t)identities[i].device << 16) |
+                        PCI_VENDOR_ID_INTEL);
+        g_assert_cmphex(qtest_readw(qts, cfg + PCI_CLASS_DEVICE), ==,
+                        identities[i].class_id);
+        g_assert_cmphex(qtest_readb(qts, cfg + PCI_CLASS_PROG), ==,
+                        identities[i].prog_if);
+        g_assert_cmphex(qtest_readw(qts, cfg + PCI_SUBSYSTEM_VENDOR_ID),
+                        ==, identities[i].subsystem_vendor);
+        g_assert_cmphex(qtest_readw(qts, cfg + PCI_SUBSYSTEM_ID), ==,
+                        identities[i].subsystem);
+        g_assert_cmphex(qtest_readb(qts, cfg + PCI_INTERRUPT_PIN), ==, 0);
+        for (bar = 0; bar < 6; bar++) {
+            g_assert_cmphex(qtest_readl(qts, cfg + PCI_BASE_ADDRESS_0 +
+                                        bar * 4), ==, 0);
+        }
+    }
+    qtest_quit(qts);
+
+    /* zx1 is a different platform and carries none of them. */
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(qtest_readl(qts, IA64_PCI_CONFIG_BASE +
+                                ((uint64_t)IA64_460GX_PID_SLOT << 15)),
+                    ==, 0xffffffff);
+    qtest_quit(qts);
+}
+
+static void test_460gx_south_bridge_pic(void)
+{
+    const uint64_t pic_cmd = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x20);
+    const uint64_t pic_data = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x21);
+    const uint64_t inta = 0xfefe0000ULL;
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+
+    qtest_writeb(qts, pic_cmd, 0x11);   /* ICW1: cascade, ICW4 to follow */
+    qtest_writeb(qts, pic_data, 0x08);  /* ICW2: interrupt vector base 8 */
+    qtest_writeb(qts, pic_data, 0x04);  /* ICW3: slave cascaded on IR2 */
+    qtest_writeb(qts, pic_data, 0x01);  /* ICW4: 8086 mode */
+    g_assert_cmphex(qtest_readb(qts, inta), ==, 0x0f);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(qtest_readb(qts, inta), ==, 0x00);
+    qtest_quit(qts);
+}
+
+/*
+ * The bridge's timer unit and its NMI Status and Control register.  The IFB
+ * carries three 82C54-equivalent counters (SSDM 15.4) -- counter 0 on IRQ 0,
+ * counter 1 driving the DRAM refresh, counter 2 the speaker tone -- and Nmisc
+ * at I/O 0x61 (SSDM 11.2.4.1), whose bits 3:0 are read/write and whose bits
+ * 7, 5 and 4 are status.  Both existed only in realfw mode before; they are
+ * platform hardware and belong to the bridge, so the machine must have them
+ * with no flag, and zx1 -- which models no south bridge -- must not.
+ */
+#define IA64_PIT_COUNTER0       0x40
+#define IA64_PIT_CONTROL        0x43
+#define IA64_NMISC_PORT         0x61
+#define IA64_NMISC_REFRESH      0x10
+#define IA64_NMISC_TIMER2_OUT   0x20
+
+static void test_460gx_south_bridge_timer(void)
+{
+    const uint64_t counter0 =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIT_COUNTER0);
+    const uint64_t control =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIT_CONTROL);
+    const uint64_t nmisc =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_NMISC_PORT);
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    uint8_t first;
+    unsigned int i;
+
+    /*
+     * Program counter 0 for a periodic square wave and read the count back
+     * through a counter-latch command: an unbacked port would answer 0xff to
+     * both halves, which is not a count this counter can hold (it was loaded
+     * with 0x1000 and only counts down).
+     */
+    qtest_writeb(qts, control, 0x36);           /* counter 0, LSB+MSB, mode 3 */
+    qtest_writeb(qts, counter0, 0x00);
+    qtest_writeb(qts, counter0, 0x10);          /* initial count 0x1000 */
+    qtest_writeb(qts, control, 0x00);           /* latch counter 0 */
+    {
+        uint8_t lsb = qtest_readb(qts, counter0);
+        uint8_t msb = qtest_readb(qts, counter0);
+
+        g_assert_cmpuint((msb << 8) | lsb, <=, 0x1000);
+    }
+
+    /* Nmisc: bits 3:0 are stored, and the status bits above them are not. */
+    qtest_writeb(qts, nmisc, 0x0f);
+    g_assert_cmphex(qtest_readb(qts, nmisc) & 0x0f, ==, 0x0f);
+    qtest_writeb(qts, nmisc, 0x00);
+    g_assert_cmphex(qtest_readb(qts, nmisc) & 0x0f, ==, 0x00);
+    /* Bit 7 (latched SERR#) and bit 6 (reserved) read zero. */
+    g_assert_cmphex(qtest_readb(qts, nmisc) & 0xc0, ==, 0x00);
+
+    /*
+     * The refresh toggle must actually toggle: the vendor firmware times a
+     * delay by waiting for a full 0->1->0 period, and a port stuck at either
+     * value hangs it.  Clock the guest forward rather than spinning.
+     */
+    first = qtest_readb(qts, nmisc) & IA64_NMISC_REFRESH;
+    for (i = 0; i < 100; i++) {
+        qtest_clock_step(qts, 20000);
+        if ((qtest_readb(qts, nmisc) & IA64_NMISC_REFRESH) != first) {
+            break;
+        }
+    }
+    g_assert_cmpuint(i, <, 100);
+
+    /*
+     * Bit 5 follows counter 2's output, and port 0x61 bit 0 is that counter's
+     * gate -- the speaker path.  Run it in mode 3 with a short count and step
+     * the clock: the output must be seen both high and low, which open bus
+     * (stuck at 1) cannot do.
+     */
+    {
+        const uint64_t counter2 =
+            IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x42);
+        bool seen_high = false;
+        bool seen_low = false;
+
+        qtest_writeb(qts, control, 0xb6);       /* counter 2, LSB+MSB, mode 3 */
+        qtest_writeb(qts, counter2, 0x20);
+        qtest_writeb(qts, counter2, 0x00);      /* initial count 0x20 */
+        qtest_writeb(qts, nmisc, 0x01);         /* gate the counter on */
+        for (i = 0; i < 200; i++) {
+            if (qtest_readb(qts, nmisc) & IA64_NMISC_TIMER2_OUT) {
+                seen_high = true;
+            } else {
+                seen_low = true;
+            }
+            if (seen_high && seen_low) {
+                break;
+            }
+            qtest_clock_step(qts, 10000);
+        }
+        g_assert_true(seen_high);
+        g_assert_true(seen_low);
+    }
+    qtest_quit(qts);
+
+    /* zx1 models no south bridge, so the port is unclaimed: open bus. */
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(qtest_readb(qts, nmisc), ==, 0xff);
+    qtest_quit(qts);
+}
+
+/*
+ * The path from the counters to the PIC.  Counter 0 drives IRQ 0, which is how
+ * a test can put a controlled edge on a PIC input with no CPU to run: mode 0
+ * holds the output low while the counter runs and raises it at terminal count,
+ * mode 2 is the periodic tick, and mode 4 a one-shot strobe.  Their output
+ * shapes matter beyond the tick rate, because a controller that presents a
+ * request only while its input is still asserted -- which is what an 8259A
+ * does -- can only deliver an interrupt whose source holds the line long
+ * enough to acknowledge.
+ */
+#define IA64_PIC_INTA           0xfefe0000ULL
+#define IA64_PIC_CMD            0x20
+#define IA64_PIC_DATA           0x21
+#define IA64_PIC_VECTOR_BASE    0x08
+#define IA64_PIC_SPURIOUS       (IA64_PIC_VECTOR_BASE + 7)
+/* 11932 counts of the 1.193182 MHz input, and the nanoseconds they take. */
+#define IA64_PIT_100HZ_COUNT    0x2e9c
+#define IA64_PIT_100HZ_NS       10002150
+
+static void pic_master_init(QTestState *qts)
+{
+    const uint64_t cmd =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIC_CMD);
+    const uint64_t data =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIC_DATA);
+
+    qtest_writeb(qts, cmd, 0x11);                    /* ICW1: cascade, ICW4 */
+    qtest_writeb(qts, data, IA64_PIC_VECTOR_BASE);   /* ICW2: vector base */
+    qtest_writeb(qts, data, 0x04);                   /* ICW3: slave on IR2 */
+    qtest_writeb(qts, data, 0x01);                   /* ICW4: 8086 mode */
+    qtest_writeb(qts, data, 0x00);                   /* OCW1: unmask all */
+}
+
+static uint8_t pic_master_irr(QTestState *qts)
+{
+    const uint64_t cmd =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIC_CMD);
+
+    qtest_writeb(qts, cmd, 0x0a);                    /* OCW3: read IRR */
+    return qtest_readb(qts, cmd);
+}
+
+static void pic_master_eoi(QTestState *qts)
+{
+    /* OCW2: non-specific EOI. */
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIC_CMD),
+                 0x20);
+}
+
+static void pit_counter0_program(QTestState *qts, uint8_t mode, uint16_t count)
+{
+    const uint64_t control =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIT_CONTROL);
+    const uint64_t counter0 =
+        IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIT_COUNTER0);
+
+    qtest_writeb(qts, control, 0x30 | (mode << 1));  /* counter 0, LSB+MSB */
+    qtest_writeb(qts, counter0, count & 0xff);
+    qtest_writeb(qts, counter0, count >> 8);
+}
+
+/*
+ * The generic host helper addresses one bus: it builds config addresses as
+ * ecam_alloc_ptr + (devfn << 12) + offset.  Offsetting the base by the bus
+ * number therefore points the whole QPCIBus at that bus, which is how the
+ * tests reach devices behind the 460GX expander roots.
+ */
+static void ia64_qpci_init_on_bus(QGenericPCIBus *gbus, QTestState *qts,
+                                  unsigned int bus)
+{
+    qpci_init_generic(gbus, qts, NULL, false);
+    gbus->ecam_alloc_ptr = IA64_PCI_CONFIG_BASE + ((uint64_t)bus << 20);
+    gbus->gpex_pio_base = IA64_LEGACY_IO_BASE;
+}
+
+static void ia64_qpci_init(QGenericPCIBus *gbus, QTestState *qts)
+{
+    ia64_qpci_init_on_bus(gbus, qts, 0);
+}
+
+/*
+ * The counters have to be clocked, and QEMU_CLOCK_VIRTUAL only runs while the
+ * machine is running, so these tests must not pass -S.
+ */
+static QTestState *ia64_vpc_start_running(void)
+{
+    return qtest_init("-machine 460gx -cpu merced -m 256M");
+}
+
+/*
+ * Withdrawing unacknowledged requests only works if the sources hold their
+ * line the way the hardware does.  Counter 0 in mode 2 is the periodic tick:
+ * its output is high for the whole period bar one input clock, so every tick
+ * is still there to acknowledge.  A strobe (mode 4) idles high and pulses low
+ * for one clock, so its interrupt is the edge at the end of the pulse and the
+ * line is asserted from then on -- modelled upside down, as a 838ns high
+ * pulse, the strobe would be gone before anything could take it.
+ */
+static void test_460gx_pit_ticks_survive(void)
+{
+    QTestState *qts = ia64_vpc_start_running();
+    unsigned int i;
+
+    pic_master_init(qts);
+    pic_master_eoi(qts);
+
+    pit_counter0_program(qts, 2, IA64_PIT_100HZ_COUNT);
+    for (i = 0; i < 10; i++) {
+        qtest_clock_step(qts, IA64_PIT_100HZ_NS);
+        g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==,
+                        IA64_PIC_VECTOR_BASE);
+        pic_master_eoi(qts);
+    }
+
+    /*
+     * Leave the line low first, so the strobe's rising edge is the one the
+     * counter makes rather than one left over from the mode 0 run.
+     */
+    pit_counter0_program(qts, 0, IA64_PIT_100HZ_COUNT);
+    pit_counter0_program(qts, 4, IA64_PIT_100HZ_COUNT);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==, IA64_PIC_VECTOR_BASE);
+    pic_master_eoi(qts);
+
+    qtest_clock_step(qts, IA64_PIT_100HZ_NS);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==, IA64_PIC_VECTOR_BASE);
+    pic_master_eoi(qts);
+
+    qtest_quit(qts);
+}
+
+/*
+ * The same counter read back through the status command, whose top bit is OUT.
+ * A rate generator idles high and drops for a single input clock just before
+ * the reload, so a sample taken at any ordinary moment reads high; the notch is
+ * one 838ns clock, which the counter's own timer deadlines step straight onto.
+ * Modelled the other way up -- low, with OUT high only at the instant of the
+ * reload -- every sample reads low instead, which is what the status byte and
+ * Nmisc bit 5 used to report.
+ */
+#define IA64_PIT_READBACK_STATUS_C0     0xe2
+#define IA64_PIT_STATUS_OUT             0x80
+
+static uint8_t pit_counter0_status(QTestState *qts)
+{
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_PIT_CONTROL),
+                 IA64_PIT_READBACK_STATUS_C0);
+    return qtest_readb(qts, IA64_LEGACY_IO_BASE +
+                       ia64_sparse_io_offset(IA64_PIT_COUNTER0));
+}
+
+static void test_460gx_pit_mode2_out_level(void)
+{
+    QTestState *qts = ia64_vpc_start_running();
+    bool seen_low = false;
+    unsigned int i;
+
+    /*
+     * High from the moment the counter is programmed, not from its first
+     * terminal count.
+     */
+    pit_counter0_program(qts, 2, IA64_PIT_100HZ_COUNT);
+    g_assert_cmphex(pit_counter0_status(qts) & IA64_PIT_STATUS_OUT, ==,
+                    IA64_PIT_STATUS_OUT);
+
+    /* Nine samples spread over the period, all of them clear of the notch. */
+    for (i = 0; i < 9; i++) {
+        qtest_clock_step(qts, IA64_PIT_100HZ_NS / 10);
+        g_assert_cmphex(pit_counter0_status(qts) & IA64_PIT_STATUS_OUT, ==,
+                        IA64_PIT_STATUS_OUT);
+    }
+
+    /* The notch is still there: the counter's own deadlines land on it. */
+    for (i = 0; i < 8 && !seen_low; i++) {
+        qtest_clock_step_next(qts);
+        seen_low = (pit_counter0_status(qts) & IA64_PIT_STATUS_OUT) == 0;
+    }
+    g_assert_true(seen_low);
+
+    qtest_quit(qts);
+}
+
+/*
+ * An 8259A presents a request only while the edge latch is set *and* the input
+ * is still asserted: a latched edge whose input goes away before the
+ * acknowledge leaves nothing to report, which is why the part answers a
+ * spurious IR7 instead (SSDM 15.2.5, "the IRQ inputs must remain active until
+ * after the falling edge of the first INTA#").  Firmware depends on it -- the
+ * vendor i2000 CSM masks the IDE interrupt and polls the IRR for it, so a
+ * request that stayed latched for the rest of the boot made every wait after
+ * the first return immediately, and every ATAPI read after the first fail.
+ */
+static void test_460gx_pic_edge_withdrawal(void)
+{
+    QTestState *qts = ia64_vpc_start_running();
+
+    pic_master_init(qts);
+    g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==, IA64_PIC_SPURIOUS);
+    pic_master_eoi(qts);
+
+    /*
+     * Mode 0 gives a clean edge: the output sits low while the counter runs
+     * and goes high at terminal count, and reloading the count drops it again.
+     */
+    pit_counter0_program(qts, 0, IA64_PIT_100HZ_COUNT);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x00);
+    qtest_clock_step(qts, IA64_PIT_100HZ_NS);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x01);
+
+    /* The input goes away with the request still unacknowledged. */
+    pit_counter0_program(qts, 0, IA64_PIT_100HZ_COUNT);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x00);
+    g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==, IA64_PIC_SPURIOUS);
+    pic_master_eoi(qts);
+
+    /* The edge latch re-arms with it, so the next assertion is a request. */
+    qtest_clock_step(qts, IA64_PIT_100HZ_NS);
+    g_assert_cmphex(pic_master_irr(qts) & 0x01, ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, IA64_PIC_INTA), ==, IA64_PIC_VECTOR_BASE);
+    pic_master_eoi(qts);
+
+    qtest_quit(qts);
+}
+
+
+/*
+ * The bridge's RTC is a 256-byte part in two 128-byte banks (SSDM 15.5.1).
+ * Ports 0x70/0x71 reach the standard bank.  Ports 0x72/0x73 reach the
+ * extended bank only while RTCCFG (function 0, config offset C8h) bit 2 is
+ * set; with it clear -- the reset state, and where the vendor firmware leaves
+ * it -- they alias the standard bank, which is what lets firmware write its
+ * CMOS configuration through one pair and read it back through the other.
+ * Bits 4 and 3 lock bytes 38h-3Fh of the extended and standard bank, once,
+ * until a hardware reset.
+ */
+#define IA64_RTC_INDEX          0x70
+#define IA64_RTC_DATA           0x71
+#define IA64_RTC_EXT_INDEX      0x72
+#define IA64_RTC_EXT_DATA       0x73
+#define IA64_RTC_SCRATCH        0x40    /* user RAM, outside the lock range */
+#define IA64_RTCCFG             0xc8
+#define IA64_RTCCFG_UPPER_EN    0x04
+#define IA64_RTCCFG_LOCK_UPPER  0x10
+
+static void rtc_bank_write(QTestState *qts, uint16_t index_port,
+                           uint8_t index, uint8_t value)
+{
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(index_port),
+                 index);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(index_port + 1),
+                 value);
+}
+
+static uint8_t rtc_bank_read(QTestState *qts, uint16_t index_port,
+                             uint8_t index)
+{
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(index_port),
+                 index);
+    return qtest_readb(qts,
+                       IA64_LEGACY_IO_BASE +
+                       ia64_sparse_io_offset(index_port + 1));
+}
+
+static void test_460gx_south_bridge_rtc_banks(void)
+{
+    const uint64_t ifb_cfg = IA64_PCI_CONFIG_BASE +
+                             ((uint64_t)IA64_460GX_IFB_SLOT << 15);
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+
+    /*
+     * Out of reset 0x72/0x73 reach the extended bank: Upper RAM Enable is
+     * set, contrary to the SSDM's 00h default, because the vendor firmware
+     * never sets it and still keeps its configuration there (it 0xFF-fills
+     * extended bytes 08h-1Fh during POST, which through the alias would halt
+     * the clock).  So a write through 0x70/0x71 must not show up at 0x72/0x73.
+     */
+    g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG), ==,
+                    IA64_RTCCFG_UPPER_EN);
+    rtc_bank_write(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH, 0x5a);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0x00);
+    /* Filling extended 0Ah-0Dh leaves the clock's registers A-D alone. */
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x0a, 0xff);
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x0b, 0xff);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x0a) & 0x70, ==, 0x20);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x0b) & 0x80, ==, 0x00);
+
+    /* Clearing the bit makes 0x72/0x73 alias the standard bank. */
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, 0x00);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0x5a);
+
+    /* With Upper RAM Enable set again they reach their own bank. */
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
+    g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG) &
+                    IA64_RTCCFG_UPPER_EN, ==, IA64_RTCCFG_UPPER_EN);
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH, 0xa5);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0xa5);
+    /* The standard bank kept its own byte: these are two banks, not one. */
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0x5a);
+
+    /* Clearing the bit puts the alias back, and the standard byte reappears. */
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, 0x00);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0x5a);
+
+    /*
+     * Lock Upper RAM Bytes: 38h-3Fh of the extended bank stop reading and
+     * writing, and the bit is write-once -- clearing it must not unlock.
+     */
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x38, 0x3c);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x38), ==, 0x3c);
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG,
+                 IA64_RTCCFG_UPPER_EN | IA64_RTCCFG_LOCK_UPPER);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x38), ==, 0xff);
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x38, 0x11);
+    qtest_writeb(qts, ifb_cfg + IA64_RTCCFG, IA64_RTCCFG_UPPER_EN);
+    g_assert_cmphex(qtest_readb(qts, ifb_cfg + IA64_RTCCFG) &
+                    IA64_RTCCFG_LOCK_UPPER, ==, IA64_RTCCFG_LOCK_UPPER);
+    /* Byte 40h is outside the locked range and still answers. */
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, IA64_RTC_SCRATCH),
+                    ==, 0xa5);
+
+    /*
+     * The century byte at 32h is inside the standard bank's user RAM
+     * (0Eh-7Fh, SSDM 15.5.1), so it is plain read/write storage.  The realfw
+     * path used to model it as a read-only hardware register; that was a
+     * deviation, and this pins the documented behaviour so it cannot come
+     * back.
+     */
+    rtc_bank_write(qts, IA64_RTC_INDEX, 0x32, 0x19);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x32), ==, 0x19);
+    rtc_bank_write(qts, IA64_RTC_INDEX, 0x32, 0x20);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x32), ==, 0x20);
+    qtest_quit(qts);
+}
+
+/*
+ * The board's hardware monitors on the bridge's SMBus.  The vendor firmware
+ * initialises two chips (0x2C and 0x4E) through the bridge's PIIX4-layout
+ * host controller during POST and polls each transaction to completion; an
+ * empty bus fails them with a device error and the poll never exits, so the
+ * monitors have to be there and have to acknowledge.  Drive one byte-data
+ * write and read it back the way the firmware does.
+ */
+#define IA64_SMB_BASE_PORT      0xfff0
+#define IA64_SMB_HSTSTS         0x00
+#define IA64_SMB_HSTCNT         0x02
+#define IA64_SMB_HSTCMD         0x03
+#define IA64_SMB_HSTADD         0x04
+#define IA64_SMB_HSTDAT0        0x05
+#define IA64_SMB_CNT_BYTE_DATA  0x08
+#define IA64_SMB_CNT_START      0x40
+#define IA64_SMB_STS_HOST_BUSY  0x01
+#define IA64_SMB_STS_INTR       0x02
+#define IA64_SMB_STS_DEV_ERR    0x04
+
+/*
+ * Each group of four ports occupies its own 4 KB page of the sparse window,
+ * so a register block's ports are not contiguous in memory: every register
+ * has to be translated from its own port number.
+ */
+static uint64_t smb_reg(uint8_t reg)
+{
+    return IA64_LEGACY_IO_BASE +
+           ia64_sparse_io_offset(IA64_SMB_BASE_PORT + reg);
+}
+
+static uint8_t smb_wait(QTestState *qts)
+{
+    const uint64_t sts = smb_reg(IA64_SMB_HSTSTS);
+    uint8_t value = 0;
+    unsigned int i;
+
+    for (i = 0; i < 100; i++) {
+        value = qtest_readb(qts, sts);
+        if (!(value & IA64_SMB_STS_HOST_BUSY)) {
+            break;
+        }
+    }
+    return value;
+}
+
+static void smb_start(QTestState *qts, uint8_t address, uint8_t command,
+                      uint8_t data, bool read)
+{
+    qtest_writeb(qts, smb_reg(IA64_SMB_HSTSTS), 0xff);   /* clear status */
+    qtest_writeb(qts, smb_reg(IA64_SMB_HSTCMD), command);
+    qtest_writeb(qts, smb_reg(IA64_SMB_HSTADD),
+                 (address << 1) | (read ? 1 : 0));
+    qtest_writeb(qts, smb_reg(IA64_SMB_HSTDAT0), data);
+    qtest_writeb(qts, smb_reg(IA64_SMB_HSTCNT),
+                 IA64_SMB_CNT_START | IA64_SMB_CNT_BYTE_DATA);
+}
+
+static void test_460gx_smbus_hwmon(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    unsigned int i;
+
+    /*
+     * The firmware finds the controller at 0xFFF0 because the machine
+     * programs the bridge's SMBus BAR there, as the real firmware does.
+     * Registers the controller does not implement must read zero -- the
+     * firmware uses offset 0x0e as a controller-enable check and spins if it
+     * floats high.
+     */
+    g_assert_cmphex(qtest_readb(qts, smb_reg(0x0e)), ==, 0x00);
+
+    /* Both monitors acknowledge: a completed transaction, no device error. */
+    for (i = 0; i < 2; i++) {
+        const uint8_t address = i == 0 ? 0x2c : 0x4e;
+
+        smb_start(qts, address, 0x13, 0x5a, false);
+        g_assert_cmphex(smb_wait(qts) & (IA64_SMB_STS_INTR |
+                                         IA64_SMB_STS_DEV_ERR), ==,
+                        IA64_SMB_STS_INTR);
+    }
+
+    /* The byte written is the byte read back from that register. */
+    smb_start(qts, 0x2c, 0x13, 0x00, true);
+    g_assert_cmphex(smb_wait(qts) & IA64_SMB_STS_DEV_ERR, ==, 0);
+    g_assert_cmphex(qtest_readb(qts, smb_reg(IA64_SMB_HSTDAT0)), ==, 0x5a);
+
+    /* An address with nothing on it reports a device error instead. */
+    smb_start(qts, 0x55, 0x00, 0x00, false);
+    g_assert_cmphex(smb_wait(qts) & IA64_SMB_STS_DEV_ERR, ==,
+                    IA64_SMB_STS_DEV_ERR);
+    qtest_quit(qts);
+}
+
+/*
+ * The chipset answers PCI configuration cycles at CF8/CFC (460GX SSDM 2.3),
+ * the mechanism the vendor firmware enumerates through.  It is real hardware
+ * and the machine carries it whichever firmware runs.  Device numbers on the
+ * bus CBN names are the chipset's own functions (Table 2-1); every other
+ * address forwards to the PCI bus.  CBN resets to FFh, so the chipset's own
+ * functions answer on bus FF from power-on and the compatibility bus shows
+ * its real devices immediately; the vendor firmware programs the chipset
+ * there through POST and moves it to 0xEE only at the end of enumeration.
+ */
+#define IA64_CF8_PORT   0xcf8
+#define IA64_CFC_PORT   0xcfc
+#define IA64_CBN_DEVICE 0x10
+#define IA64_CBN_REG    0x40
+#define IA64_CBN_BUS    0xee
+
+static void cf8_select(QTestState *qts, uint8_t bus, uint8_t device,
+                       uint8_t function, uint8_t reg)
+{
+    qtest_writel(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CF8_PORT),
+                 0x80000000U | ((uint32_t)bus << 16) |
+                 ((uint32_t)device << 11) | ((uint32_t)function << 8) |
+                 (reg & 0xfc));
+}
+
+static uint32_t cf8_readl(QTestState *qts, uint8_t bus, uint8_t device,
+                          uint8_t function, uint8_t reg)
+{
+    cf8_select(qts, bus, device, function, reg);
+    return qtest_readl(qts, IA64_LEGACY_IO_BASE +
+                       ia64_sparse_io_offset(IA64_CFC_PORT));
+}
+
+static void cf8_writel(QTestState *qts, uint8_t bus, uint8_t device,
+                       uint8_t function, uint8_t reg, uint32_t value)
+{
+    cf8_select(qts, bus, device, function, reg);
+    qtest_writel(qts, IA64_LEGACY_IO_BASE +
+                 ia64_sparse_io_offset(IA64_CFC_PORT), value);
+}
+
+/*
+ * The System Address Controller's register aperture and the platform's
+ * diagnostic port.  The firmware arbitrates which processor boots through a
+ * semaphore in the SAC block -- it clears bit 7, polls for bit 7, and
+ * compares the low seven bits against its own LID.id -- so the block has to
+ * answer, and the semaphore has to read granted to id 0.  Chipset hardware,
+ * so the machine carries it whichever firmware runs; zx1 has neither.
+ */
+#define IA64_SAC_BASE      0x00000000feb00000ULL
+#define IA64_SAC_BOOT_SEM  0xcc0
+#define IA64_POST_PORT     0x80
+
+static void test_460gx_sac_aperture(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    const uint64_t post = IA64_LEGACY_IO_BASE +
+        ia64_sparse_io_offset(IA64_POST_PORT);
+
+    /*
+     * The BSP-select word (SSDM 4.1.3: "a write once register in the SAC")
+     * is claimed by the first access that reaches it, and the claim names
+     * the first CPU (LID.id 0 here): SAL reads it once, checks bit 7 and
+     * compares the low seven bits with its own id.  Later stores are
+     * dropped.
+     */
+    g_assert_cmphex(qtest_readl(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM), ==,
+                    0x80);
+    qtest_writel(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM, 0x83);
+    qtest_writeb(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM, 0x00);
+    g_assert_cmphex(qtest_readl(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM), ==,
+                    0x80);
+
+    /* The rest of the aperture is read/write scratch, not open bus. */
+    qtest_writel(qts, IA64_SAC_BASE + 0x100, 0xa55aa55a);
+    g_assert_cmphex(qtest_readl(qts, IA64_SAC_BASE + 0x100), ==, 0xa55aa55a);
+    g_assert_cmphex(qtest_readl(qts, IA64_SAC_BASE + 0x200), ==, 0);
+
+    /* The diagnostic port latches the last code written to it. */
+    qtest_writeb(qts, post, 0xc6);
+    g_assert_cmphex(qtest_readb(qts, post), ==, 0xc6);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(qtest_readb(qts, IA64_SAC_BASE + IA64_SAC_BOOT_SEM), ==,
+                    0x00);
+    g_assert_cmphex(qtest_readb(qts, post), ==, 0xff);
+    qtest_quit(qts);
+}
+
+/*
+ * The i2000's SMSC LPC47B27x Super I/O answers its configuration pair at
+ * 2Eh/2Fh: 55h enters, AAh leaves, index 07h selects the logical device,
+ * and the vendor DSDT reads COM1 (LDN 4) as ACTR 30h / IOAH-IOAL 60h-61h /
+ * INTR 70h -- 3F8h on IRQ 4, active, as the board's firmware configures it.
+ * Outside configuration mode the data port reads open bus.
+ */
+static void test_460gx_superio(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    uint64_t idx = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2e);
+    uint64_t dat = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2f);
+
+    qtest_writeb(qts, idx, 0x07);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xff);
+    qtest_writeb(qts, idx, 0x55);
+    qtest_writeb(qts, idx, 0x20);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x51);
+    qtest_writeb(qts, idx, 0x07);
+    qtest_writeb(qts, dat, 0x04);
+    qtest_writeb(qts, idx, 0x30);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x01);
+    qtest_writeb(qts, idx, 0x60);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x03);
+    qtest_writeb(qts, idx, 0x61);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xf8);
+    qtest_writeb(qts, idx, 0x70);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x04);
+    qtest_writeb(qts, idx, 0x07);
+    qtest_writeb(qts, dat, 0x05);
+    qtest_writeb(qts, idx, 0x30);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x00);
+    qtest_writeb(qts, idx, 0xaa);
+    qtest_writeb(qts, idx, 0x30);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xff);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    qtest_writeb(qts, idx, 0x55);
+    qtest_writeb(qts, idx, 0x20);
+    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xff);
+    qtest_quit(qts);
+}
+
+static void test_460gx_config_ports(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+
+    /* Out of reset CBN is FFh: the chipset answers there, not on bus 0. */
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0x84e08086);
+    /*
+     * CBN lives in bus 0 device 10h, which is a register file of its own --
+     * not the expander port that bus CBN carries at the same device number.
+     */
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_CBN_DEVICE, 0, 0x40) & 0xff,
+                    ==, 0xff);
+    /* ... and bus 0 is the real compatibility bus: the PID at 00:00.0. */
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_460GX_PID_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x123d8086);
+    g_assert_cmphex(cf8_readl(qts, 0, 5, 0, PCI_VENDOR_ID), ==, 0x12298086);
+    /* The i2000's expander ports: WXB at 12h/13h, GXB at 14h (three fns). */
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x12, 1, PCI_VENDOR_ID), ==,
+                    0x84e68086);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x13, 1, PCI_VENDOR_ID), ==,
+                    0x84e68086);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, PCI_VENDOR_ID), ==,
+                    0x84ea8086);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 2, PCI_VENDOR_ID), ==,
+                    0x84e28086);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x15, 0, PCI_VENDOR_ID), ==,
+                    0xffffffff);
+
+    /* Program CBN through the device reserved for it, as firmware does. */
+    cf8_select(qts, 0, IA64_CBN_DEVICE, 0, IA64_CBN_REG);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 IA64_CBN_BUS);
+
+    /* The chipset has moved: the SAC answers on CBN ... */
+    g_assert_cmphex(cf8_readl(qts, IA64_CBN_BUS, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0x84e08086);
+    g_assert_cmphex(cf8_readl(qts, IA64_CBN_BUS, 0x04, 0, PCI_VENDOR_ID), ==,
+                    0x84e18086);
+
+    /* ... and bus 0 now forwards to the machine's real devices. */
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_460GX_IFB_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x76008086);
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_460GX_PID_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x123d8086);
+    /* Devices behind the expander roots are reachable by bus number too. */
+    g_assert_cmphex(cf8_readl(qts, IA64_460GX_WXB0_BUS,
+                              IA64_460GX_WXB0_SCSI_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x12161077);
+
+    /*
+     * "On the bus that the chipset is mapped into (determined by the CBN
+     * register), Device Numbers 0-31 are reserved for the 460GX chipset
+     * components as shown in Table 2-1.  All other devices numbers are
+     * forwarded to the selected bus" (SSDM 2.3.1).  So point CBN at a bus a
+     * root really carries: the whole bus becomes chipset space, and the SCSI
+     * adapter that answered a moment ago must stop answering.  Looking an
+     * unpopulated chipset device number up on the PCI buses instead is what
+     * would alias a real device's config space into the chipset's window.
+     */
+    cf8_select(qts, 0, IA64_CBN_DEVICE, 0, IA64_CBN_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 IA64_460GX_WXB0_BUS);
+    /* The SCSI adapter's device number is the SAC's there now, not its own. */
+    g_assert_cmphex(cf8_readl(qts, IA64_460GX_WXB0_BUS,
+                              IA64_460GX_WXB0_SCSI_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x84e08086);
+    /* And a device number the chipset does not populate reads absent. */
+    g_assert_cmphex(cf8_readl(qts, IA64_460GX_WXB0_BUS, 0x0f, 0,
+                              PCI_VENDOR_ID), ==, 0xffffffff);
+    cf8_select(qts, 0, IA64_CBN_DEVICE, 0, IA64_CBN_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 IA64_CBN_BUS);
+
+    /*
+     * Expander port 0 sits at device 10h on bus CBN and shares neither
+     * storage nor meaning with the CBN window on bus 0: programming its
+     * registers must not move the chipset.
+     */
+    cf8_select(qts, IA64_CBN_BUS, IA64_CBN_DEVICE, 0, IA64_CBN_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 0x55);
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_CBN_DEVICE, 0, IA64_CBN_REG) & 0xff,
+                    ==, IA64_CBN_BUS);
+    g_assert_cmphex(cf8_readl(qts, IA64_CBN_BUS, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0x84e08086);
+    g_assert_cmphex(cf8_readl(qts, 0x55, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0xffffffff);
+
+    /* An empty device number reads as absent, not as zero. */
+    g_assert_cmphex(cf8_readl(qts, 0, 0x1d, 0, PCI_VENDOR_ID), ==, 0xffffffff);
+
+    /*
+     * Configuration cycles route by each port's Bus Number / Subordinate Bus
+     * Number pair (SSDM 2.3.1): number the WXB's port a 0x12 and its bus
+     * answers there, the port's own number as a type 0 cycle even before
+     * SUBNO is raised.  Bus 0 stays the compatibility bus (2.2.1), and the
+     * compatibility port's own number reaches it as well (Table 2-1).
+     */
+    cf8_select(qts, IA64_CBN_BUS, 0x12, 0, 0x48);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 0x12);
+    g_assert_cmphex(cf8_readl(qts, 0x12, IA64_460GX_WXB0_SCSI_SLOT, 0,
+                              PCI_VENDOR_ID), ==, 0x12161077);
+    g_assert_cmphex(cf8_readl(qts, 0x13, IA64_460GX_WXB0_SCSI_SLOT, 0,
+                              PCI_VENDOR_ID), ==, 0xffffffff);
+    cf8_select(qts, IA64_CBN_BUS, IA64_CBN_DEVICE, 0, 0x48);
+    qtest_writew(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 0xd0d0);
+    g_assert_cmphex(cf8_readl(qts, 0xd0, IA64_460GX_IFB_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x76008086);
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_460GX_IFB_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0x76008086);
+
+    /*
+     * Port 0xCF9 is the reset control, aliased with byte 1 of the config
+     * address: a byte write with RST_CPU set resets the system, while the
+     * dword writes software addresses the config register with do not.  The
+     * reset re-seeds the chipset store, so CBN coming back as FFh -- the
+     * chipset answering on bus FF again -- is what shows the machine went
+     * through reset.
+     */
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0xcf9),
+                 0x06);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0x84e08086);
+    g_assert_cmphex(cf8_readl(qts, IA64_CBN_BUS, 0x00, 0, PCI_VENDOR_ID), ==,
+                    0xffffffff);
+    qtest_quit(qts);
+
+    /* zx1 is a different chipset and answers no configuration cycles here. */
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmphex(cf8_readl(qts, 0, 0x00, 0, PCI_VENDOR_ID), ==, 0xffffffff);
+    qtest_quit(qts);
+}
+
+
+/*
+ * The GXB AGP host bridge (dev 14h fn 1) holds the graphics aperture base in
+ * the 64-bit BAPBASE register (98h).  The vendor firmware programs it at 4 GiB
+ * (low dword 0, high dword 1); an above-4-GiB base makes Windows XP-64 fail the
+ * AGP root with Code 12, so the realfw config path clamps an above-4-GiB base
+ * below 4 GiB while leaving a legitimate below-4-GiB base as written.
+ */
+static void test_460gx_agp_aperture_rebased(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+
+    /* Firmware's 4 GiB BAPBASE (low 0, high 1) reads back clamped below 4 GiB. */
+    cf8_writel(qts, 0xff, 0x14, 1, 0x98, 0x00000000);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x9c, 0x00000001);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xd0000000);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x00000000);
+
+    /* A below-4-GiB base is legitimate (agp460 writes the aperture back once
+     * the OS owns it) and is stored verbatim -- only above-4-GiB is clamped. */
+    cf8_writel(qts, 0xff, 0x14, 1, 0x98, 0xc0000000);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x9c, 0x00000000);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xc0000000);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x00000000);
+
+    /* Scope: only dev 14h function 1's BAPBASE.  Function 0 (the SAC) is not
+     * clamped, and registers outside 98h-9fh are ordinary config storage. */
+    cf8_writel(qts, 0xff, 0x14, 0, 0x9c, 0x00000001);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 0, 0x9c), ==, 0x00000001);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x94, 0xdeadbeef);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x94), ==, 0xdeadbeef);
+
+    qtest_quit(qts);
+}
+
+/*
+ * The SAC's function-0 indexed register file: 64h selects an entry, 70h-73h is
+ * the window onto it.  Undocumented -- the SSDM publishes only the SAC's
+ * error, monitor and interrupt registers -- but the vendor firmware walks it
+ * unmistakably, writing an entry number to 64h, reading 64h back, then reading
+ * and rewriting 70h, over Table 2-1's chipset device numbers.  Backed by one
+ * cell, as plain config storage is, every entry aliases: the firmware's own
+ * walk reads at one entry what it wrote at the one before, so what it decides
+ * about which expander ports exist comes from the alias rather than from the
+ * machine.  Each SAC has its own file.
+ */
+#define IA64_SAC_IDX_REG    0x64
+#define IA64_SAC_IDX_DATA   0x70
+
+static void sac_idx_write(QTestState *qts, uint8_t sac, uint8_t entry,
+                          uint32_t value)
+{
+    cf8_select(qts, 0xff, sac, 0, IA64_SAC_IDX_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 entry);
+    cf8_select(qts, 0xff, sac, 0, IA64_SAC_IDX_DATA);
+    qtest_writel(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 value);
+}
+
+static uint32_t sac_idx_read(QTestState *qts, uint8_t sac, uint8_t entry)
+{
+    cf8_select(qts, 0xff, sac, 0, IA64_SAC_IDX_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 entry);
+    return cf8_readl(qts, 0xff, sac, 0, IA64_SAC_IDX_DATA);
+}
+
+/*
+ * One byte of a Memory Card A DIMM's SPD EEPROM, read the way the vendor
+ * firmware's sizing loop does: raise bit 0 of register 48h in the MAC
+ * function (4-7) that selects the row within a stack, name the DIMM's I2C
+ * address (54h-57h = stack 0, 50h-53h = stack 1, bit 7 = read) in the SAC's
+ * IIADR register, then read the byte through the card's function 2.
+ */
+static uint8_t spd_read(QTestState *qts, unsigned row, unsigned off)
+{
+    unsigned fn;
+
+    for (fn = 4; fn < 8; fn++) {
+        cf8_writel(qts, 0xff, 0x05, fn, 0x48, fn - 4 == row % 4 ? 1 : 0);
+    }
+    cf8_writel(qts, 0xff, 0x00, 0, 0x68, row < 4 ? 0xd4 : 0xd0);
+    return cf8_readl(qts, 0xff, 0x05, 2, off & 0xfc) >> ((off & 3) * 8);
+}
+
+/*
+ * The SPD images follow -m: rows of four identical DIMMs are populated from
+ * the largest Table 5-2 geometry down, 64 MB row increments, eight rows.
+ * The sizing loop reads bytes 2, 3, 4, 5 and 17 and computes
+ * 2^(rows+columns) x banks x ranks x 8 bytes per DIMM.
+ */
+static void spd_assert_row(QTestState *qts, unsigned row, unsigned row_bits,
+                           unsigned col_bits, unsigned ranks, unsigned banks)
+{
+    g_assert_cmpuint(spd_read(qts, row, 2), ==, 4);
+    g_assert_cmpuint(spd_read(qts, row, 3), ==, row_bits);
+    g_assert_cmpuint(spd_read(qts, row, 4), ==, col_bits);
+    g_assert_cmpuint(spd_read(qts, row, 5), ==, ranks);
+    g_assert_cmpuint(spd_read(qts, row, 17), ==, banks);
+}
+
+static void spd_assert_empty(QTestState *qts, unsigned row)
+{
+    g_assert_cmpuint(spd_read(qts, row, 2), ==, 0);
+    g_assert_cmpuint(spd_read(qts, row, 3), ==, 0);
+}
+
+static void test_460gx_spd_follows_ram_size(void)
+{
+    QTestState *qts;
+    unsigned row, sum, i;
+
+    /* 1 GiB: one row of 32Mx72 (256 MB) DIMMs, the i2000's four slots. */
+    qts = qtest_init("-machine 460gx -cpu merced -m 1G -S");
+    spd_assert_row(qts, 0, 13, 10, 1, 4);
+    for (row = 1; row < 8; row++) {
+        spd_assert_empty(qts, row);
+    }
+    /* Identity bytes and the byte-63 checksum of that image. */
+    g_assert_cmpuint(spd_read(qts, 0, 6), ==, 72);
+    g_assert_cmpuint(spd_read(qts, 0, 11), ==, 2);
+    g_assert_cmpuint(spd_read(qts, 0, 31), ==, 0x40);
+    for (sum = 0, i = 0; i < 63; i++) {
+        sum += spd_read(qts, 0, i);
+    }
+    g_assert_cmpuint(spd_read(qts, 0, 63), ==, sum & 0xff);
+    /* Without a row selected, or with two, the tunnel answers nothing. */
+    for (i = 4; i < 8; i++) {
+        cf8_writel(qts, 0xff, 0x05, i, 0x48, i < 6 ? 1 : 0);
+    }
+    cf8_writel(qts, 0xff, 0x00, 0, 0x68, 0xd4);
+    g_assert_cmpuint(cf8_readl(qts, 0xff, 0x05, 2, 0) & 0xff0000, ==, 0);
+    qtest_quit(qts);
+
+    /*
+     * 6 GiB + 256 MB: a 4 GB row of 64Mx72x2 (1 GB) DIMMs, a 2 GB row of
+     * 64Mx72 (512 MB), then 256 MB as a row of 8Mx72 (64 MB) DIMMs -- the
+     * second stack's first row, reached through I2C address 50h.
+     */
+    qts = qtest_init("-machine 460gx -cpu merced -m 6400M -S");
+    spd_assert_row(qts, 0, 13, 11, 2, 4);
+    spd_assert_row(qts, 1, 13, 11, 1, 4);
+    spd_assert_row(qts, 2, 12, 9, 1, 4);
+    g_assert_cmpuint(spd_read(qts, 0, 31), ==, 0x80);
+    g_assert_cmpuint(spd_read(qts, 2, 13), ==, 8);
+    for (row = 3; row < 8; row++) {
+        spd_assert_empty(qts, row);
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * The low DRAM band ends at the lowest programmed PCIS: "10_0000h - PCIS[7]"
+ * decodes to DRAM, "PCIS[7] - FDFF_FFFFh" to PCI, and DRAM resumes at
+ * "1_0000_0000h to TOM" (SSDM Table 4-1) -- memory behind the gap "is moved
+ * so that it is addressed above 4 GB" (4.1.5).  The vendor firmware programs
+ * PCIS 40h (2 GB) once it has sized 4 GB of DIMMs and reports a TOM of 6 GB.
+ */
+static void test_460gx_pcis_moves_dram_gap(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 3G -S");
+    const uint64_t two_gb = 0x80000000ULL, four_gb = 0x100000000ULL;
+
+    /* Static layout first: 3 GiB contiguous from 0. */
+    qtest_writel(qts, two_gb - 0x10, 0x11111111);
+    qtest_writel(qts, two_gb, 0x22222222);
+    qtest_writel(qts, two_gb + 0x40000000 - 0x10, 0x33333333);
+    g_assert_cmphex(qtest_readl(qts, two_gb), ==, 0x22222222);
+
+    /* PCIS 40h on the compatibility port opens the gap at 2 GiB. */
+    cf8_writel(qts, 0xff, 0x10, 0, 0x84, 0x40);
+    g_assert_cmphex(qtest_readl(qts, two_gb - 0x10), ==, 0x11111111);
+    g_assert_cmphex(qtest_readl(qts, two_gb), !=, 0x22222222);
+    g_assert_cmphex(qtest_readl(qts, four_gb), ==, 0x22222222);
+    g_assert_cmphex(qtest_readl(qts, four_gb + 0x40000000 - 0x10), ==,
+                    0x33333333);
+    /* What is written above 4 GiB is the same DRAM the gap displaced. */
+    qtest_writel(qts, four_gb + 0x100, 0x44444444);
+
+    /* A lower PCIS on another port lowers the band with it. */
+    cf8_writel(qts, 0xff, 0x14, 0, 0x84, 0x20);
+    g_assert_cmphex(qtest_readl(qts, two_gb - 0x10), !=, 0x11111111);
+    g_assert_cmphex(qtest_readl(qts, four_gb + 0x40000000 - 0x10), ==,
+                    0x11111111);
+    g_assert_cmphex(qtest_readl(qts, four_gb + 0x40000000 + 0x100), ==,
+                    0x44444444);
+
+    /* FFh (empty port) and 00h (reset) carry no window: back to static. */
+    cf8_writel(qts, 0xff, 0x14, 0, 0x84, 0xff);
+    cf8_writel(qts, 0xff, 0x10, 0, 0x84, 0x00);
+    g_assert_cmphex(qtest_readl(qts, two_gb), ==, 0x22222222);
+    g_assert_cmphex(qtest_readl(qts, two_gb + 0x100), ==, 0x44444444);
+    g_assert_cmphex(qtest_readl(qts, two_gb - 0x10), ==, 0x11111111);
+    qtest_quit(qts);
+}
+
+static void test_460gx_sac_indexed_file(void)
+{
+    QTestState *qts = ia64_vpc_start("");
+
+    /* The selector reads back, which is how the firmware checks it took. */
+    cf8_select(qts, 0xff, 0x00, 0, IA64_SAC_IDX_REG);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 0x13);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x00, 0, IA64_SAC_IDX_REG) & 0xff,
+                    ==, 0x13);
+
+    /*
+     * An entry nobody has written reads the device-present word (SSDM 2.2.1
+     * DEVNPRES, bit n = Table 2-1 device n, set = absent): the two SACs, the
+     * SDC, Memory Card A and expander ports 10h, 12h, 13h and 14h are
+     * populated, everything else is not.  The vendor firmware takes bit 20
+     * (device 14h) as "no GXB" and parks the AGP root when it is set.
+     */
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x14), ==, 0xffe2ffcc);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0xfe) & (1u << 20), ==, 0);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0xfe) & (1u << 16), ==, 0);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0xfe) & (1u << 22), !=, 0);
+
+    /*
+     * Function 0's 60h, read as a byte after 78h is written 0, is the
+     * number of expanders (Table 2-1: four).  The firmware bounds its port
+     * loop with it; open bus there numbers 16 rounds of phantom ports.
+     */
+    cf8_select(qts, 0xff, 0x00, 0, 0x78);
+    qtest_writeb(qts,
+                 IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 0x00);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x00, 0, 0x60) & 0xff, ==, 4);
+
+    /* Entries keep their own values rather than sharing one cell. */
+    sac_idx_write(qts, 0x00, 0x10, 0x11223344);
+    sac_idx_write(qts, 0x00, 0x12, 0x55667788);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x10), ==, 0x11223344);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x12), ==, 0x55667788);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x14), ==, 0xffe2ffcc);
+
+    /* And the second SAC has a file of its own. */
+    sac_idx_write(qts, 0x01, 0x10, 0x99aabbcc);
+    g_assert_cmphex(sac_idx_read(qts, 0x01, 0x10), ==, 0x99aabbcc);
+    g_assert_cmphex(sac_idx_read(qts, 0x00, 0x10), ==, 0x11223344);
+
+    qtest_quit(qts);
+}
+
+
+/*
+ * The 460GX variable gap follows the expander ports' PCIS registers (SSDM
+ * 4.1.3.1: each port decodes from PCIS x 32M up to the next port's PCIS).
+ * The vendor DSDT hands those slices out as root windows -- PCI0 from
+ * PCIS(10h), PCI3 (the GXB) from PCIS(14h) below it -- so a BAR a guest puts
+ * in any of them has to decode, and one below every programmed PCIS must
+ * not.  FFh is what the firmware writes for an empty port.
+ */
+static void test_460gx_pcis_window(void)
+{
+    /* The OHCI at 00:02.0 on the compatibility bus; HcRevision reads 10h. */
+    const uint64_t cfg = IA64_PCI_CONFIG_BASE + (2ULL << 15);
+    const uint64_t bar = 0xa9000000ULL;
+    const uint64_t cfc = IA64_LEGACY_IO_BASE +
+                         ia64_sparse_io_offset(IA64_CFC_PORT);
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+
+    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_0, bar);
+    qtest_writew(qts, cfg + PCI_COMMAND, PCI_COMMAND_MEMORY);
+    g_assert_cmphex(qtest_readl(qts, bar), !=, 0x10);
+
+    /* The compatibility port alone opens the gap from B4000000. */
+    cf8_select(qts, 0xff, 0x10, 0, 0x84);
+    qtest_writeb(qts, cfc, 0x5a);
+    g_assert_cmphex(qtest_readl(qts, bar), !=, 0x10);
+    g_assert_cmphex(qtest_readl(qts, 0xb5000000ULL), !=, 0x10);
+    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_0, 0xb5000000);
+    g_assert_cmphex(qtest_readl(qts, 0xb5000000ULL), ==, 0x10);
+    qtest_writel(qts, cfg + PCI_BASE_ADDRESS_0, bar);
+
+    /* The GXB's PCIS at A8000000 brings the lower window in. */
+    cf8_select(qts, 0xff, 0x14, 0, 0x84);
+    qtest_writeb(qts, cfc, 0x54);
+    g_assert_cmphex(qtest_readl(qts, bar), ==, 0x10);
+
+    /* An empty port does not extend it. */
+    qtest_writeb(qts, cfc, 0xff);
+    g_assert_cmphex(qtest_readl(qts, bar), !=, 0x10);
+    qtest_quit(qts);
+}
+
+static void test_460gx_root_window_containment(void)
+{
+    /*
+     * Every optional device on, and each display adapter in turn: the
+     * graphics BARs are the largest on the machine and the ones most likely
+     * to grow past the GXB root's window.
+     */
+    check_root_window_containment("-machine 460gx,audio=on,lsi=on,ide=on "
+                                  "-cpu merced -m 256M -S");
+    check_root_window_containment("-machine 460gx,vga=mach64 "
+                                  "-cpu merced -m 256M -S");
+    check_root_window_containment("-machine 460gx,vga=nv15gl "
+                                  "-cpu merced -m 256M -S");
+}
+
+static void test_iosapic_version_per_machine(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    uint32_t version;
+
+    version = iosapic_read(qts, 1);
+    g_assert_cmphex(version & 0xff, ==, 0x21);
+    g_assert_cmpuint((version >> 16) & 0xff, ==, 63);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    version = iosapic_read(qts, 1);
+    g_assert_cmphex(version & 0xff, ==, 0x11);
+    g_assert_cmpuint((version >> 16) & 0xff, ==, 23);
+    qtest_quit(qts);
 }
 
 static void test_realfw_chipset_identity(void)
@@ -1765,10 +3372,100 @@ static void test_realfw_chipset_identity(void)
     g_assert_cmphex(realfw_cfg_readl(qts, 0x04, 0, PCI_CACHE_LINE_SIZE) &
                     0x00800000, ==, 0);
 
-    /* The IFB the firmware scans bus 0 for is still where it was. */
-    g_assert_cmphex(realfw_cfg_readl(qts, 0x1e, 0, PCI_VENDOR_ID), ==,
-                    0x76008086);
+    /*
+     * A device number the chipset does not claim forwards to the PCI bus:
+     * the south bridge the firmware scans bus 0 for answers from the real
+     * 82468GX at 00:03.0, not from a shadow in the config store.  Its
+     * frequency mailbox at register D0h reads back with the done flag set,
+     * which is what lets the firmware's frequency detection finish instead
+     * of rebooting through 0xCF9 forever (plans/phase5 SESSION 17).
+     */
+    g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
+                                         PCI_VENDOR_ID), ==, 0x76008086);
+    g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0, 0xd0)
+                    & 0x8000, ==, 0x8000);
 
+    qtest_quit(qts);
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+/*
+ * Under the vendor firmware the south bridge's ACPI block sits at A00h --
+ * the FADT's PM1a_EVT/PM1a_CNT, the DSDT and SAL_B's PMI handler all assume
+ * it -- although this firmware build never reaches the chipset-init pokes
+ * that would program it (the machine supplies their result).  The FADT's
+ * SMI_CMD B2h with ACPI_ENABLE A0h reaches the PMI handler, which sets
+ * SCI_EN; ACPI_DISABLE A1h clears it.  The DSDT's _S5 is SLP_TYP 4, and
+ * Windows' HAL writes it with SLP_EN to power off: that must end the
+ * machine, not fall through to the HAL's 30-second EFI cold reset.
+ */
+static uint64_t realfw_port(uint16_t port)
+{
+    return IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port);
+}
+
+static void test_realfw_ifb_acpi_block(void)
+{
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *path = NULL;
+    g_autofree char *quoted_path = NULL;
+    g_autofree uint8_t *image = NULL;
+    const uint64_t image_size = 0x20000;
+    const uint64_t base = 0x100000000ULL - image_size;
+    const uint64_t fit_addr = base + 0x10000;
+    const uint64_t sale_addr = base + 0x8000;
+    g_autoptr(GError) error = NULL;
+    QTestState *qts;
+
+    tmpdir = g_dir_make_tmp("ia64-vpc-realfw-XXXXXX", &error);
+    g_assert_no_error(error);
+    path = g_build_filename(tmpdir, "flash.bin", NULL);
+    quoted_path = g_shell_quote(path);
+    image = g_malloc0(image_size);
+    memset(image, 0xff, image_size);
+    memcpy(image + (fit_addr - base), "_FIT_   ", 8);
+    stq_le_p(image + (fit_addr - base) + 8, 0x0100000000000010ULL);
+    stq_le_p(image + image_size - 32, (1ULL << 63) | fit_addr);
+    stq_le_p(image + image_size - 24, (1ULL << 63) | sale_addr);
+    g_assert_true(g_file_set_contents(path, (char *)image, image_size,
+                                      &error));
+
+    qts = qtest_initf("-machine 460gx,realfw=%s -m 256M -S", quoted_path);
+
+    /* The bridge's ACPI base and enable read as the init script leaves them. */
+    g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
+                                         0x40), ==, 0x00000a01);
+    g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
+                                         0x44) & 1, ==, 1);
+    /* PM1a_CNT decodes (not open bus), SCI_EN clear out of reset. */
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a04)), ==, 0);
+    /* Global Control at 1Ah: bit 3 by default, APMC_EN from the script. */
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a1a)) & 0x0408, ==,
+                    0x0408);
+
+    /* ACPI_ENABLE through SMI_CMD: SCI_EN and the power button enable. */
+    qtest_writeb(qts, realfw_port(0x00b2), 0xa0);
+    g_assert_cmphex(qtest_readb(qts, realfw_port(0x00b2)), ==, 0xa0);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a04)) & 1, ==, 1);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a02)) & 0x0100, ==,
+                    0x0100);
+    qtest_writeb(qts, realfw_port(0x00b2), 0xa1);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a04)) & 1, ==, 0);
+    /* APMS is plain storage. */
+    qtest_writeb(qts, realfw_port(0x00b3), 0x5a);
+    g_assert_cmphex(qtest_readb(qts, realfw_port(0x00b3)), ==, 0x5a);
+
+    /* The vendor _S5 (SLP_TYP 4) with SLP_EN powers the machine off. */
+    qtest_writeb(qts, realfw_port(0x00b2), 0xa0);
+    qtest_writew(qts, realfw_port(0x0a04), (4 << 10) | (1 << 13) | 1);
+    qtest_qmp_eventwait(qts, "SHUTDOWN");
+    qtest_quit(qts);
+
+    /* Without the vendor firmware the part keeps its reset state. */
+    qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
+                                         0x44) & 1, ==, 0);
     qtest_quit(qts);
     g_assert_cmpint(g_unlink(path), ==, 0);
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
@@ -1816,7 +3513,7 @@ static void test_realfw_flash_window(void)
     /*
      * The flash is a writable Intel-CFI part.  Read Device ID (0x90) exposes
      * the JEDEC identity the SDV firmware checks: manufacturer 0x89 at byte
-     * offset 0, device 0xac (82802AB Firmware Hub) at byte offset 1.
+     * offset 0, device 0xac (82802AC Firmware Hub) at byte offset 1.
      */
     qtest_writeb(qts, base, 0x90);
     g_assert_cmphex(qtest_readb(qts, base + 0), ==, 0x89);
@@ -1836,13 +3533,134 @@ static void test_realfw_flash_window(void)
     g_assert_cmphex(qtest_readq(qts, sale_addr), ==, 0x0123456789abcdefULL);
 
     /*
-     * realfw mode aliases the CMD646 register blocks onto the legacy IDE
-     * ports the SDV firmware polls.  With no media the empty primary channel
-     * reports status 0x00 (BSY clear, no drive) at port 0x1f7 -- not the
-     * open-bus 0xff that would hang the firmware's drive detection.
+     * Register-based block locking.  Every block comes out of reset
+     * write-locked, and 0x91 directs the access that follows to the
+     * addressed block's lock register at offset 2 -- the sequence the SDV
+     * firmware runs before each erase, with 0x00 ("full access") as the
+     * value.  A program aimed at a locked block must abort with SR.1 Device
+     * Protect set and leave the array alone.
      */
-    g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE +
-                                ia64_sparse_io_offset(0x1f7)), ==, 0x00);
+    {
+        const uint64_t blk = base + 0x10000;    /* the image's second block */
+        const uint64_t cell = blk + 0x1000;     /* erased space inside it */
+
+        /* Out of reset the block is write-locked. */
+        qtest_writeb(qts, blk, 0x91);
+        g_assert_cmphex(qtest_readb(qts, blk + 2), ==, 0x01);
+        qtest_writeb(qts, blk, 0xff);           /* end the register access */
+
+        /* A program aborts with SR.1 and leaves the array alone. */
+        qtest_writeb(qts, blk, 0x50);
+        qtest_writeb(qts, cell, 0x40);
+        qtest_writeb(qts, cell, 0x5a);
+        qtest_writeb(qts, blk, 0x70);
+        g_assert_cmphex(qtest_readb(qts, blk) & 0x02, ==, 0x02);
+        qtest_writeb(qts, blk, 0xff);
+        g_assert_cmphex(qtest_readb(qts, cell), ==, 0xff);
+
+        /* Unlock it the way the firmware does, and the program takes. */
+        qtest_writeb(qts, blk, 0x91);
+        qtest_writeb(qts, blk + 2, 0x00);
+        qtest_writeb(qts, blk, 0x50);
+        qtest_writeb(qts, cell, 0x40);
+        qtest_writeb(qts, cell, 0x5a);
+        qtest_writeb(qts, blk, 0x70);
+        g_assert_cmphex(qtest_readb(qts, blk) & 0x02, ==, 0x00);
+        qtest_writeb(qts, blk, 0xff);
+        g_assert_cmphex(qtest_readb(qts, cell), ==, 0x5a);
+
+        /* The register reads back what was written. */
+        qtest_writeb(qts, blk, 0x91);
+        g_assert_cmphex(qtest_readb(qts, blk + 2), ==, 0x00);
+        qtest_writeb(qts, blk, 0xff);
+
+        /*
+         * Programming only clears bits.  The firmware walks a marker byte
+         * through 3F, 2F, 23, F5, F1 and reads back 21; an overwriting
+         * model leaves F1, which its QuickBoot rejects on the next boot.
+         */
+        {
+            static const uint8_t steps[] = { 0x3f, 0x2f, 0x23, 0xf5, 0xf1 };
+            const uint64_t mark = blk + 0x200;
+            unsigned k;
+
+            for (k = 0; k < ARRAY_SIZE(steps); k++) {
+                qtest_writeb(qts, blk, 0x50);
+                qtest_writeb(qts, mark, 0x40);
+                qtest_writeb(qts, mark, steps[k]);
+                qtest_writeb(qts, blk, 0xff);
+            }
+            g_assert_cmphex(qtest_readb(qts, mark), ==, 0x21);
+        }
+
+        /*
+         * The CdbDatabase directory-entry state byte, exactly as the vendor
+         * setup menu drives it when it saves settings (traced from a "Save
+         * New Settings" / "Load Factory Settings" write on bios130.BIN).  A
+         * fresh record's state advances 3F -> 2F -> 27 -> 23 as the copy is
+         * written and verified, and 23 is the "valid" state QuickBoot loads
+         * at POST 0x92.  To retire an old copy the firmware programs 25 over
+         * the 23 and then 21: on any bit-clearing part the 25 (which would
+         * set bit 2) collapses straight to 21, so the record ends "invalid".
+         * A model that overwrote would leave 25, an extra live record the
+         * loader would trip over.  This is the state machine the whole
+         * database-update sequence rests on.
+         */
+        {
+            const uint64_t st = blk + 0x300;
+            const uint8_t write_path[] = { 0x3f, 0x2f, 0x27, 0x23 };
+            unsigned k;
+
+            for (k = 0; k < ARRAY_SIZE(write_path); k++) {
+                qtest_writeb(qts, blk, 0x50);
+                qtest_writeb(qts, st, 0x40);
+                qtest_writeb(qts, st, write_path[k]);
+                qtest_writeb(qts, blk, 0xff);
+            }
+            /* Record is committed: the loadable "valid" state. */
+            g_assert_cmphex(qtest_readb(qts, st), ==, 0x23);
+
+            /* Invalidate: 25 over 23 collapses to 21 (bit 2 cannot be set). */
+            qtest_writeb(qts, blk, 0x50);
+            qtest_writeb(qts, st, 0x40);
+            qtest_writeb(qts, st, 0x25);
+            qtest_writeb(qts, blk, 0xff);
+            g_assert_cmphex(qtest_readb(qts, st), ==, 0x21);
+
+            /* Programming the final 21 leaves it 21, not below. */
+            qtest_writeb(qts, blk, 0x50);
+            qtest_writeb(qts, st, 0x40);
+            qtest_writeb(qts, st, 0x21);
+            qtest_writeb(qts, blk, 0xff);
+            g_assert_cmphex(qtest_readb(qts, st), ==, 0x21);
+        }
+    }
+
+    /*
+     * The south bridge's IDE function is in compatibility mode and decodes
+     * the fixed legacy ports the SDV firmware polls -- but only once that
+     * firmware has set IDETIM's decode enable, which is what it does before
+     * it looks at a port (SSDM 12.2.10, and see the ide-decode-enable test).
+     * The machine is stopped here, so the register is still at its reset
+     * value and port 0x1f7 is open bus; with the bit set, the empty primary
+     * channel reports status 0x00 -- BSY clear, no drive.
+     */
+    {
+        const uint64_t status = IA64_LEGACY_IO_BASE +
+            ia64_sparse_io_offset(0x1f7);
+        QGenericPCIBus idebus;
+        QPCIDevice *ide;
+
+        g_assert_cmphex(qtest_readb(qts, status), ==, 0xff);
+        ia64_qpci_init(&idebus, qts);
+        ide = qpci_device_find(&idebus.bus,
+                               QPCI_DEVFN(IA64_460GX_IFB_SLOT,
+                                          IA64_460GX_IFB_IDE_FUNCTION));
+        g_assert_nonnull(ide);
+        qpci_config_writew(ide, INTEL_82468GX_IFB_IDETIM_PRIMARY, 0x8000);
+        g_assert_cmphex(qtest_readb(qts, status), ==, 0x00);
+        g_free(ide);
+    }
 
     /*
      * realfw mode wires an 8259 PIC for the legacy timer tick, reachable
@@ -1874,12 +3692,6 @@ static void test_realfw_flash_window(void)
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
-static void ia64_qpci_init(QGenericPCIBus *gbus, QTestState *qts)
-{
-    qpci_init_generic(gbus, qts, NULL, false);
-    gbus->ecam_alloc_ptr = IA64_PCI_CONFIG_BASE;
-    gbus->gpex_pio_base = IA64_LEGACY_IO_BASE;
-}
 
 static void assert_pci_device(QPCIBus *bus, const ExpectedPCIDevice *expected)
 {
@@ -1914,7 +3726,12 @@ static void test_ahci_off(void)
 {
     QTestState *qts = ia64_vpc_start("-machine ahci=off");
     QGenericPCIBus gbus;
-    static const unsigned int kept_slots[] = { 2, 3, 4, 5, 6 };
+    /*
+     * Bus 0 after the i2000 relocation: the OHCI at 2, the south bridge at 3
+     * and the 82559 at 5.  Graphics went to the GXB root and the SCSI HBA to
+     * WXB0; device 4 is the audio slot, filled only with audio=on.
+     */
+    static const unsigned int kept_slots[] = { 2, 3, 5 };
     unsigned i;
 
     ia64_qpci_init(&gbus, qts);
@@ -1939,7 +3756,7 @@ static void test_ahci_on(void)
     static const ExpectedPCIDevice ahci_dev = {
         .slot = 1, .vendor = 0x8086, .device = 0x2922,
         .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
-        .irq_line = 17, .irq_pin = 1,
+        .irq_line = 35, .irq_pin = 1,
         .bars = { [4] = 0x0000c101, [5] = 0xee020000 },
     };
     QTestState *qts = ia64_vpc_start("-machine ahci=on");
@@ -1967,58 +3784,142 @@ static void test_pci_default_layout(void)
         {
             .slot = 2, .vendor = 0x106b, .device = 0x003f,
             .command = PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER,
-            .irq_line = 18, .irq_pin = 1,
+            .irq_line = 39, .irq_pin = 1,
             .bars = { [0] = 0xee010000 },
-        }, {
-            .slot = 3, .vendor = 0x8086, .device = 0x7020,
-            .command = PCI_COMMAND_IO | PCI_COMMAND_MASTER,
-            .irq_line = 18, .irq_pin = 4,
-            .bars = { [4] = 0x0000c121 },
-        }, {
-            .slot = 4, .vendor = 0x1000, .device = 0x0012,
-            .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
-                       PCI_COMMAND_MASTER,
-            .irq_line = 16, .irq_pin = 1,
-            .bars = {
-                [0] = 0x0000c201,
-                [1] = 0xee030000,
-                [2] = 0xee032000,
-            },
-        }, {
-            .slot = 5, .vendor = 0x1002, .device = 0x5046,
-            .command = PCI_COMMAND_IO | PCI_COMMAND_MEMORY,
-            .irq_line = 17, .irq_pin = 1,
-            .bars = {
-                [0] = 0xf0000008,
-                [1] = 0x0000c301,
-                [2] = 0xf5000000,
-            },
         },
+        expected_i82557b,
+    };
+    /*
+     * The south bridge is the 82468GX I/O and Firmware Bridge at 00:03: a
+     * four-function device carrying the LPC/ISA bridge, the IDE controller,
+     * the UHCI host controller and the SMBus controller.  Chipset parts have
+     * no subsystem identity.  The UHCI keeps the I/O base and interrupt the
+     * discrete PIIX3 function had, so nothing else in the map moves.  Both
+     * IDE channels are in compatibility mode and decode the fixed legacy
+     * ports, so that function places only its bus-master BAR and takes no
+     * PCI interrupt: it uses ISA IRQs 14 and 15 through the bridge.
+     */
+    static const struct {
+        unsigned int function;
+        uint16_t device;
+        uint16_t class_id;
+        uint32_t bar4;
+        uint8_t irq_line;
+        uint8_t irq_pin;
+    } ifb_functions[] = {
+        { 0, 0x7600, PCI_CLASS_BRIDGE_ISA, 0, 0, 0 },
+        { 1, 0x7601, PCI_CLASS_STORAGE_IDE, 0x0000c001, 0, 0 },
+        { 2, 0x7602, PCI_CLASS_SERIAL_USB, 0x0000c121, 47, 4 },
+        { 3, 0x7603, PCI_CLASS_SERIAL_SMBUS, 0x0000fff1, 46, 2 },
+    };
+    /*
+     * The SCSI HBA is at 01:00.0 on the first WXB root -- the seat the board
+     * gives its QLogic adapter, which is the machine's default.  Its
+     * subsystem identity is part of the match ql12160.sys makes, so pin that
+     * too, and it has no third BAR where the LSI kept its script RAM.  INTA
+     * there is 16 + 1 * 4 + (0 + 0) % 4 = 20.
+     */
+    static const struct {
+        uint32_t reg;
+        uint32_t value;
+    } wxb0_scsi[] = {
+        { PCI_VENDOR_ID, 0x12161077 },
+        { PCI_SUBSYSTEM_VENDOR_ID, 0x00071077 },
+        { PCI_BASE_ADDRESS_0, 0x0000b001 },
+        { PCI_BASE_ADDRESS_1, 0xfa000000 },
+        { PCI_BASE_ADDRESS_2, 0x00000000 },
+        { PCI_INTERRUPT_LINE, 0x00000113 },
+    };
+    /*
+     * The graphics adapter is no longer on bus 0: it sits at 03:00.0 behind
+     * the GXB expander, with the same fixed BARs and INTA on the GXB root's
+     * own interrupt block (16 + 3 * 4 + (0 + 0) % 4 = 28).
+     */
+    static const struct {
+        uint32_t reg;
+        uint32_t value;
+    } gxb_vga[] = {
+        { PCI_VENDOR_ID, 0x50461002 },
+        { PCI_BASE_ADDRESS_0, 0xf0000008 },
+        { PCI_BASE_ADDRESS_1, 0x0000d801 },
+        { PCI_BASE_ADDRESS_2, 0xf5000000 },
+        { PCI_INTERRUPT_LINE, 0x00000137 },
     };
     QTestState *qts = ia64_vpc_start(NULL);
     QGenericPCIBus gbus;
     unsigned i;
 
     ia64_qpci_init(&gbus, qts);
-    /* Slot 0 (IDE, ide=on) and slot 1 (AHCI, ahci=on) are empty by default. */
-    for (i = 0; i < 8; i++) {
+    /*
+     * Slot 0 holds the Programmable Interrupt Device's single function, and
+     * slot 1 (AHCI, ahci=on) is empty by default.
+     */
+    for (i = 1; i < 8; i++) {
         QPCIDevice *empty = qpci_device_find(&gbus.bus, QPCI_DEVFN(0, i));
 
         g_assert_null(empty);
     }
     g_assert_null(qpci_device_find(&gbus.bus, QPCI_DEVFN(1, 0)));
+    g_assert_null(qpci_device_find(&gbus.bus, QPCI_DEVFN(6, 0)));
     for (i = 0; i < ARRAY_SIZE(devices); i++) {
         assert_pci_device(&gbus.bus, &devices[i]);
     }
-    {
-        QPCIDevice *lsi = qpci_device_find(&gbus.bus, QPCI_DEVFN(4, 0));
+    for (i = 0; i < ARRAY_SIZE(gxb_vga); i++) {
+        uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                       ((uint64_t)IA64_460GX_GXB_BUS << 20);
 
-        g_assert_nonnull(lsi);
-        g_assert_cmphex(qpci_config_readw(lsi, PCI_SUBSYSTEM_VENDOR_ID), ==,
-                        PCI_VENDOR_ID_LSI_LOGIC);
-        g_assert_cmphex(qpci_config_readw(lsi, PCI_SUBSYSTEM_ID), ==,
-                        PCI_VENDOR_ID_LSI_LOGIC);
-        g_free(lsi);
+        g_assert_cmphex(qtest_readl(qts, cfg + gxb_vga[i].reg), ==,
+                        gxb_vga[i].value);
+    }
+    for (i = 0; i < ARRAY_SIZE(wxb0_scsi); i++) {
+        uint64_t cfg = IA64_PCI_CONFIG_BASE +
+                       ((uint64_t)IA64_460GX_WXB0_BUS << 20);
+
+        g_assert_cmphex(qtest_readl(qts, cfg + wxb0_scsi[i].reg), ==,
+                        wxb0_scsi[i].value);
+    }
+    for (i = 0; i < G_N_ELEMENTS(ifb_functions); i++) {
+        QPCIDevice *fn = qpci_device_find(
+            &gbus.bus, QPCI_DEVFN(IA64_460GX_IFB_SLOT,
+                                  ifb_functions[i].function));
+
+        g_assert_nonnull(fn);
+        g_assert_cmphex(qpci_config_readw(fn, PCI_VENDOR_ID), ==,
+                        PCI_VENDOR_ID_INTEL);
+        g_assert_cmphex(qpci_config_readw(fn, PCI_DEVICE_ID), ==,
+                        ifb_functions[i].device);
+        g_assert_cmphex(qpci_config_readw(fn, PCI_CLASS_DEVICE), ==,
+                        ifb_functions[i].class_id);
+        g_assert_cmphex(qpci_config_readw(fn, PCI_SUBSYSTEM_VENDOR_ID),
+                        ==, 0);
+        g_assert_cmphex(qpci_config_readw(fn, PCI_SUBSYSTEM_ID), ==, 0);
+        g_assert_cmphex(qpci_config_readl(fn, PCI_BASE_ADDRESS_4), ==,
+                        ifb_functions[i].bar4);
+        g_assert_cmpuint(qpci_config_readb(fn, PCI_INTERRUPT_PIN), ==,
+                         ifb_functions[i].irq_pin);
+        g_assert_cmpuint(qpci_config_readb(fn, PCI_INTERRUPT_LINE), ==,
+                         ifb_functions[i].irq_line);
+        g_free(fn);
+    }
+
+    {
+        QGenericPCIBus wxb0;
+        QGenericPCIBus wxb1;
+        QPCIDevice *scsi;
+
+        ia64_qpci_init_on_bus(&wxb0, qts, IA64_460GX_WXB0_BUS);
+        scsi = qpci_device_find(&wxb0.bus,
+                                QPCI_DEVFN(IA64_460GX_WXB0_SCSI_SLOT, 0));
+        g_assert_nonnull(scsi);
+        g_assert_cmphex(qpci_config_readw(scsi, PCI_VENDOR_ID), ==,
+                        0x1077);   /* QLogic */
+        g_free(scsi);
+
+        /* The second WXB root is the park, and nothing is parked by default. */
+        ia64_qpci_init_on_bus(&wxb1, qts, IA64_460GX_WXB1_BUS);
+        scsi = qpci_device_find(&wxb1.bus,
+                                QPCI_DEVFN(IA64_460GX_WXB1_SCSI_SLOT, 0));
+        g_assert_null(scsi);
     }
     assert_pci_device(&gbus.bus, &expected_i82557b);
     qtest_quit(qts);
@@ -2211,15 +4112,107 @@ static void assert_cmd646_at_slot0(QTestState *qts)
     qtest_quit(qts);
 }
 
+/*
+ * A hand-attached CMD646 lands where it is told.  Slot 0 of the
+ * compatibility bus is the Programmable Interrupt Device's seat on 460gx, so
+ * this runs on zx1, where that slot is IDE's platform-anticipated home.
+ */
 static void test_pci_explicit_cmd646_slot0(void)
 {
-    assert_cmd646_at_slot0(ia64_vpc_start("-device cmd646-ide,secondary=1,addr=0"));
+    assert_cmd646_at_slot0(qtest_initf(
+        "-machine zx1 -m 256M -S "
+        "-device cmd646-ide,secondary=1,addr=0,bus=pci"));
 }
 
-/* The ide=on machine option instantiates the same CMD646 at slot 0. */
+/*
+ * On zx1 the ide=on machine option instantiates the same CMD646 at slot 0.
+ * On 460gx it has nothing to do: the IDE controller is function 1 of the
+ * south bridge, part of the board and not switchable, and slot 0 belongs to
+ * the Programmable Interrupt Device, so the option is accepted without
+ * effect.
+ */
 static void test_ide_on_slot0(void)
 {
-    assert_cmd646_at_slot0(ia64_vpc_start("-machine ide=on"));
+    QTestState *qts;
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+
+    assert_cmd646_at_slot0(qtest_initf("-machine zx1,ide=on -m 256M -S"));
+
+    qts = ia64_vpc_start("-machine ide=on");
+    ia64_qpci_init(&gbus, qts);
+    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(IA64_460GX_PID_SLOT, 0));
+    g_assert_nonnull(dev);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x123d);
+    g_free(dev);
+    dev = qpci_device_find(&gbus.bus,
+                           QPCI_DEVFN(IA64_460GX_IFB_SLOT,
+                                      IA64_460GX_IFB_IDE_FUNCTION));
+    g_assert_nonnull(dev);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_VENDOR_ID), ==,
+                    PCI_VENDOR_ID_INTEL);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x7601);
+    g_free(dev);
+    qtest_quit(qts);
+}
+
+/*
+ * IDETIM bit 15, the channel's IDE Decode Enable (SSDM 12.2.10).  It resets
+ * clear, and while it is clear the channel's ATA command and control blocks
+ * are not decoded here at all -- the access falls through to LPC, which on
+ * this board answers nothing.  Firmware sets it, and an operating system
+ * reads it back to decide whether the channel is there, so a model that
+ * decoded the ports regardless would tell the two different stories: Windows'
+ * PIIX miniport reports the channel disabled straight from this bit and never
+ * touches a port, which is how a guest ends up with no boot device at all.
+ *
+ * With the block decoded and no drive on the channel the status register
+ * reads zero; undecoded it is open bus, so the two are easy to tell apart.
+ */
+#define IA64_IFB_IDE_PRIMARY_STATUS     0x1f7
+#define IA64_IFB_IDE_SECONDARY_STATUS   0x177
+
+static void test_460gx_ide_decode_enable(void)
+{
+    const uint64_t primary = IA64_LEGACY_IO_BASE +
+        ia64_sparse_io_offset(IA64_IFB_IDE_PRIMARY_STATUS);
+    const uint64_t secondary = IA64_LEGACY_IO_BASE +
+        ia64_sparse_io_offset(IA64_IFB_IDE_SECONDARY_STATUS);
+    QTestState *qts = ia64_vpc_start("");
+    QGenericPCIBus gbus;
+    QPCIDevice *dev;
+
+    ia64_qpci_init(&gbus, qts);
+    dev = qpci_device_find(&gbus.bus,
+                           QPCI_DEVFN(IA64_460GX_IFB_SLOT,
+                                      IA64_460GX_IFB_IDE_FUNCTION));
+    g_assert_nonnull(dev);
+
+    g_assert_cmphex(qtest_readb(qts, primary), ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts, secondary), ==, 0xff);
+
+    /* Each channel's decode follows its own register. */
+    qpci_config_writew(dev, INTEL_82468GX_IFB_IDETIM_PRIMARY, 0x8000);
+    g_assert_cmphex(qtest_readb(qts, primary), ==, 0x00);
+    g_assert_cmphex(qtest_readb(qts, secondary), ==, 0xff);
+
+    qpci_config_writew(dev, INTEL_82468GX_IFB_IDETIM_SECONDARY, 0x8000);
+    g_assert_cmphex(qtest_readb(qts, secondary), ==, 0x00);
+
+    /* Clearing it takes the block back off the bus. */
+    qpci_config_writew(dev, INTEL_82468GX_IFB_IDETIM_PRIMARY, 0x0000);
+    g_assert_cmphex(qtest_readb(qts, primary), ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts, secondary), ==, 0x00);
+
+    /* The timing fields are writable and do not move the decode. */
+    qpci_config_writew(dev, INTEL_82468GX_IFB_IDETIM_SECONDARY, 0xe371);
+    g_assert_cmphex(qpci_config_readw(dev,
+                                      INTEL_82468GX_IFB_IDETIM_SECONDARY),
+                    ==, 0xe371);
+    g_assert_cmphex(qtest_readb(qts, secondary), ==, 0x00);
+
+    g_free(dev);
+    qtest_quit(qts);
 }
 
 static void lsi_write_script_insn(QTestState *qts, uint32_t *addr,
@@ -2292,7 +4285,7 @@ static void test_lsi_async_nodata_command(void)
     uint8_t status;
     unsigned int i;
 
-    qts = ia64_vpc_start(
+    qts = ia64_vpc_start_lsi(
         "-blockdev driver=null-co,read-zeroes=on,"
                   "node-name=disk0,size=1048576 "
         "-device scsi-hd,drive=disk0,bus=scsi.0,scsi-id=0");
@@ -2327,7 +4320,7 @@ static void test_lsi_dbms_no_leak(void)
     QTestState *qts;
     uint8_t status;
 
-    qts = ia64_vpc_start(
+    qts = ia64_vpc_start_lsi(
         "-blockdev driver=null-co,read-zeroes=on,"
                   "node-name=disk0,size=1048576 "
         "-device scsi-hd,drive=disk0,bus=scsi.0,scsi-id=0");
@@ -2378,7 +4371,7 @@ static void test_lsi_memory_move_mmws(void)
     uint8_t dstat = 0;
     unsigned int i;
 
-    qts = ia64_vpc_start(NULL);   /* a memory move needs no SCSI target */
+    qts = ia64_vpc_start_lsi(NULL);   /* a memory move needs no SCSI target */
 
     qtest_memwrite(qts, src, src_pattern, sizeof(src_pattern));
     qtest_memset(qts, dst, 0xaa, sizeof(src_pattern));
@@ -2703,13 +4696,15 @@ static void test_openbus_io_port(void)
     /*
      * A legacy I/O port that no device claims floats the bus high: a byte
      * read returns 0xff, not 0x00.  Real SDV firmware byte-reads a Super I/O
-     * device-ID register at port 0x2f (and the 0x2e index alongside it) and
-     * requires 0xff for an absent chip.  A port a device does answer keeps
+     * device-ID register through the 0x2e/0x2f pair and accepts 0xff there
+     * as "no chip fitted"; the 460gx board now carries the chip at 0x2e, so
+     * the alternate pair at 0x4e/0x4f, which the same firmware also probes,
+     * is the one that must float.  A port a device does answer keeps
      * returning its own value.  (Sparse I/O maps consecutive ports to
      * non-consecutive addresses, so only single-port byte reads are probed.)
      */
-    const uint64_t sio2f = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2f);
-    const uint64_t sio2e = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2e);
+    const uint64_t sio2f = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x4f);
+    const uint64_t sio2e = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x4e);
     const uint32_t pm_port = IA64_ACPI_PM_IO_BASE + IA64_ACPI_PM1_CNT_OFFSET;
     const uint64_t pm = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(pm_port);
     QTestState *qts = ia64_vpc_start(NULL);
@@ -2899,7 +4894,8 @@ static void test_savevm_restores_platform_state(void)
  * fills at every supported depth (including the 24bpp path that used to abort
  * on 3-byte pixel accesses).
  */
-#define ATI_SLOT                5
+/* The graphics adapter is at 03:00.0, behind the GXB expander root. */
+#define ATI_SLOT                IA64_460GX_GXB_VGA_SLOT
 
 /* Register offsets (RAGE 128 PRO RRG / hw/display/ati_regs.h). */
 #define ATI_MM_INDEX            0x0000
@@ -2938,7 +4934,7 @@ typedef struct {
 static void ati_dev_open(ATITestDev *a, const char *extra)
 {
     a->qts = extra ? ia64_vpc_start(extra) : ia64_vpc_start(NULL);
-    ia64_qpci_init(&a->gbus, a->qts);
+    ia64_qpci_init_on_bus(&a->gbus, a->qts, IA64_460GX_GXB_BUS);
     a->dev = qpci_device_find(&a->gbus.bus, QPCI_DEVFN(ATI_SLOT, 0));
     g_assert_nonnull(a->dev);
     g_assert_cmphex(qpci_config_readw(a->dev, PCI_VENDOR_ID), ==, 0x1002);
@@ -2989,7 +4985,6 @@ static void ati_pll_wr(ATITestDev *a, uint32_t idx, uint32_t v)
  * a non-header 64-bit BAR the driver masks to gart_bus_addr; it sits in the
  * platform PCI MMIO hole (below 4 GiB, as the 32-bit r128 AGP_BASE requires).
  */
-#define IA64_AGP_SLOT           31U
 #define IA64_AGP_BAPBASE        0x98
 #define IA64_AGP_GXBCTL         0xa0
 #define IA64_AGP_AGPSIZ         0xa2
@@ -3219,6 +5214,25 @@ static void test_ati_rom_bar_tables(void)
         }
     }
     g_assert_cmpint(sig_at, ==, 0x30);
+
+    /*
+     * The ATI header and PLL block must sit inside the first 8 KB: the
+     * miniport maps the C0000h shadow of this image one page at a time.
+     */
+    {
+        uint32_t hdr = lduw_le_p(rom + 0x48);
+        uint32_t pll = lduw_le_p(rom + hdr + 0x30);
+
+        g_assert_cmpuint(hdr + 0x40, <=, 0x2000);
+        g_assert_cmpuint(pll + 0x32, <=, 0x2000);
+        g_assert_cmphex(lduw_le_p(rom + hdr + 0x14), ==, hdr);
+        g_assert_cmpuint(lduw_le_p(rom + pll + 0x08), ==, 12000);
+        g_assert_cmpuint(lduw_le_p(rom + pll + 0x0a), ==, 12000);
+        g_assert_cmpuint(lduw_le_p(rom + pll + 0x0e), ==, 2950);
+        g_assert_cmpuint(ldl_le_p(rom + pll + 0x16), ==, 40000);
+        g_assert_cmpuint(ldl_le_p(rom + pll + 0x22), ==, 40000);
+        g_assert_cmpuint(lduw_le_p(rom + pll + 0x2e), ==, 40000 & 0xffff);
+    }
 
     /* PCIR restated to this adapter (EFI 1.10 wants it to match the header) */
     pcir = lduw_le_p(rom + 0x18);
@@ -3864,7 +5878,8 @@ static void mach64_dev_open_id(Mach64TestDev *a, const char *extra,
                                uint16_t dev_id)
 {
     a->qts = ia64_vpc_start(extra ?: "-machine vga=mach64");
-    ia64_qpci_init(&a->gbus, a->qts);
+    /* Every graphics adapter sits on the GXB root, whatever the model. */
+    ia64_qpci_init_on_bus(&a->gbus, a->qts, IA64_460GX_GXB_BUS);
     a->dev = qpci_device_find(&a->gbus.bus, QPCI_DEVFN(ATI_SLOT, 0));
     g_assert_nonnull(a->dev);
     g_assert_cmphex(qpci_config_readw(a->dev, PCI_VENDOR_ID), ==, 0x1002);
@@ -4206,6 +6221,8 @@ int main(int argc, char **argv)
                    test_savevm_restores_platform_state);
     qtest_add_func("/ia64-vpc/agp/gxb", test_agp_gxb);
     qtest_add_func("/ia64-vpc/realfw/flash-window", test_realfw_flash_window);
+    qtest_add_func("/ia64-vpc/realfw/ifb-acpi-block",
+                   test_realfw_ifb_acpi_block);
     qtest_add_func("/ia64-vpc/agp/off", test_agp_off);
     qtest_add_func("/ia64-vpc/ati/config-ids", test_ati_config_ids);
     qtest_add_func("/ia64-vpc/ati/pll-regfile", test_ati_pll_regfile);
@@ -4233,10 +6250,49 @@ int main(int argc, char **argv)
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
                    test_eepro100_eeprom_map);
+    qtest_add_func("/ia64-vpc/pci/460gx-no-chipset-bus",
+                   test_460gx_no_chipset_bus);
+    qtest_add_func("/ia64-vpc/pci/460gx-platform-identities",
+                   test_460gx_platform_identities);
+    qtest_add_func("/ia64-vpc/pci/460gx-config-ports", test_460gx_config_ports);
+    qtest_add_func("/ia64-vpc/pci/460gx-agp-aperture-rebased",
+                   test_460gx_agp_aperture_rebased);
+    qtest_add_func("/ia64-vpc/isa/460gx-superio", test_460gx_superio);
+    qtest_add_func("/ia64-vpc/pci/460gx-sac-indexed-file",
+                   test_460gx_sac_indexed_file);
+    qtest_add_func("/ia64-vpc/pci/460gx-sac-aperture", test_460gx_sac_aperture);
+    qtest_add_func("/ia64-vpc/pci/460gx-pcis-moves-dram-gap",
+                   test_460gx_pcis_moves_dram_gap);
+    qtest_add_func("/ia64-vpc/pci/460gx-spd-follows-ram-size",
+                   test_460gx_spd_follows_ram_size);
+    qtest_add_func("/ia64-vpc/pci/460gx-pcis-window", test_460gx_pcis_window);
+    qtest_add_func("/ia64-vpc/pci/460gx-smbus-hwmon", test_460gx_smbus_hwmon);
+    qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",
+                   test_460gx_south_bridge_rtc_banks);
+    qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-timer",
+                   test_460gx_south_bridge_timer);
+    qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-pic",
+                   test_460gx_south_bridge_pic);
+    qtest_add_func("/ia64-vpc/pci/460gx-pit-ticks-survive",
+                   test_460gx_pit_ticks_survive);
+    qtest_add_func("/ia64-vpc/pci/460gx-ide-decode-enable",
+                   test_460gx_ide_decode_enable);
+    qtest_add_func("/ia64-vpc/pci/460gx-pit-mode2-out-level",
+                   test_460gx_pit_mode2_out_level);
+    qtest_add_func("/ia64-vpc/pci/460gx-pic-edge-withdrawal",
+                   test_460gx_pic_edge_withdrawal);
+    qtest_add_func("/ia64-vpc/pci/460gx-root-window-containment",
+                   test_460gx_root_window_containment);
+    qtest_add_func("/ia64-vpc/pci/460gx-expander-roots",
+                   test_460gx_expander_roots);
+    qtest_add_func("/ia64-vpc/iosapic/version-per-machine",
+                   test_iosapic_version_per_machine);
     qtest_add_func("/ia64-vpc/realfw/chipset-identity",
                    test_realfw_chipset_identity);
     qtest_add_func("/ia64-vpc/scsi/isp12160-mailbox",
                    test_isp12160_mailbox);
+    qtest_add_func("/ia64-vpc/scsi/isp12160-firmware-checksum",
+                   test_isp12160_firmware_checksum);
     qtest_add_func("/ia64-vpc/audio/cs4281-codec",
                    test_cs4281_codec_access);
     qtest_add_func("/ia64-vpc/ohci/port-resume", test_ohci_port_resume);

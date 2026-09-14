@@ -3,6 +3,8 @@
 DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
 {
     External (\_SB.PCI0, DeviceObj)
+    // The south bridge's LPC/ISA function, declared in the DSDT.
+    External (\_SB.PCI0.ISA, DeviceObj)
 
     Scope (\_SB)
     {
@@ -82,7 +84,7 @@ DefinitionBlock ("", "SSDT", 2, "QEMU  ", "IA64SSDT", 0x00000001)
 
     }
 
-    Scope (\_SB.PCI0)
+    Scope (\_SB.PCI0.ISA)
     {
         Name (P2EN, 0x0F)
 

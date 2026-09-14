@@ -41,6 +41,7 @@
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qom/object.h"
+#include "hw/southbridge/intel_82468gx.h"
 #include "hcd-uhci.h"
 
 #define FRAME_TIMER_FREQ 1000
@@ -314,8 +315,19 @@ static void uhci_reset(DeviceState *dev)
 
     pci_conf = s->dev.config;
 
-    pci_conf[0x6a] = 0x01; /* usb clock */
+    pci_conf[0x6a] =
+        pci_get_word(pci_conf + PCI_DEVICE_ID) ==
+        INTEL_82468GX_IFB_USB_DEVICE_ID ? 0x00 : 0x01;
     pci_conf[0x6b] = 0x00;
+    if (pci_get_word(pci_conf + PCI_DEVICE_ID) ==
+        INTEL_82468GX_IFB_USB_DEVICE_ID) {
+        pci_set_word(pci_conf + PCI_COMMAND, 0);
+        pci_set_word(pci_conf + PCI_STATUS, 0x0280);
+        pci_conf[PCI_LATENCY_TIMER] = 0;
+        pci_conf[USB_SBRN] = USB_RELEASE_1;
+        pci_set_word(pci_conf + 0xc0, 0x2000);
+        pci_conf[0xc4] = 0;
+    }
     s->cmd = 0;
     s->status = UHCI_STS_HCHALTED;
     s->status2 = 0;
@@ -770,8 +782,15 @@ static int uhci_handle_td(UHCIState *s, UHCIQueue *q, uint32_t qh_addr,
         /*
          * ehci11d spec page 22: "Even if the Active bit in the TD is already
          * cleared when the TD is fetched ... an IOC interrupt is generated"
+         *
+         * Real Intel UHCI (e.g. the 82468GX IFB) does not do this: it only
+         * raises IOC for a TD it actually completes, so a controller left with
+         * an inactive IOC anchor TD in its frame list (as the i2000 vendor
+         * firmware leaves at OS hand-off) does not assert its interrupt.  The
+         * ioc_on_inactive_td property (default true) keeps the historical
+         * behaviour for existing users; it is cleared for the IFB variant.
          */
-        if (td->ctrl & TD_CTRL_IOC) {
+        if ((td->ctrl & TD_CTRL_IOC) && s->ioc_on_inactive_td) {
                 *int_mask |= 0x01;
         }
         return TD_RESULT_NEXT_QH;
@@ -1233,6 +1252,41 @@ void usb_uhci_common_realize(PCIDevice *dev, Error **errp)
     pci_register_bar(&s->dev, 4, PCI_BASE_ADDRESS_SPACE_IO, &s->io_bar);
 }
 
+static void ifb_uhci_realize(PCIDevice *dev, Error **errp)
+{
+    UHCIState *s = UHCI(dev);
+    uint32_t bar_wmask;
+
+    usb_uhci_common_realize(dev, errp);
+    if (errp && *errp) {
+        return;
+    }
+
+    /*
+     * The real 82468GX IFB UHCI only raises IOC for a TD it completes, so the
+     * inactive IOC anchor TD the vendor firmware leaves in frame 0 at OS
+     * hand-off does not assert INTD.  Match that: without this the emulated
+     * controller storms IOSAPIC input 47 the moment XP connects the interrupt.
+     */
+    s->ioc_on_inactive_td = false;
+
+    bar_wmask = pci_get_long(dev->wmask + PCI_BASE_ADDRESS_4);
+    memset(dev->wmask, 0, pci_config_size(dev));
+    memset(dev->w1cmask, 0, pci_config_size(dev));
+    pci_set_word(dev->wmask + PCI_COMMAND, BIT(2) | BIT(0));
+    pci_set_word(dev->w1cmask + PCI_STATUS,
+                 BIT(13) | BIT(12) | BIT(11));
+    dev->wmask[PCI_LATENCY_TIMER] = 0xf0;
+    pci_set_long(dev->wmask + PCI_BASE_ADDRESS_4, bar_wmask);
+    dev->wmask[PCI_INTERRUPT_LINE] = 0xff;
+    dev->wmask[0x6a] = BIT(1);
+    dev->wmask[0x6b] = 0;
+    pci_set_word(dev->wmask + 0xc0, 0x20bf);
+    pci_set_word(dev->w1cmask + 0xc0, 0x8f00);
+    dev->wmask[0xc4] = 0x03;
+    uhci_reset(DEVICE(dev));
+}
+
 static void usb_uhci_exit(PCIDevice *dev)
 {
     UHCIState *s = UHCI(dev);
@@ -1260,10 +1314,12 @@ static const Property uhci_properties_companion[] = {
     DEFINE_PROP_UINT32("firstport", UHCIState, firstport, 0),
     DEFINE_PROP_UINT32("bandwidth", UHCIState, frame_bandwidth, 1280),
     DEFINE_PROP_UINT32("maxframes", UHCIState, maxframes, 128),
+    DEFINE_PROP_BOOL("ioc-on-inactive-td", UHCIState, ioc_on_inactive_td, true),
 };
 static const Property uhci_properties_standalone[] = {
     DEFINE_PROP_UINT32("bandwidth", UHCIState, frame_bandwidth, 1280),
     DEFINE_PROP_UINT32("maxframes", UHCIState, maxframes, 128),
+    DEFINE_PROP_BOOL("ioc-on-inactive-td", UHCIState, ioc_on_inactive_td, true),
 };
 
 static void uhci_class_init(ObjectClass *klass, const void *data)
@@ -1372,6 +1428,15 @@ static UHCIInfo uhci_info[] = {
         .revision  = 0x03,
         .irq_pin   = 2,
         .unplug    = false,
+    },{
+        .name      = TYPE_INTEL_82468GX_IFB_USB,
+        .vendor_id = INTEL_82468GX_IFB_VENDOR_ID,
+        .device_id = INTEL_82468GX_IFB_USB_DEVICE_ID,
+        .revision  = 0x00,
+        .irq_pin   = 3,
+        .realize   = ifb_uhci_realize,
+        .unplug    = true,
+        .notuser   = true,
     }
 };
 

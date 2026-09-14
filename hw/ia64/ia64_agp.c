@@ -259,6 +259,17 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
     ia64_agp_update_aperture(s);
 }
 
+/*
+ * Extend the GART translation over another root bus.  The GXB bridge sits on
+ * the chipset's own bus while the AGP master it translates is on the GXB's
+ * downstream root, so that bus needs the same DMA routing: the master's devfn
+ * is translated through the aperture, everything else passes through.
+ */
+void ia64_agp_attach_bus(IA64AGPState *s, PCIBus *bus)
+{
+    pci_setup_iommu(bus, &ia64_agp_iommu_ops, s);
+}
+
 static void ia64_agp_reset(DeviceState *dev)
 {
     IA64AGPState *s = IA64_AGP(dev);

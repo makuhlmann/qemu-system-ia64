@@ -22,19 +22,28 @@ struct IA64PCIState {
 
     MemoryRegion pci_mmio;
     MemoryRegion pci_mmio_window;
+    MemoryRegion pci_mmio_low_window;
+    bool low_window_mapped;
     MemoryRegion pci_io;
     MemoryRegion pci_io_sparse;
     MemoryRegion pci_config;
     AddressSpace pci_io_as;
-    qemu_irq irq[IA64_PCI_INTX_LINES];
+    qemu_irq irq[IA64_PCI_INTX_MAX_OUTPUTS];
+    const IA64IntxRoute *intx_routes;
+    unsigned int intx_nroutes;
+    unsigned int intx_fallback_base;
 
     /*
-     * The HP zx1 Mercury second root bus, or NULL.  When set, the ECAM config
-     * handler dispatches config cycles for IA64_MERCURY_BUS to it, so a guest
-     * (and firmware SAL) reach devices behind the Mercury host bridge through
-     * this one segment-0 ECAM window.
+     * Secondary root buses reached through this one segment-0 ECAM window.
+     * The zx1 machine registers the Mercury root here; the 460gx machine
+     * registers its three expander roots.  A config cycle whose bus field
+     * matches a registered root's bus number is dispatched to that root, so a
+     * guest (and firmware SAL) reach every root through the same window --
+     * the faithful analog of the chipset forwarding the cycle to the bridge
+     * that owns the bus.
      */
-    PCIBus *mercury_bus;
+    PCIBus *secondary_bus[IA64_PCI_MAX_SECONDARY_ROOTS];
+    unsigned int secondary_count;
 };
 
 static hwaddr ia64_pci_sparse_io_port(hwaddr encoded)
@@ -171,15 +180,18 @@ static PCIDevice *ia64_pci_config_device(IA64PCIState *s, hwaddr addr,
     uint8_t slot = extract64(addr, 15, 5);
     uint8_t func = extract64(addr, 12, 3);
     PCIBus *target = phb->bus;
+    unsigned int i;
 
     /*
-     * Route config cycles for the Mercury bus number to the second root bus.
-     * Its bus_num override reports IA64_MERCURY_BUS, so pci_find_device() below
-     * resolves devices on it.  This is the faithful analog of the real zx1 mio
-     * forwarding a rope's config cycles to the Mercury (LBA) it hosts.
+     * Route a config cycle to whichever secondary root reports this bus
+     * number.  Each such root overrides bus_num, so pci_find_device() below
+     * resolves devices on it.
      */
-    if (s->mercury_bus != NULL && bus == IA64_MERCURY_BUS) {
-        target = s->mercury_bus;
+    for (i = 0; i < s->secondary_count; i++) {
+        if (pci_bus_num(s->secondary_bus[i]) == bus) {
+            target = s->secondary_bus[i];
+            break;
+        }
     }
 
     *reg = addr & 0xfff;
@@ -252,8 +264,46 @@ int ia64_pci_route_intx_gsi(uint8_t devfn, int irq_num)
     return IA64_PCI_INTX_GSI_BASE + ia64_pci_route_intx_output(devfn, irq_num);
 }
 
+int ia64_intx_route_lookup(const IA64IntxRoute *routes, unsigned int nroutes,
+                           unsigned int fallback_base, uint8_t devfn, int pin)
+{
+    unsigned int i;
+
+    for (i = 0; i < nroutes; i++) {
+        if (routes[i].slot == PCI_SLOT(devfn)) {
+            return routes[i].gsi[pin & 3];
+        }
+    }
+    return fallback_base + (PCI_SLOT(devfn) + pin) % IA64_PCI_INTX_LINES;
+}
+
+void ia64_pci_host_set_intx_routes(DeviceState *dev,
+                                   const IA64IntxRoute *routes,
+                                   unsigned int nroutes,
+                                   unsigned int fallback_base)
+{
+    IA64PCIState *s = IA64_PCI_HOST_BRIDGE(dev);
+
+    s->intx_routes = routes;
+    s->intx_nroutes = nroutes;
+    s->intx_fallback_base = fallback_base;
+}
+
+static unsigned int ia64_pci_intx_outputs(const IA64PCIState *s)
+{
+    return s->intx_routes != NULL ? IA64_PCI_INTX_MAX_OUTPUTS
+                                  : IA64_PCI_INTX_LINES;
+}
+
 static int ia64_pci_map_irq(PCIDevice *d, int irq_num)
 {
+    IA64PCIState *s = IA64_PCI_HOST_BRIDGE(pci_get_bus(d)->qbus.parent);
+
+    if (s->intx_routes != NULL) {
+        return ia64_intx_route_lookup(s->intx_routes, s->intx_nroutes,
+                                      s->intx_fallback_base, d->devfn,
+                                      irq_num);
+    }
     return ia64_pci_route_intx_output(d->devfn, irq_num);
 }
 
@@ -261,7 +311,7 @@ static void ia64_pci_set_irq(void *opaque, int irq_num, int level)
 {
     IA64PCIState *s = opaque;
 
-    if (irq_num < IA64_PCI_INTX_LINES) {
+    if (irq_num >= 0 && irq_num < (int)ia64_pci_intx_outputs(s)) {
         qemu_set_irq(s->irq[irq_num], level);
     }
 }
@@ -299,12 +349,13 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
                           &ia64_pci_config_ops, s, "ia64-pci-config",
                           IA64_PCI_CONFIG_SIZE);
 
-    qdev_init_gpio_out(dev, s->irq, IA64_PCI_INTX_LINES);
+    qdev_init_gpio_out(dev, s->irq, ia64_pci_intx_outputs(s));
 
     phb->bus = pci_register_root_bus(dev, "pci",
                                      ia64_pci_set_irq, ia64_pci_map_irq, s,
                                      &s->pci_mmio, &s->pci_io,
-                                     PCI_DEVFN(0, 0), 4, TYPE_PCI_BUS);
+                                     PCI_DEVFN(0, 0),
+                                     ia64_pci_intx_outputs(s), TYPE_PCI_BUS);
 
     memory_region_add_subregion_overlap(get_system_memory(),
                                         IA64_PCI_MMIO_BASE,
@@ -319,6 +370,27 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
                                 &s->pci_config);
 }
 
+void ia64_pci_host_set_low_mmio_window(DeviceState *pci_host, uint64_t base)
+{
+    IA64PCIState *s = IA64_PCI_HOST_BRIDGE(pci_host);
+
+    if (s->low_window_mapped) {
+        memory_region_del_subregion(get_system_memory(),
+                                    &s->pci_mmio_low_window);
+        object_unparent(OBJECT(&s->pci_mmio_low_window));
+        s->low_window_mapped = false;
+    }
+    if (base >= IA64_PCI_MMIO_BASE) {
+        return;
+    }
+    memory_region_init_alias(&s->pci_mmio_low_window, OBJECT(s),
+                             "pci-mmio-low-window", &s->pci_mmio, base,
+                             IA64_PCI_MMIO_BASE - base);
+    memory_region_add_subregion_overlap(get_system_memory(), base,
+                                        &s->pci_mmio_low_window, -1);
+    s->low_window_mapped = true;
+}
+
 MemoryRegion *ia64_pci_host_mmio(DeviceState *pci_host)
 {
     return &IA64_PCI_HOST_BRIDGE(pci_host)->pci_mmio;
@@ -329,9 +401,17 @@ MemoryRegion *ia64_pci_host_io(DeviceState *pci_host)
     return &IA64_PCI_HOST_BRIDGE(pci_host)->pci_io;
 }
 
+void ia64_pci_host_add_secondary_bus(DeviceState *pci_host, PCIBus *bus)
+{
+    IA64PCIState *s = IA64_PCI_HOST_BRIDGE(pci_host);
+
+    g_assert(s->secondary_count < IA64_PCI_MAX_SECONDARY_ROOTS);
+    s->secondary_bus[s->secondary_count++] = bus;
+}
+
 void ia64_pci_host_set_mercury_bus(DeviceState *pci_host, PCIBus *bus)
 {
-    IA64_PCI_HOST_BRIDGE(pci_host)->mercury_bus = bus;
+    ia64_pci_host_add_secondary_bus(pci_host, bus);
 }
 
 static void ia64_pci_class_init(ObjectClass *klass, const void *data)

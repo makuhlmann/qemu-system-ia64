@@ -447,19 +447,6 @@ static void cmos_ioport_write(void *opaque, hwaddr addr,
             s->cmos_index = RTC_CENTURY;
             /* fall through */
         case RTC_CENTURY:
-            if (s->century_read_only) {
-                /*
-                 * Read-only hardware century byte: drop the write.  Real
-                 * hardware's century register is not writable, and the i2000
-                 * SDV firmware's end-of-POST RTC probe writes 0 to it and then
-                 * requires it to still read back the century (else it reports
-                 * EFI_DEVICE_ERROR, whose zero result count trips a break 1).
-                 * With a writable byte and the RTC halted for the probe, the
-                 * read-back would be the written 0 and the probe fails; keeping
-                 * the stored century makes the probe read back the real value.
-                 */
-                break;
-            }
             /* fall through */
         case RTC_SECONDS:
         case RTC_MINUTES:
@@ -655,10 +642,25 @@ static void rtc_get_time(MC146818RtcState *s, struct tm *tm)
 static void rtc_set_time(MC146818RtcState *s)
 {
     struct tm tm = {};
+    time_t base;
     g_autofree const char *qom_path = object_get_canonical_path(OBJECT(s));
 
     rtc_get_time(s, &tm);
-    s->base_rtc = mktimegm(&tm);
+    base = mktimegm(&tm);
+    /*
+     * A calendar the nanosecond clock cannot hold (|base| * 1e9 past
+     * INT64) must not become the base time: it wraps get_guest_rtc_ns()
+     * and the clock reads back as garbage and stops.  The HP i2000 firmware
+     * gets here from its century write-probe -- it stores 00 in CMOS 32h
+     * (year 0026) and reads it back before restoring 20h -- inside every
+     * EFI GetTime; on the real part the century byte is plain RAM and the
+     * time keeps running, so leave the base time alone for such a write.
+     */
+    if (base < -(INT64_MAX / NANOSECONDS_PER_SECOND) ||
+        base > INT64_MAX / NANOSECONDS_PER_SECOND) {
+        return;
+    }
+    s->base_rtc = base;
     s->last_update = qemu_clock_get_ns(rtc_clock);
 
     qapi_event_send_rtc_change(qemu_timedate_diff(&tm), qom_path);
@@ -743,25 +745,6 @@ static uint64_t cmos_ioport_read(void *opaque, hwaddr addr,
             s->cmos_index = RTC_CENTURY;
             /* fall through */
         case RTC_CENTURY:
-            if (s->century_read_only) {
-                /*
-                 * Read-only hardware century byte: always report the real
-                 * century as a two-digit BCD value (e.g. 0x20 for the 2000s),
-                 * independent of the RTC's SET/halt state, of any write (which
-                 * we drop), and crucially of REG_B_DM: unlike the time fields,
-                 * the century register is BCD even when the RTC is in binary
-                 * mode, which the i2000 SDV firmware relies on (its end-of-POST
-                 * RTC self-test both write-probes this byte and builds a year
-                 * from it that it range-checks to [1998, 2099]).
-                 */
-                time_t guest_sec = get_guest_rtc_ns(s) / NANOSECONDS_PER_SECOND;
-                struct tm tm;
-                int century;
-                gmtime_r(&guest_sec, &tm);
-                century = (tm.tm_year + 1900) / 100;
-                ret = ((century / 10) << 4) | (century % 10);
-                break;
-            }
             /* fall through */
         case RTC_SECONDS:
         case RTC_MINUTES:

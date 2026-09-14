@@ -421,13 +421,13 @@ test_pal_freq_ratios = require_registers("pal_freq_ratios",
     pal_call_program(PAL_FREQ_RATIOS),
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
     "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_16_3,
-    "r11": PAL_RATIO_2_1}, entry=0x10)
+    "r11": PAL_RATIO_16_1}, entry=0x10)
 
 test_pal_freq_ratios_madison = require_registers(
     "pal_freq_ratios_madison", pal_call_program(PAL_FREQ_RATIOS),
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
      "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_4_1,
-     "r11": PAL_RATIO_2_1}, entry=0x10, cpu="madison")
+     "r11": PAL_RATIO_16_1}, entry=0x10, cpu="madison")
 
 # Regression: a PAL procedure returns its status in GR8; on hardware that
 # register write clears the NaT bit.  r8-r11 are PAL *output* registers, so a
@@ -454,12 +454,13 @@ test_pal_call_clears_return_reg_nat = require_registers(
     }, entry=0x10)
 
 # --- Merced (original Itanium) model-differentiated PAL responses ----------
-# 800 MHz core / 133.33 MHz bus / 200 MHz ITC (249634-002 datasheet).
+# 800 MHz core / 133.33 MHz bus (249634-002 datasheet); the ITC counts
+# processor clocks, so its ratio is the processor ratio (245473-002).
 test_pal_freq_ratios_merced = require_registers(
     "pal_freq_ratios_merced", pal_call_program(PAL_FREQ_RATIOS),
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
      "r9": PAL_RATIO_8_1, "r10": PAL_RATIO_4_3,
-     "r11": PAL_RATIO_2_1}, entry=0x10, cpu="merced")
+     "r11": PAL_RATIO_8_1}, entry=0x10, cpu="merced")
 
 # PAL_FREQ_BASE base clock is the same 100 MHz for merced.
 test_pal_freq_base_merced = require_registers(

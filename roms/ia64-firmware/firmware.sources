@@ -3,6 +3,7 @@ firmware.c
 unicode_collation.c
 smbios.c
 storage.c
+isp12160.c
 efi_memmap.c
 ide.c
 console.c

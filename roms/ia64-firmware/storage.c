@@ -10,6 +10,7 @@
 #include "fw-services.h"
 #include "fw-legacy-io.h"
 #include "fw-storage.h"
+#include "fw-isp12160.h"
 
 /* --- LSI53C895A SCSI Block I/O driver ----------------------------------- */
 
@@ -36,6 +37,7 @@
 #define SCSI_SENSE_KEY_UNIT_ATTENTION 0x06U
 
 #define PCI_SUB_CLASS_SCSI           0x00U
+#define PCI_VENDOR_ID_LSI            0x1000U
 #define PCI_LSI_BAR1_OFFSET          0x14U
 
 #define LSI_REG_SCID                 0x04U
@@ -90,6 +92,12 @@ static UINT8  mLsiMsgOut[1] __attribute__((aligned(8)));
 static UINT8  mLsiMsgIn[8] __attribute__((aligned(8)));
 static UINT8  mLsiStatus[1] __attribute__((aligned(8)));
 static UINT8  mScsiBounce[SCSI_BOUNCE_SIZE] __attribute__((aligned(8)));
+
+/* Which host adapter the SCSI layer is talking to, once one is found. */
+#define SCSI_TRANSPORT_NONE     0U
+#define SCSI_TRANSPORT_LSI      1U
+#define SCSI_TRANSPORT_ISP12160 2U
+static UINT8 mScsiTransport;
 
 #define AHCI_MAX_PORTS                 6U
 #define AHCI_COMMAND_LIST_ENTRIES      32U
@@ -327,9 +335,18 @@ static BOOLEAN scsi_find_lsi_controller(PCI_DEVICE_LOCATION *Location)
                     PCI_CLASS_REVISION_OFFSET, 4);
                 sub_class = (UINT8)((class_rev >> 16) & 0xffU);
                 base_class = (UINT8)((class_rev >> 24) & 0xffU);
-                if (id == 0x00121000U ||
-                    (base_class == PCI_BASE_CLASS_MASS_STORAGE &&
-                     sub_class == PCI_SUB_CLASS_SCSI)) {
+                /*
+                 * Match an LSI Logic SCSI controller: this driver speaks
+                 * 53C8xx SCRIPTS, so the vendor has to match.  Accepting any
+                 * mass-storage/SCSI device here used to be harmless because
+                 * the 53C895A was always present and found first; now that
+                 * the QLogic holds the SCSI seat and the LSI is opt-in, that
+                 * matched the QLogic instead and drove SCRIPTS at it, which
+                 * hangs the probe on a machine with no LSI at all.
+                 */
+                if ((id & 0xffffU) == PCI_VENDOR_ID_LSI &&
+                    base_class == PCI_BASE_CLASS_MASS_STORAGE &&
+                    sub_class == PCI_SUB_CLASS_SCSI) {
                     Location->Bus = (UINT8)bus;
                     Location->Device = device;
                     Location->Function = function;
@@ -388,9 +405,6 @@ static BOOLEAN lsi_init_controller(void)
     lsi_write8(LSI_REG_SIEN1, 0);
     lsi_write8(LSI_REG_ISTAT0, LSI_ISTAT0_INTF);
 
-    uart_puts("SCSI controller:      LSI53C895A mmio=0x");
-    uart_put_hex64(mLsiMmioBase);
-    uart_puts("\r\n");
     return 1;
 }
 
@@ -626,6 +640,20 @@ static LSI_SCRIPT_RESULT lsi_reset_scsi_target(UINT8 Target,
     return lsi_wait_for_script(Timeout100ns, NULL);
 }
 
+/*
+ * Run the CDB staged in mLsiCdb against a device, through whichever host
+ * adapter the platform turned out to have.  The layer above -- inquiry,
+ * capacity, read and write -- is the same for both, so this is the only
+ * place that knows which transport is live.
+ *
+ * Only a write moves data to the device, and the QLogic's command IOCB has
+ * to be told; the LSI's script works the direction out for itself.
+ */
+static BOOLEAN scsi_cdb_to_device(const UINT8 *Cdb)
+{
+    return Cdb[0] == SCSI_CMD_WRITE_10;
+}
+
 static BOOLEAN lsi_scsi_command_prepared(SCSI_DEVICE *Dev, UINTN CdbLen,
                                          UINT8 *Data, UINT32 DataLen)
 {
@@ -636,6 +664,11 @@ static BOOLEAN lsi_scsi_command_prepared(SCSI_DEVICE *Dev, UINTN CdbLen,
         return 0;
     }
 
+    if (mScsiTransport == SCSI_TRANSPORT_ISP12160) {
+        return isp12160_command(Dev->target, mLsiCdb, CdbLen, Data, DataLen,
+                                scsi_cdb_to_device(mLsiCdb), &status) &&
+               status == 0;
+    }
     return lsi_run_scsi_script(Dev->target, mLsiCdb, CdbLen, Data, DataLen,
                                &status);
 }
@@ -798,17 +831,28 @@ static BOOLEAN scsi_write_blocks(SCSI_DEVICE *Dev, const UINT8 *Buffer,
     return lsi_scsi_command_prepared(Dev, 10, mScsiBounce, byte_count);
 }
 
-void scsi_probe_devices(void)
+const CHAR8 *scsi_transport_name(void)
+{
+    switch (mScsiTransport) {
+    case SCSI_TRANSPORT_LSI:
+        return "LSI53C895A";
+    case SCSI_TRANSPORT_ISP12160:
+        return "ISP12160";
+    default:
+        return "none";
+    }
+}
+
+static void scsi_probe_transport(void)
 {
     UINTN target;
 
-    fw_set_mem(mScsiDevices, sizeof(mScsiDevices), 0);
-    mBootScsiDevice = NULL;
-    mDiskScsiDevice = NULL;
-
-    if (!lsi_init_controller()) {
-        return;
-    }
+    uart_puts("SCSI controller:      ");
+    uart_puts(scsi_transport_name());
+    uart_puts(" mmio=0x");
+    uart_put_hex64(mScsiTransport == SCSI_TRANSPORT_ISP12160 ?
+                   isp12160_mmio_base() : mLsiMmioBase);
+    uart_puts("\r\n");
 
     for (target = 0; target < SCSI_DEVICE_MAX; target++) {
         SCSI_DEVICE *dev = &mScsiDevices[target];
@@ -855,6 +899,40 @@ void scsi_probe_devices(void)
              (!mDiskScsiDevice->media_present && dev->media_present))) {
             mDiskScsiDevice = dev;
         }
+    }
+}
+
+/*
+ * Probe the QLogic the i2000 actually carries first, then the LSI, which is
+ * opt-in and there for images installed against it.  While a guest is being
+ * migrated from one adapter to the other both are present with the disk on
+ * only one, so an adapter that answers but carries no device must not end
+ * the search.
+ */
+static BOOLEAN scsi_probe_one(UINT32 Transport)
+{
+    fw_set_mem(mScsiDevices, sizeof(mScsiDevices), 0);
+    mScsiTransport = Transport;
+    scsi_probe_transport();
+    if (mBootScsiDevice == NULL && mDiskScsiDevice == NULL) {
+        mScsiTransport = SCSI_TRANSPORT_NONE;
+        return 0;
+    }
+    return 1;
+}
+
+void scsi_probe_devices(void)
+{
+    fw_set_mem(mScsiDevices, sizeof(mScsiDevices), 0);
+    mBootScsiDevice = NULL;
+    mDiskScsiDevice = NULL;
+    mScsiTransport = SCSI_TRANSPORT_NONE;
+
+    if (isp12160_initialise() && scsi_probe_one(SCSI_TRANSPORT_ISP12160)) {
+        return;
+    }
+    if (lsi_init_controller()) {
+        scsi_probe_one(SCSI_TRANSPORT_LSI);
     }
 }
 

@@ -47,7 +47,15 @@ extern char __fw_ivt[];
 #define UART_MCR_RTS  0x02U
 #define UART_MCR_LOOP 0x10U
 
-#define FW_ITC_TICKS_PER_100NS 20ULL
+/*
+ * ITC rate, set at boot from PAL_FREQ_RATIOS: the ITC counts processor
+ * clocks (800 MHz on Merced, 1.6 GHz on the Itanium 2 models).  20 (200 MHz)
+ * only until fw_init_itc_rate() has run.
+ */
+extern UINT64 fw_itc_ticks_per_100ns;
+#define FW_ITC_TICKS_PER_100NS fw_itc_ticks_per_100ns
+void fw_pal_freq_ratios(UINT64 *Processor, UINT64 *Bus, UINT64 *Itc);
+void fw_init_itc_rate(void);
 #define FW_ITC_TICKS_PER_MICROSECOND (FW_ITC_TICKS_PER_100NS * 10ULL)
 #define FW_ITC_TICKS_PER_SECOND (FW_ITC_TICKS_PER_100NS * 10000000ULL)
 

@@ -862,10 +862,20 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
      */
     cpu->env.insertable_page_mask = icc->insertable_page_mask;
     cpu->env.purgeable_page_mask = icc->purgeable_page_mask;
+    cpu->env.itc_hz = icc->pal->freq_base_hz * icc->pal->itc_ratio_num /
+                      icc->pal->itc_ratio_den;
     cpu->env.impl_pa_bits = icc->impl_pa_bits;
     cpu->env.impl_va_msb = icc->impl_va_msb;
     cpu->env.impl_rid_bits = icc->impl_rid_bits;
     cpu->env.impl_key_bits = icc->impl_key_bits;
+    /*
+     * The LINT0/LINT1 pins start masked: the architecture leaves LRR0-1
+     * undefined out of reset and firmware programs them before it relies on
+     * a pin (SDM vol 2 5.8.3.9), and nothing must reach the SAPIC through a
+     * pin nobody has steered yet.
+     */
+    cpu->env.cr[IA64_CR_LRR0] = 1ULL << 16;
+    cpu->env.cr[IA64_CR_LRR1] = 1ULL << 16;
     /*
      * Bound of the persistent region-7 KSEG physical alias (see
      * ia64_sal_boot_identity_pa_type()): the kernel reaches KSEG0 structures
@@ -1025,7 +1035,7 @@ static const IA64PalProfile ia64_pal_profile_madison = {
     .freq_base_hz = 100000000ULL,
     .proc_ratio_num = 16, .proc_ratio_den = 1,   /* 1.6 GHz */
     .bus_ratio_num = 4,   .bus_ratio_den = 1,     /* 400 MHz */
-    .itc_ratio_num = 2,   .itc_ratio_den = 1,     /* 200 MHz */
+    .itc_ratio_num = 16,  .itc_ratio_den = 1,     /* ITC at the core clock */
     .has_post_merced_pal = true,
     .pal_vendor = 1,
     .pal_a_model = 2, .pal_a_revision = 0x23,
@@ -1066,7 +1076,7 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     .freq_base_hz = 100000000ULL,
     .proc_ratio_num = 16, .proc_ratio_den = 1,    /* 1.6 GHz */
     .bus_ratio_num = 16,  .bus_ratio_den = 3,      /* 533.33 MHz */
-    .itc_ratio_num = 2,   .itc_ratio_den = 1,      /* 200 MHz */
+    .itc_ratio_num = 16,  .itc_ratio_den = 1,      /* ITC at the core clock */
     .has_post_merced_pal = true,
     .pal_vendor = 1,
     .pal_a_model = 2, .pal_a_revision = 0x23,
@@ -1136,8 +1146,9 @@ static const IA64PalProfile ia64_pal_profile_merced = {
     .freq_base_hz = 100000000ULL,
     .proc_ratio_num = 8,  .proc_ratio_den = 1,     /* 800 MHz */
     .bus_ratio_num = 4,   .bus_ratio_den = 3,       /* 133.33 MHz */
-    .itc_ratio_num = 2,   .itc_ratio_den = 1,       /* 200 MHz (ITC ratio not
-                                                     * separately published) */
+    .itc_ratio_num = 8,   .itc_ratio_den = 1,       /* ITC at the core clock
+                                                     * (245473-002: the ITC counts
+                                                     * processor clocks) */
     .has_post_merced_pal = false,
     /*
      * PAL 8.8.30, the C2 stepping's firmware version (249720-009 revision

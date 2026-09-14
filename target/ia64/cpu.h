@@ -7,6 +7,7 @@
 #include "fpu/softfloat.h"
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "qemu/timer.h"
+#include "qemu/host-utils.h"
 
 #ifdef CONFIG_USER_ONLY
 #error "IA-64 target currently supports system mode only"
@@ -954,6 +955,7 @@ typedef struct CPUArchState {
 
     /* Application Registers */
     uint64_t ar[IA64_AR_COUNT];
+    uint64_t itc_hz;          /* ITC ticks per second, from the PAL profile */
 #define ar_kr0    ar[IA64_AR_KR0]
 #define ar_kr7    ar[IA64_AR_KR7]
 #define ar_rsc    ar[IA64_AR_RSC]
@@ -1590,7 +1592,8 @@ void ia64_rse_delivery_check(CPUIA64State *env, int excp);
 
 CPUState *ia64_cpu_by_sapic_id(uint8_t id, uint8_t eid);
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector);
-void ia64_sapic_set_extint(CPUState *cs, int level);
+void ia64_cpu_set_lint(CPUState *cs, int pin, int level);
+void ia64_lint_lrr_written(CPUIA64State *env, int pin);
 void ia64_sapic_update_interrupt(CPUIA64State *env);
 bool ia64_sapic_has_pending(CPUIA64State *env);
 int  ia64_sapic_accept(CPUIA64State *env);
@@ -1604,7 +1607,22 @@ void ia64_itc_advance_pending_itm(CPUIA64State *env);
 void ia64_itc_check_timer(CPUIA64State *env);
 void ia64_itc_enter_halt(CPUIA64State *env);
 
-#define IA64_ITC_NS_PER_TICK 5
+/*
+ * ITC rate.  On real parts the interval time counter runs at the processor
+ * clock (PAL_FREQ_RATIOS reports the same ratio for both), and firmware
+ * written for them stalls on ar.itc scaled by that frequency: the HP i2000's
+ * splash countdown ran 4x slow while the ITC ticked at a fixed 200 MHz.
+ * The rate is cached per CPU from its PAL profile at reset.
+ */
+static inline uint64_t ia64_itc_ns_to_ticks(const CPUIA64State *env, int64_t ns)
+{
+    return muldiv64(ns, env->itc_hz, NANOSECONDS_PER_SECOND);
+}
+
+static inline int64_t ia64_itc_ticks_to_ns(const CPUIA64State *env, uint64_t ticks)
+{
+    return muldiv64(ticks, NANOSECONDS_PER_SECOND, env->itc_hz);
+}
 
 static inline bool ia64_external_interrupt_vector_valid(uint8_t vector)
 {

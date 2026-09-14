@@ -353,6 +353,44 @@ fw_pal_halt_light:
     .endp fw_pal_halt_light
     .size fw_pal_halt_light, . - fw_pal_halt_light
 
+    /* PAL_FREQ_RATIOS (index 0Eh): processor, bus and ITC ratios to the
+     * base frequency, each (numerator << 32) | denominator. */
+    .section .text.fw_pal_freq_ratios, "ax"
+    .global fw_pal_freq_ratios
+    .type fw_pal_freq_ratios, @function
+    .proc fw_pal_freq_ratios
+    .explicit
+fw_pal_freq_ratios:
+    alloc r36 = ar.pfs, 3, 2, 0, 0
+    ;;
+    mov r35 = b0
+    movl r28 = 0xe
+    mov r29 = r0
+    mov r30 = r0
+    mov r31 = r0
+    ;;
+    movl r14 = pal_proc_entry
+    ;;
+    mov b6 = r14
+    movl r14 = 1f
+    ;;
+    mov b0 = r14
+    ;;
+    br.sptk.many b6
+    ;;
+1:
+    st8 [r32] = r9
+    st8 [r33] = r10
+    ;;
+    st8 [r34] = r11
+    mov b0 = r35
+    mov ar.pfs = r36
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp fw_pal_freq_ratios
+    .size fw_pal_freq_ratios, . - fw_pal_freq_ratios
+
     .section .text.fw_ebc_bridge, "ax"
 
     /* A generated thunk passes its firmware-owned context in r8. */

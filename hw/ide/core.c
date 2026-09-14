@@ -2205,6 +2205,20 @@ void ide_bus_exec_cmd(IDEBus *bus, uint32_t val)
         ide_cmd_done(s);
         ide_bus_set_irq(s->bus);
     }
+    /*
+     * A device sets BSY within 400 ns of a command being written (ATA-5
+     * 9.7), so software may read the status register right away and see it
+     * busy before the result appears.  The emulated command completes
+     * inside the write, which means BSY is never visible -- and firmware
+     * that probes a drive by waiting for BSY to assert before it waits for
+     * it to clear (the Intel SDV / HP i2000 firmware's IDE driver polls a
+     * thousand times for it after IDENTIFY PACKET DEVICE) concludes there is
+     * no device.  On a bus that asks for it, report BSY once on the first
+     * status read after each command.
+     */
+    if (bus->bsy_after_cmd) {
+        s->bsy_latched = true;
+    }
 }
 
 /* IOport [R]ead [R]egisters */
@@ -2308,6 +2322,11 @@ uint32_t ide_ioport_read(void *opaque, uint32_t addr)
             ret = 0;
         } else {
             ret = s->status;
+            if (s->bsy_latched) {
+                /* While BSY is set the other bits are not yet valid. */
+                ret = (ret & ~(DRQ_STAT | ERR_STAT)) | BUSY_STAT;
+                s->bsy_latched = false;
+            }
         }
         qemu_irq_lower(bus->irq);
         break;
@@ -2328,6 +2347,10 @@ uint32_t ide_status_read(void *opaque, uint32_t addr)
         ret = 0;
     } else {
         ret = s->status;
+        if (s->bsy_latched) {
+            ret = (ret & ~(DRQ_STAT | ERR_STAT)) | BUSY_STAT;
+            s->bsy_latched = false;
+        }
     }
 
     trace_ide_status_read(addr, ret, bus, s);
@@ -2821,6 +2844,16 @@ void ide_bus_init_output_irq(IDEBus *bus, qemu_irq irq_out)
 
 void ide_bus_set_irq(IDEBus *bus)
 {
+    /*
+     * The device is asserting its interrupt, so the command is past the
+     * window in which it holds BSY: whatever the status register now says is
+     * what software must see.  Drop a pending one-shot BSY (see
+     * ide_bus_exec_cmd) rather than injecting it into a later phase -- the
+     * vendor i2000 firmware treats BSY after it has read a data-phase
+     * interrupt reason as a failed command and abandons the transfer.
+     */
+    bus->ifs[0].bsy_latched = false;
+    bus->ifs[1].bsy_latched = false;
     if (!(bus->cmd & IDE_CTRL_DISABLE_IRQ)) {
         qemu_irq_raise(bus->irq);
     }

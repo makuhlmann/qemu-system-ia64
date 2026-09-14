@@ -325,8 +325,8 @@ struct _EFI_UGA_DRAW_PROTOCOL {
 
 /* SAL + ACPI table scaffolds live in fw-acpi.h. */
 
-FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE == 649u, dsdt_generated_aml_size);
-FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_AML_SIZE == 496u,
+FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE == 2695u, dsdt_generated_aml_size);
+FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_AML_SIZE == 519u,
                  ssdt_generated_aml_size);
 /* The nested zx1-profile DSDT/SSDT; the larger sets ACPI_DSDT/SSDT Aml[]. */
 FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_ZX1_AML_SIZE == 1182u,
@@ -608,6 +608,15 @@ static UINT32 mHighMonotonicCount;
 
 typedef struct _EFI_PCI_IO_PROTOCOL EFI_PCI_IO_PROTOCOL;
 
+/*
+ * USB host controller identities: the discrete PIIX3 function zx1 carries,
+ * and function 2 of the i2000's 82468GX I/O and Firmware Bridge.
+ */
+#define FW_PCI_PIIX3_UHCI_ID 0x70208086U
+#define FW_PCI_IFB_UHCI_ID   0x76028086U
+/* Likewise the IDE controller: a discrete CMD646, or the bridge's function 1. */
+#define FW_PCI_IFB_IDE_ID    0x76018086U
+
 typedef struct FW_PCI_IO_DEVICE {
     EFI_HANDLE *Handle;
     EFI_PCI_IO_PROTOCOL *Protocol;
@@ -660,7 +669,7 @@ static EFI_HANDLE mTcgHandle;
 EFI_HANDLE mStorageDriverHandle;
 static EFI_HANDLE mArchitecturalHandle;
 #define FW_PCI_IO_DEVICE_COUNT 6U
-static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT];
+static FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT];
 EFI_LOADED_IMAGE_PROTOCOL mLoadedImageProto;
 static IA64_FPSWA_INTERFACE mFpswaProto;
 static EFI_LOADED_IMAGE_PROTOCOL mFpswaLoadedImageProto;
@@ -9336,7 +9345,7 @@ static EFI_PCI_IO_PROTOCOL mPciUhciIoProto;
 static EFI_PCI_IO_PROTOCOL mPciLsiIoProto;
 static EFI_PCI_IO_PROTOCOL mPciVgaIoProto;
 
-static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
+static FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     {
         &mPciIdeHandle, &mPciIdeIoProto, &mPciIdeDevicePath,
         0, 0, 0, FW_PCI_IDE_ATTRIBUTES, PCI_IDE_CMD646_ID,
@@ -9354,17 +9363,19 @@ static const FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     },
     {
         &mPciUhciHandle, &mPciUhciIoProto, &mPciUhciDevicePath,
-        0, 3, 0, FW_PCI_UHCI_ATTRIBUTES, 0x70208086U,
+        0, 3, 0, FW_PCI_UHCI_ATTRIBUTES, FW_PCI_PIIX3_UHCI_ID,
         4, 0x0000c121U, 0x20, "UHCI", 1,
     },
     {
         &mPciLsiHandle, &mPciLsiIoProto, &mPciLsiDevicePath,
-        0, 4, 0, FW_PCI_LSI_ATTRIBUTES, 0x00121000U,
+        IA64_460GX_WXB0_BUS, IA64_460GX_WXB0_SCSI_SLOT, 0,
+        FW_PCI_LSI_ATTRIBUTES, 0x00121000U,
         1, PCI_LSI_MMIO_BAR, 0x400, "LSI", 1,
     },
     {
         &mGraphicsHandle, &mPciVgaIoProto, &mGraphicsDevicePath,
-        0, 5, 0, FW_PCI_VGA_ATTRIBUTES, PCI_VGA_ATI_ID,
+        IA64_460GX_GXB_BUS, IA64_460GX_GXB_VGA_SLOT, 0,
+        FW_PCI_VGA_ATTRIBUTES, PCI_VGA_ATI_ID,
         0, PCI_VGA_FB_BAR | 0x8U, PCI_VGA_ATI_FB_SIZE, "VGA", 0,
     },
 };
@@ -13835,6 +13846,70 @@ EFI_HANDLE fw_scsi_controller_handle(VOID)
  * slots into: platform state -> EFI core init -> device/storage bring-up
  * -> protocol/selftest battery -> boot policy.
  */
+/*
+ * Mask the 8259 pair, as a PC-AT BIOS does before handing off.  The south
+ * bridge carries both PICs and the 82C54 timer, whose counter 0 free-runs on
+ * IRQ 0 from power-up (460GX SSDM 15.4); the PICs come out of reset with no
+ * mask, so leaving them alone lets that tick assert INTR, which a processor
+ * takes as an ExtINT.  This machine delivers interrupts through the IOSAPIC
+ * and neither we nor an OS loaded here services vector 0, so the tick would
+ * just burn the guest's time.  Program both controllers the conventional way
+ * -- cascade on IR2, 8086 mode, vectors 0x08/0x70 -- and then mask every
+ * line; firmware that wants the legacy tick (the vendor SDV firmware does)
+ * reprograms them for itself.
+ */
+static void fw_mask_legacy_pics(void)
+{
+    static const struct {
+        UINT16 command;
+        UINT16 data;
+        UINT8 vector_base;
+        UINT8 icw3;
+    } pics[2] = {
+        { 0x20, 0x21, 0x08, 0x04 },   /* master: slave cascaded on IR2 */
+        { 0xa0, 0xa1, 0x70, 0x02 },   /* slave: cascade identity 2 */
+    };
+    UINTN i;
+
+    for (i = 0; i < 2; i++) {
+        ata_pio_write8(LEGACY_IO_BASE + pics[i].command, 0x11);
+        ata_pio_write8(LEGACY_IO_BASE + pics[i].data, pics[i].vector_base);
+        ata_pio_write8(LEGACY_IO_BASE + pics[i].data, pics[i].icw3);
+        ata_pio_write8(LEGACY_IO_BASE + pics[i].data, 0x01);
+        ata_pio_write8(LEGACY_IO_BASE + pics[i].data, 0xff);
+    }
+}
+
+/*
+ * Give the 460GX's own configuration space its bus number.  The chipset's
+ * SAC, SDC, memory cards and expander ports answer configuration cycles on
+ * the bus the CBN register names; it comes out of reset as FFh, and the
+ * vendor firmware moves it to EEh once it has finished enumerating (460GX
+ * SSDM 2.3.2, Table 2-1).  Program the same number so the chipset sits where
+ * that firmware, and everything written against it, expects.  CBN itself is
+ * reached at bus 0 device 10h, which is reserved for exactly this and is
+ * never forwarded.
+ *
+ * Nothing here needs the chipset's registers -- this firmware enumerates
+ * through ECAM -- but leaving CBN at 0 would leave CF8/CFC answering for
+ * the chipset at addresses that belong to real devices.
+ */
+#define FW_460GX_CBN_BUS      0xee
+#define FW_460GX_CBN_DEVICE   0x10
+#define FW_460GX_CBN_REGISTER 0x40
+
+static void fw_program_chipset_bus_number(void)
+{
+    volatile UINT32 *config_address =
+        (volatile UINT32 *)(UINTN)(LEGACY_IO_BASE + 0xcf8);
+    volatile UINT8 *config_data =
+        (volatile UINT8 *)(UINTN)(LEGACY_IO_BASE + 0xcfc);
+
+    *config_address = 0x80000000U | ((UINT32)FW_460GX_CBN_DEVICE << 11) |
+                      FW_460GX_CBN_REGISTER;
+    *config_data = FW_460GX_CBN_BUS;
+}
+
 static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 {
 
@@ -13848,6 +13923,8 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     mBootStackBase = stack_top - FW_BOOT_STACK_SIZE;
     mCpuAssistBase = stack_top - IA64_FW_CPU_ASSIST_SIZE;
     fw_platform()->DecodeTopology();
+    fw_mask_legacy_pics();
+    fw_program_chipset_bus_number();
     mResetFloatingPointDisableBits =
         fw_read_psr() & (IA64_PSR_DFL | IA64_PSR_DFH);
 
@@ -13898,28 +13975,68 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 }
 
 /*
- * On zx1 the AGP graphics adapter lives behind the Mercury (LBA) PCI root
- * bridge, not on PCI0: retarget the EFI console/graphics device paths from
- * PCI0 (ACPI _UID 0) device 5 to the Mercury root (ACPI _UID 1) at
- * IA64_MERCURY_VGA_SLOT.  Both roots advertise PNP0A03 (0x0A0341D0), so only
- * the _UID and PCI device number change.  Run once, after the chipset profile
- * is known (fw_phase_platform_init) and before the paths are installed as the
- * GOP handle's device path / ConOut variables (fw_phase_efi_core_init).
+ * Neither machine puts its graphics adapter on the first PCI root.  On zx1
+ * the AGP adapter lives behind the Mercury (LBA) bridge at ACPI _UID 1; on
+ * the i2000 it lives behind the GXB expander, the AGP root, at _UID 3 device
+ * 0.  Retarget the EFI console/graphics device paths accordingly.  Every root
+ * advertises PNP0A03 (0x0A0341D0), so only the _UID and the PCI device number
+ * change.  Run once, after the chipset profile is known
+ * (fw_phase_platform_init) and before the paths are installed as the GOP
+ * handle's device path / ConOut variables (fw_phase_efi_core_init).
  */
 static void fw_retarget_vga_device_paths(void)
 {
-    if (!fw_platform_is_zx1()) {
+    UINT32 uid;
+    UINT8 device;
+
+    if (fw_platform_is_zx1()) {
+        uid = 1;
+        device = IA64_MERCURY_VGA_SLOT;
+    } else {
+        uid = IA64_460GX_GXB_BUS;
+        device = IA64_460GX_GXB_VGA_SLOT;
+    }
+    mGraphicsDevicePath.Acpi.Uid = uid;
+    mGraphicsDevicePath.Pci.Device = device;
+    mConsoleOutputDevicePath.Graphics.Acpi.Uid = uid;
+    mConsoleOutputDevicePath.Graphics.Pci.Device = device;
+}
+
+/*
+ * The USB and IDE controllers are functions 2 and 1 of the 82468GX I/O and
+ * Firmware Bridge on the i2000, not discrete function-zero devices of their
+ * own.  Retarget their fixed PCI-I/O table entries and device paths, which
+ * the static initializers give the zx1 layout.  Same timing rule as
+ * fw_retarget_vga_device_paths().
+ */
+static void fw_retarget_south_bridge_device_paths(void)
+{
+    UINTN i;
+
+    if (fw_platform_is_zx1()) {
         return;
     }
-    mGraphicsDevicePath.Acpi.Uid = 1;
-    mGraphicsDevicePath.Pci.Device = IA64_MERCURY_VGA_SLOT;
-    mConsoleOutputDevicePath.Graphics.Acpi.Uid = 1;
-    mConsoleOutputDevicePath.Graphics.Pci.Device = IA64_MERCURY_VGA_SLOT;
+    for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
+        if (mPciIoDevices[i].Protocol == &mPciUhciIoProto) {
+            mPciIoDevices[i].Device = IA64_460GX_IFB_SLOT;
+            mPciIoDevices[i].Function = IA64_460GX_IFB_USB_FUNCTION;
+            mPciIoDevices[i].ExpectedId = FW_PCI_IFB_UHCI_ID;
+        } else if (mPciIoDevices[i].Protocol == &mPciIdeIoProto) {
+            mPciIoDevices[i].Device = IA64_460GX_IFB_SLOT;
+            mPciIoDevices[i].Function = IA64_460GX_IFB_IDE_FUNCTION;
+            mPciIoDevices[i].ExpectedId = FW_PCI_IFB_IDE_ID;
+        }
+    }
+    mPciUhciDevicePath.Pci.Device = IA64_460GX_IFB_SLOT;
+    mPciUhciDevicePath.Pci.Function = IA64_460GX_IFB_USB_FUNCTION;
+    mPciIdeDevicePath.Pci.Device = IA64_460GX_IFB_SLOT;
+    mPciIdeDevicePath.Pci.Function = IA64_460GX_IFB_IDE_FUNCTION;
 }
 
 static void fw_phase_efi_core_init(void)
 {
     fw_retarget_vga_device_paths();
+    fw_retarget_south_bridge_device_paths();
     efi_init_boot_services();
     efi_init_runtime_services();
     uart_puts("UEFI Time Services:   ");
@@ -14388,7 +14505,9 @@ static void fw_phase_protocols_and_selftests(void)
         uart_puts("ATA PIO");
     }
     if (mBootStorageDevice.Kind == FW_STORAGE_SCSI) {
-        uart_puts(", LSI53C895A)\r\n");
+        uart_puts(", ");
+        uart_puts(scsi_transport_name());
+        uart_puts(")\r\n");
     } else if (mBootStorageDevice.Kind == FW_STORAGE_AHCI) {
         uart_puts(", AHCI)\r\n");
     } else if (mBootStorageDevice.Kind == FW_STORAGE_IDE) {
@@ -14717,8 +14836,24 @@ static void fw_phase_boot(void)
     while (1) {}
 }
 
+UINT64 fw_itc_ticks_per_100ns = 20ULL;
+
+void fw_init_itc_rate(void)
+{
+    UINT64 processor, bus, itc, num, den;
+
+    fw_pal_freq_ratios(&processor, &bus, &itc);
+    num = itc >> 32;
+    den = itc & 0xffffffffULL;
+    if (num != 0 && den != 0) {
+        /* SAL_FREQ_BASE platform clock is 100 MHz = 10 ticks per 100 ns. */
+        fw_itc_ticks_per_100ns = 10ULL * num / den;
+    }
+}
+
 void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 {
+    fw_init_itc_rate();
     fw_phase_platform_init(gp, stack_top, boot_b0);
     fw_phase_efi_core_init();
     fw_phase_storage_bringup();

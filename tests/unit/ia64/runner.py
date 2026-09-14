@@ -52,6 +52,7 @@ class MicroProgram:
     completion: Completion
     data: tuple[MemoryInitializer, ...] = ()
     machine_args: tuple[str, ...] = ()
+    machine: str = "ia64-vpc"
     cpu: str | None = None
     smp: str = "1"
     memory: str | None = None
@@ -105,7 +106,7 @@ def _command(qemu: str, program: MicroProgram) -> list[str]:
     # home and relies on the identity window there; pin the machine to the
     # unrelocated layout (the shipping firmware runs from the RAM-top
     # shadow by default since rework phase 2.2).
-    machine = "ia64-vpc,fw-relocate=off"
+    machine = f"{program.machine},fw-relocate=off"
     if program.machine_args:
         machine += "," + ",".join(program.machine_args)
     command = [

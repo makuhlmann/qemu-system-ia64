@@ -18,8 +18,28 @@
 
 #define IA64_PCI_INTX_GSI_BASE 16
 #define IA64_PCI_INTX_LINES    4
+/* zx1 registers one secondary root; 460gx registers three expander roots. */
+#define IA64_PCI_MAX_SECONDARY_ROOTS 4
 
 int ia64_pci_route_intx_gsi(uint8_t devfn, int irq_num);
+
+/*
+ * A board's INTx wiring for one PCI slot: the interrupt-controller input each
+ * of INTA..INTD reaches.  A root given a table drives those inputs directly
+ * (its GPIO outputs are numbered by input); a slot the table does not list
+ * swizzles into the four inputs at @fallback_base.
+ */
+typedef struct IA64IntxRoute {
+    uint8_t slot;
+    uint8_t gsi[4];          /* INTA..INTD */
+} IA64IntxRoute;
+#define IA64_PCI_INTX_MAX_OUTPUTS 64
+int ia64_intx_route_lookup(const IA64IntxRoute *routes, unsigned int nroutes,
+                           unsigned int fallback_base, uint8_t devfn, int pin);
+void ia64_pci_host_set_intx_routes(DeviceState *dev,
+                                   const IA64IntxRoute *routes,
+                                   unsigned int nroutes,
+                                   unsigned int fallback_base);
 
 /*
  * The shared identity-mapped MMIO/I/O windows of the primary host bridge.  The
@@ -28,6 +48,12 @@ int ia64_pci_route_intx_gsi(uint8_t devfn, int irq_num);
  * fixed aperture the machine already programs -- see ia64_mercury.c.
  */
 MemoryRegion *ia64_pci_host_mmio(DeviceState *pci_host);
+/*
+ * Route [base, IA64_PCI_MMIO_BASE) to PCI as well -- the 460GX's variable
+ * gap, whose bottom the compatibility port's PCIS register sets.  RAM below
+ * it keeps priority; base >= IA64_PCI_MMIO_BASE removes the extension.
+ */
+void ia64_pci_host_set_low_mmio_window(DeviceState *pci_host, uint64_t base);
 MemoryRegion *ia64_pci_host_io(DeviceState *pci_host);
 
 /*
@@ -36,5 +62,7 @@ MemoryRegion *ia64_pci_host_io(DeviceState *pci_host);
  * faithful analog of zx1 SAL rope-routing).  NULL until the zx1 machine wires it.
  */
 void ia64_pci_host_set_mercury_bus(DeviceState *pci_host, PCIBus *bus);
+/* Register a secondary root bus for ECAM dispatch by its own bus number. */
+void ia64_pci_host_add_secondary_bus(DeviceState *pci_host, PCIBus *bus);
 
 #endif

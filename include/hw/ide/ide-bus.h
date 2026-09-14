@@ -26,6 +26,8 @@ struct IDEBus {
     PortioList portio_list;
     PortioList portio2_list;
     VMChangeStateEntry *vmstate;
+    /* Show BSY on the first status read after each command (see core.c). */
+    bool bsy_after_cmd;
 };
 
 #define TYPE_IDE_BUS "IDE"

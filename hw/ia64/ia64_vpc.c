@@ -38,6 +38,9 @@
 #include "hw/ide/ide-dev.h"
 #include "hw/ide/pci.h"
 #include "hw/input/i8042.h"
+#include "hw/isa/smsc_lpc47b27x.h"
+#include "hw/southbridge/intel_82468gx.h"
+#include "hw/ia64/ia64_460gx_identity.h"
 #include "hw/acpi/acpi.h"
 #ifdef CONFIG_IA64_VPC_STORAGE
 #include "hw/scsi/isp12160.h"
@@ -64,6 +67,9 @@
 #include "hw/ia64/ia64_sba.h"
 #include "hw/ia64/ia64_lba.h"
 #include "hw/ia64/ia64_mercury.h"
+#include "hw/ia64/ia64_expander.h"
+#include "hw/i2c/i2c.h"
+#include "hw/ia64/ia64_i2000_hwmon.h"
 #include "hw/core/or-irq.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
@@ -90,6 +96,13 @@
  * is no DRAM island between the aperture and the chipset/SAPIC region.
  */
 #define IA64_LOW_RAM_LIMIT IA64_PCI_MMIO_BASE
+/*
+ * 460GX Memory Card A: two stacks of four DIMM rows, each row four identical
+ * DIMMs (SSDM Table 5-1: "4 DIMMs per row which must be populated as a unit",
+ * "Up to 4 rows per stack", "2 stacks per card").  Memory Card B stays absent.
+ */
+#define IA64_460GX_MEM_ROWS 8
+#define IA64_460GX_MEM_ROW_MIN_MB 64
 /*
  * The firmware address space, RTC/watchdog/NVRAM devices, IVT, IOSAPIC,
  * local SAPIC and ACPI PM block addresses are shared with the firmware via
@@ -134,9 +147,9 @@
  * grant register as always-granted-to-id-0; everything else in the page
  * is write-store/read-back scratch, logged for the stage-1 inventory.
  */
-#define IA64_REALFW_SAC_BASE      IA64_U64(0x00000000feb00000)
-#define IA64_REALFW_SAC_SIZE      0x10000
-#define IA64_REALFW_SAC_BOOT_SEM  0xcc0
+#define IA64_460GX_SAC_BASE      IA64_U64(0x00000000feb00000)
+#define IA64_460GX_SAC_SIZE      0x10000
+#define IA64_460GX_SAC_BOOT_SEM  0xcc0
 #define IA64_REALFW_PTR_FIT       (IA64_REALFW_WINDOW_END - 32)
 #define IA64_REALFW_PTR_SALE      (IA64_REALFW_WINDOW_END - 24)
 /* Bit 63 in firmware pointers is the uncacheable-attribute flag, not
@@ -146,21 +159,58 @@
 #define IA64_AHCI_IDP_IO_BASE   0x0000c100U
 #define IA64_UHCI_IO_BASE       0x0000c120U
 /* LSI BAR0 is 0x100 bytes and therefore requires 0x100-byte alignment. */
-#define IA64_LSI_IO_BASE        0x0000c200U
-#define IA64_VGA_IO_BASE        0x0000c300U
+/*
+ * The chipset routes I/O in 4 KiB segments, one or more per logical PCI bus
+ * (SSDM 4; plans/sdv-i2000-firmware-reference.md 8.3), so a device behind an
+ * expander root takes a port range out of a segment that belongs to that
+ * root rather than a hole punched in the compatibility bus's.  Segment B is
+ * the first WXB root's, D the AGP root's and E the second WXB root's; the
+ * compatibility bus keeps the rest, including the legacy ports.
+ */
+/*
+ * The SCSI seat's ports come out of segment B, the first WXB root's; the
+ * second adapter parks on the second WXB root and takes segment E.
+ */
+#define IA64_SCSI_SEAT_IO_BASE  0x0000b000U
+#define IA64_SCSI_PARK_IO_BASE  0x0000e000U
 /*
  * The vendor ATI Rage 128 vgabios hardcodes its register I/O base at 0xD800 and
- * only falls back to a port-space scan if a signature probe there fails, so in
- * realfw mode the card's I/O BAR must live at 0xD800 for the BIOS's register
- * accesses (MM_INDEX/DATA, the PLL file) to reach the device.  Guests read the
- * BAR from config space, so they use the layout-fixed IA64_VGA_IO_BASE.
+ * only falls back to a port-space scan if a signature probe there fails, so the
+ * card's I/O BAR lives there: it is the address the card's own BIOS expects to
+ * find it at, and a guest reads the BAR from config space and follows.  It is
+ * inside the graphics root's I/O segment either way (0xD000-0xDFFF, see
+ * roms/ia64-firmware/dsdt-pci-root.asl).
  */
-#define IA64_VGA_IO_BASE_REALFW 0x0000d800U
+#define IA64_VGA_IO_BASE        0x0000d800U
 #define IA64_E1000_IO_BASE      0x0000c400U
 #define IA64_OHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define IA64_AHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00020000ULL)
-#define IA64_LSI_MMIO_PCI_BASE  (IA64_PCI_MMIO_BASE + 0x00030000ULL)
-#define IA64_LSI_RAM_PCI_BASE   (IA64_PCI_MMIO_BASE + 0x00032000ULL)
+/*
+ * Devices behind an expander root must have their BARs inside that root's
+ * own producer window, or the guest's PnP resource arbiter cannot assign
+ * them: a boot controller that fails this bugchecks the guest with STOP
+ * 0x7B before it ever reaches the disk.
+ *
+ * The 460GX decodes one n x 32 MB aperture per logical PCI bus out of the
+ * gap below 4 GiB - 32 MiB (SSDM 4; plans/sdv-i2000-firmware-reference.md
+ * 7.1), so each root owns a whole number of those units and nothing is
+ * carved out of another root's range: the compatibility bus takes the unit
+ * at the bottom of the gap, graphics takes the five units its framebuffer
+ * and register apertures need, and the two WXB roots take one unit each at
+ * the top.  The DSDT windows in roms/ia64-firmware/dsdt-pci-root.asl mirror
+ * the split exactly.
+ */
+#define IA64_PCI_MMIO_UNIT      0x02000000ULL
+#define IA64_WXB0_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 6 * IA64_PCI_MMIO_UNIT)
+#define IA64_WXB1_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 7 * IA64_PCI_MMIO_UNIT)
+/*
+ * The memory BARs of whichever adapter holds the SCSI seat come out of the
+ * first WXB root's aperture, and the parked adapter's out of the second's.
+ * The LSI's script RAM BAR sits 8 KiB above its register BAR either way.
+ */
+#define IA64_SCSI_SEAT_MMIO_PCI_BASE IA64_WXB0_MMIO_PCI_BASE
+#define IA64_SCSI_PARK_MMIO_PCI_BASE IA64_WXB1_MMIO_PCI_BASE
+#define IA64_LSI_RAM_BAR_OFFSET      0x00002000ULL
 #define IA64_E1000_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00040000ULL)
 #define IA64_E1000_MMIO_SIZE    0x00020000ULL
 #define IA64_E1000_IO_SIZE      0x00000040U
@@ -170,8 +220,20 @@
  * includes each adapter's Flash aperture) and below the graphics
  * framebuffer at IA64_PCI_MMIO_BASE + 0x02000000.
  */
-#define IA64_ISP12160_IO_BASE    0x0000c500U
-#define IA64_ISP12160_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01820000ULL)
+/*
+ * The south bridge's IDE bus-master register file.  Both channels are in
+ * compatibility mode and decode the fixed legacy ports, so only this BAR
+ * needs an address; it is the one the firmware allocates for a controller
+ * that arrives unassigned (PCI_IDE_BMDMA_BAR), kept identical so guest and
+ * firmware agree.
+ */
+#define IA64_IFB_IDE_BMDMA_IO_BASE 0x0000c000U
+/*
+ * The south bridge's SMBus host controller.  The real SDV firmware programs
+ * this BAR to 0xFFF0 and drives the board's sensor chips through it
+ * (plans/phase5 SESSION 8), so use the same base here.
+ */
+#define IA64_IFB_SMBUS_IO_BASE   0x0000fff0U
 #define IA64_CS4281_BA0_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01800000ULL)
 #define IA64_CS4281_BA1_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01810000ULL)
 /*
@@ -216,7 +278,7 @@
  * ATI BIOS pointer at 48h (verified against three retail Rage 128 Pro
  * dumps).  At 20h its 18h-byte data structure would straddle 30h.
  */
-#define IA64_INT10_ROM_PCIR_OFFSET    0x00e0U
+#define IA64_INT10_ROM_PCIR_OFFSET    0x0060U
 #define IA64_INT10_ROM_ATI_SIG_OFFSET 0x0030U
 #define IA64_INT10_ROM_ATI_HEADER_OFFSET 0x0080U
 #define IA64_INT10_ROM_ATI_PLL_OFFSET 0x00c0U
@@ -261,7 +323,13 @@
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
 /* Graphics (Rage 128) lands here: slots 0-4 are reserved/built-in, VGA next. */
 #define IA64_VPC_VGA_SLOT           5
+/*
+ * The i2000 carries its 82559 Ethernet at 00:05.0, the slot the graphics
+ * adapter used to occupy before it moved to the GXB root.  zx1 keeps the
+ * adapter where it was.
+ */
 #define IA64_VPC_NIC_SLOT           6
+#define IA64_460GX_NIC_SLOT         5
 
 #define IA64_SAPIC_DELIVERY_INT     0
 #define IA64_SAPIC_DELIVERY_NMI     4
@@ -489,6 +557,24 @@ struct IA64VpcMachineClass {
     uint64_t chipset_profile;
 };
 
+/*
+ * The SAC's function-0 indexed register file.  Neither the register pair nor
+ * the file is published -- the SSDM documents only the SAC's error, monitor
+ * and interrupt registers -- but the vendor firmware's use of it is not
+ * ambiguous: it writes an entry number to 64h, reads 64h back to confirm the
+ * selector took, then reads and rewrites 70h-73h, and it walks that sequence
+ * over entries 01h, 03h-07h and 10h-1Eh -- Table 2-1's chipset device numbers,
+ * expander ports included.  Backing 70h with one cell, as ordinary config
+ * storage does, makes every entry the same cell: the firmware's own walk then
+ * reads at entry 04h what it wrote at 03h, so anything it concludes about
+ * which expander ports exist is an artefact of the alias.
+ */
+#define IA64_460GX_SAC_IDX_REG      0x64
+#define IA64_460GX_SAC_IDX_DATA     0x70
+#define IA64_460GX_SAC_IDX_ENTRIES  256
+/* Expanders the SAC has ports for: Expander 0-3 at 10h-17h (Table 2-1). */
+#define IA64_460GX_EXPANDER_COUNT   4
+
 struct IA64VpcMachineState {
     MachineState parent_obj;
 
@@ -496,6 +582,7 @@ struct IA64VpcMachineState {
     bool ahci_enabled;
     bool audio_enabled;
     bool isp_enabled;
+    bool lsi_enabled;
     bool fw_relocate;
     uint64_t fw_map_quirk_disable;
     bool ide_enabled;
@@ -510,27 +597,20 @@ struct IA64VpcMachineState {
     uint64_t realfw_entry;
     uint64_t realfw_base;
     PFlashCFI01 *realfw_flash;
-    MemoryRegion realfw_post_io;
-    MemoryRegion realfw_sac_mmio;
-    MemoryRegion realfw_cfg_io;
-    MemoryRegion realfw_ide_data[2];
-    MemoryRegion realfw_ide_cmd[2];
-    MemoryRegion realfw_rtc_ext_alias;
-    MemoryRegion realfw_smbus_io;
-    MemoryRegion realfw_port61_io;
-    qemu_irq realfw_extint;
-    uint8_t *realfw_sac_data;
-    uint16_t realfw_post_last;
-    uint32_t realfw_config_address;
-    /*
-     * Persistent CPU-frequency mailbox (south bridge 00:03.0 reg 0xd0), NOT
-     * cleared by ia64_vpc_reset so the firmware's one-time "New CPU frequency
-     * is set" write survives its CF9 reboot.  See ia64_realfw_cfg_read.
-     */
-    uint32_t realfw_freq_mailbox;
+    MemoryRegion post_io;
+    MemoryRegion sac_mmio;
+    MemoryRegion cfg_io;
+    qemu_irq extint;
+    uint8_t *sac_data;
+    uint16_t post_last;
+    uint32_t cfg_address;
     /* 460GX chipset config space: bus CBN devices, 8 fns x 256 bytes. */
-    uint8_t *realfw_chipset_cfg;
-    PCIBus *realfw_pci_bus;
+    uint8_t *chipset_cfg;
+    /* The SAC function-0 register file behind 64h/70h, one per SAC. */
+    uint8_t sac_indexed[2][IA64_460GX_SAC_IDX_ENTRIES][4];
+    /* DIMM size per Memory Card A row, in MB; 0 = row not populated. */
+    uint32_t mem_row_dimm_mb[IA64_460GX_MEM_ROWS];
+    PCIBus *host_pci_bus;
     char *vga_model;
     bool alat_full;
 
@@ -538,6 +618,9 @@ struct IA64VpcMachineState {
     PCIDevice *sba_dev;
     DeviceState *lba_dev;
     DeviceState *mercury_host;      /* zx1: the Mercury (LBA) PCI host bridge */
+    /* 460gx: the WXB0, WXB1 and GXB expander roots (buses 1, 2 and 3). */
+    DeviceState *expander_host[IA64_460GX_EXPANDER_ROOTS];
+    PCIBus *expander_bus[IA64_460GX_EXPANDER_ROOTS];
     PCIBus *mercury_bus;            /* zx1: the Mercury second root bus         */
     PCIDevice *ahci_dev;
     PCIDevice *audio_dev;
@@ -545,13 +628,16 @@ struct IA64VpcMachineState {
     PCIDevice *ide_dev;
     PCIDevice *ohci_dev;
     PCIDevice *uhci_dev;
+    Intel82468GXIFBState *ifb;
     PCIDevice *lsi_dev;
     PCIDevice *vga_dev;
     PCIDevice *nic_devs[MAX_NICS];
     unsigned int nic_count;
 
-    MemoryRegion *ram_aliases[4];
+    MemoryRegion ram_aliases[4];
     unsigned int ram_alias_count;
+    /* Where the low DRAM band ends: the chipset's PCI gap base. */
+    uint64_t low_ram_limit;
     MemoryRegion *vga_fb_alias;
     MemoryRegion *vga_mmio_alias;
     MemoryRegion *vga_legacy_alias;
@@ -563,6 +649,9 @@ struct IA64VpcMachineState {
     MemoryRegion acpi_reset;
     MemoryRegion debug_uart_legacy_io;
     SerialMM *debug_uart;
+    MemoryRegion console_uart_legacy_io;
+    SerialMM *console_uart;
+    DeviceState *pci_host_dev;
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     MemoryRegion int10_pci_io;
     IA64Int10Registers int10_request;
@@ -1418,6 +1507,42 @@ static const MemoryRegionOps ia64_int10_io_ops = {
     },
 };
 
+/*
+ * The ATI BIOS header and PLL info block as the Rage 128 miniport
+ * (ati2mpaa) consumes them.  Traced from the driver on both firmwares: it
+ * copies 82 bytes of header, follows header+14h to a 12-byte table and
+ * header+30h to the PLL block, and reads 50 (32h) bytes of the latter:
+ * +08h XCLK, +0Ah a second clock, +0Eh reference frequency, +10h reference
+ * divider, +12h/+16h the PLL range, +22h a 32-bit clock limit and +2Eh/+30h
+ * a 16-bit pair it recombines into another.  A block that stops at +20h
+ * leaves the last three as whatever follows it in the image - which is why
+ * the 2 KB synthetic image "worked" (its PCIR structure supplied non-zero
+ * bytes) while the CSM-shadowed PCI ROM did not (zero padding): the memory
+ * clock came out as 0 and every mode-set was refused.  Both builders now
+ * publish the full block; the table pointer at +14h aims at the zeroed
+ * header itself (12 bytes of zeros are all the driver needs from it).
+ * Values are in the 10 kHz units of the Rage 128 BIOS interface.
+ */
+#define IA64_ATI_HDR_SIZE  0x40U
+#define IA64_ATI_PLL_SIZE  0x32U
+
+static void ia64_ati_write_bios_tables(uint8_t *rom, uint32_t hdr, uint32_t pll)
+{
+    memset(rom + hdr, 0, IA64_ATI_HDR_SIZE);
+    memset(rom + pll, 0, IA64_ATI_PLL_SIZE);
+    stw_le_p(rom + hdr + 0x14, hdr);
+    stw_le_p(rom + hdr + 0x30, pll);
+    stw_le_p(rom + pll + 0x08, IA64_ATI_PLL_XCLK);
+    stw_le_p(rom + pll + 0x0a, IA64_ATI_PLL_XCLK);
+    stw_le_p(rom + pll + 0x0e, IA64_ATI_PLL_REFERENCE_FREQ);
+    stw_le_p(rom + pll + 0x10, IA64_ATI_PLL_REFERENCE_DIV);
+    stl_le_p(rom + pll + 0x12, IA64_ATI_PLL_MIN_FREQ);
+    stl_le_p(rom + pll + 0x16, IA64_ATI_PLL_MAX_FREQ);
+    stl_le_p(rom + pll + 0x22, IA64_ATI_PLL_MAX_FREQ);
+    stw_le_p(rom + pll + 0x2e, IA64_ATI_PLL_MAX_FREQ & 0xffffU);
+    stw_le_p(rom + pll + 0x30, IA64_ATI_PLL_MAX_FREQ >> 16);
+}
+
 static void ia64_int10_install_ati_bios_info(uint8_t *rom,
                                              uint16_t vendor,
                                              uint16_t device)
@@ -1467,18 +1592,8 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      * Rage128-compatible display model and its existing VGA BIOS.
      */
     stw_le_p(rom + 0x48, IA64_INT10_ROM_ATI_HEADER_OFFSET);
-    stw_le_p(rom + IA64_INT10_ROM_ATI_HEADER_OFFSET + 0x30,
-             IA64_INT10_ROM_ATI_PLL_OFFSET);
-    stw_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x08,
-             IA64_ATI_PLL_XCLK);
-    stw_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x0e,
-             IA64_ATI_PLL_REFERENCE_FREQ);
-    stw_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x10,
-             IA64_ATI_PLL_REFERENCE_DIV);
-    stl_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x12,
-             IA64_ATI_PLL_MIN_FREQ);
-    stl_le_p(rom + IA64_INT10_ROM_ATI_PLL_OFFSET + 0x16,
-             IA64_ATI_PLL_MAX_FREQ);
+    ia64_ati_write_bios_tables(rom, IA64_INT10_ROM_ATI_HEADER_OFFSET,
+                               IA64_INT10_ROM_ATI_PLL_OFFSET);
 }
 
 static void ia64_vpc_install_int10(IA64VpcMachineState *s)
@@ -1491,9 +1606,11 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
     size_t i;
 
     g_assert(IA64_INT10_ROM_ATI_SIG_OFFSET + 10 <= 0x48);
-    g_assert(IA64_INT10_ROM_ATI_PLL_OFFSET + 0x20 <=
-             IA64_INT10_ROM_PCIR_OFFSET);
     g_assert(IA64_INT10_ROM_PCIR_OFFSET + 0x18 <=
+             IA64_INT10_ROM_ATI_HEADER_OFFSET);
+    g_assert(IA64_INT10_ROM_ATI_HEADER_OFFSET + IA64_ATI_HDR_SIZE <=
+             IA64_INT10_ROM_ATI_PLL_OFFSET);
+    g_assert(IA64_INT10_ROM_ATI_PLL_OFFSET + IA64_ATI_PLL_SIZE <=
              IA64_INT10_ROM_HANDLER_OFFSET);
     g_assert(IA64_INT10_ROM_HANDLER_OFFSET +
              sizeof(ia64_int10_handler) <= IA64_INT10_ROM_OEM_OFFSET);
@@ -1532,7 +1649,6 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
     stw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 0x12, 0x0100);
     rom[IA64_INT10_ROM_PCIR_OFFSET + 0x14] = 0;
     rom[IA64_INT10_ROM_PCIR_OFFSET + 0x15] = 0x80;
-    memcpy(rom + 0x60, "QEMU IA64 VBE INT10", 20);
     ia64_int10_install_ati_bios_info(rom, vendor, device);
     memcpy(rom + IA64_INT10_ROM_HANDLER_OFFSET, ia64_int10_handler,
            sizeof(ia64_int10_handler));
@@ -1550,6 +1666,10 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
     }
     stw_le_p(rom + IA64_INT10_ROM_MODES_OFFSET +
              G_N_ELEMENTS(ia64_vbe_modes) * 2, 0xffff);
+    g_assert(IA64_INT10_ROM_MODES_OFFSET + (G_N_ELEMENTS(ia64_vbe_modes) + 1) * 2 +
+             20 < sizeof(rom) - 1);
+    memcpy(rom + IA64_INT10_ROM_MODES_OFFSET + (G_N_ELEMENTS(ia64_vbe_modes) + 1) * 2,
+           "QEMU IA64 VBE INT10", 20);
 
     for (i = 0; i < sizeof(rom) - 1; i++) {
         checksum += rom[i];
@@ -1570,74 +1690,10 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
 }
 
 /*
- * Real-firmware video-ROM shadow.  The synthetic INT10 ROM above is a passive
- * 2 KiB image for Windows guests, which read the video BIOS through the PCI ROM
- * BAR (VideoPortGetRomImage).  The vendor SDV firmware instead POSTs the video
- * card's option ROM the legacy PC-AT way: shadow it to 0xC0000 and call
- * C000:0003.  Its shadow copy reads through the ROM BAR, and our ROM-BAR model
- * is not faithful enough for that read to capture the whole image -- only the
- * header lands, so the option ROM's entry jump (e.g. std vgabios `jmp 0x55C3`)
- * runs the CPU into empty shadow and hangs POST at ~0xc6.
- *
- * Place a complete option ROM at the 0xC0000 shadow directly so the firmware
- * finds a whole, valid option ROM to POST in place.  This is the realfw analogue
- * of install_int10 (the synthetic stub is skipped in realfw).  The ROM is the
- * emulated card's own expansion ROM by default, or -- when realfw-vga-rom= names
- * a file -- an authentic vendor card BIOS (e.g. the ATI Rage 128 Pro the SDV
- * shipped with), so the firmware POSTs the real BIOS for accurate emulation.
- */
-static void ia64_vpc_install_realfw_video_rom(IA64VpcMachineState *s)
-{
-    PCIDevice *pci_dev = s->vga_dev;
-    g_autofree uint8_t *file_rom = NULL;
-    const uint8_t *rom = NULL;
-    uint64_t rom_size = 0;
-    uint32_t declared;
-
-    if (s->realfw_vga_rom_path != NULL) {
-        GError *gerr = NULL;
-        gsize len = 0;
-
-        if (!g_file_get_contents(s->realfw_vga_rom_path, (gchar **)&file_rom,
-                                 &len, &gerr)) {
-            warn_report("realfw-vga-rom '%s': %s (falling back to card ROM)",
-                        s->realfw_vga_rom_path, gerr->message);
-            g_error_free(gerr);
-        } else {
-            rom = file_rom;
-            rom_size = len;
-        }
-    }
-    if (file_rom == NULL) {
-        if (pci_dev == NULL ||
-            pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
-            return;
-        }
-        rom = memory_region_get_ram_ptr(&pci_dev->rom);
-        rom_size = memory_region_size(&pci_dev->rom);
-    }
-    if (rom == NULL || rom_size < 0x400 || rom[0] != 0x55 || rom[1] != 0xaa) {
-        return;
-    }
-    declared = (uint32_t)rom[2] * 512U;
-    if (declared == 0 || declared > rom_size) {
-        declared = rom_size;
-    }
-    /* The legacy video-ROM window is C0000h-CFFFFh (64 KiB). */
-    if (declared > 0x10000) {
-        declared = 0x10000;
-    }
-    cpu_physical_memory_write(IA64_INT10_ROM_BASE, rom, declared);
-}
-
-/*
- * When realfw-vga-rom= supplies an authentic card BIOS, load it into the video
- * device's own expansion ROM as well as the 0xC0000 shadow.  The vendor firmware
- * re-shadows the option ROM's header from the PCI ROM BAR during POST; if the BAR
- * still held the emulated card's stock vgabios, that header's entry jump (a
- * different offset) would be laid over the real BIOS body already shadowed at
- * 0xC0000, and the CPU would jump into the wrong image and run away.  Keeping the
- * BAR and the shadow the same image keeps the re-shadow consistent.  Called
+ * When realfw-vga-rom= supplies an authentic card BIOS -- e.g. the ATI Rage 128
+ * Pro the SDV shipped with -- load it into the video device's own expansion ROM,
+ * so a firmware that POSTs the card's option ROM the legacy PC-AT way shadows
+ * and runs the real BIOS rather than the emulated card's stock vgabios.  Called
  * before configure_vga() so the ATI table / checksum fixups act on this image.
  */
 static void ia64_vpc_load_realfw_device_rom(IA64VpcMachineState *s)
@@ -2170,6 +2226,31 @@ static void ia64_vpc_set_isp(Object *obj, bool value, Error **errp)
     s->isp_enabled = value;
 }
 
+static bool ia64_vpc_get_lsi(Object *obj, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    (void)errp;
+
+    return s->lsi_enabled;
+}
+
+static void ia64_vpc_set_lsi(Object *obj, bool value, Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+#ifndef CONFIG_IA64_VPC_STORAGE
+    if (value) {
+        error_setg(errp, "SCSI support is not present in this build");
+        return;
+    }
+#else
+    (void)errp;
+#endif
+
+    s->lsi_enabled = value;
+}
+
 static bool ia64_vpc_get_ide(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -2460,6 +2541,28 @@ static void ia64_vpc_set_alat(Object *obj, const char *value, Error **errp)
     error_setg(errp, "alat must be 'zero' or 'full'");
 }
 
+/*
+ * The vendor firmware's FADT: PM1a_EVT_BLK A00h, PM1a_CNT_BLK A04h, PM_TMR
+ * A08h, GPE0 A0Ch, SMI_CMD B2h, ACPI_ENABLE A0h, ACPI_DISABLE A1h; its MADT
+ * routes the SCI (ISA IRQ 9) to GSI 49.
+ */
+#define IA64_460GX_IFB_ACPI_IO_BASE 0x0a00
+#define IA64_I2000_SCI_GSI          49
+#define IA64_460GX_ACPI_ENABLE_CMD  0xa0
+#define IA64_460GX_ACPI_DISABLE_CMD 0xa1
+
+static void ia64_vpc_realfw_apmc(void *opaque, int n, int level)
+{
+    IA64VpcMachineState *s = opaque;
+
+    (void)n;
+    if (level == IA64_460GX_ACPI_ENABLE_CMD) {
+        intel_82468gx_ifb_acpi_sci_enable(s->ifb, true);
+    } else if (level == IA64_460GX_ACPI_DISABLE_CMD) {
+        intel_82468gx_ifb_acpi_sci_enable(s->ifb, false);
+    }
+}
+
 static void ia64_vpc_acpi_update_sci(ACPIREGS *ar)
 {
     IA64VpcMachineState *s = container_of(ar, IA64VpcMachineState,
@@ -2627,15 +2730,22 @@ static const VMStateDescription vmstate_ia64_vpc = {
 static uint64_t ia64_vpc_lsapic_read(void *opaque, hwaddr addr,
                                        unsigned size)
 {
-    (void)opaque;
+    IA64VpcMachineState *s = opaque;
 
     if (addr == IA64_PIB_INTA_OFFSET && size == 1) {
         /*
          * Interrupt-acknowledge byte.  When an ExtINT is delivered (IVR reads
          * 0) firmware reads this location to run the INTA cycle against the
-         * external 8259 PIC and obtain the real 8-bit vector.  The PIC exists
-         * only in realfw mode; without it the cycle reads back 0.
+         * external 8259 PIC and obtain the real 8-bit vector.  The PIC is the
+         * pair inside the south bridge where the platform has one; failing
+         * that, the machine-wide legacy PIC.  With neither, the cycle reads
+         * back 0.
          */
+        if (s != NULL && s->ifb != NULL) {
+            int vector = intel_82468gx_ifb_pic_read_irq(s->ifb);
+
+            return vector < 0 ? 0 : (uint64_t)vector;
+        }
         if (isa_pic != NULL) {
             return pic_read_irq(isa_pic);
         }
@@ -2768,8 +2878,7 @@ static uint64_t ia64_vpc_map_ram_alias(IA64VpcMachineState *s,
     }
 
     g_assert(s->ram_alias_count < ARRAY_SIZE(s->ram_aliases));
-    alias = g_new(MemoryRegion, 1);
-    s->ram_aliases[s->ram_alias_count++] = alias;
+    alias = &s->ram_aliases[s->ram_alias_count++];
     memory_region_init_alias(alias, OBJECT(s), name, machine->ram,
                              backing_offset, size);
     memory_region_add_subregion(get_system_memory(), guest_base, alias);
@@ -2815,6 +2924,9 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
      * Keep this in lockstep with fw_init_guest_high_ram_ranges() +
      * efi_add_low_ram_band() in roms/ia64-firmware/.
      */
+    if (s->low_ram_limit == 0) {
+        s->low_ram_limit = IA64_LOW_RAM_LIMIT;
+    }
     if (ia64_vpc_chipset_is_zx1(s) && remaining > IA64_LOW_RAM_LIMIT) {
         size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
                                       IA64_SBA_IOVA_BASE,
@@ -2828,7 +2940,7 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
         remaining -= size;
     } else {
         size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
-                                      IA64_LOW_RAM_LIMIT,
+                                      s->low_ram_limit,
                                       "ia64-vpc.low-ram");
         offset += size;
         remaining -= size;
@@ -2837,6 +2949,36 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
     ia64_vpc_map_ram_alias(s, IA64_HIGH_RAM_AFTER_FIRMWARE_BASE,
                            offset, remaining, remaining,
                            "ia64-vpc.high-ram-above-4g");
+}
+
+/*
+ * Move the top of the low DRAM band.  The 460GX decodes "10_0000h - PCIS[7]"
+ * to DRAM and "PCIS[7] - FDFF_FFFFh" to PCI, with DRAM again from
+ * "1_0000_0000h to TOM" (SSDM Table 4-1): memory behind the variable gap
+ * "is moved so that it is addressed above 4 GB" (4.1.5).  The vendor
+ * firmware sizes memory, then programs the ports' PCIS from what it found
+ * -- 2 GB for 4 GB of DIMMs, which its TOM of 6 GB confirms -- so the band
+ * follows the lowest PCIS rather than the static aperture our own firmware
+ * assumes.  Everything DRAM-backed is re-aliased in one transaction; the
+ * backing store is untouched, so the bytes stay where the guest wrote them
+ * in the DRAM's own address order.
+ */
+static void ia64_vpc_set_low_ram_limit(IA64VpcMachineState *s, uint64_t limit)
+{
+    unsigned i;
+
+    if (limit == s->low_ram_limit || MACHINE(s)->ram == NULL) {
+        return;
+    }
+    memory_region_transaction_begin();
+    for (i = 0; i < s->ram_alias_count; i++) {
+        memory_region_del_subregion(get_system_memory(), &s->ram_aliases[i]);
+        object_unparent(OBJECT(&s->ram_aliases[i]));
+    }
+    s->ram_alias_count = 0;
+    s->low_ram_limit = limit;
+    ia64_vpc_map_ram(s);
+    memory_region_transaction_commit();
 }
 
 static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
@@ -2891,7 +3033,61 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
                               sizeof(handoff));
 }
 
-static void ia64_vpc_configure_pci_irq(PCIDevice *pci_dev)
+/*
+ * How the i2000 wires PCI INTx into the 460GX Programmable Interrupt Device,
+ * per slot, INTA..INTD.  This is the board's own description of itself: the
+ * _PRT packages of the vendor firmware's DSDT (W460GXBS, PLAT()=1 branch),
+ * which Windows programs the PID's 64 inputs from.  A slot a root's table
+ * does not list has no interrupt on the real board; here it swizzles into
+ * the spare inputs at IA64_460GX_INTX_FALLBACK_GSI so an add-in card in an
+ * unlisted slot still works.  Keep in lockstep with the _PRT packages in
+ * roms/ia64-firmware/dsdt-pci-root.asl.
+ */
+static const IA64IntxRoute ia64_i2000_pci0_intx[] = {
+    { 0x01, { 35, 34, 33, 32 } },
+    { 0x02, { 39, 38, 37, 36 } },   /* OHCI */
+    { 0x03, { 46, 46, 47, 47 } },   /* 82468GX: SMBus INTB, USB INTD */
+    { 0x04, { 45, 45, 45, 45 } },
+    { 0x05, { 44, 44, 44, 44 } },   /* 82557 */
+};
+static const IA64IntxRoute ia64_i2000_wxb0_intx[] = {
+    { 0x00, { 19, 18, 17, 16 } },   /* SCSI */
+    { 0x01, { 23, 22, 21, 20 } },
+    { 0x02, { 43, 42, 41, 40 } },
+    { 0x0f, { 56, 56, 56, 56 } },   /* hot-plug controller */
+};
+static const IA64IntxRoute ia64_i2000_wxb1_intx[] = {
+    { 0x00, { 27, 26, 25, 24 } },
+    { 0x01, { 31, 30, 29, 28 } },
+    { 0x0f, { 57, 57, 57, 57 } },
+};
+static const IA64IntxRoute ia64_i2000_gxb_intx[] = {
+    { 0x00, { 55, 54, 55, 54 } },   /* AGP graphics */
+};
+#define IA64_460GX_INTX_FALLBACK_GSI 60
+
+static const struct {
+    const IA64IntxRoute *routes;
+    unsigned int nroutes;
+} ia64_i2000_root_intx[IA64_460GX_EXPANDER_ROOTS] = {
+    [IA64_460GX_ROOT_WXB0] = { ia64_i2000_wxb0_intx,
+                               ARRAY_SIZE(ia64_i2000_wxb0_intx) },
+    [IA64_460GX_ROOT_WXB1] = { ia64_i2000_wxb1_intx,
+                               ARRAY_SIZE(ia64_i2000_wxb1_intx) },
+    [IA64_460GX_ROOT_GXB]  = { ia64_i2000_gxb_intx,
+                               ARRAY_SIZE(ia64_i2000_gxb_intx) },
+};
+
+/*
+ * Program a device's interrupt line from the interrupt block its root owns.
+ * Devices on bus 0, and everything on zx1 (where both roots wire-OR into one
+ * block of four), use IA64_PCI_INTX_GSI_BASE.  Each 460GX expander root has
+ * its own block, so a device behind one must report a line from that block --
+ * the line has to agree with the root's ACPI _PRT and with the input the
+ * expander's GPIO actually drives.
+ */
+static void ia64_vpc_configure_pci_irq_on_root(PCIDevice *pci_dev,
+                                               unsigned int gsi_base)
 {
     uint8_t pin;
 
@@ -2901,10 +3097,34 @@ static void ia64_vpc_configure_pci_irq(PCIDevice *pci_dev)
 
     pin = pci_dev->config[PCI_INTERRUPT_PIN];
     if (pin >= 1 && pin <= PCI_NUM_PINS) {
-        pci_default_write_config(pci_dev, PCI_INTERRUPT_LINE,
-                                 ia64_pci_route_intx_gsi(pci_dev->devfn,
-                                                         pin - 1), 1);
+        unsigned int line;
+
+        if (gsi_base == IA64_460GX_INTX_FALLBACK_GSI) {
+            /* A 460gx root: its bus maps the pin straight to a PID input. */
+            line = pci_get_bus(pci_dev)->map_irq(pci_dev, pin - 1);
+        } else {
+            line = gsi_base +
+                (ia64_pci_route_intx_gsi(pci_dev->devfn, pin - 1) -
+                 IA64_PCI_INTX_GSI_BASE);
+        }
+        pci_default_write_config(pci_dev, PCI_INTERRUPT_LINE, line, 1);
     }
+}
+
+/* The interrupt block owned by the root that carries bus @bus. */
+static unsigned int ia64_vpc_root_gsi_base(const IA64VpcMachineState *s,
+                                           uint8_t bus)
+{
+    if (ia64_vpc_chipset_is_zx1(s)) {
+        return IA64_PCI_INTX_GSI_BASE;
+    }
+    return IA64_460GX_INTX_FALLBACK_GSI;
+}
+
+static void ia64_vpc_configure_pci_irq(IA64VpcMachineState *s,
+                                       PCIDevice *pci_dev)
+{
+    ia64_vpc_configure_pci_irq_on_root(pci_dev, ia64_vpc_root_gsi_base(s, 0));
 }
 
 static void ia64_vpc_configure_ahci(PCIDevice *pci_dev)
@@ -2936,6 +3156,10 @@ static void ia64_vpc_configure_audio(PCIDevice *pci_dev)
                              PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER, 2);
 }
 
+/*
+ * The QLogic is the default adapter and always holds the SCSI seat when it
+ * is present, so its BARs come out of the first WXB root's window.
+ */
 static void ia64_vpc_configure_isp(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
@@ -2943,10 +3167,10 @@ static void ia64_vpc_configure_isp(PCIDevice *pci_dev)
     }
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
-                             IA64_ISP12160_IO_BASE |
+                             IA64_SCSI_SEAT_IO_BASE |
                              PCI_BASE_ADDRESS_SPACE_IO, 4);
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
-                             IA64_ISP12160_MMIO_PCI_BASE, 4);
+                             IA64_SCSI_SEAT_MMIO_PCI_BASE, 4);
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
                              PCI_COMMAND_MASTER, 2);
@@ -2976,18 +3200,62 @@ static void ia64_vpc_configure_uhci(PCIDevice *pci_dev)
                              PCI_COMMAND_IO | PCI_COMMAND_MASTER, 2);
 }
 
-static void ia64_vpc_configure_lsi(PCIDevice *pci_dev)
+/*
+ * Whether the machine carries the modelled 82468GX south bridge, and with it
+ * an IDE controller that is part of the board rather than an option.  zx1 is
+ * a different platform.
+ */
+static bool ia64_vpc_has_south_bridge(const IA64VpcMachineState *s)
+{
+    return !ia64_vpc_chipset_is_zx1(s);
+}
+
+static void ia64_vpc_configure_ifb_ide(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
         return;
     }
 
-    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
-                             IA64_LSI_IO_BASE, 4);
-    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
-                             IA64_LSI_MMIO_PCI_BASE, 4);
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_4,
+                             IA64_IFB_IDE_BMDMA_IO_BASE |
+                             PCI_BASE_ADDRESS_SPACE_IO, 4);
+    pci_default_write_config(pci_dev, PCI_COMMAND,
+                             PCI_COMMAND_IO | PCI_COMMAND_MASTER, 2);
+}
+
+static void ia64_vpc_configure_ifb_smbus(PCIDevice *pci_dev)
+{
+    if (pci_dev == NULL) {
+        return;
+    }
+
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_4,
+                             IA64_IFB_SMBUS_IO_BASE |
+                             PCI_BASE_ADDRESS_SPACE_IO, 4);
+    pci_default_write_config(pci_dev, PCI_COMMAND, PCI_COMMAND_IO, 2);
+}
+
+/*
+ * The LSI holds the seat only when the QLogic is off; with both adapters
+ * present it parks on the second WXB root and its BARs follow it there.
+ */
+static void ia64_vpc_configure_lsi(IA64VpcMachineState *s, PCIDevice *pci_dev)
+{
+    uint32_t io_base;
+    uint64_t mmio_base;
+
+    if (pci_dev == NULL) {
+        return;
+    }
+
+    io_base = s->isp_enabled ? IA64_SCSI_PARK_IO_BASE : IA64_SCSI_SEAT_IO_BASE;
+    mmio_base = s->isp_enabled ? IA64_SCSI_PARK_MMIO_PCI_BASE :
+                                 IA64_SCSI_SEAT_MMIO_PCI_BASE;
+
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0, io_base, 4);
+    pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1, mmio_base, 4);
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_2,
-                             IA64_LSI_RAM_PCI_BASE, 4);
+                             mmio_base + IA64_LSI_RAM_BAR_OFFSET, 4);
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
                              PCI_COMMAND_MASTER, 2);
@@ -3058,28 +3326,53 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
         }
     }
 
-    hdr = declared;
-    pll = hdr + 0x40U;
-    if (pll + 0x20U > rom_size) {
+    /*
+     * Keep the header and PLL block inside the first 8 KB of the image.  The
+     * Rage 128 miniport (ati2mpaa) maps the C0000h shadow with a single
+     * VideoPortGetDeviceBase(0xC0000, 256) call - one 8 KB IA-64 page - and
+     * then follows the 48h -> header -> header+30h -> PLL pointer chain
+     * through that mapping; tables appended past the page (the previous
+     * placement at the declared end, 9A00h for the shipped image) read as
+     * whatever the neighbouring system PTEs map: XCLK 0, every mode-set
+     * refused, VgaSave at 640x480x4.  The shipped SeaVGABIOS keeps a zero
+     * run at 144h-200h; take the first zero run below 2000h that holds the
+     * 40h-byte header plus the 32h-byte PLL block (72h), and
+     * only if none exists fall back to appending.
+     */
+    hdr = 0;
+    for (i = 0x50; i + IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE <= 0x2000U &&
+         i + IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE <= declared; i += 16) {
+        uint32_t z;
+
+        for (z = 0; z < IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE &&
+             rom[i + z] == 0; z++) {
+            continue;
+        }
+        if (z == IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE) {
+            hdr = i;
+            break;
+        }
+    }
+    if (hdr == 0) {
+        hdr = declared;
+    }
+    pll = hdr + IA64_ATI_HDR_SIZE;
+    if (pll + IA64_ATI_PLL_SIZE > rom_size) {
         return;
     }
 
     memcpy(rom + 0x30, ati_signature, sizeof(ati_signature) - 1);
     stw_le_p(rom + 0x48, hdr);
-    memset(rom + hdr, 0, 0x60);
-    stw_le_p(rom + hdr + 0x30, pll);
-    stw_le_p(rom + pll + 0x08, IA64_ATI_PLL_XCLK);
-    stw_le_p(rom + pll + 0x0e, IA64_ATI_PLL_REFERENCE_FREQ);
-    stw_le_p(rom + pll + 0x10, IA64_ATI_PLL_REFERENCE_DIV);
-    stl_le_p(rom + pll + 0x12, IA64_ATI_PLL_MIN_FREQ);
-    stl_le_p(rom + pll + 0x16, IA64_ATI_PLL_MAX_FREQ);
+    ia64_ati_write_bios_tables(rom, hdr, pll);
 
     /* Grow the declared image so a bounds-checking parser sees the tables. */
-    declared = ROUND_UP(pll + 0x20U, 512U);
-    if (declared > rom_size || declared / 512U > 0xffU) {
-        return;
+    if (pll + IA64_ATI_PLL_SIZE > declared) {
+        declared = ROUND_UP(pll + IA64_ATI_PLL_SIZE, 512U);
+        if (declared > rom_size || declared / 512U > 0xffU) {
+            return;
+        }
+        rom[2] = (uint8_t)(declared / 512U);
     }
-    rom[2] = (uint8_t)(declared / 512U);
     pcir = lduw_le_p(rom + 0x18);
     if (pcir != 0 && pcir + 0x18U <= declared &&
         memcmp(rom + pcir, "PCIR", 4) == 0) {
@@ -3324,6 +3617,34 @@ static void ia64_vpc_configure_nic(PCIDevice *pci_dev, unsigned int index)
                              PCI_COMMAND_MASTER, 2);
 }
 
+/*
+ * Build one SCSI adapter at the bus and device number the caller picked.
+ * Both take the drives given without an explicit interface, so the adapter
+ * built first -- the one holding the seat -- is the one that gets them.
+ */
+#ifdef CONFIG_IA64_VPC_STORAGE
+static bool ia64_vpc_init_lsi(IA64VpcMachineState *s, PCIBus *bus, int devfn,
+                              Error **errp)
+{
+    s->lsi_dev = pci_new(devfn, "lsi53c895a");
+    qdev_prop_set_bit(DEVICE(s->lsi_dev), "disconnect-on-data-wait", false);
+    if (!pci_realize_and_unref(s->lsi_dev, bus, errp)) {
+        return false;
+    }
+    ia64_vpc_configure_lsi(s, s->lsi_dev);
+    lsi53c8xx_handle_legacy_cmdline(DEVICE(s->lsi_dev));
+    return true;
+}
+
+static void ia64_vpc_init_isp(IA64VpcMachineState *s, PCIBus *bus, int devfn)
+{
+    s->isp_dev = pci_create_simple(bus, devfn, TYPE_ISP12160_SCSI);
+    ia64_vpc_configure_isp(s->isp_dev);
+    scsi_bus_legacy_handle_cmdline(
+        SCSI_BUS(qdev_get_child_bus(DEVICE(s->isp_dev), "isp12160-scsi.0")));
+}
+#endif
+
 static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
 {
     ia64_vpc_configure_ahci(s->ahci_dev);
@@ -3331,23 +3652,40 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_isp(s->isp_dev);
     ia64_vpc_configure_ohci(s->ohci_dev);
     ia64_vpc_configure_uhci(s->uhci_dev);
-    ia64_vpc_configure_lsi(s->lsi_dev);
+    ia64_vpc_configure_ifb_ide(
+        intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_IDE_FUNCTION));
+    ia64_vpc_configure_ifb_smbus(
+        intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
+    ia64_vpc_configure_lsi(s, s->lsi_dev);
     ia64_vpc_configure_vga(s->vga_dev,
-                           s->realfw_path != NULL ? IA64_VGA_IO_BASE_REALFW
-                                                  : IA64_VGA_IO_BASE);
+                           IA64_VGA_IO_BASE);
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_nic(s->nic_devs[i], i);
     }
-    ia64_vpc_configure_pci_irq(s->ahci_dev);
-    ia64_vpc_configure_pci_irq(s->audio_dev);
-    ia64_vpc_configure_pci_irq(s->isp_dev);
-    ia64_vpc_configure_pci_irq(s->ide_dev);
-    ia64_vpc_configure_pci_irq(s->ohci_dev);
-    ia64_vpc_configure_pci_irq(s->uhci_dev);
-    ia64_vpc_configure_pci_irq(s->lsi_dev);
-    ia64_vpc_configure_pci_irq(s->vga_dev);
+    ia64_vpc_configure_pci_irq(s, s->ahci_dev);
+    ia64_vpc_configure_pci_irq(s, s->audio_dev);
+    ia64_vpc_configure_pci_irq_on_root(
+        s->isp_dev,
+        ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
+                               IA64_460GX_WXB0_BUS));
+    ia64_vpc_configure_pci_irq(s, s->ide_dev);
+    ia64_vpc_configure_pci_irq(s, s->ohci_dev);
+    ia64_vpc_configure_pci_irq(s, s->uhci_dev);
+    ia64_vpc_configure_pci_irq(s,
+        intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_IDE_FUNCTION));
+    ia64_vpc_configure_pci_irq(s,
+        intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
+    ia64_vpc_configure_pci_irq_on_root(
+        s->lsi_dev,
+        ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
+                               s->isp_enabled ? IA64_460GX_WXB1_BUS :
+                                                IA64_460GX_WXB0_BUS));
+    ia64_vpc_configure_pci_irq_on_root(
+        s->vga_dev,
+        ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
+                               IA64_460GX_GXB_BUS));
     for (unsigned int i = 0; i < s->nic_count; i++) {
-        ia64_vpc_configure_pci_irq(s->nic_devs[i]);
+        ia64_vpc_configure_pci_irq(s, s->nic_devs[i]);
     }
 }
 
@@ -3369,7 +3707,7 @@ static void ia64_vpc_record_nic(IA64VpcMachineState *s, PCIBus *bus,
 
     s->nic_devs[s->nic_count] = pci_dev;
     ia64_vpc_configure_nic(pci_dev, s->nic_count);
-    ia64_vpc_configure_pci_irq(pci_dev);
+    ia64_vpc_configure_pci_irq(s, pci_dev);
     s->nic_count++;
 }
 
@@ -3377,17 +3715,21 @@ static void ia64_vpc_init_network(IA64VpcMachineState *s, PCIBus *pci_bus)
 {
     MachineState *machine = MACHINE(s);
     MachineClass *mc = MACHINE_GET_CLASS(machine);
+    g_autofree char *slot_arg = NULL;
+    unsigned int first_slot;
     unsigned int slot;
 
     s->nic_count = 0;
     memset(s->nic_devs, 0, sizeof(s->nic_devs));
 
     /* Keep the default adapter at a stable BDF after the built-in devices. */
-    pci_init_nic_in_slot(pci_bus, mc->default_nic, NULL,
-                         stringify(IA64_VPC_NIC_SLOT));
+    first_slot = ia64_vpc_chipset_is_zx1(s) ? IA64_VPC_NIC_SLOT :
+                                              IA64_460GX_NIC_SLOT;
+    slot_arg = g_strdup_printf("%u", first_slot);
+    pci_init_nic_in_slot(pci_bus, mc->default_nic, NULL, slot_arg);
     pci_init_nic_devices(pci_bus, mc->default_nic);
 
-    for (slot = IA64_VPC_NIC_SLOT; slot < PCI_SLOT_MAX; slot++) {
+    for (slot = first_slot; slot < PCI_SLOT_MAX; slot++) {
         ia64_vpc_record_nic(s, pci_bus,
                             pci_find_device(pci_bus, 0, PCI_DEVFN(slot, 0)));
     }
@@ -3522,6 +3864,23 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
     s->ohci_dev = pci_create_simple(pci_bus, -1, "pci-ohci");
     ia64_vpc_configure_ohci(s->ohci_dev);
 
+    /*
+     * The UHCI controller is function 2 of the south bridge on 460gx, so it
+     * already exists by the time this runs; zx1 still gets a discrete one.
+     */
+    if (s->ifb != NULL) {
+        s->uhci_dev = intel_82468gx_ifb_function(s->ifb,
+                                                 IA64_460GX_IFB_USB_FUNCTION);
+        if (s->uhci_dev == NULL) {
+            error_setg(errp, "%s did not create its USB function",
+                       TYPE_INTEL_82468GX_IFB);
+            return false;
+        }
+    } else {
+        s->uhci_dev = pci_create_simple(pci_bus, -1, TYPE_PIIX3_USB_UHCI);
+    }
+    ia64_vpc_configure_uhci(s->uhci_dev);
+
     add_default_input = defaults_enabled() && !s->i8042_enabled;
     if (add_default_input) {
         /*
@@ -3529,19 +3888,18 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
          * become QEMU's active input handler, which would otherwise hide
          * firmware-visible PS/2 input before a guest USB stack exists.  Use
          * an absolute pointer so graphical front ends do not require a
-         * relative-pointer grab.
+         * relative-pointer grab.  Name the OHCI's bus rather than resolving
+         * the only USB bus in the machine: with the south bridge's UHCI
+         * present there is more than one.
          */
-        usb_bus = USB_BUS(object_resolve_type_unambiguous(TYPE_USB_BUS,
-                                                          errp));
+        usb_bus = USB_BUS(QLIST_FIRST(&DEVICE(s->ohci_dev)->child_bus));
         if (usb_bus == NULL) {
+            error_setg(errp, "the OHCI controller has no USB bus");
             return false;
         }
         usb_create_simple(usb_bus, "usb-kbd");
         usb_create_simple(usb_bus, "usb-tablet");
     }
-
-    s->uhci_dev = pci_create_simple(pci_bus, -1, TYPE_PIIX3_USB_UHCI);
-    ia64_vpc_configure_uhci(s->uhci_dev);
     return true;
 }
 #endif
@@ -3584,7 +3942,7 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
  * after this handler, so we must NOT read ROM content here.  PE32+
  * plabel parsing is deferred to the machine_done notifier.
  */
-static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s);
+static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s);
 
 static void ia64_vpc_reset(void *opaque)
 {
@@ -3616,8 +3974,12 @@ static void ia64_vpc_reset(void *opaque)
      * power-on identity on every reset (harmless on the initial cold reset,
      * which merely repeats the init-time seed).
      */
-    if (s->realfw_path != NULL) {
-        ia64_vpc_init_realfw_chipset_cfg(s);
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        ia64_vpc_init_chipset_cfg(s);
+        /* The SAC's scratch block, the write-once BSP-select word included. */
+        if (s->sac_data != NULL) {
+            memset(s->sac_data, 0, IA64_460GX_SAC_SIZE);
+        }
     }
 
     acpi_pm1_evt_reset(&s->acpi_regs);
@@ -3626,19 +3988,15 @@ static void ia64_vpc_reset(void *opaque)
     acpi_gpe_reset(&s->acpi_regs);
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     /*
-     * The synthetic INT10 ROM is a passive 2 KiB image for Windows guests that
-     * read the video BIOS through the PCI ROM BAR.  In realfw mode the vendor
-     * SDV firmware instead POSTs the video device's own expansion ROM the
-     * legacy way (shadow to 0xC0000, call C000:0003); a 2 KiB stub whose entry
-     * jumps into its (absent) body then runs the CPU away into empty shadow, so
-     * shadow the device's complete option ROM there instead.
+     * The synthetic INT10 ROM: a passive 2 KiB image at the legacy video-ROM
+     * window for guests that read the video BIOS through the PCI ROM BAR.
+     * What sits at 0xC0000 is firmware's business rather than the machine's --
+     * a firmware that POSTs the card's own option ROM the legacy PC-AT way
+     * shadows it over this -- so put the same image there whichever firmware
+     * is about to run.
      */
     if (s->vga_dev != NULL) {
-        if (s->realfw_path != NULL) {
-            ia64_vpc_install_realfw_video_rom(s);
-        } else {
-            ia64_vpc_reset_int10(s);
-        }
+        ia64_vpc_reset_int10(s);
     }
 #endif
 }
@@ -3660,13 +4018,28 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
     ia64_vpc_configure_platform_pci(s);
 
     if (s->realfw_entry != 0) {
+        /*
+         * The i2000/SDV is a two-socket board whose processors answer to
+         * bus-agent ids 0 and 3: the vendor firmware's MADT template
+         * declares exactly those two Local SAPIC slots (ids 0 and 3, the
+         * second enabled once its processor checks in), and the OS's
+         * AP wake-up IPI is addressed to that LID.  SAL_A derives the LID
+         * from the geographic id PAL hands it in GR33 ("dep r2=r33,r0,0,3;
+         * shl r2=r2,24; mov cr.lid=r2" at 0xFFFF3608), so the id has to
+         * travel there: a second CPU announced as id 1 checks in, is
+         * published as id 3, and never hears the IPI.  The configuration
+         * check caps realfw at two processors.
+         */
+        static const uint8_t socket_lid_id[] = { 0, 3 };
+
         CPU_FOREACH(cs) {
             IA64BootInfo info = {
                 .firmware_base = s->realfw_base,
                 .firmware_entry = s->realfw_entry,
                 .iva = IA64_REALFW_IVT_BASE,
                 .raw_entry = true,
-                .raw_proc_id = cs->cpu_index,
+                .raw_proc_id = socket_lid_id[MIN(cs->cpu_index,
+                                                 ARRAY_SIZE(socket_lid_id) - 1)],
                 /*
                  * SAL calls PAL procedures through the machine-planted stub
                  * (GR34; GR36's authentication procedure lands on the same
@@ -3676,7 +4049,16 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                  */
                 .raw_pal_proc = IA64_REALFW_PAL_STUB_BASE,
                 .raw_pal_auth = IA64_REALFW_PAL_STUB_BASE,
-                .powered_off = cs->cpu_index != 0,
+                /*
+                 * Every processor leaves reset together and runs SAL_A,
+                 * which arbitrates the BSP through the SAC's write-once
+                 * word at FEB0_0CC0h; the losers wait at FEB0_0CB0h for
+                 * the BSP's release, then park in SAL_B polling cr.irr for
+                 * the OS's wake-up IPI (SAL 3.2.3 step 4, "wake APs ...
+                 * return them to rendezvous").  Powering them off here
+                 * would leave the vendor MADT with one processor.
+                 */
+                .powered_off = false,
             };
 
             ia64_cpu_set_boot_info(IA64_CPU(cs), &info);
@@ -3732,6 +4114,30 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
     if (s->realfw_path != NULL && machine->firmware != NULL) {
         error_setg(errp, "realfw= and -bios are mutually exclusive");
         return false;
+    }
+    if (s->realfw_path != NULL && !ia64_vpc_chipset_is_zx1(s) &&
+        machine->smp.cpus > 2) {
+        error_setg(errp, "realfw supports at most 2 CPUs: the i2000/SDV "
+                   "firmware declares two processor sockets");
+        return false;
+    }
+    if (s->realfw_path != NULL && !ia64_vpc_chipset_is_zx1(s)) {
+        /*
+         * The vendor firmware sizes memory from the DIMMs alone (SSDM
+         * 5.5.1), so RAM must be a population of Memory Card A: a multiple
+         * of the 64 MB row increment, at most eight rows of 4 GB.
+         */
+        uint64_t max = (uint64_t)IA64_460GX_MEM_ROWS * 4 * GiB;
+
+        if (machine->ram_size % (IA64_460GX_MEM_ROW_MIN_MB * MiB) != 0 ||
+            machine->ram_size > max) {
+            g_autofree char *inc = size_to_str(IA64_460GX_MEM_ROW_MIN_MB * MiB);
+            g_autofree char *top = size_to_str(max);
+
+            error_setg(errp, "Invalid RAM size for realfw: the 460GX memory "
+                       "card takes multiples of %s up to %s", inc, top);
+            return false;
+        }
     }
     return true;
 }
@@ -3869,18 +4275,18 @@ static bool ia64_vpc_relocate_firmware(uint8_t *image, int64_t size,
  * tabulated in plans/sdv-i2000-firmware-reference.md sec 6.5).  Logged on
  * change only, so a code re-written in a wait loop cannot flood the log.
  */
-static uint64_t ia64_realfw_post_read(void *opaque, hwaddr addr, unsigned size)
+static uint64_t ia64_460gx_post_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
 
-    return s->realfw_post_last >> (addr * 8);
+    return s->post_last >> (addr * 8);
 }
 
-static void ia64_realfw_post_write(void *opaque, hwaddr addr, uint64_t val,
+static void ia64_460gx_post_write(void *opaque, hwaddr addr, uint64_t val,
                                    unsigned size)
 {
     IA64VpcMachineState *s = opaque;
-    uint16_t code = s->realfw_post_last;
+    uint16_t code = s->post_last;
 
     if (size == 2 && addr == 0) {
         code = val;
@@ -3888,146 +4294,98 @@ static void ia64_realfw_post_write(void *opaque, hwaddr addr, uint64_t val,
         code &= ~(0xff << (addr * 8));
         code |= (val & 0xff) << (addr * 8);
     }
-    if (code != s->realfw_post_last) {
-        s->realfw_post_last = code;
-        qemu_log("ia64-realfw: POST %02x%02x\n", code >> 8, code & 0xff);
+    if (code != s->post_last) {
+        s->post_last = code;
+        qemu_log("ia64-460gx: POST %02x%02x\n", code >> 8, code & 0xff);
     }
 }
 
-static const MemoryRegionOps ia64_realfw_post_ops = {
-    .read = ia64_realfw_post_read,
-    .write = ia64_realfw_post_write,
+static const MemoryRegionOps ia64_460gx_post_ops = {
+    .read = ia64_460gx_post_read,
+    .write = ia64_460gx_post_write,
     .valid.min_access_size = 1,
     .valid.max_access_size = 2,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
 /*
- * IFB fn3 SMBus host controller (PIIX4-style register file at I/O 0xFFF0).
+ * FEB0_0CC0h "is used for BSP selection.  It is a write once register in
+ * the SAC" (SSDM 4.1.3).  The vendor firmware's normal reset path never
+ * stores to it: SAL_B loads the word, polls until bit 7 is set and compares
+ * the low seven bits with its own LID.id (link 0x400A90; SAL_A's recovery
+ * path additionally stores 80h | id first, 0xFFFF32C2).  So the first
+ * processor whose access reaches the SAC claims it -- the system bus carries
+ * the requesting agent's id -- and every later access reads that claim.
+ * The poll is a single load: "ld4.acq r3=[r4]; tbit.z p7,p6=r3,7;;
+ * (p07) br.cond 0x400AA0" branches to its own bundle, so the word must
+ * already carry the claim when the first load returns -- the SAC decides on
+ * that access, it does not leave the processor to try again.
  *
- * During QuickBoot the SDV firmware programs the IFB Function 3 SMBus I/O BAR
- * to 0xFFF0 and runs SMBus byte-data transactions to initialise the board's
- * hardware-monitor sensor chips (observed device addresses 0x2C and 0x4E): it
- * writes SMBHSTCMD/ADD/DAT0, kicks SMBHSTCNT with START (bit 6), then spins on
- * SMBHSTSTS bit 1 (INTR = transaction complete) with HOST_BUSY (bit 0) clear
- * -- i.e. `(status & 3) == 2`.  With no I/O region here the poll floats high
- * (0xff -> status bits 11b) and the firmware hangs at POST 0xc6.
- *
- * We have no physical devices behind the bus.  The firmware only needs the
- * transaction to *complete*: it polls SMBHSTSTS for `(status & 3) == 2` (INTR
- * set, HOST_BUSY clear), so report the controller permanently idle-with-INTR
- * (0x02).  Every other register reads back 0 -- the value the firmware got for
- * these ports before this region existed (the sparse-I/O container answers 0
- * for an in-range but unclaimed port), which its controller-enable poll at
- * offset 0xe depends on: floating those bytes high (0xff) instead makes that
- * poll spin forever.  Register offsets follow the Intel PIIX4 SMBus layout
- * (SMBHSTSTS 0, SMBHSTCNT 2, SMBHSTCMD 3, SMBHSTADD 4, SMBHSTDAT0 5).
+ * Which processor's access arrives first is a bus-arbitration outcome, and
+ * with multi-threaded TCG it would be a coin toss; socket 3 won one boot in
+ * three, and that boot never reached the video POST (the IA-32 CSM runs on
+ * the machine's first CPU).  Real boards boot from socket 0 unless it is
+ * absent, so whichever access claims the word, the claim names the first
+ * CPU's LID.id; later stores are dropped.
  */
-#define IA64_REALFW_SMB_STS   0x00   /* bit0 HOST_BUSY, bit1 INTR, bit2 DEV_ERR */
-#define IA64_REALFW_SMB_BASE  0xfff0
-#define IA64_REALFW_SMB_SIZE  0x10
-
-static uint64_t ia64_realfw_smbus_read(void *opaque, hwaddr addr, unsigned size)
+static void ia64_460gx_sac_claim_bsp(IA64VpcMachineState *s)
 {
-    return (addr == IA64_REALFW_SMB_STS) ? 0x02 : 0;
+    if (!(s->sac_data[IA64_460GX_SAC_BOOT_SEM] & 0x80) && first_cpu != NULL) {
+        CPUIA64State *env = cpu_env(first_cpu);
+
+        s->sac_data[IA64_460GX_SAC_BOOT_SEM] =
+            0x80 | ((env->cr[IA64_CR_SAPIC_LID] >> IA64_SAPIC_LID_ID_SHIFT) &
+                    0x7f);
+    }
 }
 
-static void ia64_realfw_smbus_write(void *opaque, hwaddr addr, uint64_t val,
-                                    unsigned size)
-{
-    /* No physical device: every transaction "completes" with nothing to do. */
-}
-
-static const MemoryRegionOps ia64_realfw_smbus_ops = {
-    .read = ia64_realfw_smbus_read,
-    .write = ia64_realfw_smbus_write,
-    .valid.min_access_size = 1,
-    .valid.max_access_size = 4,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
-
-/*
- * System Control Port B (I/O 0x61).  Near the end of POST the SDV firmware
- * uses bit 4 -- the DRAM REFRESH toggle -- as a timing reference: it reads
- * port 0x61 in a tight loop and waits for bit 4 to flip a full 0->1->0 refresh
- * period to calibrate a delay.  Real hardware toggles that bit roughly every
- * 15 us; unmodelled the port floats to a constant (open-bus 0xff, bit 4 stuck
- * at 1) and the loop never sees the flip, hanging at POST ~0x05.
- *
- * Report the pre-existing open-bus value 0xff -- which is what the firmware saw
- * for the other bits before this region existed and reached this far with, so
- * nothing that reads the port earlier regresses -- but drive bit 4 from the
- * virtual clock so the refresh toggle is observed.  Writes (the firmware pokes
- * the timer-2/speaker gate bits) are dropped, exactly as the unbacked port did.
- */
-#define IA64_REALFW_PORT61            0x61
-#define IA64_REALFW_PORT61_REFRESH_NS 15000
-
-static uint64_t ia64_realfw_port61_read(void *opaque, hwaddr addr, unsigned size)
-{
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    uint8_t refresh = (now / IA64_REALFW_PORT61_REFRESH_NS) & 1;
-
-    return (uint8_t)((0xff & ~0x10) | (refresh << 4));
-}
-
-static void ia64_realfw_port61_write(void *opaque, hwaddr addr, uint64_t val,
-                                     unsigned size)
-{
-    /* Open bus: writes are dropped, as for the previously unbacked port. */
-}
-
-static const MemoryRegionOps ia64_realfw_port61_ops = {
-    .read = ia64_realfw_port61_read,
-    .write = ia64_realfw_port61_write,
-    .valid.min_access_size = 1,
-    .valid.max_access_size = 1,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
-
-static uint64_t ia64_realfw_sac_read(void *opaque, hwaddr addr, unsigned size)
+static uint64_t ia64_460gx_sac_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
     uint64_t val = 0;
     unsigned i;
 
+    if (addr <= IA64_460GX_SAC_BOOT_SEM &&
+        addr + size > IA64_460GX_SAC_BOOT_SEM) {
+        ia64_460gx_sac_claim_bsp(s);
+    }
     for (i = 0; i < size; i++) {
-        val |= (uint64_t)s->realfw_sac_data[addr + i] << (i * 8);
+        val |= (uint64_t)s->sac_data[addr + i] << (i * 8);
     }
-    if (addr <= IA64_REALFW_SAC_BOOT_SEM &&
-        addr + size > IA64_REALFW_SAC_BOOT_SEM) {
-        /* Boot semaphore: granted, holder id 0 (the BSP's LID.id). */
-        val |= 0x80ULL << ((IA64_REALFW_SAC_BOOT_SEM - addr) * 8);
-    }
-    qemu_log_mask(LOG_UNIMP, "ia64-realfw: SAC read  +%04x/%u = 0x%" PRIx64
+    qemu_log_mask(LOG_UNIMP, "ia64-460gx: SAC read  +%04x/%u = 0x%" PRIx64
                   "\n", (unsigned)addr, size, val);
     return val;
 }
 
-static void ia64_realfw_sac_write(void *opaque, hwaddr addr, uint64_t val,
+static void ia64_460gx_sac_write(void *opaque, hwaddr addr, uint64_t val,
                                   unsigned size)
 {
     IA64VpcMachineState *s = opaque;
     unsigned i;
 
     for (i = 0; i < size; i++) {
-        s->realfw_sac_data[addr + i] = val >> (i * 8);
+        if (addr + i == IA64_460GX_SAC_BOOT_SEM) {
+            ia64_460gx_sac_claim_bsp(s);
+            continue;
+        }
+        s->sac_data[addr + i] = val >> (i * 8);
     }
-    qemu_log_mask(LOG_UNIMP, "ia64-realfw: SAC write +%04x/%u = 0x%" PRIx64
+    qemu_log_mask(LOG_UNIMP, "ia64-460gx: SAC write +%04x/%u = 0x%" PRIx64
                   "\n", (unsigned)addr, size, val);
 }
 
-static const MemoryRegionOps ia64_realfw_sac_ops = {
-    .read = ia64_realfw_sac_read,
-    .write = ia64_realfw_sac_write,
+static const MemoryRegionOps ia64_460gx_sac_ops = {
+    .read = ia64_460gx_sac_read,
+    .write = ia64_460gx_sac_write,
     .valid.min_access_size = 1,
     .valid.max_access_size = 8,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
 /*
- * 460GX CF8/CFC configuration space (realfw mode).  Bus CBN (reset 0)
- * carries the chipset's own devices (SSDM Table 2-1): dev 00h/01h SAC,
+ * 460GX CF8/CFC configuration space.  Bus CBN (reset FFh, programmed to
+ * EEh by both firmwares) carries the chipset's own devices (SSDM Table 2-1):
+ * dev 00h/01h SAC,
  * 04h SDC, 05h/06h Memory Card A/B (MAC; SPD EEPROMs tunnel through its
  * higher functions over I2C), dev 10h the CBN-programming device.  The
  * public SSDM documents none of the platform-setup register offsets
@@ -4036,73 +4394,445 @@ static const MemoryRegionOps ia64_realfw_sac_ops = {
  * Memory Card A claims presence with a MAC ID, dev 10h reg 40h is the CBN.
  * Accesses to non-chipset device numbers forward to the QEMU PCI bus.
  */
-#define IA64_REALFW_IFB_DEV       0x1e
-static const uint8_t ia64_realfw_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
-                                                    IA64_REALFW_IFB_DEV,
-                                                    0x10 };
-#define IA64_REALFW_CFG_FN_SIZE   256
-#define IA64_REALFW_CFG_DEV_SIZE  (8 * IA64_REALFW_CFG_FN_SIZE)
-#define IA64_REALFW_CFG_SIZE      \
-    (ARRAY_SIZE(ia64_realfw_chipset_devs) * IA64_REALFW_CFG_DEV_SIZE)
-#define IA64_REALFW_CBN_DEV       0x10
-#define IA64_REALFW_CBN_REG       0x40
+/*
+ * The chipset's own functions, on bus CBN (460GX SSDM Table 2-1): the SAC at
+ * 00h/01h, the SDC at 04h, the memory cards at 05h/06h and the expander
+ * ports at 10h+.  The south bridge is NOT among them -- it is an ordinary
+ * PCI device on the compatibility bus, and this machine models it there.
+ */
+static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
+                                                   0x10, 0x12, 0x13, 0x14 };
+#define IA64_460GX_CFG_FN_SIZE   256
+#define IA64_460GX_CFG_DEV_SIZE  (8 * IA64_460GX_CFG_FN_SIZE)
+/*
+ * One block per chipset device, plus one more for the CBN window: bus 0
+ * device 10h is a register file of its own (SSDM 2.2.1 and 2.3.2, "Device
+ * 10h on Bus #0 is mapped to the SAC; it contains the programmable Chipset
+ * Bus Number"), distinct from the expander port that Table 2-1 puts at
+ * device 10h on bus CBN.
+ */
+#define IA64_460GX_CFG_SIZE      \
+    ((ARRAY_SIZE(ia64_460gx_chipset_devs) + 1) * IA64_460GX_CFG_DEV_SIZE)
+#define IA64_460GX_CBN_DEV       0x10
+#define IA64_460GX_CBN_REG       0x40
+/*
+ * An expander port's bus-number pair, at the offsets the vendor firmware's
+ * host enumeration programs and its DSDT reads (\_SB.CBN.SACn.BSNO/SBNO;
+ * the SSDM names the registers without placing them: "the destination ...
+ * is determined by the Bus Number and Subordinate Bus Number of each PCI
+ * port in each PXB", 2.3.1).  Port 0 is "Expander 0, Bus a ... the
+ * compatibility bus (where the boot vector is always directed)" (Table
+ * 2-1), which bus 0 reaches regardless (2.2.1: every non-chipset device
+ * number on bus 0 forwards to it), and which its programmed pair reaches
+ * like any other port's -- the firmware only computes a port's windows
+ * (PCIS, IOR) from what it finds on the bus it just numbered, so a port
+ * that ignored its pair would leave PCI0 without a window, and its DSDT
+ * hands that pair to Windows as PCI0's _CRS bus range.
+ */
+#define IA64_460GX_XXB_BUSNO_REG 0x48
+#define IA64_460GX_XXB_SUBNO_REG 0x49
+/*
+ * PCIS: the port's PCI memory window base in 32 MB units.  "PCIS[7] -
+ * FDFF_FFFFh: PCIx, PCIS register determines target PCI bus" (SSDM
+ * memory-map table; 4.1.3.1 for the variable gap it bounds).  The vendor
+ * DSDT hands [PCIS << 25, FE000000h) to Windows as PCI0's window, so the
+ * compatibility port's value is where the machine's routed window has to
+ * start -- Windows placed the OHCI's and 82557's BARs below the fixed
+ * EE000000h aperture and their drivers read open bus (Code 10).
+ */
+#define IA64_460GX_XXB_PCIS_REG  0x84
+#define IA64_460GX_COMPAT_PORT   0x10
 
 /*
- * SPD EEPROM served through the MAC's I2C pass-through: firmware writes the
- * DIMM's I2C address (0x54..0x57, bit 7 = read) into the SAC IIADR register
- * (dev 00h fn 0 reg 0x68), then config reads of Memory Card fn 2/3 return
- * the addressed EEPROM's bytes at the register offset (observed protocol,
- * plans/phase5-real-firmware-boot.md sec 5.5; register naming per
- * plans/460gx-config-space-notes.md).  One image serves all four DIMMs:
- * 256 MB registered SDRAM (32Mx4 devices: 13 row / 10 column address bits,
- * 4 banks, 1 module rank, x72 ECC) - 4 x 256 MB = 1 GiB on Memory Card A.
+ * The GXB AGP host bridge (chipset device 14h, function 1 -- "BRI4") holds the
+ * AGP graphics aperture base.  AGPSIZ (reg A2h) bit 3 selects which register
+ * supplies it: the 32-bit APBASE (reg 10h) when clear, or the 64-bit BAPBASE
+ * (reg 98h) when set (460GX SSDM 7).  The vendor firmware programs AGPSIZ=09h
+ * (bit 3 set, bit 0 = 256 MiB) and BAPBASE=0x1_00000000, i.e. a 256 MiB
+ * aperture based at 4 GiB.
+ *
+ * That above-4-GiB base is what makes Windows XP 64-bit (build 2600) fail the
+ * GXB/AGP root with Code 12.  agp460.sys reads AGPSIZ then BAPBASE
+ * (WSRV03 base/busdrv/agp/agp460/gart.c AgpQueryAperture) and agplib appends a
+ * *pinned*, non-relocatable memory requirement [base, base+size-1] for the
+ * aperture -- on IA-64 PnP may not move the aperture base, so only that one
+ * "preferred" descriptor is offered (agplib/resource.c ~205, 262-271).  This
+ * build serialises the aperture as a 32-bit CmResourceTypeMemory descriptor,
+ * so a 4 GiB base truncates to [0, 0x0FFFFFFF]; that range lies inside RAM,
+ * the arbiter cannot grant it, and the root gets Code 12 and never enumerates
+ * its AGP child.  A below-4-GiB base is represented and placed intact.
+ *
+ * So when a write leaves BAPBASE naming an address at or above 4 GiB, re-base
+ * the aperture inside PCI3's producer window, below the graphics framebuffer.
+ * Only an above-4-GiB base is clamped -- a legitimate below-4-GiB base (agp460
+ * writes the aperture back once the OS owns it) is left as written.  AGPSIZ
+ * bit 3 stays set: it only selects the 64-bit register, not an above-4-GiB
+ * address (our own ia64_agp GART runs bit 3 set with a below-4-GiB base too).
+ * Realfw-only: own-firmware guests reach PCI config
+ * through ECAM and never write this chipset store, and the 460GX
+ * GART-translation device (ia64_agp, bus 0 dev 31) keeps its own aperture base
+ * (0xEE000000), so the Linux AGP-GART DMA path is unaffected.  agp460 now
+ * programs the aperture at a different base than ia64_agp decodes, so Windows
+ * AGP-texture DMA would need the two reconciled -- a known gap, not a
+ * regression (that path was dead while the root failed Code 12).
  */
-#define IA64_REALFW_SAC_IIADR_REG 0x68
-static const uint8_t ia64_realfw_spd[64] = {
-    [0] = 128,    /* bytes written by manufacturer */
-    [1] = 8,      /* log2 of EEPROM size (256 bytes) */
-    [2] = 4,      /* memory type: SDRAM */
-    [3] = 13,     /* row address bits */
-    [4] = 10,     /* column address bits */
-    [5] = 1,      /* module rows (ranks) */
-    [6] = 72,     /* module data width low */
-    [8] = 1,      /* interface level: LVTTL */
-    [9] = 0xa0,   /* cycle time 10 ns (PC100) */
-    [11] = 2,     /* ECC */
-    [12] = 0x82,  /* refresh: self-refresh, 15.6 us */
-    [13] = 4,     /* primary SDRAM device width x4 */
-    [17] = 4,     /* banks per SDRAM device */
-    [18] = 4,     /* CAS latencies supported */
-    [31] = 0x40,  /* module rank density: 256 MB */
+#define IA64_460GX_GXB_DEV              0x14
+#define IA64_460GX_GXB_BRIDGE_FN       1
+#define IA64_460GX_GXB_BAPBASE_REG     0x98    /* 64-bit AGP aperture base */
+#define IA64_460GX_GXB_BAPBASE_LAST    0x9f
+#define IA64_460GX_GXB_AGP_APERTURE_BASE 0x00000000d0000000ULL
+
+/*
+ * SPD EEPROMs served through the MAC's I2C pass-through: firmware writes the
+ * DIMM's I2C address (bit 7 = read) into the SAC IIADR register (dev 00h fn 0
+ * reg 0x68), then config reads of Memory Card fn 2/3 return the addressed
+ * EEPROM's bytes at the register offset (observed protocol,
+ * plans/phase5-real-firmware-boot.md sec 5.5; register naming per
+ * plans/460gx-config-space-notes.md).  The card's eight rows are addressed
+ * as two stacks of four: the stack by the I2C address (54h-57h and 50h-53h
+ * = DIMM 0-3 of a row in either stack), the row within the stack by which of
+ * the MAC's functions 4-7 has bit 0 of its register 48h set -- the firmware
+ * raises exactly one before it reads a row's four EEPROMs (POST F0 trace).
+ *
+ * The sizing loop reads bytes 2 (memory type, must say SDRAM), 3, 4, 5 and
+ * 17 (row and column address bits, ranks, banks per device) and requires
+ * the row's four DIMMs to match, so a row's size is
+ * 2^(rows+columns) x banks x ranks x 8 bytes per DIMM, times four.  The
+ * DIMM geometries below are Table 5-2's x72 SDRAM configurations, one per
+ * size from 2Mx72 (16 MB) to 64Mx72x2 (1 GB), so a row holds 64 MB to 4 GB
+ * -- "64 MB is the smallest increment" (Table 5-1).
+ */
+#define IA64_460GX_SAC_IIADR_REG 0x68
+static const struct {
+    uint32_t dimm_mb;
+    uint8_t row_bits;
+    uint8_t col_bits;
+    uint8_t ranks;
+    uint8_t banks;
+    uint8_t width;      /* primary SDRAM device width, SPD byte 13 */
+} ia64_460gx_dimm_geometries[] = {
+    /* Table 5-2: 64M x 72 x 2, 256 Mbit 64Mx4, double sided */
+    { 1024, 13, 11, 2, 4, 4 },
+    /* 64M x 72, 256 Mbit 64Mx4 */
+    {  512, 13, 11, 1, 4, 4 },
+    /* 32M x 72, 128 Mbit 32Mx4 */
+    {  256, 13, 10, 1, 4, 4 },
+    /* 16M x 72, 64 Mbit 16Mx4 */
+    {  128, 12, 10, 1, 4, 4 },
+    /* 8M x 72, 64 Mbit 8Mx8 */
+    {   64, 12,  9, 1, 4, 8 },
+    /* 4M x 72, 16 Mbit 4Mx4 */
+    {   32, 11, 10, 1, 2, 4 },
+    /* 2M x 72, 16 Mbit 2Mx8 */
+    {   16, 11,  9, 1, 2, 8 },
 };
 
-static uint8_t *ia64_realfw_chipset_cfg(IA64VpcMachineState *s,
+/*
+ * Populate Memory Card A for the machine's RAM size: rows are filled from
+ * the largest DIMM down, so 1 GiB is one row of 32Mx72 (the i2000's four
+ * slots), and a size the card cannot hold exactly leaves the remainder
+ * unpopulated (the caller rejects that where it matters).  Rows may differ
+ * in DIMM type (SSDM 5.2.1: "Different rows may use different size DIMMs").
+ * Returns the size populated, in bytes.
+ */
+static uint64_t ia64_460gx_plan_memory_rows(IA64VpcMachineState *s,
+                                            uint64_t ram_size)
+{
+    uint64_t left_mb = ram_size / MiB;
+    unsigned row = 0, g;
+
+    memset(s->mem_row_dimm_mb, 0, sizeof(s->mem_row_dimm_mb));
+    for (g = 0; g < ARRAY_SIZE(ia64_460gx_dimm_geometries); g++) {
+        uint32_t row_mb = ia64_460gx_dimm_geometries[g].dimm_mb * 4;
+
+        while (row < IA64_460GX_MEM_ROWS && left_mb >= row_mb) {
+            s->mem_row_dimm_mb[row++] = ia64_460gx_dimm_geometries[g].dimm_mb;
+            left_mb -= row_mb;
+        }
+    }
+    return ram_size - left_mb * MiB;
+}
+
+/*
+ * One byte of the JEDEC SDRAM SPD image describing a DIMM of the given
+ * size: the geometry bytes the sizing loop reads, plus the PC100 x72 ECC
+ * identity bytes a stricter parser would check, and the byte-63 checksum.
+ */
+static uint8_t ia64_460gx_spd_byte(uint32_t dimm_mb, unsigned off)
+{
+    unsigned g;
+
+    for (g = 0; g < ARRAY_SIZE(ia64_460gx_dimm_geometries); g++) {
+        if (ia64_460gx_dimm_geometries[g].dimm_mb == dimm_mb) {
+            break;
+        }
+    }
+    if (g == ARRAY_SIZE(ia64_460gx_dimm_geometries) || off > 63) {
+        return 0;
+    }
+    switch (off) {
+    case 0:  return 128;    /* bytes written by manufacturer */
+    case 1:  return 8;      /* log2 of EEPROM size (256 bytes) */
+    case 2:  return 4;      /* memory type: SDRAM */
+    case 3:  return ia64_460gx_dimm_geometries[g].row_bits;
+    case 4:  return ia64_460gx_dimm_geometries[g].col_bits;
+    case 5:  return ia64_460gx_dimm_geometries[g].ranks;
+    case 6:  return 72;     /* module data width low */
+    case 8:  return 1;      /* interface level: LVTTL */
+    case 9:  return 0xa0;   /* cycle time 10 ns (PC100) */
+    case 11: return 2;      /* ECC */
+    case 12: return 0x82;   /* refresh: self-refresh, 15.6 us */
+    case 13: return ia64_460gx_dimm_geometries[g].width;
+    case 17: return ia64_460gx_dimm_geometries[g].banks;
+    case 18: return 4;      /* CAS latencies supported */
+    case 31:                /* rank density, 4 MB units, bit per size */
+        return (dimm_mb / ia64_460gx_dimm_geometries[g].ranks) / 4;
+    case 63: {
+        unsigned sum = 0, i;
+
+        for (i = 0; i < 63; i++) {
+            sum += ia64_460gx_spd_byte(dimm_mb, i);
+        }
+        return sum;
+    }
+    default:
+        return 0;
+    }
+}
+
+/* Bus 0 device 10h: the SAC face that carries the Chipset Bus Number. */
+static uint8_t *ia64_460gx_cbn_window(IA64VpcMachineState *s, uint8_t fn)
+{
+    return s->chipset_cfg +
+           ARRAY_SIZE(ia64_460gx_chipset_devs) * IA64_460GX_CFG_DEV_SIZE +
+           fn * IA64_460GX_CFG_FN_SIZE;
+}
+
+static uint8_t ia64_460gx_cbn(IA64VpcMachineState *s)
+{
+    return ia64_460gx_cbn_window(s, 0)[IA64_460GX_CBN_REG];
+}
+
+static uint8_t *ia64_460gx_chipset_cfg(IA64VpcMachineState *s,
                                         uint8_t bus, uint8_t dev, uint8_t fn)
 {
-    uint8_t cbn = s->realfw_chipset_cfg[(ARRAY_SIZE(ia64_realfw_chipset_devs)
-                                         - 1) * IA64_REALFW_CFG_DEV_SIZE +
-                                        IA64_REALFW_CBN_REG];
     unsigned i;
 
-    /* Dev 10h is always on bus 0; the rest live on bus CBN. */
-    if (bus == 0 && dev == IA64_REALFW_CBN_DEV) {
-        dev = IA64_REALFW_CBN_DEV;
-    } else if (bus != cbn) {
+    /*
+     * The CBN window answers on bus 0 whatever CBN itself holds, so resolve
+     * it before consulting CBN -- which also keeps the two apart if firmware
+     * ever programs CBN to 0.  Everything else lives on bus CBN.
+     */
+    if (bus == 0 && dev == IA64_460GX_CBN_DEV) {
+        return ia64_460gx_cbn_window(s, fn);
+    }
+    if (bus != ia64_460gx_cbn(s)) {
         return NULL;
     }
-    for (i = 0; i < ARRAY_SIZE(ia64_realfw_chipset_devs); i++) {
-        if (ia64_realfw_chipset_devs[i] == dev) {
-            return s->realfw_chipset_cfg + i * IA64_REALFW_CFG_DEV_SIZE +
-                   fn * IA64_REALFW_CFG_FN_SIZE;
+    for (i = 0; i < ARRAY_SIZE(ia64_460gx_chipset_devs); i++) {
+        if (ia64_460gx_chipset_devs[i] == dev) {
+            return s->chipset_cfg + i * IA64_460GX_CFG_DEV_SIZE +
+                   fn * IA64_460GX_CFG_FN_SIZE;
         }
     }
     return NULL;
 }
 
-static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
+/*
+ * The byte a SAC function-0 register-file access lands on: 70h-73h is a window
+ * onto the entry 64h selects, so it comes from the file rather than from the
+ * device's own config storage.  Any other device, function or offset stays
+ * where it was.
+ */
+static uint8_t *ia64_460gx_sac_indexed(IA64VpcMachineState *s, uint8_t dev,
+                                       uint8_t fn, const uint8_t *cfg,
+                                       unsigned off)
+{
+    if (fn != 0 || dev > 0x01 ||
+        off < IA64_460GX_SAC_IDX_DATA ||
+        off >= IA64_460GX_SAC_IDX_DATA + 4) {
+        return NULL;
+    }
+    return &s->sac_indexed[dev][cfg[IA64_460GX_SAC_IDX_REG]]
+                          [off - IA64_460GX_SAC_IDX_DATA];
+}
+
+/*
+ * The expander ports this board populates, in Table 2-1's device numbers,
+ * and the root each one's PCI bus is modelled as: Expander 1 (the WXB) at
+ * 12h/13h with its buses a and b, Expander 2 (the GXB) at 14h.  Expander 0
+ * is the compatibility bus, handled before these are consulted.
+ */
+#define IA64_460GX_ROOT_COMPAT   (-1)
+static const struct {
+    uint8_t dev;
+    int root;
+} ia64_460gx_expander_ports[] = {
+    { 0x10, IA64_460GX_ROOT_COMPAT },
+    { 0x12, IA64_460GX_ROOT_WXB0 },
+    { 0x13, IA64_460GX_ROOT_WXB1 },
+    { 0x14, IA64_460GX_ROOT_GXB },
+};
+#define IA64_460GX_ROOT_NONE     (-2)
+
+static int ia64_460gx_expander_port_root(uint8_t dev)
+{
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(ia64_460gx_expander_ports); i++) {
+        if (ia64_460gx_expander_ports[i].dev == dev) {
+            return ia64_460gx_expander_ports[i].root;
+        }
+    }
+    return IA64_460GX_ROOT_NONE;
+}
+
+/*
+ * The variable gap below 4G - 32M is carved among the expander ports by
+ * their PCIS registers: each port decodes from PCIS x 32M up to the next
+ * port's PCIS, and the highest one up to the fixed ranges (SSDM 4.1.3.1,
+ * "PCIS[7] - FDFF_FFFFh -> PCIx").  The vendor DSDT hands those exact slices
+ * out as the root windows: PCI0 [PCIS(10h), FE000000), PCI1 [PCIS(12h),
+ * PCIS(10h)), PCI3 [PCIS(14h), PCIS(13h)).  All four roots share one PCI
+ * memory space here, so a single alias from the lowest programmed PCIS to
+ * the fixed aperture covers every window a guest can place a BAR in.  00h
+ * (reset) and FFh (what the firmware writes for an empty port) carry no
+ * window.
+ */
+static void ia64_460gx_update_low_mmio_window(IA64VpcMachineState *s)
+{
+    uint8_t cbn = ia64_460gx_cbn(s);
+    uint64_t base = ~0ULL;
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(ia64_460gx_expander_ports); i++) {
+        const uint8_t *cfg = ia64_460gx_chipset_cfg(
+            s, cbn, ia64_460gx_expander_ports[i].dev, 0);
+        uint8_t pcis;
+
+        if (cfg == NULL) {
+            continue;
+        }
+        pcis = cfg[IA64_460GX_XXB_PCIS_REG];
+        if (pcis == 0x00 || pcis == 0xff) {
+            continue;
+        }
+        base = MIN(base, (uint64_t)pcis << 25);
+    }
+    ia64_pci_host_set_low_mmio_window(s->pci_host_dev, base);
+    ia64_vpc_set_low_ram_limit(s, MIN(base, IA64_LOW_RAM_LIMIT));
+}
+
+/*
+ * Find the device a configuration address names.  "If the Bus Number is not
+ * CBN, the destination and type of access is determined by the Bus Number
+ * and Subordinate Bus Number of each PCI port in each PXB.  A type 0 access
+ * is generated on the appropriate PCI bus if one of the PXB port's bus number
+ * is matched.  Otherwise, a type 1 configuration cycle is generated on the
+ * appropriate PCI bus below the PXB port whose subordinate bus number is in
+ * that range" (SSDM 2.3.1).  So a port whose firmware-programmed pair
+ * brackets the bus claims the cycle: its own bus number reaches the root's
+ * children, a higher one descends through the bridges below, which carry
+ * the numbers the same firmware gave them.  Bus 0 is the compatibility bus
+ * (Table 2-1) whatever its port's pair says, and is never looked up.
+ *
+ * A bus no port claims falls back to the board's fixed numbering -- the one
+ * ECAM uses and this machine's own firmware and guests enumerate by -- so a
+ * cycle to those buses keeps working with the ports unprogrammed.
+ */
+static PCIDevice *ia64_460gx_cfg_find_device(IA64VpcMachineState *s,
+                                             uint8_t bus, uint8_t devfn)
+{
+    PCIDevice *pci_dev;
+    unsigned int i;
+
+    if (bus != 0) {
+        uint8_t cbn = ia64_460gx_cbn(s);
+
+        for (i = 0; i < ARRAY_SIZE(ia64_460gx_expander_ports); i++) {
+            int root_index = ia64_460gx_expander_ports[i].root;
+            PCIBus *root = root_index == IA64_460GX_ROOT_COMPAT
+                ? s->host_pci_bus : s->expander_bus[root_index];
+            const uint8_t *cfg = ia64_460gx_chipset_cfg(
+                s, cbn, ia64_460gx_expander_ports[i].dev, 0);
+            uint8_t busno, subno;
+
+            if (root == NULL || cfg == NULL) {
+                continue;
+            }
+            busno = cfg[IA64_460GX_XXB_BUSNO_REG];
+            subno = cfg[IA64_460GX_XXB_SUBNO_REG];
+            if (busno == 0) {
+                continue;
+            }
+            /*
+             * The port's own number is a type 0 cycle whatever SUBNO holds:
+             * firmware writes BUSNO, scans the bus, and only then raises
+             * SUBNO, so the scan must already reach the port's devices.
+             */
+            if (bus == busno) {
+                return pci_find_device(root, pci_bus_num(root), devfn);
+            }
+            if (bus > busno && bus <= subno) {
+                return pci_find_device(root, bus, devfn);
+            }
+        }
+    }
+
+    pci_dev = pci_find_device(s->host_pci_bus, bus, devfn);
+    for (i = 0; pci_dev == NULL && i < ARRAY_SIZE(s->expander_bus); i++) {
+        if (s->expander_bus[i] != NULL) {
+            pci_dev = pci_find_device(s->expander_bus[i], bus, devfn);
+        }
+    }
+    return pci_dev;
+}
+
+/*
+ * The DIMM row the firmware's SPD access names, or -1: the IIADR address
+ * picks the stack, the one MAC function 4-7 whose register 48h bit 0 is
+ * raised picks the row in it.  The four DIMMs of a row are identical, so
+ * the address's DIMM number is not needed.
+ */
+static int ia64_460gx_spd_row(IA64VpcMachineState *s, uint8_t bus)
+{
+    const uint8_t *sac = ia64_460gx_chipset_cfg(s, bus, 0, 0);
+    int row = -1, stack;
+    unsigned fn;
+
+    if (sac == NULL) {
+        return -1;
+    }
+    switch (sac[IA64_460GX_SAC_IIADR_REG] & 0xfc) {
+    case 0xd4:
+        stack = 0;
+        break;
+    case 0xd0:
+        stack = 1;
+        break;
+    default:
+        return -1;
+    }
+    for (fn = 4; fn < 8; fn++) {
+        const uint8_t *r = ia64_460gx_chipset_cfg(s, bus, 0x05, fn);
+
+        if (r == NULL) {
+            return -1;
+        }
+        if (r[0x48] & 1) {
+            if (row >= 0) {
+                return -1;
+            }
+            row = stack * 4 + (fn - 4);
+        }
+    }
+    return row;
+}
+
+static uint64_t ia64_460gx_cfg_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64VpcMachineState *s = opaque;
-    uint32_t cf8 = s->realfw_config_address;
+    uint32_t cf8 = s->cfg_address;
     uint8_t bus = cf8 >> 16, dev = (cf8 >> 11) & 0x1f, fn = (cf8 >> 8) & 7;
     unsigned reg = (cf8 & 0xfc) | (addr & 3);
     uint8_t *cfg;
@@ -4110,74 +4840,27 @@ static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
     unsigned i;
 
     if (addr < 4) {
-        return s->realfw_config_address >> (addr * 8);
+        return s->cfg_address >> (addr * 8);
     }
     if (!(cf8 & 0x80000000)) {
         return (1ULL << (size * 8)) - 1;
     }
-    /*
-     * CPU-frequency mailbox (south bridge 00:03.0 reg 0xd0).  The SDV firmware
-     * stores the detected processor frequency here and reads it back on the
-     * next boot; a fresh (zero) mailbox makes its frequency detector fall back
-     * to a sentinel and take the one-time "New CPU frequency is set. System
-     * resets." reboot (port 0xCF9).  The register is battery-backed on real
-     * hardware, so the written value must survive that reset for the reboot to
-     * be one-shot rather than an infinite loop.  Model it as a persistent cell
-     * that ia64_vpc_reset does NOT clear.  See plans/phase5 SESSION 17.
-     */
-    if (s->realfw_path != NULL && bus == 0 && dev == 3 && fn == 0 &&
-        (reg & 0xfc) == 0xd0) {
-        {
-            /*
-             * Bit 15 is the hardware "done/valid" flag: the firmware writes a
-             * frequency command (bit 15 clear) and polls until the mailbox
-             * reads back with bit 15 set.  Real silicon sets it once it has
-             * latched the value; our model completes instantly, so present the
-             * stored command with bit 15 forced set.
-             */
-            uint32_t cell = s->realfw_freq_mailbox | 0x8000;
-            for (i = 0; i < size; i++) {
-                unsigned b = (reg & 3) + i;
-                if (b < 4) {
-                    val |= (uint64_t)((cell >> (b * 8)) & 0xff) << (i * 8);
-                }
-            }
-        }
-        return val;
-    }
-    cfg = ia64_realfw_chipset_cfg(s, bus, dev, fn);
+    cfg = ia64_460gx_chipset_cfg(s, bus, dev, fn);
     if (cfg != NULL && dev == 0x05 && (fn == 2 || fn == 3)) {
         /*
-         * MAC I2C pass-through: serve the addressed DIMM's SPD EEPROM.
-         * The card carries 4 rows x 4 DIMMs (row select = one-hot in
-         * fn 4..7 reg 0x48); only row 0 is populated - 4 x 256 MB = 1 GiB.
-         *
-         * The SAC (dev 0) and the MAC's fn 4..7 sit on the same bus as the
-         * addressed dev 5 - i.e. the CBN bus, which the guest's own address
-         * decoded here as 'bus'.  Once the firmware has programmed CBN to a
-         * non-zero value (which happens late in POST) a hard-coded bus 0 no
-         * longer resolves these functions and the lookup returns NULL, so use
-         * 'bus' and guard defensively.
+         * MAC I2C pass-through: serve the addressed DIMM's SPD EEPROM.  An
+         * unpopulated row answers zeros, which the sizing loop takes as
+         * "no SDRAM here" from byte 2 and moves on.  The SAC and the MAC's
+         * row-select functions are looked up on the bus the firmware used
+         * (CBN, which it reprograms late in POST), not a fixed one.
          */
-        uint8_t *sac = ia64_realfw_chipset_cfg(s, bus, 0, 0);
-        uint8_t *r4 = ia64_realfw_chipset_cfg(s, bus, 0x05, 4);
-        uint8_t *r5 = ia64_realfw_chipset_cfg(s, bus, 0x05, 5);
-        uint8_t *r6 = ia64_realfw_chipset_cfg(s, bus, 0x05, 6);
-        uint8_t *r7 = ia64_realfw_chipset_cfg(s, bus, 0x05, 7);
+        int row = ia64_460gx_spd_row(s, bus);
 
-        if (sac != NULL && r4 != NULL && r5 != NULL && r6 != NULL &&
-            r7 != NULL) {
-            uint8_t iiadr = sac[IA64_REALFW_SAC_IIADR_REG];
-            bool row0 = r4[0x48] == 1 && r5[0x48] == 0 &&
-                        r6[0x48] == 0 && r7[0x48] == 0;
-
-            if ((iiadr & 0xfc) == 0xd4 && row0) {
-                for (i = 0; i < size; i++) {
-                    unsigned off = (reg + i) & 0xff;
-
-                    val |= (uint64_t)(off < sizeof(ia64_realfw_spd)
-                                      ? ia64_realfw_spd[off] : 0) << (i * 8);
-                }
+        if (row >= 0 && s->mem_row_dimm_mb[row] != 0) {
+            for (i = 0; i < size; i++) {
+                val |= (uint64_t)ia64_460gx_spd_byte(s->mem_row_dimm_mb[row],
+                                                     (reg + i) & 0xff)
+                       << (i * 8);
             }
         }
     } else if (cfg != NULL && (reg & 0xfc) == 0x30) {
@@ -4194,28 +4877,43 @@ static uint64_t ia64_realfw_cfg_read(void *opaque, hwaddr addr, unsigned size)
         val = 0;
     } else if (cfg != NULL) {
         for (i = 0; i < size; i++) {
-            val |= (uint64_t)cfg[(reg + i) & 0xff] << (i * 8);
+            unsigned off = (reg + i) & 0xff;
+            const uint8_t *file = ia64_460gx_sac_indexed(s, dev, fn, cfg, off);
+
+            val |= (uint64_t)(file != NULL ? *file : cfg[off]) << (i * 8);
         }
+    } else if (bus == ia64_460gx_cbn(s)) {
+        /*
+         * "On the bus that the chipset is mapped into (determined by the CBN
+         * register), Device Numbers 0-31 are reserved for the 460GX chipset
+         * components as shown in Table 2-1.  All other devices numbers are
+         * forwarded to the selected bus" (SSDM 2.3.1).  Every device number
+         * on bus CBN is therefore chipset space: one this board does not
+         * populate answers as absent rather than being looked for on a PCI
+         * bus, which is what keeps the two apart should CBN ever land on a
+         * bus number a root actually carries.
+         */
+        val = (1ULL << (size * 8)) - 1;
     } else {
-        PCIDevice *pci_dev = pci_find_device(s->realfw_pci_bus, bus,
-                                             PCI_DEVFN(dev, fn));
+        PCIDevice *pci_dev = ia64_460gx_cfg_find_device(s, bus,
+                                                        PCI_DEVFN(dev, fn));
 
         val = pci_dev != NULL
             ? pci_host_config_read_common(pci_dev, reg,
                                           pci_config_size(pci_dev), size)
             : (1ULL << (size * 8)) - 1;
     }
-    qemu_log_mask(LOG_UNIMP, "ia64-realfw: cfg%c read  %02x:%02x.%x "
+    qemu_log_mask(LOG_UNIMP, "ia64-460gx: cfg%c read  %02x:%02x.%x "
                   "@0x%02x/%u = 0x%" PRIx64 "\n", cfg ? '*' : ' ',
                   bus, dev, fn, reg, size, val);
     return val;
 }
 
-static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
+static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
                                   unsigned size)
 {
     IA64VpcMachineState *s = opaque;
-    uint32_t cf8 = s->realfw_config_address;
+    uint32_t cf8 = s->cfg_address;
     uint8_t bus = cf8 >> 16, dev = (cf8 >> 11) & 0x1f, fn = (cf8 >> 8) & 7;
     unsigned reg = (cf8 & 0xfc) | (addr & 3);
     uint8_t *cfg;
@@ -4225,14 +4923,13 @@ static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
         /*
          * Port 0xCF9 (RST_CNT): an 8-bit access is the legacy PC reset-control
          * register, aliased with byte 1 of the 0xCF8 config-address register.
-         * RST_CPU (bit 2) set triggers a system reset.  The SDV firmware writes
-         * 0xCF9=2 then 0xCF9=6 to reboot after its one-time "New CPU frequency
-         * is set" configuration step (the historical POST-0xc6 "wall").  The
-         * warm-boot path this reset lands in is still being brought up (the
-         * post-reset video-ROM POST diverges), so honouring the reset is gated
-         * behind STDBG_CF9RESET for now — see plans/phase5-real-firmware-boot.md.
+         * Software addresses the config register with dword writes, so only a
+         * byte access here is the reset control -- as on real hardware, which
+         * aliases them the same way.  RST_CPU (bit 2) resets the system.
          */
-        if ((data & 0x04) && getenv("STDBG_CF9RESET")) {
+        qemu_log_mask(LOG_UNIMP, "ia64-460gx: CF9 write 0x%02x\n",
+                      (unsigned)(data & 0xff));
+        if (data & 0x04) {
             qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             return;
         }
@@ -4240,8 +4937,8 @@ static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
 
     if (addr < 4) {
         for (i = 0; i < size && addr + i < 4; i++) {
-            s->realfw_config_address &= ~(0xffU << ((addr + i) * 8));
-            s->realfw_config_address |= ((data >> (i * 8)) & 0xff) <<
+            s->cfg_address &= ~(0xffU << ((addr + i) * 8));
+            s->cfg_address |= ((data >> (i * 8)) & 0xff) <<
                                         ((addr + i) * 8);
         }
         return;
@@ -4249,31 +4946,54 @@ static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
     if (!(cf8 & 0x80000000)) {
         return;
     }
-    /* CPU-frequency mailbox at 00:03.0 reg 0xd0 - see the read path. */
-    if (s->realfw_path != NULL && bus == 0 && dev == 3 && fn == 0 &&
-        (reg & 0xfc) == 0xd0) {
-        for (i = 0; i < size; i++) {
-            unsigned b = (reg & 3) + i;
-            if (b < 4) {
-                s->realfw_freq_mailbox &= ~(0xffU << (b * 8));
-                s->realfw_freq_mailbox |= ((data >> (i * 8)) & 0xff) << (b * 8);
-            }
-        }
-        return;
-    }
-    cfg = ia64_realfw_chipset_cfg(s, bus, dev, fn);
-    qemu_log_mask(LOG_UNIMP, "ia64-realfw: cfg%c write %02x:%02x.%x "
+    cfg = ia64_460gx_chipset_cfg(s, bus, dev, fn);
+    qemu_log_mask(LOG_UNIMP, "ia64-460gx: cfg%c write %02x:%02x.%x "
                   "@0x%02x/%u = 0x%" PRIx64 "\n", cfg ? '*' : ' ',
                   bus, dev, fn, reg, size, data);
     if (cfg != NULL) {
         for (i = 0; i < size; i++) {
-            cfg[(reg + i) & 0xff] = data >> (i * 8);
+            unsigned off = (reg + i) & 0xff;
+            uint8_t *file = ia64_460gx_sac_indexed(s, dev, fn, cfg, off);
+            uint8_t byte = data >> (i * 8);
+
+            if (file != NULL) {
+                *file = byte;
+            } else {
+                cfg[off] = byte;
+            }
+            if (bus != 0 && fn == 0 && off == IA64_460GX_XXB_PCIS_REG &&
+                ia64_460gx_expander_port_root(dev) != IA64_460GX_ROOT_NONE) {
+                ia64_460gx_update_low_mmio_window(s);
+            }
+        }
+        /*
+         * Re-base an above-4-GiB GXB AGP aperture below 4 GiB (see
+         * IA64_460GX_GXB_BAPBASE_REG above).  Clamp only when the stored 64-bit
+         * BAPBASE actually names an address at or above 4 GiB, so the firmware's
+         * 0x1_00000000 is corrected while a legitimate below-4-GiB base -- such
+         * as agp460's own AgpSetAperture write-back -- is stored verbatim.  The
+         * check runs when this access touches the register (its high dword
+         * arrives as a separate size-4 write at 0x9c, per the POST trace).
+         */
+        if (bus != 0 && dev == IA64_460GX_GXB_DEV &&
+            fn == IA64_460GX_GXB_BRIDGE_FN &&
+            reg <= IA64_460GX_GXB_BAPBASE_LAST &&
+            reg + size > IA64_460GX_GXB_BAPBASE_REG) {
+            uint64_t bap = ldq_le_p(cfg + IA64_460GX_GXB_BAPBASE_REG);
+
+            if (bap >> 32) {
+                stq_le_p(cfg + IA64_460GX_GXB_BAPBASE_REG,
+                         IA64_460GX_GXB_AGP_APERTURE_BASE);
+            }
         }
         return;
     }
+    if (bus == ia64_460gx_cbn(s)) {
+        return;     /* an unpopulated chipset device number (SSDM 2.3.1) */
+    }
     {
-        PCIDevice *pci_dev = pci_find_device(s->realfw_pci_bus, bus,
-                                             PCI_DEVFN(dev, fn));
+        PCIDevice *pci_dev = ia64_460gx_cfg_find_device(s, bus,
+                                                        PCI_DEVFN(dev, fn));
 
         if (pci_dev != NULL) {
             pci_host_config_write_common(pci_dev, reg,
@@ -4283,9 +5003,9 @@ static void ia64_realfw_cfg_write(void *opaque, hwaddr addr, uint64_t data,
     }
 }
 
-static const MemoryRegionOps ia64_realfw_cfg_ops = {
-    .read = ia64_realfw_cfg_read,
-    .write = ia64_realfw_cfg_write,
+static const MemoryRegionOps ia64_460gx_cfg_ops = {
+    .read = ia64_460gx_cfg_read,
+    .write = ia64_460gx_cfg_write,
     .valid.min_access_size = 1,
     .valid.max_access_size = 4,
     .impl.min_access_size = 1,
@@ -4299,14 +5019,15 @@ static const MemoryRegionOps ia64_realfw_cfg_ops = {
  * medium.  The rest of the function's config space stays read/write
  * scratch.
  */
-static void ia64_vpc_init_realfw_chipset_identity(IA64VpcMachineState *s,
+static void ia64_vpc_init_chipset_identity(IA64VpcMachineState *s,
                                                   uint8_t dev, uint8_t fn,
                                                   uint16_t device_id,
                                                   uint8_t revision,
                                                   uint16_t class_id,
                                                   bool multifunction)
 {
-    uint8_t *cfg = ia64_realfw_chipset_cfg(s, 0, dev, fn);
+    uint8_t cbn = ia64_460gx_cbn(s);
+    uint8_t *cfg = ia64_460gx_chipset_cfg(s, cbn, dev, fn);
 
     if (cfg == NULL) {
         return;
@@ -4323,16 +5044,44 @@ static void ia64_vpc_init_realfw_chipset_identity(IA64VpcMachineState *s,
     }
 }
 
-static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s)
+static void ia64_vpc_init_chipset_cfg(IA64VpcMachineState *s)
 {
+    uint8_t *cbn_window;
     uint8_t *mac_a;
 
-    if (s->realfw_chipset_cfg == NULL) {
-        s->realfw_chipset_cfg = g_malloc0(IA64_REALFW_CFG_SIZE);
+    if (s->chipset_cfg == NULL) {
+        s->chipset_cfg = g_malloc0(IA64_460GX_CFG_SIZE);
     } else {
-        memset(s->realfw_chipset_cfg, 0, IA64_REALFW_CFG_SIZE);
+        memset(s->chipset_cfg, 0, IA64_460GX_CFG_SIZE);
     }
-    s->realfw_config_address = 0;
+    s->cfg_address = 0;
+    if (s->pci_host_dev != NULL) {
+        ia64_pci_host_set_low_mmio_window(s->pci_host_dev, ~0ULL);
+    }
+    /*
+     * CBN comes out of reset as FFh: the chipset's own functions answer on
+     * bus FF until firmware moves them.  The vendor firmware programs its
+     * SAC and expander ports there throughout POST and only writes 0xEE at
+     * the end of enumeration, so a store that reset CBN to 0 both dropped
+     * all of that programming and shadowed the compatibility bus's real
+     * devices 00h-05h behind the chipset's.  This has to happen before the
+     * identity seeding below, which resolves every device through CBN and
+     * would otherwise seed bus 0's blocks.
+     */
+    cbn_window = ia64_460gx_cbn_window(s, 0);
+    cbn_window[IA64_460GX_CBN_REG] = 0xff;
+    /*
+     * The SSDM says the device holding CBN *is* the SAC, so its window
+     * carries the SAC identity rather than the expander port's.
+     */
+    stw_le_p(cbn_window + PCI_VENDOR_ID, PCI_VENDOR_ID_INTEL);
+    stw_le_p(cbn_window + PCI_DEVICE_ID, 0x84e0);
+    stw_le_p(cbn_window + PCI_STATUS, PCI_STATUS_DEVSEL_MEDIUM);
+    cbn_window[PCI_REVISION_ID] = 0x03;
+    stw_le_p(cbn_window + PCI_CLASS_DEVICE, PCI_CLASS_BRIDGE_HOST);
+    stw_le_p(cbn_window + PCI_SUBSYSTEM_VENDOR_ID, PCI_VENDOR_ID_INTEL);
+    stw_le_p(cbn_window + PCI_SUBSYSTEM_ID, 0x84e0);
+    cbn_window[PCI_HEADER_TYPE] = PCI_HEADER_TYPE_MULTI_FUNCTION;
     /*
      * The chipset's own functions carry their real identities.  Without
      * them a firmware config read of the SAC, SDC or expander returns a
@@ -4342,159 +5091,194 @@ static void ia64_vpc_init_realfw_chipset_cfg(IA64VpcMachineState *s)
      * expander device numbers per plans/sdv-i2000-firmware-reference.md,
      * which places expander port n at bus CBN device 10h + n.
      */
-    ia64_vpc_init_realfw_chipset_identity(s, 0x00, 0, 0x84e0, 0x03,
+    ia64_vpc_init_chipset_identity(s, 0x00, 0, 0x84e0, 0x03,
                                           PCI_CLASS_BRIDGE_HOST, true);
-    ia64_vpc_init_realfw_chipset_identity(s, 0x01, 0, 0x84e0, 0x03,
+    ia64_vpc_init_chipset_identity(s, 0x01, 0, 0x84e0, 0x03,
                                           PCI_CLASS_BRIDGE_HOST, false);
-    ia64_vpc_init_realfw_chipset_identity(s, 0x04, 0, 0x84e1, 0x03,
+    ia64_vpc_init_chipset_identity(s, 0x04, 0, 0x84e1, 0x03,
                                           PCI_CLASS_BRIDGE_HOST, false);
     /*
      * Expander port 0 is the PXB, which hosts the compatibility bus.  Its
      * function 0 is the downstream SAC; function 1 is the bridge itself.
      * Function 0 register 40h is also where the firmware programs CBN
-     * (observed; see ia64_realfw_chipset_cfg), so only the header is
+     * (observed; see ia64_460gx_chipset_cfg), so only the header is
      * seeded here.
      */
-    ia64_vpc_init_realfw_chipset_identity(s, IA64_REALFW_CBN_DEV, 0,
+    ia64_vpc_init_chipset_identity(s, IA64_460GX_CBN_DEV, 0,
                                           0x84e0, 0x03,
                                           PCI_CLASS_BRIDGE_HOST, true);
-    ia64_vpc_init_realfw_chipset_identity(s, IA64_REALFW_CBN_DEV, 1,
+    ia64_vpc_init_chipset_identity(s, IA64_460GX_CBN_DEV, 1,
                                           0x84cb, 0x05,
                                           PCI_CLASS_BRIDGE_HOST, false);
+    /*
+     * The other expander ports the i2000 populates, at Table 2-1's
+     * device numbers: Expander 1 is the WXB with its two buses (12h/13h,
+     * fn1 the bridge, 84E6), Expander 2 the GXB (14h; fn1 the AGP bridge
+     * 84EA, fn2 its GART function 84E2).  Each port's fn0 is its
+     * downstream SAC face, as on port 0.  The vendor firmware scans for
+     * exactly these (ee:12.0/13.0/14.0 @48h, ee:12.1 @80h, ee:14.1/14.2) and
+     * decides which buses carry a window -- the graphics card behind the GXB
+     * stays disabled unless its port exists.
+     */
+    ia64_vpc_init_chipset_identity(s, 0x12, 0, 0x84e0, 0x03,
+                                          PCI_CLASS_BRIDGE_HOST, true);
+    ia64_vpc_init_chipset_identity(s, 0x12, 1, 0x84e6, 0x07,
+                                          PCI_CLASS_BRIDGE_HOST, false);
+    ia64_vpc_init_chipset_identity(s, 0x13, 0, 0x84e0, 0x03,
+                                          PCI_CLASS_BRIDGE_HOST, true);
+    ia64_vpc_init_chipset_identity(s, 0x13, 1, 0x84e6, 0x07,
+                                          PCI_CLASS_BRIDGE_HOST, false);
+    ia64_vpc_init_chipset_identity(s, 0x14, 0, 0x84e0, 0x03,
+                                          PCI_CLASS_BRIDGE_HOST, true);
+    ia64_vpc_init_chipset_identity(s, 0x14, 1, 0x84ea, 0x02,
+                                          PCI_CLASS_BRIDGE_HOST, false);
+    ia64_vpc_init_chipset_identity(s, 0x14, 2, 0x84e2, 0x02,
+                                          PCI_CLASS_BRIDGE_HOST, false);
+
+    /*
+     * The SAC's device-specific registers (40h-FFh of devices 00h/01h) are
+     * not documented in the SSDM.  The vendor firmware's early POST reads
+     * them before writing anything (it selects a register through 78h and
+     * reads 60h, and checks DEVNPRES at 70h), and it stops at POST 0x54 when
+     * they read as zero while it passes when they read as open bus -- which
+     * is what they were on this machine before bus FF was modelled.  Seed
+     * them with 0xFF and let writes stick.  The memory card (dev 05h) must
+     * not be seeded: its SPD/I2C tunnel reading 0xFF fails memory init at
+     * POST 0xF1.
+     */
+    /*
+     * The register file behind 64h/70h resets to the chipset's device-present
+     * word rather than to open bus.  The SSDM never lays the register out,
+     * but it names it and numbers its bits: "The DEVNPRES register is used
+     * to determine which chipset devices are present; see Table 2-1"
+     * (2.2.1), and the memory map keys the AGP GART range on "DEVNPRES[14]"
+     * -- "If the DEVNPRES bit for Device 14 is set (meaning that there is no
+     * xXB attached to the Expander bus)" (4.1.3.1).  So bit n is Table 2-1's
+     * device n, and a set bit means absent.
+     *
+     * The vendor firmware reads that word through this window, right after
+     * its walk over the entries (pciHost.c, link 0x4b0ca0 of SAL_B): bit 20
+     * set makes it record "GXB Status" = 1 under "/IO/Bus/PCI", set bits
+     * 20-23 itself, and later park expander ports 14h-18h onto the WXB's bus
+     * (link 0x4b0670) -- which is what left the vendor DSDT's PCI1 and PCI3
+     * roots on one bus number, and both of them Code 12 under Windows.  An
+     * all-ones seed says every expander port is missing, the GXB included.
+     * Seed every entry with the populated devices instead; writes still
+     * stick per entry.
+     */
+    {
+        uint32_t devnpres = ~0u;
+        unsigned i, e;
+
+        for (i = 0; i < ARRAY_SIZE(ia64_460gx_chipset_devs); i++) {
+            devnpres &= ~(1u << ia64_460gx_chipset_devs[i]);
+        }
+        for (i = 0; i < ARRAY_SIZE(s->sac_indexed); i++) {
+            for (e = 0; e < IA64_460GX_SAC_IDX_ENTRIES; e++) {
+                stl_le_p(s->sac_indexed[i][e], devnpres);
+            }
+        }
+    }
+
+    {
+        unsigned i, fn;
+
+        for (i = 0; i < ARRAY_SIZE(ia64_460gx_chipset_devs); i++) {
+            if (ia64_460gx_chipset_devs[i] > 0x01) {
+                continue;
+            }
+            for (fn = 0; fn < 8; fn++) {
+                memset(s->chipset_cfg + i * IA64_460GX_CFG_DEV_SIZE +
+                       fn * IA64_460GX_CFG_FN_SIZE + 0x40, 0xff, 0xc0);
+            }
+            /*
+             * Function 0's 60h, read as a byte after the firmware writes 0
+             * to 78h, is the number of expanders the SAC has ports for
+             * (SSDM Table 2-1: Expander 0-3 at 10h-17h).  The vendor
+             * firmware loops that many times over devices 10h, 12h, 14h,
+             * ... testing each one's DEVNPRES bit, and hands the ports it
+             * finds to its bus-numbering loop.  Read as open bus the count
+             * is 255: the loop wraps through every device number, treats
+             * the wrapped ones as present, and numbers 16 rounds of phantom
+             * ports before the real ones, which leaves the compatibility
+             * bus at D0h/D6h instead of 0 and the GXB's bus off the 4 its
+             * IA-32 CSM addresses the VGA card at.  The firmware also
+             * read-modify-writes the dword to clear bit 0, so the count
+             * lives in the same cell and writes stick.
+             */
+            stl_le_p(s->chipset_cfg + i * IA64_460GX_CFG_DEV_SIZE + 0x60,
+                     IA64_460GX_EXPANDER_COUNT);
+        }
+    }
 
     /*
      * Memory Card A (dev 05h fn 0) claims presence with the MAC identity
      * (8086:84E3, rev B-1 = 03h; pci.ids, flagged unverified in
      * plans/460gx-config-space-notes.md).  Memory Card B stays absent.
      */
-    mac_a = ia64_realfw_chipset_cfg(s, 0, 0x05, 0);
+    mac_a = ia64_460gx_chipset_cfg(s, 0xff, 0x05, 0);
     stw_le_p(mac_a + PCI_VENDOR_ID, 0x8086);
     stw_le_p(mac_a + PCI_DEVICE_ID, 0x84e3);
     mac_a[PCI_REVISION_ID] = 0x03;
 
+    ia64_460gx_plan_memory_rows(s, MACHINE(s)->ram_size);
+}
+
+/*
+ * The chipset answers PCI configuration cycles at the architected CF8/CFC
+ * port pair (460GX SSDM 2.3): CONFIG_ADDRESS at 0xCF8 latches bus, device,
+ * function and register, and a CFC access reads or writes the addressed
+ * config space.  Device numbers on the bus the CBN register maps the chipset
+ * into are the chipset's own functions (Table 2-1); everything else forwards
+ * to the PCI bus.  This is the mechanism the vendor firmware enumerates
+ * through, and it is real hardware, so the machine carries it whichever
+ * firmware runs -- ECAM, which is what our firmware and guests use, reaches
+ * the four expander buses and stays the only way a guest sees the machine.
+ */
+static void ia64_vpc_init_460gx_chipset(IA64VpcMachineState *s,
+                                       MemoryRegion *pci_io)
+{
     /*
-     * 460GX I/O & Firmware Bridge (IFB), the platform south bridge.  Real
-     * SDV firmware's QuickBoot scans bus 0 for it (8086:7600) and fatal-spins
-     * if absent (POST 0x98).  Model Function 0's identity per the 460GX SSDM
-     * §11: multi-function ISA/LPC bridge.  The other functions (fn1 IDE,
-     * fn2 USB, fn3 SMBus) and the config-register behaviours are added as the
-     * firmware exercises them; the rest of the config space is read/write
-     * scratch (see ia64_realfw_cfg_read/write).
+     * The System Address Controller's memory-mapped register aperture, and
+     * the diagnostic port every PC-class platform decodes at I/O 0x80.  The
+     * firmware arbitrates which processor boots through a semaphore in the
+     * SAC block (clear bit 7, poll bit 7, compare the low seven bits against
+     * LID.id); this model grants it to id 0, so the boot processor proceeds
+     * and an application processor waits, which is what a UP or an SMP boot
+     * both need.  The rest of the block is read/write scratch.
      */
-    {
-        uint8_t *ifb0 = ia64_realfw_chipset_cfg(s, 0, IA64_REALFW_IFB_DEV, 0);
+    s->sac_data = g_malloc0(IA64_460GX_SAC_SIZE);
+    memory_region_init_io(&s->sac_mmio, OBJECT(s), &ia64_460gx_sac_ops, s,
+                          "ia64-460gx.sac", IA64_460GX_SAC_SIZE);
+    memory_region_add_subregion(get_system_memory(), IA64_460GX_SAC_BASE,
+                                &s->sac_mmio);
+    memory_region_init_io(&s->post_io, OBJECT(s), &ia64_460gx_post_ops, s,
+                          "ia64-460gx.post", 2);
+    memory_region_add_subregion(pci_io, 0x80, &s->post_io);
 
-        stw_le_p(ifb0 + PCI_VENDOR_ID, 0x8086);          /* VID */
-        stw_le_p(ifb0 + PCI_DEVICE_ID, 0x7600);          /* DID = IFB */
-        ifb0[PCI_REVISION_ID] = 0x03;                    /* RID (stepping) */
-        ifb0[PCI_CLASS_PROG] = 0x00;                     /* CLASSC 060100h: */
-        stw_le_p(ifb0 + PCI_CLASS_DEVICE, 0x0601);       /*   ISA bridge */
-        ifb0[PCI_HEADER_TYPE] = 0x80;                    /* multi-function */
-    }
+    ia64_vpc_init_chipset_cfg(s);
+    memory_region_init_io(&s->cfg_io, OBJECT(s),
+                          &ia64_460gx_cfg_ops, s, "ia64-460gx.cfg", 8);
+    memory_region_add_subregion(pci_io, 0xcf8, &s->cfg_io);
 }
 
-static void ia64_vpc_init_realfw_devices(IA64VpcMachineState *s,
-                                         MemoryRegion *pci_io)
-{
-    s->realfw_sac_data = g_malloc0(IA64_REALFW_SAC_SIZE);
-    memory_region_init_io(&s->realfw_sac_mmio, OBJECT(s),
-                          &ia64_realfw_sac_ops, s, "ia64-realfw.sac",
-                          IA64_REALFW_SAC_SIZE);
-    memory_region_add_subregion(get_system_memory(), IA64_REALFW_SAC_BASE,
-                                &s->realfw_sac_mmio);
-    memory_region_init_io(&s->realfw_post_io, OBJECT(s),
-                          &ia64_realfw_post_ops, s, "ia64-realfw.post", 2);
-    memory_region_add_subregion(pci_io, 0x80, &s->realfw_post_io);
-    memory_region_init_io(&s->realfw_smbus_io, OBJECT(s),
-                          &ia64_realfw_smbus_ops, s, "ia64-realfw.smbus",
-                          IA64_REALFW_SMB_SIZE);
-    memory_region_add_subregion(pci_io, IA64_REALFW_SMB_BASE,
-                                &s->realfw_smbus_io);
-    memory_region_init_io(&s->realfw_port61_io, OBJECT(s),
-                          &ia64_realfw_port61_ops, s, "ia64-realfw.port61", 1);
-    memory_region_add_subregion(pci_io, IA64_REALFW_PORT61,
-                                &s->realfw_port61_io);
-    ia64_vpc_init_realfw_chipset_cfg(s);
-    memory_region_init_io(&s->realfw_cfg_io, OBJECT(s),
-                          &ia64_realfw_cfg_ops, s, "ia64-realfw.cfg", 8);
-    memory_region_add_subregion(pci_io, 0xcf8, &s->realfw_cfg_io);
-}
+
 
 /*
- * Real SDV firmware drives IDE through the fixed legacy I/O ports, not the
- * controller's PCI BARs: it polls the primary status register at 0x1f7 during
- * drive detection and spins forever if nothing answers.  The CMD646's ATA
- * register blocks are otherwise only reachable at firmware-assigned BAR
- * addresses, so alias them into the legacy ranges (command block 0x1f0-0x1f7
- * and 0x170-0x177, control block at 0x3f4/0x374 whose offset-2 register is the
- * 0x3f6/0x376 alt-status).  With no media attached the channels report an
- * empty bus, which the firmware reads as "no drive" and moves on.  This runs
- * only in realfw mode; our own firmware and guests use the PCI BARs.
+ * The master 8259's INTR line drives the boot processor's LINT0 pin.  What
+ * the processor makes of it is up to its Local Redirection Register 0: the
+ * SDV firmware programs a level-triggered ExtINT there for its legacy tick
+ * (IVR reads 0 and it fetches the 8-bit vector through the INTA byte), and
+ * an operating system masks the pin before it enables interrupts.  The PIC
+ * never programs the IOSAPIC; the pair's INTR does not pass through it.
  */
-static void ia64_vpc_map_realfw_legacy_ide(IA64VpcMachineState *s,
-                                           MemoryRegion *pci_io)
-{
-    PCIIDEState *ide = PCI_IDE(s->ide_dev);
-    static const struct {
-        uint16_t data_base;
-        uint16_t cmd_base;
-    } channel[2] = {
-        { 0x1f0, 0x3f4 },
-        { 0x170, 0x374 },
-    };
-    int i;
-
-    for (i = 0; i < 2; i++) {
-        g_autofree char *data_name =
-            g_strdup_printf("ia64-realfw.ide-data%d", i);
-        g_autofree char *cmd_name =
-            g_strdup_printf("ia64-realfw.ide-cmd%d", i);
-
-        memory_region_init_alias(&s->realfw_ide_data[i], OBJECT(s), data_name,
-                                 &ide->data_bar[i], 0, 8);
-        memory_region_add_subregion(pci_io, channel[i].data_base,
-                                    &s->realfw_ide_data[i]);
-        memory_region_init_alias(&s->realfw_ide_cmd[i], OBJECT(s), cmd_name,
-                                 &ide->cmd_bar[i], 0, 4);
-        memory_region_add_subregion(pci_io, channel[i].cmd_base,
-                                    &s->realfw_ide_cmd[i]);
-    }
-}
-
-/*
- * The master 8259's INTR line, delivered to the boot processor as an IA-64
- * ExtINT (SAPIC vector 0): while the PIC asserts INTR the processor takes an
- * external interrupt whose IVR reads 0, and firmware then fetches the real
- * 8-bit vector from the PIC itself.  ExtINT is level-sensitive, so forward the
- * line state directly -- de-asserting it (for example when firmware masks the
- * PIC before draining IVR) withdraws the pending vector 0.
- */
-static void ia64_vpc_realfw_extint(void *opaque, int n, int level)
+static void ia64_vpc_extint(void *opaque, int n, int level)
 {
     (void)opaque;
     (void)n;
     if (first_cpu != NULL) {
-        ia64_sapic_set_extint(first_cpu, level);
+        ia64_cpu_set_lint(first_cpu, 0, level);
     }
-}
-
-/*
- * Real SDV firmware uses the legacy PC-AT timer tick during POST: it programs
- * the 8254 PIT channel 0 for a periodic square wave and routes its IRQ 0
- * through the 8259 PIC, whose INTR reaches the processor as an ExtINT (above).
- * The machine is otherwise IOSAPIC-only, so instantiate the pair only in
- * realfw mode and wire PIT OUT0 straight into 8259 IR0, independent of the
- * IOSAPIC-backed ISA IRQ inputs the rest of the machine uses.
- */
-static void ia64_vpc_init_realfw_pic(IA64VpcMachineState *s, ISABus *isa_bus)
-{
-    qemu_irq *pic_irqs;
-
-    s->realfw_extint = qemu_allocate_irq(ia64_vpc_realfw_extint, s, 0);
-    pic_irqs = i8259_init(isa_bus, s->realfw_extint);
-    /* PIT OUT0 -> 8259 IR0 (isa_irq = -1 selects the explicit alt_irq). */
-    i8254_pit_init(isa_bus, 0x40, -1, pic_irqs[0]);
-    g_free(pic_irqs);
 }
 
 static const uint8_t ia64_realfw_pal_stub[32] = {
@@ -4613,7 +5397,9 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
         qdev_prop_set_bit(dev, "big-endian", 0);
         /*
          * JEDEC ID the firmware checks: manufacturer 0x89 (Intel), device
-         * 0xAC (82802AB Firmware Hub).  It byte-reads read-ID offset 0 for
+         * 0xAC (82802AC Firmware Hub, 8 Mbit -- the part the 460GX datasheet
+         * names, though the vendor image mapped here is larger than one).
+         * It byte-reads read-ID offset 0 for
          * the manufacturer and offset 1 for the device, then combines them to
          * 0xAC89.  pflash returns id0<<8|id1 at word offset 0 and id2<<8|id3
          * at word offset 1, so a byte read of offset 0 yields id1 (hold the
@@ -4624,7 +5410,13 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
         qdev_prop_set_uint16(dev, "id0", 0x00ac);
         qdev_prop_set_uint16(dev, "id1", 0x0089);        /* Intel (offset 0) */
         qdev_prop_set_uint16(dev, "id2", 0x0000);
-        qdev_prop_set_uint16(dev, "id3", 0x00ac);        /* 82802AB (offset 1) */
+        qdev_prop_set_uint16(dev, "id3", 0x00ac);        /* 82802AC (offset 1) */
+        /*
+         * The board's firmware storage is Intel 82802AC Firmware Hubs, which
+         * lock every block for writing out of reset and expect firmware to
+         * clear the lock register before programming (datasheet 290658).
+         */
+        qdev_prop_set_bit(dev, "block-locking", true);
         qdev_prop_set_string(dev, "name", "ia64-realfw-flash");
         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 
@@ -4791,14 +5583,26 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     ia64_vpc_map_lsapic(s);
 
     iosapic = qdev_new(TYPE_IA64_IOSAPIC);
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        /*
+         * On the i2000 the interrupt controller is the 460GX Programmable
+         * Interrupt Device: 64 inputs reporting IOSAPIC version 2.1.  Its
+         * width is what lets each PCI root own its own block of four INTx
+         * lines (16, 20, 24, 28) rather than sharing one block.
+         */
+        qdev_prop_set_uint32(iosapic, "num-pins", IA64_IOSAPIC_460GX_PINS);
+        qdev_prop_set_uint32(iosapic, "version",
+                             IA64_IOSAPIC_460GX_VERSION);
+    }
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(iosapic), errp)) {
         return false;
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(iosapic), 0, IA64_IOSAPIC_BASE);
 
-    serial_mm_init(get_system_memory(), IA64_UART_BASE, 0,
-                   qdev_get_gpio_in(iosapic, 4),
-                   115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+    s->console_uart = serial_mm_init(get_system_memory(), IA64_UART_BASE, 0,
+                                     qdev_get_gpio_in(iosapic, 4),
+                                     115200, serial_hd(0),
+                                     DEVICE_LITTLE_ENDIAN);
     if (debug_port_get_chardev()) {
         s->debug_uart = serial_mm_init(get_system_memory(),
                                        IA64_DEBUG_UART_BASE, 0,
@@ -4821,6 +5625,12 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     qemu_add_machine_init_done_notifier(&s->done_notifier);
 
     pci_host = qdev_new(TYPE_IA64_PCI_HOST_BRIDGE);
+    s->pci_host_dev = pci_host;
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        ia64_pci_host_set_intx_routes(pci_host, ia64_i2000_pci0_intx,
+                                      ARRAY_SIZE(ia64_i2000_pci0_intx),
+                                      IA64_460GX_INTX_FALLBACK_GSI);
+    }
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(pci_host), errp)) {
         return false;
     }
@@ -4889,13 +5699,19 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         ia64_lba_set_mercury_bus(IA64_LBA(s->lba_dev), s->mercury_bus);
     } else {
         s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
+        /*
+         * The AGP master is the graphics adapter on the GXB's downstream
+         * root, so the GART translates that bus's device 0.
+         */
         object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
-                                PCI_DEVFN(IA64_VPC_VGA_SLOT, 0), &error_abort);
+                                PCI_DEVFN(IA64_460GX_GXB_VGA_SLOT, 0),
+                                &error_abort);
         object_property_set_bool(OBJECT(s->agp_dev), "gart-enabled",
                                 s->agp_enabled, &error_abort);
         if (!pci_realize_and_unref(s->agp_dev, pci_bus, errp)) {
             return false;
         }
+
     }
 
     /*
@@ -4906,9 +5722,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     pci_bus_set_slot_reserved_mask(pci_bus, 1U << 0);
     pci_io = pci_bus->address_space_io;
     ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
-    if (s->realfw_path != NULL) {
-        s->realfw_pci_bus = pci_bus;
-        ia64_vpc_init_realfw_devices(s, pci_io);
+    s->host_pci_bus = pci_bus;
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        ia64_vpc_init_460gx_chipset(s, pci_io);
     }
 
     /*
@@ -4927,6 +5743,20 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
                                  IA64_LEGACY_COM1_IO_SIZE);
         memory_region_add_subregion(pci_io, IA64_LEGACY_COM1_IO_BASE,
                                     &s->debug_uart_legacy_io);
+    } else if (!ia64_vpc_chipset_is_zx1(s) && s->console_uart != NULL) {
+        /*
+         * Otherwise the i2000's COM1 is the console: the Super I/O's UART1
+         * at 3F8h on IRQ 4, which is what the vendor DSDT reports for it
+         * (UAR1, LDN 4) and what its firmware talks to.  The console UART
+         * already sits on PID input 4, so the same device serves both the
+         * memory-mapped window this firmware uses and the legacy one.
+         */
+        memory_region_init_alias(&s->console_uart_legacy_io, OBJECT(s),
+                                 "ia64-vpc.console-uart-legacy-io",
+                                 &s->console_uart->serial.io, 0,
+                                 IA64_LEGACY_COM1_IO_SIZE);
+        memory_region_add_subregion(pci_io, IA64_LEGACY_COM1_IO_BASE,
+                                    &s->console_uart_legacy_io);
     }
 
     /*
@@ -4938,10 +5768,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * input (level-triggered, wire-OR -- exactly how the two roots share the
      * platform's four PCI interrupt lines).
      */
-    for (i = 0; i < IA64_PCI_INTX_LINES; i++) {
-        qemu_irq gsi = qdev_get_gpio_in(iosapic, IA64_PCI_INTX_GSI_BASE + i);
-
-        if (ia64_vpc_chipset_is_zx1(s)) {
+    if (ia64_vpc_chipset_is_zx1(s)) {
+        for (i = 0; i < IA64_PCI_INTX_LINES; i++) {
+            qemu_irq gsi = qdev_get_gpio_in(iosapic,
+                                            IA64_PCI_INTX_GSI_BASE + i);
             DeviceState *org = qdev_new(TYPE_OR_IRQ);
 
             object_property_set_int(OBJECT(org), "num-lines", 2, &error_abort);
@@ -4949,8 +5779,101 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
             qdev_connect_gpio_out(org, 0, gsi);
             qdev_connect_gpio_out(pci_host, i, qdev_get_gpio_in(org, 0));
             qdev_connect_gpio_out(s->mercury_host, i, qdev_get_gpio_in(org, 1));
-        } else {
-            qdev_connect_gpio_out(pci_host, i, gsi);
+        }
+    } else {
+        /*
+         * On the i2000 each root's outputs are numbered by PID input (the
+         * board tables above), so every output goes to the input of the
+         * same number; inputs 0-15 stay the ISA lines, which no table names.
+         */
+        for (i = IA64_PCI_INTX_GSI_BASE; i < IA64_PCI_INTX_MAX_OUTPUTS; i++) {
+            qdev_connect_gpio_out(pci_host, i, qdev_get_gpio_in(iosapic, i));
+        }
+    }
+
+    /*
+     * The i2000's other three PCI roots: the two WXB buses and the GXB AGP
+     * bus.  Each is a root in its own right, sharing the primary host
+     * bridge's identity-mapped windows the way the zx1 Mercury root does, and
+     * each owns its own block of four PID inputs rather than sharing bus 0's
+     * -- which is why the Programmable Interrupt Device has 64 of them.  They
+     * are created empty here; devices move onto them in a later step of
+     * plans/460gx-i2000-fidelity-plan.md.
+     */
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        static const struct {
+            const char *name;
+            uint8_t bus;
+            unsigned int index;
+        } expanders[IA64_460GX_EXPANDER_ROOTS] = {
+            /*
+             * Created youngest-first.  QEMU resolves a "-device" with no
+             * bus= to the most recently realized PCI bus, so this order
+             * makes WXB0 the default: on a real i2000 bus 0 is the
+             * compatibility bus carrying the on-board south bridge, while
+             * add-in cards go in the WXB slots.  Name the bus explicitly
+             * ("bus=pci", "bus=gxb", ...) to place a device elsewhere.
+             */
+            { "gxb",  IA64_460GX_GXB_BUS,  IA64_460GX_ROOT_GXB },
+            { "wxb1", IA64_460GX_WXB1_BUS, IA64_460GX_ROOT_WXB1 },
+            { "wxb0", IA64_460GX_WXB0_BUS, IA64_460GX_ROOT_WXB0 },
+        };
+        unsigned int root;
+
+        for (root = 0; root < IA64_460GX_EXPANDER_ROOTS; root++) {
+            unsigned int line;
+
+            unsigned int index = expanders[root].index;
+
+            s->expander_host[index] = ia64_expander_host_create(
+                OBJECT(s), expanders[root].name,
+                ia64_pci_host_mmio(pci_host), ia64_pci_host_io(pci_host),
+                expanders[root].bus,
+                ia64_i2000_root_intx[index].routes,
+                ia64_i2000_root_intx[index].nroutes,
+                IA64_460GX_INTX_FALLBACK_GSI, errp);
+            if (s->expander_host[index] == NULL) {
+                return false;
+            }
+            s->expander_bus[index] =
+                ia64_expander_host_bus(s->expander_host[index]);
+            ia64_pci_host_add_secondary_bus(pci_host, s->expander_bus[index]);
+
+            for (line = IA64_PCI_INTX_GSI_BASE;
+                 line < IA64_PCI_INTX_MAX_OUTPUTS; line++) {
+                qdev_connect_gpio_out(s->expander_host[index], line,
+                                      qdev_get_gpio_in(iosapic, line));
+            }
+        }
+
+        /*
+         * The GART translates the AGP master, which lives on the GXB's
+         * downstream root, so that bus needs the same DMA routing as the
+         * bus the GXB bridge itself sits on.
+         */
+        if (s->agp_dev != NULL) {
+            ia64_agp_attach_bus(IA64_AGP(s->agp_dev),
+                                s->expander_bus[IA64_460GX_ROOT_GXB]);
+        }
+
+        /*
+         * Each WXB bus carries an Integrated Hot-Plug Controller for its
+         * expansion slots.  Nothing implements hot plug here; the controller
+         * is present because the board has one, and idle.
+         */
+        for (root = 0; root < IA64_460GX_EXPANDER_ROOTS; root++) {
+            unsigned int index = expanders[root].index;
+
+            if (index != IA64_460GX_ROOT_WXB0 &&
+                index != IA64_460GX_ROOT_WXB1) {
+                continue;
+            }
+            if (!pci_realize_and_unref(
+                    pci_new(PCI_DEVFN(IA64_460GX_IHPC_SLOT, 0),
+                            TYPE_IA64_460GX_IHPC),
+                    s->expander_bus[index], errp)) {
+                return false;
+            }
         }
     }
 
@@ -4969,12 +5892,13 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         ahci = ICH9_AHCI(s->ahci_dev);
         g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
         /*
-         * The AHCI ports and the cmd646 IDE controller both present an ATA
-         * "if=ide" bus.  When ide=on the CMD646 owns those drives (below), so
-         * only bind if=ide media to SATA when IDE is not the active owner;
-         * a user can still attach disks to this controller explicitly.
+         * The AHCI ports and the IDE controller both present an ATA "if=ide"
+         * bus.  IDE owns those drives whenever it is there to own them --
+         * always on a board with the south bridge, and with ide=on
+         * elsewhere -- so only bind if=ide media to SATA otherwise; a user
+         * can still attach disks to this controller explicitly.
          */
-        if (!s->ide_enabled) {
+        if (!s->ide_enabled && !ia64_vpc_has_south_bridge(s)) {
             ide_drive_get(sata_drives, ahci->ahci.ports);
             ahci_ide_create_devs(&ahci->ahci, sata_drives);
         }
@@ -4983,60 +5907,143 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
 #endif
 
-    isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, errp);
-    if (isa_bus == NULL) {
-        return false;
-    }
-    for (i = 0; i < ISA_NUM_IRQS; i++) {
-        s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
-    }
-    isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
-    if (s->realfw_path != NULL) {
-        ia64_vpc_init_realfw_pic(s, isa_bus);
+    /*
+     * The i2000's south bridge is the Intel 82468GX I/O and Firmware Bridge
+     * at 00:03, a four-function device: LPC/ISA, IDE, UHCI and SMBus.  Its
+     * function 0 owns the ISA bus and the 8259 pair, so on 460gx the legacy
+     * devices below hang off the bridge that carries them on the board
+     * rather than off a bus with no parent.  Each of the sixteen ISA
+     * interrupt inputs drives both that PIC and the matching Programmable
+     * Interrupt Device input, which is how they reach the guest: an IA-64
+     * guest runs the SAPIC, and the PIC is there for the real SDV firmware
+     * (and for the PC/AT-compatible flag our MADT already sets).
+     *
+     * zx1 is a different platform with a different south bridge, so it keeps
+     * the parentless ISA bus until it gets one of its own.
+     *
+     * realfw mode keeps it too: that path replaces the whole chipset with the
+     * shadow config space in ia64_vpc_init_chipset_cfg(), which models
+     * an IFB of its own (at device 1Eh, where the SDV firmware's bus scan
+     * happens to find it).  Two models of one chip on one bus is incoherent,
+     * and converging them means re-validating the real firmware's POST, so
+     * that belongs to plans/phase5-real-firmware-boot.md rather than here.
+     */
+    if (ia64_vpc_has_south_bridge(s)) {
+        /*
+         * Under the vendor firmware the bridge comes up with its ACPI block
+         * at A00h, where the firmware's FADT (PM1a_EVT A00h, PM1a_CNT A04h,
+         * SMI_CMD B2h with ACPI_ENABLE A0h), its DSDT and its PMI handler
+         * all expect it.  The firmware's own pokes for that (00:03.0 @44h =
+         * 0, @40h = 0A00h, @44h = 1) sit in a chipset-init script this
+         * build never reaches (plans/phase5, session 23), so the machine
+         * supplies their result; the SSDM reset state (block disabled)
+         * stays for our own firmware, which programs what it uses.
+         */
+        s->ifb = intel_82468gx_ifb_create(
+            pci_bus, PCI_DEVFN(IA64_460GX_IFB_SLOT,
+                               IA64_460GX_IFB_LPC_FUNCTION),
+            s->realfw_path != NULL ? IA64_460GX_IFB_ACPI_IO_BASE : 0, errp);
+        if (s->ifb == NULL) {
+            return false;
+        }
+        /*
+         * The bridge's SCI reaches the platform interrupt controller on the
+         * i2000's input 49: the vendor MADT's interrupt source override maps
+         * ISA IRQ 9 (the FADT's SCI_INT) to GSI 49, active low, level.
+         */
+        qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_SCI,
+                                    0, qdev_get_gpio_in(iosapic,
+                                                        IA64_I2000_SCI_GSI));
+        if (s->realfw_path != NULL) {
+            /*
+             * The APM control port's SMI is the processor's PMI on this
+             * platform, and the vendor SAL's PMI handler answers the FADT's
+             * ACPI_ENABLE/ACPI_DISABLE commands by setting or clearing
+             * SCI_EN.  PMI delivery is not modelled; this stands in for
+             * that handler's effect (intel_82468gx_ifb_acpi_sci_enable).
+             */
+            qdev_connect_gpio_out_named(DEVICE(s->ifb),
+                                        INTEL_82468GX_IFB_GPIO_APMC, 0,
+                                        qemu_allocate_irq(
+                                            ia64_vpc_realfw_apmc, s, 0));
+        }
+        for (i = 0; i < INTEL_82468GX_IFB_FUNCTIONS; i++) {
+            PCIDevice *fn = intel_82468gx_ifb_function(s->ifb, i);
+
+            if (fn == NULL) {
+                error_setg(errp, "%s did not create function %d",
+                           TYPE_INTEL_82468GX_IFB, i);
+                return false;
+            }
+            /*
+             * A chipset part carries no subsystem identity, so leave those
+             * registers at zero rather than at the PCI bus default.
+             */
+            pci_set_word(fn->config + PCI_SUBSYSTEM_VENDOR_ID, 0);
+            pci_set_word(fn->config + PCI_SUBSYSTEM_ID, 0);
+        }
+        {
+            /*
+             * The board's hardware monitors, which the vendor firmware
+             * initialises over the bridge's SMBus during POST.  They belong
+             * to the I/O board rather than to the chipset, so the machine
+             * puts them on the bus the bridge provides.
+             */
+            I2CBus *smbus = intel_82468gx_ifb_smbus(s->ifb);
+            static const uint8_t hwmon_addrs[] = {
+                IA64_I2000_HWMON_ADDR_0, IA64_I2000_HWMON_ADDR_1,
+            };
+
+            for (i = 0; i < ARRAY_SIZE(hwmon_addrs); i++) {
+                i2c_slave_create_simple(smbus, TYPE_IA64_I2000_HWMON,
+                                        hwmon_addrs[i]);
+            }
+        }
+        isa_bus = intel_82468gx_ifb_isa_bus(s->ifb);
+        for (i = 0; i < ISA_NUM_IRQS; i++) {
+            s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
+            qdev_connect_gpio_out_named(DEVICE(s->ifb),
+                                        INTEL_82468GX_IFB_GPIO_ISA_IRQ, i,
+                                        s->isa_irqs[i]);
+        }
+        /*
+         * The bridge's 8259 pair drives INTR, which a processor takes as an
+         * ExtINT.  Without this the pair answers its ports but can deliver
+         * nothing, and firmware that runs the legacy tick through the PIC --
+         * as the vendor firmware does during POST -- never sees an interrupt.
+         */
+        s->extint = qemu_allocate_irq(ia64_vpc_extint, s, 0);
+        qdev_connect_gpio_out_named(DEVICE(s->ifb),
+                                    INTEL_82468GX_IFB_GPIO_LEGACY, 0,
+                                    s->extint);
+        /*
+         * The board's Super I/O behind the bridge, as far as its
+         * configuration space: the vendor DSDT finds COM1 and the keyboard
+         * controller through it (see hw/isa/smsc_lpc47b27x.c).
+         */
+        isa_create_simple(isa_bus, TYPE_SMSC_LPC47B27X);
+    } else {
+        isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, errp);
+        if (isa_bus == NULL) {
+            return false;
+        }
+        for (i = 0; i < ISA_NUM_IRQS; i++) {
+            s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
+        }
+        isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
     }
     /*
      * The real-time clock is the standard MC146818 CMOS device at legacy
-     * ports 0x70/0x71 (IRQ 8), as the i2000/SDV Super-I/O provides - the
-     * invented MMIO seconds register at 0xFFEF0000 is gone (rework D8).
+     * ports 0x70/0x71 (IRQ 8) - the invented MMIO seconds register at
+     * 0xFFEF0000 is gone (rework D8).  On the 460GX it belongs to the south
+     * bridge, which builds it along with the extended bank at 0x72/0x73 that
+     * RTCCFG banks (SSDM 15.5), so only a machine with no bridge builds one
+     * of its own here.
      */
-    {
-        MC146818RtcState *rtc = mc146818_rtc_init(isa_bus, 2000, NULL);
-        if (s->realfw_path != NULL) {
-            /*
-             * Make the century byte (CMOS 0x32) a read-only hardware register,
-             * as on the real 460GX RTC.  Late in POST the i2000 SDV firmware
-             * probes it by writing 0 (with the RTC halted) and requires it to
-             * still read back the century; a writable byte reads back the
-             * written 0, the firmware's RTC self-test returns EFI_DEVICE_ERROR,
-             * and the zero result count trips a break 1 at POST 0x0a.  Dropping
-             * writes keeps the stored century so the probe reads it back.  Set
-             * directly rather than via a property because mc146818_rtc_init
-             * realizes the device before returning.  realfw-only; guests keep
-             * the standard writable byte.
-             */
-            rtc->century_read_only = true;
-            /*
-             * The 460GX RTC is a 256-byte part: the standard 128-byte bank is
-             * reached through ports 0x70/0x71 (RTCI/RTCD), and ports 0x72/0x73
-             * (RTCEI/RTCED) reach the upper 128-byte battery-backed bank ONLY
-             * when RTCCFG (IFB function 0, config offset C8h) bit 2 "Upper RAM
-             * Enable" is set.  [460GX SSDM 11.1.20, 11.2.5, 15.5.1]  The i2000
-             * firmware never writes RTCCFG (the IFB at bus0 dev 0x1e gets no
-             * config write to offset C8h), so that bit stays clear and 0x72/
-             * 0x73 alias 0x70/0x71 - the SAME 128-byte bank.  POST writes its
-             * CMOS configuration and checksum through 0x70/0x71 but reads them
-             * back through 0x72/0x73; without this alias every such read is
-             * open-bus 0xFF and the CMOS checksum never validates.  (This is
-             * distinct from the separate "New CPU frequency is set" reboot,
-             * which turns on the firmware's CPU-frequency-detection reads of
-             * unmodelled 460GX registers - see plans/phase5 SESSION 15.)
-             */
-            memory_region_init_alias(&s->realfw_rtc_ext_alias, OBJECT(s),
-                                     "rtc-ext-alias", &rtc->io, 0, 2);
-            memory_region_add_subregion(isa_bus->address_space_io, 0x72,
-                                        &s->realfw_rtc_ext_alias);
-        }
+    if (s->ifb == NULL) {
+        mc146818_rtc_init(isa_bus, 2000, NULL);
     }
+
 #ifdef CONFIG_IA64_VPC_PS2
     if (s->i8042_enabled) {
         ISADevice *i8042 = isa_new(TYPE_I8042);
@@ -5063,16 +6070,36 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
 #endif
 
-    /* Put the SCSI HBA on device 4. */
+    /*
+     * The SCSI HBA.  On the i2000 it belongs at 01:00.0 on the first WXB
+     * bus, and the adapter the real board carries there is the QLogic
+     * ISP12160, so that is what the machine builds by default.  The LSI
+     * 53c895a stays available behind lsi=on for images installed before the
+     * swap: on its own it takes the seat and the addresses it always had,
+     * and alongside the QLogic it parks on the second WXB bus, which is the
+     * layout an image is migrated from one adapter to the other on.
+     *
+     * Whichever adapter holds the seat is created here, before anything
+     * else that places itself automatically, so it claims the drives given
+     * without an interface and keeps the rest of the map fixed.  Device 4
+     * of the compatibility bus, where the LSI used to live, belongs to the
+     * CS4281 audio.  zx1 keeps device 4 for the seat.
+     */
 #ifdef CONFIG_IA64_VPC_STORAGE
-    s->lsi_dev = pci_new(PCI_DEVFN(4, 0), "lsi53c895a");
-    qdev_prop_set_bit(DEVICE(s->lsi_dev),
-                      "disconnect-on-data-wait", false);
-    if (!pci_realize_and_unref(s->lsi_dev, pci_bus, errp)) {
-        return false;
+    if (s->isp_enabled || s->lsi_enabled) {
+        PCIBus *scsi_bus = pci_bus;
+        int scsi_devfn = PCI_DEVFN(4, 0);
+
+        if (!ia64_vpc_chipset_is_zx1(s)) {
+            scsi_bus = s->expander_bus[IA64_460GX_ROOT_WXB0];
+            scsi_devfn = PCI_DEVFN(IA64_460GX_WXB0_SCSI_SLOT, 0);
+        }
+        if (s->isp_enabled) {
+            ia64_vpc_init_isp(s, scsi_bus, scsi_devfn);
+        } else if (!ia64_vpc_init_lsi(s, scsi_bus, scsi_devfn, errp)) {
+            return false;
+        }
     }
-    ia64_vpc_configure_lsi(s->lsi_dev);
-    lsi53c8xx_handle_legacy_cmdline(DEVICE(s->lsi_dev));
 #endif
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -5105,6 +6132,13 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (ia64_vpc_chipset_is_zx1(s)) {
         vga_bus = s->mercury_bus;
         vga_slot = IA64_MERCURY_VGA_SLOT;
+    } else {
+        /*
+         * The i2000 puts its AGP Pro graphics at 03:00.0, behind the GXB
+         * expander -- the 460GX analogue of the zx1 arrangement above.
+         */
+        vga_bus = s->expander_bus[IA64_460GX_ROOT_GXB];
+        vga_slot = IA64_460GX_GXB_VGA_SLOT;
     }
 
     if (g_strcmp0(s->vga_model, "mach64") == 0) {
@@ -5150,31 +6184,48 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
     ia64_vpc_load_realfw_device_rom(s);
     ia64_vpc_configure_vga(s->vga_dev,
-                           s->realfw_path != NULL ? IA64_VGA_IO_BASE_REALFW
-                                                  : IA64_VGA_IO_BASE);
+                           IA64_VGA_IO_BASE);
     ia64_vpc_map_vga_fixed_windows(s, s->vga_dev);
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     if (s->vga_dev != NULL) {
         ia64_vpc_init_int10(s, pci_io);
     }
 #endif
+    /*
+     * Device 4 of the compatibility bus is the i2000's audio seat.  Reserve
+     * it before any auto-placed adapter is created, so that the slot map does
+     * not depend on whether the CS4281 is switched on: an add-in card must
+     * not land there, and add-in cards belong on the WXB buses in any case.
+     * The reservation is dropped again below when the CS4281 is created.
+     */
+    if (!ia64_vpc_chipset_is_zx1(s)) {
+        pci_bus_set_slot_reserved_mask(pci_bus,
+                                       1U << IA64_460GX_AUDIO_SLOT);
+    }
+
 #ifdef CONFIG_IA64_VPC_NETWORK
     ia64_vpc_init_network(s, pci_bus);
 #endif
 
     /*
-     * The i2000's SCSI host bus adapter is a QLogic 12160, for which both
-     * XP and Server 2003 ship an in-box driver (ql12160.sys, matched on
-     * PCI\VEN_1077&DEV_1216&SUBSYS_00071077).  Off by default for the same
-     * reason as audio, and created before it so the ordering is fixed.
+     * The second SCSI adapter, when both are asked for.  It parks on the
+     * second WXB bus so the seat's addresses and interrupt stay with the
+     * primary; on zx1 it takes the next free slot of the single root.
+     * Created here, after everything that has a fixed seat of its own, so
+     * asking for it cannot move another function's BDF.
      */
 #ifdef CONFIG_IA64_VPC_STORAGE
-    if (s->isp_enabled) {
-        s->isp_dev = pci_create_simple(pci_bus, -1, TYPE_ISP12160_SCSI);
-        ia64_vpc_configure_isp(s->isp_dev);
-        scsi_bus_legacy_handle_cmdline(
-            SCSI_BUS(qdev_get_child_bus(DEVICE(s->isp_dev),
-                                        "isp12160-scsi.0")));
+    if (s->isp_enabled && s->lsi_enabled) {
+        PCIBus *park_bus = pci_bus;
+        int park_devfn = -1;
+
+        if (!ia64_vpc_chipset_is_zx1(s)) {
+            park_bus = s->expander_bus[IA64_460GX_ROOT_WXB1];
+            park_devfn = PCI_DEVFN(IA64_460GX_WXB1_SCSI_SLOT, 0);
+        }
+        if (!ia64_vpc_init_lsi(s, park_bus, park_devfn, errp)) {
+            return false;
+        }
     }
 #endif
 
@@ -5187,38 +6238,64 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      */
 #ifdef CONFIG_IA64_VPC_AUDIO
     if (s->audio_enabled) {
-        s->audio_dev = pci_create_simple(pci_bus, -1, TYPE_CS4281);
+        if (!ia64_vpc_chipset_is_zx1(s)) {
+            pci_bus_clear_slot_reserved_mask(pci_bus,
+                                             1U << IA64_460GX_AUDIO_SLOT);
+        }
+        s->audio_dev = pci_create_simple(
+            pci_bus,
+            ia64_vpc_chipset_is_zx1(s) ? -1 :
+                PCI_DEVFN(IA64_460GX_AUDIO_SLOT, 0),
+            TYPE_CS4281);
         ia64_vpc_configure_audio(s->audio_dev);
     }
 #endif
     pci_bus_clear_slot_reserved_mask(pci_bus, (1U << 0) | (1U << 1));
 
     /*
-     * With ide=on, populate the reserved slot 0 with a dual-channel CMD646
-     * PCI IDE controller.  Slot 0 is the platform-anticipated home for IDE:
-     * the firmware's fixed PCI-I/O table and the DSDT _PRT both describe an
-     * IDE function there, and it keeps every other device's BDF stable.  The
-     * firmware assigns the controller's I/O BARs on demand, exactly as for a
-     * hand-attached -device cmd646-ide.  secondary=1 enables both channels;
-     * pci_ide_create_devs() auto-binds any if=ide media across them.
+     * The Programmable Interrupt Device's face in configuration space.  Its
+     * function -- the SAPIC message block every interrupt in the machine is
+     * delivered through -- is the IOSAPIC created above; this is the same
+     * chip seen by a guest enumerating the compatibility bus, which is where
+     * a 460GX platform carries it (SSDM 1.7.2).  It takes slot 0, which the
+     * CMD646 vacated when storage moved onto the south bridge.
      */
+    if (ia64_vpc_has_south_bridge(s)) {
+        if (!pci_realize_and_unref(pci_new(PCI_DEVFN(IA64_460GX_PID_SLOT, 0),
+                                           TYPE_IA64_460GX_PID),
+                                   pci_bus, errp)) {
+            return false;
+        }
+    }
+
 #ifdef CONFIG_IA64_VPC_STORAGE
     /*
-     * realfw mode always instantiates the controller: the SDV firmware probes
-     * a legacy IDE during POST regardless of the ide=on switch, and reaches it
-     * through the fixed legacy ports aliased below rather than the PCI BARs.
+     * The i2000's IDE controller is function 1 of the south bridge, so it is
+     * part of the board and not switchable: the ide= option has no effect
+     * there, and any if=ide media binds across its two channels.  Both
+     * channels are in compatibility mode and decode the fixed legacy ports,
+     * so only the bus-master BAR is placed.
+     *
+     * On zx1, which has no such bridge, ide=on populates the reserved slot 0
+     * with a dual-channel CMD646.  Slot 0 is the platform-anticipated home
+     * for IDE there: the firmware's fixed PCI-I/O table and the DSDT _PRT
+     * both describe an IDE function at that address, and it keeps every
+     * other device's BDF stable.  The firmware assigns its I/O BARs on
+     * demand, exactly as for a hand-attached -device cmd646-ide.
      */
-    if (s->ide_enabled || s->realfw_path != NULL) {
+    if (s->ifb != NULL) {
+        s->ide_dev = intel_82468gx_ifb_function(s->ifb,
+                                                IA64_460GX_IFB_IDE_FUNCTION);
+        ia64_vpc_configure_ifb_ide(s->ide_dev);
+        pci_ide_create_devs(s->ide_dev);
+    } else if (s->ide_enabled) {
         s->ide_dev = pci_new(PCI_DEVFN(0, 0), "cmd646-ide");
         qdev_prop_set_uint32(DEVICE(s->ide_dev), "secondary", 1);
         if (!pci_realize_and_unref(s->ide_dev, pci_bus, errp)) {
             return false;
         }
-        ia64_vpc_configure_pci_irq(s->ide_dev);
+        ia64_vpc_configure_pci_irq(s, s->ide_dev);
         pci_ide_create_devs(s->ide_dev);
-        if (s->realfw_path != NULL) {
-            ia64_vpc_map_realfw_legacy_ide(s, pci_io);
-        }
     }
 #endif
 
@@ -5268,13 +6345,19 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     /*
      * Default the SATA controller off: Windows XP/2003 IA-64 ship no inbox
      * AHCI driver and otherwise see an unidentified PCI device, so the guest
-     * that most wants storage is better served booting off the LSI SCSI HBA.
+     * that most wants storage is better served booting off the SCSI HBA.
      * Re-enable with ahci=on for SATA-aware guests.  IDE (cmd646) is likewise
      * opt-in via ide=on.
+     *
+     * The SCSI HBA is the QLogic ISP12160, the adapter the i2000 carries and
+     * the one both XP and Server 2003 have an in-box driver for.  The LSI
+     * that used to hold that seat is opt-in via lsi=on, for images installed
+     * against it.
      */
     s->ahci_enabled = false;
     s->audio_enabled = false;
-    s->isp_enabled = false;
+    s->isp_enabled = true;
+    s->lsi_enabled = false;
     s->ide_enabled = false;
     s->firmware_ide_dma = true;
 #endif
@@ -5381,7 +6464,15 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_get_isp,
                                    ia64_vpc_set_isp);
     object_class_property_set_description(oc, "isp",
-        "Add the QLogic ISP12160 SCSI controller (default off)");
+        "Set on/off to enable/disable the QLogic ISP12160 SCSI controller "
+        "(default on; it holds the platform's SCSI seat)");
+    object_class_property_add_bool(oc, "lsi",
+                                   ia64_vpc_get_lsi,
+                                   ia64_vpc_set_lsi);
+    object_class_property_set_description(oc, "lsi",
+        "Add the LSI 53c895a SCSI controller (default off; it takes the "
+        "SCSI seat when isp=off, and parks on the second expander bus "
+        "otherwise)");
     object_class_property_add_bool(oc, "audio",
                                    ia64_vpc_get_audio,
                                    ia64_vpc_set_audio);

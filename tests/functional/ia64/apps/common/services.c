@@ -1679,9 +1679,10 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
     UINT32 device_id = 0;
 
     /*
-     * Read the always-present LSI53C895A boot HBA at device 4 (0x1000:0x0012).
-     * The AHCI controller at device 1 is opt-in (ahci=off by default), so it
-     * must not be assumed present here.
+     * Read the always-present boot HBA at device 4, which on this machine is
+     * the QLogic ISP12160 (0x1077:0x1216).  The AHCI controller at device 1
+     * is opt-in (ahci=off by default), so it must not be assumed present
+     * here.
      */
     return SystemTable->BootServices->LocateProtocol(
                pci_root_guid, NULL, (VOID **)&root) == EFI_SUCCESS &&
@@ -1689,7 +1690,7 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
            root->SegmentNumber == 0 &&
            root->Pci.Read(root, EfiPciWidthUint32, 4ULL << 16, 1,
                           &device_id) == EFI_SUCCESS &&
-           device_id == 0x00121000U;
+           device_id == 0x12161077U;
 }
 
 static BOOLEAN test_pci_root_resources(EFI_SYSTEM_TABLE *SystemTable)
@@ -1768,7 +1769,7 @@ static BOOLEAN test_pci_io_protocol(EFI_SYSTEM_TABLE *SystemTable)
         expected = 0x70208086U;
         break;
     case 4:
-        expected = 0x00121000U;
+        expected = 0x12161077U;
         break;
     case 5:
         expected = 0x50461002U;
