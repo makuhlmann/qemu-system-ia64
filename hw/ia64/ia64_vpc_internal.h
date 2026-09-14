@@ -211,7 +211,6 @@ struct IA64VpcMachineState {
     MemoryRegion *vga_legacy_alias;
     MemoryRegion *lsapic_mmio;
     MemoryRegion firmware_space;
-    MemoryRegion watchdog_mmio;
     MemoryRegion acpi_pm;
     MemoryRegion acpi_reset;
     SerialMM *debug_uart;
@@ -232,9 +231,6 @@ struct IA64VpcMachineState {
 #endif
 
     Object *pci_fixup_reset;
-    QEMUTimer *watchdog_timer;
-    uint64_t watchdog_timeout;
-    uint64_t watchdog_code;
     ACPIREGS acpi_regs;
     qemu_irq acpi_sci_irq;
     qemu_irq isa_irqs[ISA_NUM_IRQS];

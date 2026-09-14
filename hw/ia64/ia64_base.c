@@ -79,7 +79,6 @@
 #include "system/runstate.h"
 #include "system/system.h"
 #include "system/reset.h"
-#include "system/watchdog.h"
 #include "target/ia64/cpu-qom.h"
 #include "target/ia64/cpu.h"
 
@@ -1561,108 +1560,6 @@ static void ia64_vpc_init_int10(IA64VpcMachineState *s,
 }
 #endif
 
-static void ia64_vpc_watchdog_expired(void *opaque)
-{
-    IA64VpcMachineState *s = opaque;
-
-    warn_report("IA-64 firmware watchdog expired (code 0x%" PRIx64 ")",
-                s->watchdog_code);
-    s->watchdog_timeout = 0;
-    watchdog_perform_action();
-}
-
-static uint64_t ia64_vpc_watchdog_read(void *opaque, hwaddr addr,
-                                       unsigned size)
-{
-    IA64VpcMachineState *s = opaque;
-
-    (void)size;
-
-    switch (addr) {
-    case IA64_WATCHDOG_TIMEOUT_OFFSET:
-        return s->watchdog_timeout;
-    case IA64_WATCHDOG_CODE_OFFSET:
-        return s->watchdog_code;
-    default:
-        return 0;
-    }
-}
-
-static void ia64_vpc_watchdog_write(void *opaque, hwaddr addr,
-                                    uint64_t value, unsigned size)
-{
-    IA64VpcMachineState *s = opaque;
-    int64_t now;
-    int64_t delta;
-
-    if (size != sizeof(uint64_t)) {
-        return;
-    }
-
-    switch (addr) {
-    case IA64_WATCHDOG_CODE_OFFSET:
-        s->watchdog_code = value;
-        break;
-    case IA64_WATCHDOG_TIMEOUT_OFFSET:
-        s->watchdog_timeout = value;
-        timer_del(s->watchdog_timer);
-        if (value == 0) {
-            break;
-        }
-        now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        if (value > (uint64_t)(INT64_MAX - now) / NANOSECONDS_PER_SECOND) {
-            delta = INT64_MAX - now;
-        } else {
-            delta = value * NANOSECONDS_PER_SECOND;
-        }
-        timer_mod(s->watchdog_timer, now + delta);
-        break;
-    default:
-        break;
-    }
-}
-
-static const MemoryRegionOps ia64_vpc_watchdog_ops = {
-    .read = ia64_vpc_watchdog_read,
-    .write = ia64_vpc_watchdog_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .valid = {
-        .min_access_size = 8,
-        .max_access_size = 8,
-        .unaligned = false,
-    },
-    .impl = {
-        .min_access_size = 8,
-        .max_access_size = 8,
-        .unaligned = false,
-    },
-};
-
-static void ia64_vpc_watchdog_reset(void *opaque)
-{
-    IA64VpcMachineState *s = opaque;
-
-    timer_del(s->watchdog_timer);
-    s->watchdog_timeout = 0;
-    s->watchdog_code = 0;
-}
-
-static void ia64_vpc_init_watchdog(IA64VpcMachineState *s)
-{
-    s->watchdog_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
-                                     ia64_vpc_watchdog_expired, s);
-    memory_region_init_io(&s->watchdog_mmio, OBJECT(s),
-                          &ia64_vpc_watchdog_ops, s,
-                          "ia64-vpc.firmware-watchdog",
-                          IA64_WATCHDOG_SIZE);
-    memory_region_add_subregion_overlap(get_system_memory(),
-                                        IA64_WATCHDOG_BASE,
-                                        &s->watchdog_mmio, 2);
-    qemu_register_reset(ia64_vpc_watchdog_reset, s);
-}
-
-
-
 static char *ia64_vpc_get_realfw_vga_rom(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -2313,9 +2210,6 @@ static const VMStateDescription vmstate_ia64_vpc = {
     .minimum_version_id = 1,
     .post_load = ia64_vpc_post_load,
     .fields = (const VMStateField[]) {
-        VMSTATE_UINT64(watchdog_timeout, IA64VpcMachineState),
-        VMSTATE_UINT64(watchdog_code, IA64VpcMachineState),
-        VMSTATE_TIMER_PTR(watchdog_timer, IA64VpcMachineState),
 
         VMSTATE_UINT16(acpi_regs.pm1.evt.sts, IA64VpcMachineState),
         VMSTATE_UINT16(acpi_regs.pm1.evt.en, IA64VpcMachineState),
@@ -3989,7 +3883,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (!ia64_vpc_map_firmware_address_space(s, errp)) {
         return false;
     }
-    ia64_vpc_init_watchdog(s);
     if (!ia64_vpc_read_firmware(s, machine, errp)) {
         return false;
     }

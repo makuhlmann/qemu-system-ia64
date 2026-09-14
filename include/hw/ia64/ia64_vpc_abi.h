@@ -374,15 +374,6 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_FW_ADDRESS_SPACE_END \
     (IA64_FW_ADDRESS_SPACE_BASE + IA64_FW_ADDRESS_SPACE_SIZE)
 /*
- * Invented MMIO devices inside the firmware window (deviation D8 in
- * plans/firmware-rework-target-model.md; to be relocated).
- */
-/* QEMU-internal EFI watchdog assist; undescribed, guests never see it. */
-#define IA64_WATCHDOG_BASE            IA64_U64(0x00000000ff0fe000)
-#define IA64_WATCHDOG_SIZE            IA64_U64(0x0000000000001000)
-#define IA64_WATCHDOG_TIMEOUT_OFFSET  0x00U
-#define IA64_WATCHDOG_CODE_OFFSET     0x08U
-/*
  * The flash's NVRAM sector, the EFI variable store.  The real i2000/SDV
  * flash keeps its NVRAM/variable scratch block at 0xFFF90000 (FIT type
  * 0x1E - plans/sdv-i2000-firmware-reference.md sec 11); the project

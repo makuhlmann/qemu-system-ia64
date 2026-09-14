@@ -445,6 +445,7 @@ BOOLEAN ranges_overlap(UINT64 a_base, UINT64 a_size,
                               UINT64 b_base, UINT64 b_size);
 static BOOLEAN efi_pages_to_size(UINTN Pages, UINT64 *Size);
 static void fw_poll_timers(void);
+static void fw_watchdog_poll(void);
 UINT64 fw_read_itc(void);
 static void nvram_commit(void);
 
@@ -3321,6 +3322,7 @@ static BOOLEAN fw_event_timer_expired_at(FW_EVENT_RECORD *rec, UINT64 Now)
 
 static BOOLEAN fw_event_timer_expired(FW_EVENT_RECORD *rec)
 {
+    fw_watchdog_poll();
     if (rec == NULL || !rec->timer_active) {
         return 0;
     }
@@ -3331,6 +3333,7 @@ static void fw_poll_timers(void)
 {
     UINTN i;
 
+    fw_watchdog_poll();
     for (i = 0; i < FW_EVENT_MAX; i++) {
         FW_EVENT_RECORD *rec = &mEventRecords[i];
 
@@ -3760,15 +3763,33 @@ EFI_STATUS bs_get_next_monotonic_count(UINT64 *Count)
     return EFI_SUCCESS;
 }
 
+/*
+ * The EFI watchdog (EFI 1.10 5.4.1): an ITC deadline the firmware checks
+ * whenever it polls its timers -- in Stall, WaitForEvent and CheckEvent,
+ * which is where a loader spends its time waiting.  On expiry it resets
+ * the platform the way ResetSystem does.  A loader that hangs without
+ * calling back into boot services is not caught, which a timer interrupt
+ * would do; this firmware runs boot services with interrupts off.
+ */
+static UINT64 mWatchdogDeadline;        /* ITC value; 0 = disarmed */
+static UINT64 mWatchdogCode;
+static UINTN  mWatchdogTimeout;
+
+static void fw_watchdog_poll(void)
+{
+    if (mWatchdogDeadline == 0 || fw_read_itc() < mWatchdogDeadline) {
+        return;
+    }
+    mWatchdogDeadline = 0;
+    uart_puts("\r\nEFI watchdog expired (code 0x");
+    uart_put_hex64(mWatchdogCode);
+    uart_puts("): resetting the platform\r\n");
+    rs_reset_system(EFI_RESET_COLD, EFI_TIMEOUT, 0, NULL);
+}
+
 EFI_STATUS bs_set_watchdog_timer(UINTN Timeout, UINT64 WatchdogCode,
                                  UINTN DataSize, CHAR16 *WatchdogData)
 {
-    volatile UINT64 *timeout_register =
-        (volatile UINT64 *)(UINTN)(FW_WATCHDOG_BASE +
-                                   FW_WATCHDOG_TIMEOUT_OFFSET);
-    volatile UINT64 *code_register =
-        (volatile UINT64 *)(UINTN)(FW_WATCHDOG_BASE +
-                                   FW_WATCHDOG_CODE_OFFSET);
     UINTN i;
 
     if (WatchdogCode != 0 && WatchdogCode <= 0xffffU) {
@@ -3793,8 +3814,11 @@ EFI_STATUS bs_set_watchdog_timer(UINTN Timeout, UINT64 WatchdogCode,
         return EFI_DEVICE_ERROR;
     }
 
-    *code_register = WatchdogCode;
-    *timeout_register = Timeout;
+    mWatchdogCode = WatchdogCode;
+    mWatchdogTimeout = Timeout;
+    mWatchdogDeadline = Timeout == 0 ? 0 :
+        fw_read_itc() + (UINT64)Timeout * 1000000ULL *
+                        FW_ITC_TICKS_PER_MICROSECOND;
     return EFI_SUCCESS;
 }
 
@@ -7487,9 +7511,9 @@ static BOOLEAN __attribute__((noinline)) uefi_event_services_selftest(void)
     }
 
     if (bs_set_watchdog_timer(300, 0, 0, NULL) != EFI_SUCCESS ||
-        *(volatile UINT64 *)(UINTN)(FW_WATCHDOG_BASE +
-                                    FW_WATCHDOG_TIMEOUT_OFFSET) != 300U ||
+        mWatchdogTimeout != 300U || mWatchdogDeadline == 0 ||
         bs_set_watchdog_timer(0, 0, 0, NULL) != EFI_SUCCESS ||
+        mWatchdogDeadline != 0 ||
         bs_set_watchdog_timer(1, 1, 0, NULL) != EFI_INVALID_PARAMETER ||
         mCurrentTpl != TPL_APPLICATION) {
         ok = 0;
