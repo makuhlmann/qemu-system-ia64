@@ -41,7 +41,7 @@
 #include "hw/isa/smsc_lpc47b27x.h"
 #include "hw/southbridge/intel_82468gx.h"
 #include "hw/ia64/ia64_460gx_identity.h"
-#include "hw/ia64/ia64_460gx.h"
+#include "ia64_vpc_internal.h"
 #include "hw/acpi/acpi.h"
 #ifdef CONFIG_IA64_VPC_STORAGE
 #include "hw/scsi/isp12160.h"
@@ -90,13 +90,6 @@
  * binary (share/), so an unpacked package runs without naming it every time.
  */
 #define IA64_VPC_DEFAULT_FIRMWARE "ia64-firmware.bin"
-/*
- * Low (sub-aperture) DRAM runs contiguously from 0 up to the PCI/MMIO
- * aperture, exactly as the real 460GX keeps a single MMIO gap at the top of
- * the 32-bit space; RAM displaced by that gap is remapped above 4 GiB.  There
- * is no DRAM island between the aperture and the chipset/SAPIC region.
- */
-#define IA64_LOW_RAM_LIMIT IA64_PCI_MMIO_BASE
 /*
  * The firmware address space, RTC/watchdog/NVRAM devices, IVT, IOSAPIC,
  * local SAPIC and ACPI PM block addresses are shared with the firmware via
@@ -305,39 +298,17 @@
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
 #define IA64_PIB_XTP_OFFSET         0x001e0008ULL
 /* Graphics (Rage 128) lands here: slots 0-4 are reserved/built-in, VGA next. */
-#define IA64_VPC_VGA_SLOT           5
 /*
  * The i2000 carries its 82559 Ethernet at 00:05.0, the slot the graphics
  * adapter used to occupy before it moved to the GXB root.  zx1 keeps the
  * adapter where it was.
  */
-#define IA64_VPC_NIC_SLOT           6
-#define IA64_460GX_NIC_SLOT         5
 
 #define IA64_SAPIC_DELIVERY_INT     0
 #define IA64_SAPIC_DELIVERY_NMI     4
 #define IA64_SAPIC_DELIVERY_EXTINT  7
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
-enum {
-    IA64_INT10_REG_AX,
-    IA64_INT10_REG_BX,
-    IA64_INT10_REG_CX,
-    IA64_INT10_REG_DX,
-    IA64_INT10_REG_DI,
-    IA64_INT10_REG_ES,
-    IA64_INT10_REG_EXEC,
-    IA64_INT10_REG_DATA,
-};
-
-typedef struct IA64Int10Registers {
-    uint16_t ax;
-    uint16_t bx;
-    uint16_t cx;
-    uint16_t dx;
-    uint16_t di;
-    uint16_t es;
-} IA64Int10Registers;
 
 typedef struct IA64VbeMode {
     uint16_t number;
@@ -520,130 +491,11 @@ static const uint8_t ia64_int10_rom_init[] = {
 };
 #endif
 
-/*
- * The IA-64 machine is modeled as an abstract base ("ia64-base") carrying all
- * the shared platform (PCI host, IOSAPIC, firmware, devices), with two concrete
- * machine types built on it: "460gx" (Intel SDV / HP i2000, Merced + 460GX) and
- * "zx1" (HP rx2600 / zx2000 / zx6000, Itanium 2 + zx1 SBA).  Each concrete class
- * fixes its default CPU and its chipset personality via ChipsetProfile below;
- * "ia64-vpc" survives as a deprecated alias of zx1.
- */
-#define TYPE_IA64_VPC_MACHINE MACHINE_TYPE_NAME("ia64-base")
-OBJECT_DECLARE_TYPE(IA64VpcMachineState, IA64VpcMachineClass, IA64_VPC_MACHINE)
-
-#define TYPE_IA64_460GX_MACHINE MACHINE_TYPE_NAME("460gx")
-#define TYPE_IA64_ZX1_MACHINE   MACHINE_TYPE_NAME("zx1")
-
-struct IA64VpcMachineClass {
-    MachineClass parent_class;
-    /* The chipset personality this machine type fixes: IA64_FW_CHIPSET_*. */
-    uint64_t chipset_profile;
-};
-
-
-struct IA64VpcMachineState {
-    MachineState parent_obj;
-
-    bool i8042_enabled;
-    bool ahci_enabled;
-    bool audio_enabled;
-    bool isp_enabled;
-    bool lsi_enabled;
-    bool fw_relocate;
-    uint64_t fw_map_quirk_disable;
-    bool ide_enabled;
-    bool firmware_ide_dma;
-    bool agp_enabled;
-    uint64_t firmware_console;
-    uint16_t firmware_boot_timeout;
-    char *nvram_path;
-    char *realfw_path;
-    char *realfw_vga_rom_path;
-    char *realfw_nvram_path;
-    uint64_t realfw_entry;
-    uint64_t realfw_base;
-    PFlashCFI01 *realfw_flash;
-    qemu_irq extint;
-    /* 460gx: the chipset (SAC, CF8/CFC, config store, SPD rows). */
-    IA64460GXState *chipset;
-    PCIBus *host_pci_bus;
-    char *vga_model;
-    bool alat_full;
-
-    PCIDevice *agp_dev;
-    PCIDevice *sba_dev;
-    DeviceState *lba_dev;
-    DeviceState *mercury_host;      /* zx1: the Mercury (LBA) PCI host bridge */
-    /* 460gx: the WXB0, WXB1 and GXB expander roots (buses 1, 2 and 3). */
-    DeviceState *expander_host[IA64_460GX_EXPANDER_ROOTS];
-    PCIBus *expander_bus[IA64_460GX_EXPANDER_ROOTS];
-    PCIBus *mercury_bus;            /* zx1: the Mercury second root bus         */
-    PCIDevice *ahci_dev;
-    PCIDevice *audio_dev;
-    PCIDevice *isp_dev;
-    PCIDevice *ide_dev;
-    PCIDevice *ohci_dev;
-    PCIDevice *uhci_dev;
-    Intel82468GXIFBState *ifb;
-    PCIDevice *lsi_dev;
-    PCIDevice *vga_dev;
-    PCIDevice *nic_devs[MAX_NICS];
-    unsigned int nic_count;
-
-    MemoryRegion ram_aliases[4];
-    unsigned int ram_alias_count;
-    /* Where the low DRAM band ends: the chipset's PCI gap base. */
-    uint64_t low_ram_limit;
-    MemoryRegion *vga_fb_alias;
-    MemoryRegion *vga_mmio_alias;
-    MemoryRegion *vga_legacy_alias;
-    MemoryRegion *lsapic_mmio;
-    MemoryRegion firmware_space;
-    MemoryRegion watchdog_mmio;
-    MemoryRegion nvram_mmio;
-    MemoryRegion acpi_pm;
-    MemoryRegion acpi_reset;
-    MemoryRegion debug_uart_legacy_io;
-    SerialMM *debug_uart;
-    MemoryRegion console_uart_legacy_io;
-    SerialMM *console_uart;
-    DeviceState *pci_host_dev;
-#ifdef CONFIG_IA64_VPC_GRAPHICS
-    MemoryRegion int10_pci_io;
-    IA64Int10Registers int10_request;
-    IA64Int10Registers int10_result;
-    uint32_t int10_input_signature;
-    uint8_t int10_response[512];
-    uint16_t int10_response_length;
-    uint16_t int10_response_offset;
-    uint8_t int10_input_signature_words;
-    uint8_t int10_dpms_state;
-    uint8_t int10_legacy_mode;
-    uint8_t int10_legacy_columns;
-#endif
-
-    Object *pci_fixup_reset;
-    QEMUTimer *watchdog_timer;
-    uint64_t watchdog_timeout;
-    uint64_t watchdog_code;
-    uint8_t nvram_data[IA64_NVRAM_SIZE];
-    size_t firmware_size;
-    char *nvram_resolved_path;
-    bool nvram_write_warning;
-    ACPIREGS acpi_regs;
-    qemu_irq acpi_sci_irq;
-    qemu_irq isa_irqs[ISA_NUM_IRQS];
-    Notifier powerdown_notifier;
-    Notifier done_notifier;
-    bool vmstate_registered;
-};
-
 static uint64_t ia64_vpc_fw_base(IA64VpcMachineState *s, uint64_t ram_size)
 {
     return s->fw_relocate ? IA64_FW_IMAGE_BASE_FOR(ram_size)
                           : IA64_FW_LINK_BASE;
 }
-
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 static const IA64VbeMode *ia64_vbe_find_mode(uint16_t number)
@@ -1715,7 +1567,6 @@ static void ia64_vpc_init_int10(IA64VpcMachineState *s,
 }
 #endif
 
-
 static void ia64_vpc_watchdog_expired(void *opaque)
 {
     IA64VpcMachineState *s = opaque;
@@ -2049,7 +1900,7 @@ static const IA64VpcCompatDefault ia64_vpc_compat_defaults[] = {
     { "mach64-vga", "guest_hwcursor", "on" },
 };
 
-static void ia64_vpc_add_compat_defaults(MachineClass *mc)
+void ia64_vpc_add_compat_defaults(MachineClass *mc)
 {
     size_t i;
 
@@ -2464,14 +2315,6 @@ static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
     s->vga_model = g_strdup(value);
 }
 
-/* The chipset personality is fixed by the concrete machine type's class. */
-static bool ia64_vpc_chipset_is_zx1(const IA64VpcMachineState *s)
-{
-    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
-
-    return imc->chipset_profile == IA64_FW_CHIPSET_ZX1;
-}
-
 static char *ia64_vpc_get_alat(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
@@ -2495,28 +2338,6 @@ static void ia64_vpc_set_alat(Object *obj, const char *value, Error **errp)
     }
 
     error_setg(errp, "alat must be 'zero' or 'full'");
-}
-
-/*
- * The vendor firmware's FADT: PM1a_EVT_BLK A00h, PM1a_CNT_BLK A04h, PM_TMR
- * A08h, GPE0 A0Ch, SMI_CMD B2h, ACPI_ENABLE A0h, ACPI_DISABLE A1h; its MADT
- * routes the SCI (ISA IRQ 9) to GSI 49.
- */
-#define IA64_460GX_IFB_ACPI_IO_BASE 0x0a00
-#define IA64_I2000_SCI_GSI          49
-#define IA64_460GX_ACPI_ENABLE_CMD  0xa0
-#define IA64_460GX_ACPI_DISABLE_CMD 0xa1
-
-static void ia64_vpc_realfw_apmc(void *opaque, int n, int level)
-{
-    IA64VpcMachineState *s = opaque;
-
-    (void)n;
-    if (level == IA64_460GX_ACPI_ENABLE_CMD) {
-        intel_82468gx_ifb_acpi_sci_enable(s->ifb, true);
-    } else if (level == IA64_460GX_ACPI_DISABLE_CMD) {
-        intel_82468gx_ifb_acpi_sci_enable(s->ifb, false);
-    }
 }
 
 static void ia64_vpc_acpi_update_sci(ACPIREGS *ar)
@@ -2818,7 +2639,7 @@ static bool ia64_vpc_map_firmware_address_space(IA64VpcMachineState *s,
     return true;
 }
 
-static uint64_t ia64_vpc_map_ram_alias(IA64VpcMachineState *s,
+uint64_t ia64_vpc_map_ram_alias(IA64VpcMachineState *s,
                                        hwaddr guest_base,
                                        uint64_t backing_offset,
                                        uint64_t remaining,
@@ -2844,6 +2665,7 @@ static uint64_t ia64_vpc_map_ram_alias(IA64VpcMachineState *s,
 static void ia64_vpc_map_ram(IA64VpcMachineState *s)
 {
     MachineState *machine = MACHINE(s);
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
     uint64_t remaining = machine->ram_size;
     uint64_t offset = 0;
     uint64_t size;
@@ -2883,19 +2705,11 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
     if (s->low_ram_limit == 0) {
         s->low_ram_limit = IA64_LOW_RAM_LIMIT;
     }
-    if (ia64_vpc_chipset_is_zx1(s) && remaining > IA64_LOW_RAM_LIMIT) {
-        size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
-                                      IA64_SBA_IOVA_BASE,
-                                      "ia64-vpc.low-ram-below-iova");
+    if (imc->map_low_ram != NULL) {
+        size = imc->map_low_ram(s, offset, remaining);
         offset += size;
         remaining -= size;
-        size = ia64_vpc_map_ram_alias(s, IA64_SBA_IOVA_END, offset, remaining,
-                                      IA64_LOW_RAM_LIMIT - IA64_SBA_IOVA_END,
-                                      "ia64-vpc.low-ram-above-iova");
-        offset += size;
-        remaining -= size;
-    } else {
-        size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
+    } else {        size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
                                       s->low_ram_limit,
                                       "ia64-vpc.low-ram");
         offset += size;
@@ -2919,7 +2733,7 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
  * backing store is untouched, so the bytes stay where the guest wrote them
  * in the DRAM's own address order.
  */
-static void ia64_vpc_set_low_ram_limit(IA64VpcMachineState *s, uint64_t limit)
+void ia64_vpc_set_low_ram_limit(IA64VpcMachineState *s, uint64_t limit)
 {
     unsigned i;
 
@@ -2935,12 +2749,6 @@ static void ia64_vpc_set_low_ram_limit(IA64VpcMachineState *s, uint64_t limit)
     s->low_ram_limit = limit;
     ia64_vpc_map_ram(s);
     memory_region_transaction_commit();
-}
-
-/* The lowest programmed expander-port PCIS moved the top of the low DRAM band. */
-static void ia64_vpc_460gx_window_moved(void *opaque, uint64_t base)
-{
-    ia64_vpc_set_low_ram_limit(opaque, MIN(base, IA64_LOW_RAM_LIMIT));
 }
 
 static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
@@ -2996,51 +2804,6 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
 }
 
 /*
- * How the i2000 wires PCI INTx into the 460GX Programmable Interrupt Device,
- * per slot, INTA..INTD.  This is the board's own description of itself: the
- * _PRT packages of the vendor firmware's DSDT (W460GXBS, PLAT()=1 branch),
- * which Windows programs the PID's 64 inputs from.  A slot a root's table
- * does not list has no interrupt on the real board; here it swizzles into
- * the spare inputs at IA64_460GX_INTX_FALLBACK_GSI so an add-in card in an
- * unlisted slot still works.  Keep in lockstep with the _PRT packages in
- * roms/ia64-firmware/dsdt-pci-root.asl.
- */
-static const IA64IntxRoute ia64_i2000_pci0_intx[] = {
-    { 0x01, { 35, 34, 33, 32 } },
-    { 0x02, { 39, 38, 37, 36 } },   /* OHCI */
-    { 0x03, { 46, 46, 47, 47 } },   /* 82468GX: SMBus INTB, USB INTD */
-    { 0x04, { 45, 45, 45, 45 } },
-    { 0x05, { 44, 44, 44, 44 } },   /* 82557 */
-};
-static const IA64IntxRoute ia64_i2000_wxb0_intx[] = {
-    { 0x00, { 19, 18, 17, 16 } },   /* SCSI */
-    { 0x01, { 23, 22, 21, 20 } },
-    { 0x02, { 43, 42, 41, 40 } },
-    { 0x0f, { 56, 56, 56, 56 } },   /* hot-plug controller */
-};
-static const IA64IntxRoute ia64_i2000_wxb1_intx[] = {
-    { 0x00, { 27, 26, 25, 24 } },
-    { 0x01, { 31, 30, 29, 28 } },
-    { 0x0f, { 57, 57, 57, 57 } },
-};
-static const IA64IntxRoute ia64_i2000_gxb_intx[] = {
-    { 0x00, { 55, 54, 55, 54 } },   /* AGP graphics */
-};
-#define IA64_460GX_INTX_FALLBACK_GSI 60
-
-static const struct {
-    const IA64IntxRoute *routes;
-    unsigned int nroutes;
-} ia64_i2000_root_intx[IA64_460GX_EXPANDER_ROOTS] = {
-    [IA64_460GX_ROOT_WXB0] = { ia64_i2000_wxb0_intx,
-                               ARRAY_SIZE(ia64_i2000_wxb0_intx) },
-    [IA64_460GX_ROOT_WXB1] = { ia64_i2000_wxb1_intx,
-                               ARRAY_SIZE(ia64_i2000_wxb1_intx) },
-    [IA64_460GX_ROOT_GXB]  = { ia64_i2000_gxb_intx,
-                               ARRAY_SIZE(ia64_i2000_gxb_intx) },
-};
-
-/*
  * Program a device's interrupt line from the interrupt block its root owns.
  * Devices on bus 0, and everything on zx1 (where both roots wire-OR into one
  * block of four), use IA64_PCI_INTX_GSI_BASE.  Each 460GX expander root has
@@ -3077,10 +2840,7 @@ static void ia64_vpc_configure_pci_irq_on_root(PCIDevice *pci_dev,
 static unsigned int ia64_vpc_root_gsi_base(const IA64VpcMachineState *s,
                                            uint8_t bus)
 {
-    if (ia64_vpc_chipset_is_zx1(s)) {
-        return IA64_PCI_INTX_GSI_BASE;
-    }
-    return IA64_460GX_INTX_FALLBACK_GSI;
+    return IA64_VPC_MACHINE_GET_CLASS(s)->root_gsi_base(s, bus);
 }
 
 static void ia64_vpc_configure_pci_irq(IA64VpcMachineState *s,
@@ -3164,12 +2924,11 @@ static void ia64_vpc_configure_uhci(PCIDevice *pci_dev)
 
 /*
  * Whether the machine carries the modelled 82468GX south bridge, and with it
- * an IDE controller that is part of the board rather than an option.  zx1 is
- * a different platform.
+ * an IDE controller that is part of the board rather than an option.
  */
 static bool ia64_vpc_has_south_bridge(const IA64VpcMachineState *s)
 {
-    return !ia64_vpc_chipset_is_zx1(s);
+    return IA64_VPC_MACHINE_GET_CLASS(s)->has_south_bridge;
 }
 
 static void ia64_vpc_configure_ifb_ide(PCIDevice *pci_dev)
@@ -3607,6 +3366,13 @@ static void ia64_vpc_init_isp(IA64VpcMachineState *s, PCIBus *bus, int devfn)
 }
 #endif
 
+/* Where the board seats a built-in device: *bus and *devfn preset to defaults. */
+static void ia64_vpc_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
+                          PCIBus **bus, int *devfn)
+{
+    IA64_VPC_MACHINE_GET_CLASS(s)->seat(s, seat, bus, devfn);
+}
+
 static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
 {
     ia64_vpc_configure_ahci(s->ahci_dev);
@@ -3628,8 +3394,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_pci_irq(s, s->audio_dev);
     ia64_vpc_configure_pci_irq_on_root(
         s->isp_dev,
-        ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
-                               IA64_460GX_WXB0_BUS));
+        ia64_vpc_root_gsi_base(s, IA64_460GX_WXB0_BUS));
     ia64_vpc_configure_pci_irq(s, s->ide_dev);
     ia64_vpc_configure_pci_irq(s, s->ohci_dev);
     ia64_vpc_configure_pci_irq(s, s->uhci_dev);
@@ -3639,13 +3404,11 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
     ia64_vpc_configure_pci_irq_on_root(
         s->lsi_dev,
-        ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
-                               s->isp_enabled ? IA64_460GX_WXB1_BUS :
-                                                IA64_460GX_WXB0_BUS));
+        ia64_vpc_root_gsi_base(s, s->isp_enabled ? IA64_460GX_WXB1_BUS :
+                                                   IA64_460GX_WXB0_BUS));
     ia64_vpc_configure_pci_irq_on_root(
         s->vga_dev,
-        ia64_vpc_root_gsi_base(s, ia64_vpc_chipset_is_zx1(s) ? 0 :
-                               IA64_460GX_GXB_BUS));
+        ia64_vpc_root_gsi_base(s, IA64_460GX_GXB_BUS));
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_pci_irq(s, s->nic_devs[i]);
     }
@@ -3685,8 +3448,13 @@ static void ia64_vpc_init_network(IA64VpcMachineState *s, PCIBus *pci_bus)
     memset(s->nic_devs, 0, sizeof(s->nic_devs));
 
     /* Keep the default adapter at a stable BDF after the built-in devices. */
-    first_slot = ia64_vpc_chipset_is_zx1(s) ? IA64_VPC_NIC_SLOT :
-                                              IA64_460GX_NIC_SLOT;
+    {
+        PCIBus *bus = pci_bus;
+        int devfn = -1;
+
+        ia64_vpc_seat(s, IA64_VPC_SEAT_NIC, &bus, &devfn);
+        first_slot = PCI_SLOT(devfn);
+    }
     slot_arg = g_strdup_printf("%u", first_slot);
     pci_init_nic_in_slot(pci_bus, mc->default_nic, NULL, slot_arg);
     pci_init_nic_devices(pci_bus, mc->default_nic);
@@ -4043,6 +3811,8 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
                                             IA64VpcMachineState *s,
                                             Error **errp)
 {
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
+
     if (machine->ram_size < IA64_FW_LOW_RAM_MIN) {
         g_autofree char *size = size_to_str(IA64_FW_LOW_RAM_MIN);
 
@@ -4057,29 +3827,8 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
         error_setg(errp, "realfw= and -bios are mutually exclusive");
         return false;
     }
-    if (s->realfw_path != NULL && !ia64_vpc_chipset_is_zx1(s) &&
-        machine->smp.cpus > 2) {
-        error_setg(errp, "realfw supports at most 2 CPUs: the i2000/SDV "
-                   "firmware declares two processor sockets");
+    if (imc->validate != NULL && !imc->validate(s, errp)) {
         return false;
-    }
-    if (s->realfw_path != NULL && !ia64_vpc_chipset_is_zx1(s)) {
-        /*
-         * The vendor firmware sizes memory from the DIMMs alone (SSDM
-         * 5.5.1), so RAM must be a population of Memory Card A: a multiple
-         * of the 64 MB row increment, at most eight rows of 4 GB.
-         */
-        uint64_t max = (uint64_t)IA64_460GX_MEM_ROWS * 4 * GiB;
-
-        if (machine->ram_size % (IA64_460GX_MEM_ROW_MIN_MB * MiB) != 0 ||
-            machine->ram_size > max) {
-            g_autofree char *inc = size_to_str(IA64_460GX_MEM_ROW_MIN_MB * MiB);
-            g_autofree char *top = size_to_str(max);
-
-            error_setg(errp, "Invalid RAM size for realfw: the 460GX memory "
-                       "card takes multiples of %s up to %s", inc, top);
-            return false;
-        }
     }
     return true;
 }
@@ -4212,25 +3961,6 @@ static bool ia64_vpc_relocate_firmware(uint8_t *image, int64_t size,
  * bundle sits at a recognized PAL entry address (env->pal.pal_proc_copy_addr,
  * seeded from IA64BootInfo.raw_pal_proc in realfw mode).
  */
-
-
-
-/*
- * The master 8259's INTR line drives the boot processor's LINT0 pin.  What
- * the processor makes of it is up to its Local Redirection Register 0: the
- * SDV firmware programs a level-triggered ExtINT there for its legacy tick
- * (IVR reads 0 and it fetches the 8-bit vector through the INTA byte), and
- * an operating system masks the pin before it enables interrupts.  The PIC
- * never programs the IOSAPIC; the pair's INTR does not pass through it.
- */
-static void ia64_vpc_extint(void *opaque, int n, int level)
-{
-    (void)opaque;
-    (void)n;
-    if (first_cpu != NULL) {
-        ia64_cpu_set_lint(first_cpu, 0, level);
-    }
-}
 
 static const uint8_t ia64_realfw_pal_stub[32] = {
     0x0a, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
@@ -4482,6 +4212,7 @@ static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
 static bool ia64_vpc_build(MachineState *machine, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(machine);
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
     IA64CPU *cpu;
     DeviceState *pci_host;
     DeviceState *iosapic;
@@ -4534,16 +4265,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     ia64_vpc_map_lsapic(s);
 
     iosapic = qdev_new(TYPE_IA64_IOSAPIC);
-    if (!ia64_vpc_chipset_is_zx1(s)) {
-        /*
-         * On the i2000 the interrupt controller is the 460GX Programmable
-         * Interrupt Device: 64 inputs reporting IOSAPIC version 2.1.  Its
-         * width is what lets each PCI root own its own block of four INTx
-         * lines (16, 20, 24, 28) rather than sharing one block.
-         */
-        qdev_prop_set_uint32(iosapic, "num-pins", IA64_IOSAPIC_460GX_PINS);
-        qdev_prop_set_uint32(iosapic, "version",
-                             IA64_IOSAPIC_460GX_VERSION);
+    if (imc->iosapic_pins != 0) {
+        qdev_prop_set_uint32(iosapic, "num-pins", imc->iosapic_pins);
+        qdev_prop_set_uint32(iosapic, "version", imc->iosapic_version);
     }
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(iosapic), errp)) {
         return false;
@@ -4577,9 +4301,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 
     pci_host = qdev_new(TYPE_IA64_PCI_HOST_BRIDGE);
     s->pci_host_dev = pci_host;
-    if (!ia64_vpc_chipset_is_zx1(s)) {
-        ia64_pci_host_set_intx_routes(pci_host, ia64_i2000_pci0_intx,
-                                      ARRAY_SIZE(ia64_i2000_pci0_intx),
+    if (imc->pci0_intx != NULL) {
+        ia64_pci_host_set_intx_routes(pci_host, imc->pci0_intx,
+                                      imc->pci0_nintx,
                                       IA64_460GX_INTX_FALLBACK_GSI);
     }
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(pci_host), errp)) {
@@ -4588,83 +4312,15 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     pci_bus = PCI_BUS(qdev_get_child_bus(pci_host, "pci"));
 
     /*
-     * The core chipset's DMA-translation device, created before any other PCI
-     * device so its pci_setup_iommu() installs the bus-master DMA routing before
-     * any master's address space is resolved.  Exactly one owner per bus.
-     *
-     * chipset=zx1: the HP zx1 SBA IOC IOMMU -- one shared translated address
-     * space for every master, walking the guest-programmed in-DRAM IOPDIR, so a
-     * 32-bit master (the Rage 128) reaches RAM above 4 GiB by address
-     * translation.  No 460GX GXB is created; the Rage 128 falls back to its own
-     * PCI-GART, now translated >4 GiB by the SBA.  The zx1 LBA (created below)
-     * additionally lets Linux hp-agp negotiate AGP mode reusing the SBA IOPDIR
-     * as the GART.  The SBA is parked at a fixed high slot like the GXB.
-     *
-     * chipset=460gx (default): the 460GX GXB AGP host bridge + GART, which
-     * translates only the AGP graphics master (the Rage 128 at the fixed
-     * graphics slot below); every other master identity-passes to memory.
+     * The board's core chipset: its DMA-translation device is created before
+     * any other PCI device so its pci_setup_iommu() installs the bus-master
+     * DMA routing before any master's address space is resolved, and its
+     * further PCI roots come with it.
      */
-    if (ia64_vpc_chipset_is_zx1(s)) {
-        s->sba_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_SBA);
-        object_property_set_uint(OBJECT(s->sba_dev), "csr-base",
-                                 IA64_SBA_CSR_BASE, &error_abort);
-        if (!pci_realize_and_unref(s->sba_dev, pci_bus, errp)) {
-            return false;
-        }
-        /*
-         * The zx1 LBA AGP capability block, published to guests as ACPI
-         * HWP0003 nested inside the SBA (HWP0001).  Linux hp-agp negotiates AGP
-         * mode against it and reuses the SBA IOPDIR as the GART; it is faithful
-         * real-zx1 hardware, so it is present regardless of the agp option.
-         * The AGP capability it advertises only becomes usable once the
-         * graphics master also advertises a PCI AGP capability, which the agp
-         * option gates below.
-         */
-        s->lba_dev = qdev_new(TYPE_IA64_LBA);
-        object_property_set_uint(OBJECT(s->lba_dev), "csr-base",
-                                 IA64_LBA_CSR_BASE, &error_abort);
-        if (!qdev_realize_and_unref(s->lba_dev, NULL, errp)) {
-            return false;
-        }
-        /*
-         * The Mercury (LBA/ioa) PCI host bridge: a second PCI root bus sharing
-         * the primary host bridge's identity-mapped MMIO/I/O windows, which will
-         * carry the AGP graphics adapter -- exactly as real zx1 puts the AGP
-         * master behind Mercury.  The primary host's ECAM config handler
-         * dispatches config cycles for IA64_MERCURY_BUS here, and the SBA extends
-         * its shared DMA translation over this bus too, so a master here reaches
-         * RAM above 4 GiB through the same IOPDIR/GART.  Attach the SBA before any
-         * device is realized on the bus.
-         */
-        s->mercury_host = ia64_mercury_host_create(OBJECT(s),
-                                  ia64_pci_host_mmio(pci_host),
-                                  ia64_pci_host_io(pci_host),
-                                  IA64_MERCURY_BUS, errp);
-        if (s->mercury_host == NULL) {
-            return false;
-        }
-        s->mercury_bus = ia64_mercury_host_bus(s->mercury_host);
-        ia64_pci_host_set_mercury_bus(pci_host, s->mercury_bus);
-        ia64_sba_attach_bus(IA64_SBA(s->sba_dev), s->mercury_bus);
-        /* The Mercury CSR CONFIG_ADDRESS/DATA pair does config on this bus. */
-        ia64_lba_set_mercury_bus(IA64_LBA(s->lba_dev), s->mercury_bus);
-    } else {
-        s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
-        /*
-         * The AGP master is the graphics adapter on the GXB's downstream
-         * root, so the GART translates that bus's device 0.
-         */
-        object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
-                                PCI_DEVFN(IA64_460GX_GXB_VGA_SLOT, 0),
-                                &error_abort);
-        object_property_set_bool(OBJECT(s->agp_dev), "gart-enabled",
-                                s->agp_enabled, &error_abort);
-        if (!pci_realize_and_unref(s->agp_dev, pci_bus, errp)) {
-            return false;
-        }
-
+    if (!imc->build_chipset(s, pci_host, pci_bus, pci_bus->address_space_io,
+                            iosapic, errp)) {
+        return false;
     }
-
     /*
      * Slot 0 is intentionally empty in the default machine.  Reserve it while
      * creating the built-in devices so their historical slot numbers remain
@@ -4674,15 +4330,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     pci_io = pci_bus->address_space_io;
     ia64_vpc_init_acpi_pm(s, iosapic, pci_io);
     s->host_pci_bus = pci_bus;
-    if (!ia64_vpc_chipset_is_zx1(s)) {
-        s->chipset = ia64_460gx_create(OBJECT(s), pci_io, pci_host,
-                                       machine->ram_size,
-                                       ia64_vpc_460gx_window_moved, s, errp);
-        if (s->chipset == NULL) {
-            return false;
-        }
-        ia64_460gx_attach_root(s->chipset, -1, pci_bus);
-    }
 
     /*
      * Early IA-64 kernel debuggers predate the ACPI DBGP table and drive a
@@ -4700,7 +4347,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
                                  IA64_LEGACY_COM1_IO_SIZE);
         memory_region_add_subregion(pci_io, IA64_LEGACY_COM1_IO_BASE,
                                     &s->debug_uart_legacy_io);
-    } else if (!ia64_vpc_chipset_is_zx1(s) && s->console_uart != NULL) {
+    } else if (imc->legacy_com1_console && s->console_uart != NULL) {
         /*
          * Otherwise the i2000's COM1 is the console: the Super I/O's UART1
          * at 3F8h on IRQ 4, which is what the vendor DSDT reports for it
@@ -4715,7 +4362,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         memory_region_add_subregion(pci_io, IA64_LEGACY_COM1_IO_BASE,
                                     &s->console_uart_legacy_io);
     }
-
     /*
      * Leave ISA/SCI lines in the legacy range and route PCI INTx above 15.
      * On zx1 the graphics master lives on the Mercury second root bus, which
@@ -4725,115 +4371,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * input (level-triggered, wire-OR -- exactly how the two roots share the
      * platform's four PCI interrupt lines).
      */
-    if (ia64_vpc_chipset_is_zx1(s)) {
-        for (i = 0; i < IA64_PCI_INTX_LINES; i++) {
-            qemu_irq gsi = qdev_get_gpio_in(iosapic,
-                                            IA64_PCI_INTX_GSI_BASE + i);
-            DeviceState *org = qdev_new(TYPE_OR_IRQ);
-
-            object_property_set_int(OBJECT(org), "num-lines", 2, &error_abort);
-            qdev_realize_and_unref(org, NULL, &error_abort);
-            qdev_connect_gpio_out(org, 0, gsi);
-            qdev_connect_gpio_out(pci_host, i, qdev_get_gpio_in(org, 0));
-            qdev_connect_gpio_out(s->mercury_host, i, qdev_get_gpio_in(org, 1));
-        }
-    } else {
-        /*
-         * On the i2000 each root's outputs are numbered by PID input (the
-         * board tables above), so every output goes to the input of the
-         * same number; inputs 0-15 stay the ISA lines, which no table names.
-         */
-        for (i = IA64_PCI_INTX_GSI_BASE; i < IA64_PCI_INTX_MAX_OUTPUTS; i++) {
-            qdev_connect_gpio_out(pci_host, i, qdev_get_gpio_in(iosapic, i));
-        }
-    }
-
-    /*
-     * The i2000's other three PCI roots: the two WXB buses and the GXB AGP
-     * bus.  Each is a root in its own right, sharing the primary host
-     * bridge's identity-mapped windows the way the zx1 Mercury root does, and
-     * each owns its own block of four PID inputs rather than sharing bus 0's
-     * -- which is why the Programmable Interrupt Device has 64 of them.  They
-     * are created empty here; devices move onto them in a later step of
-     * plans/460gx-i2000-fidelity-plan.md.
-     */
-    if (!ia64_vpc_chipset_is_zx1(s)) {
-        static const struct {
-            const char *name;
-            uint8_t bus;
-            unsigned int index;
-        } expanders[IA64_460GX_EXPANDER_ROOTS] = {
-            /*
-             * Created youngest-first.  QEMU resolves a "-device" with no
-             * bus= to the most recently realized PCI bus, so this order
-             * makes WXB0 the default: on a real i2000 bus 0 is the
-             * compatibility bus carrying the on-board south bridge, while
-             * add-in cards go in the WXB slots.  Name the bus explicitly
-             * ("bus=pci", "bus=gxb", ...) to place a device elsewhere.
-             */
-            { "gxb",  IA64_460GX_GXB_BUS,  IA64_460GX_ROOT_GXB },
-            { "wxb1", IA64_460GX_WXB1_BUS, IA64_460GX_ROOT_WXB1 },
-            { "wxb0", IA64_460GX_WXB0_BUS, IA64_460GX_ROOT_WXB0 },
-        };
-        unsigned int root;
-
-        for (root = 0; root < IA64_460GX_EXPANDER_ROOTS; root++) {
-            unsigned int line;
-
-            unsigned int index = expanders[root].index;
-
-            s->expander_host[index] = ia64_expander_host_create(
-                OBJECT(s), expanders[root].name,
-                ia64_pci_host_mmio(pci_host), ia64_pci_host_io(pci_host),
-                expanders[root].bus,
-                ia64_i2000_root_intx[index].routes,
-                ia64_i2000_root_intx[index].nroutes,
-                IA64_460GX_INTX_FALLBACK_GSI, errp);
-            if (s->expander_host[index] == NULL) {
-                return false;
-            }
-            s->expander_bus[index] =
-                ia64_expander_host_bus(s->expander_host[index]);
-            ia64_460gx_attach_root(s->chipset, index, s->expander_bus[index]);
-            ia64_pci_host_add_secondary_bus(pci_host, s->expander_bus[index]);
-
-            for (line = IA64_PCI_INTX_GSI_BASE;
-                 line < IA64_PCI_INTX_MAX_OUTPUTS; line++) {
-                qdev_connect_gpio_out(s->expander_host[index], line,
-                                      qdev_get_gpio_in(iosapic, line));
-            }
-        }
-
-        /*
-         * The GART translates the AGP master, which lives on the GXB's
-         * downstream root, so that bus needs the same DMA routing as the
-         * bus the GXB bridge itself sits on.
-         */
-        if (s->agp_dev != NULL) {
-            ia64_agp_attach_bus(IA64_AGP(s->agp_dev),
-                                s->expander_bus[IA64_460GX_ROOT_GXB]);
-        }
-
-        /*
-         * Each WXB bus carries an Integrated Hot-Plug Controller for its
-         * expansion slots.  Nothing implements hot plug here; the controller
-         * is present because the board has one, and idle.
-         */
-        for (root = 0; root < IA64_460GX_EXPANDER_ROOTS; root++) {
-            unsigned int index = expanders[root].index;
-
-            if (index != IA64_460GX_ROOT_WXB0 &&
-                index != IA64_460GX_ROOT_WXB1) {
-                continue;
-            }
-            if (!pci_realize_and_unref(
-                    pci_new(PCI_DEVFN(IA64_460GX_IHPC_SLOT, 0),
-                            TYPE_IA64_460GX_IHPC),
-                    s->expander_bus[index], errp)) {
-                return false;
-            }
-        }
-    }
+    imc->wire_intx(s, pci_host, iosapic);
 
     /*
      * AHCI remains available for guests that support SATA.  Firmware boot
@@ -4866,140 +4404,12 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
 
     /*
-     * The i2000's south bridge is the Intel 82468GX I/O and Firmware Bridge
-     * at 00:03, a four-function device: LPC/ISA, IDE, UHCI and SMBus.  Its
-     * function 0 owns the ISA bus and the 8259 pair, so on 460gx the legacy
-     * devices below hang off the bridge that carries them on the board
-     * rather than off a bus with no parent.  Each of the sixteen ISA
-     * interrupt inputs drives both that PIC and the matching Programmable
-     * Interrupt Device input, which is how they reach the guest: an IA-64
-     * guest runs the SAPIC, and the PIC is there for the real SDV firmware
-     * (and for the PC/AT-compatible flag our MADT already sets).
-     *
-     * zx1 is a different platform with a different south bridge, so it keeps
-     * the parentless ISA bus until it gets one of its own.
-     *
-     * realfw mode keeps it too: that path replaces the whole chipset with the
-     * shadow config space of the 460GX chipset device, which modelled
-     * an IFB of its own (at device 1Eh, where the SDV firmware's bus scan
-     * happens to find it).  Two models of one chip on one bus is incoherent,
-     * and converging them means re-validating the real firmware's POST, so
-     * that belongs to plans/phase5-real-firmware-boot.md rather than here.
+     * The board's south bridge and ISA bus, with the RTC and the legacy
+     * interrupt inputs (which drive the matching IOSAPIC inputs).
      */
-    if (ia64_vpc_has_south_bridge(s)) {
-        /*
-         * Under the vendor firmware the bridge comes up with its ACPI block
-         * at A00h, where the firmware's FADT (PM1a_EVT A00h, PM1a_CNT A04h,
-         * SMI_CMD B2h with ACPI_ENABLE A0h), its DSDT and its PMI handler
-         * all expect it.  The firmware's own pokes for that (00:03.0 @44h =
-         * 0, @40h = 0A00h, @44h = 1) sit in a chipset-init script this
-         * build never reaches (plans/phase5, session 23), so the machine
-         * supplies their result; the SSDM reset state (block disabled)
-         * stays for our own firmware, which programs what it uses.
-         */
-        s->ifb = intel_82468gx_ifb_create(
-            pci_bus, PCI_DEVFN(IA64_460GX_IFB_SLOT,
-                               IA64_460GX_IFB_LPC_FUNCTION),
-            s->realfw_path != NULL ? IA64_460GX_IFB_ACPI_IO_BASE : 0, errp);
-        if (s->ifb == NULL) {
-            return false;
-        }
-        /*
-         * The bridge's SCI reaches the platform interrupt controller on the
-         * i2000's input 49: the vendor MADT's interrupt source override maps
-         * ISA IRQ 9 (the FADT's SCI_INT) to GSI 49, active low, level.
-         */
-        qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_SCI,
-                                    0, qdev_get_gpio_in(iosapic,
-                                                        IA64_I2000_SCI_GSI));
-        if (s->realfw_path != NULL) {
-            /*
-             * The APM control port's SMI is the processor's PMI on this
-             * platform, and the vendor SAL's PMI handler answers the FADT's
-             * ACPI_ENABLE/ACPI_DISABLE commands by setting or clearing
-             * SCI_EN.  PMI delivery is not modelled; this stands in for
-             * that handler's effect (intel_82468gx_ifb_acpi_sci_enable).
-             */
-            qdev_connect_gpio_out_named(DEVICE(s->ifb),
-                                        INTEL_82468GX_IFB_GPIO_APMC, 0,
-                                        qemu_allocate_irq(
-                                            ia64_vpc_realfw_apmc, s, 0));
-        }
-        for (i = 0; i < INTEL_82468GX_IFB_FUNCTIONS; i++) {
-            PCIDevice *fn = intel_82468gx_ifb_function(s->ifb, i);
-
-            if (fn == NULL) {
-                error_setg(errp, "%s did not create function %d",
-                           TYPE_INTEL_82468GX_IFB, i);
-                return false;
-            }
-            /*
-             * A chipset part carries no subsystem identity, so leave those
-             * registers at zero rather than at the PCI bus default.
-             */
-            pci_set_word(fn->config + PCI_SUBSYSTEM_VENDOR_ID, 0);
-            pci_set_word(fn->config + PCI_SUBSYSTEM_ID, 0);
-        }
-        {
-            /*
-             * The board's hardware monitors, which the vendor firmware
-             * initialises over the bridge's SMBus during POST.  They belong
-             * to the I/O board rather than to the chipset, so the machine
-             * puts them on the bus the bridge provides.
-             */
-            I2CBus *smbus = intel_82468gx_ifb_smbus(s->ifb);
-            static const uint8_t hwmon_addrs[] = {
-                IA64_I2000_HWMON_ADDR_0, IA64_I2000_HWMON_ADDR_1,
-            };
-
-            for (i = 0; i < ARRAY_SIZE(hwmon_addrs); i++) {
-                i2c_slave_create_simple(smbus, TYPE_IA64_I2000_HWMON,
-                                        hwmon_addrs[i]);
-            }
-        }
-        isa_bus = intel_82468gx_ifb_isa_bus(s->ifb);
-        for (i = 0; i < ISA_NUM_IRQS; i++) {
-            s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
-            qdev_connect_gpio_out_named(DEVICE(s->ifb),
-                                        INTEL_82468GX_IFB_GPIO_ISA_IRQ, i,
-                                        s->isa_irqs[i]);
-        }
-        /*
-         * The bridge's 8259 pair drives INTR, which a processor takes as an
-         * ExtINT.  Without this the pair answers its ports but can deliver
-         * nothing, and firmware that runs the legacy tick through the PIC --
-         * as the vendor firmware does during POST -- never sees an interrupt.
-         */
-        s->extint = qemu_allocate_irq(ia64_vpc_extint, s, 0);
-        qdev_connect_gpio_out_named(DEVICE(s->ifb),
-                                    INTEL_82468GX_IFB_GPIO_LEGACY, 0,
-                                    s->extint);
-        /*
-         * The board's Super I/O behind the bridge, as far as its
-         * configuration space: the vendor DSDT finds COM1 and the keyboard
-         * controller through it (see hw/isa/smsc_lpc47b27x.c).
-         */
-        isa_create_simple(isa_bus, TYPE_SMSC_LPC47B27X);
-    } else {
-        isa_bus = isa_bus_new(NULL, get_system_memory(), pci_io, errp);
-        if (isa_bus == NULL) {
-            return false;
-        }
-        for (i = 0; i < ISA_NUM_IRQS; i++) {
-            s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
-        }
-        isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
-    }
-    /*
-     * The real-time clock is the standard MC146818 CMOS device at legacy
-     * ports 0x70/0x71 (IRQ 8) - the invented MMIO seconds register at
-     * 0xFFEF0000 is gone (rework D8).  On the 460GX it belongs to the south
-     * bridge, which builds it along with the extended bank at 0x72/0x73 that
-     * RTCCFG banks (SSDM 15.5), so only a machine with no bridge builds one
-     * of its own here.
-     */
-    if (s->ifb == NULL) {
-        mc146818_rtc_init(isa_bus, 2000, NULL);
+    isa_bus = imc->build_isa(s, pci_bus, pci_io, iosapic, errp);
+    if (isa_bus == NULL) {
+        return false;
     }
 
 #ifdef CONFIG_IA64_VPC_PS2
@@ -5046,12 +4456,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #ifdef CONFIG_IA64_VPC_STORAGE
     if (s->isp_enabled || s->lsi_enabled) {
         PCIBus *scsi_bus = pci_bus;
-        int scsi_devfn = PCI_DEVFN(4, 0);
+        int scsi_devfn = -1;
 
-        if (!ia64_vpc_chipset_is_zx1(s)) {
-            scsi_bus = s->expander_bus[IA64_460GX_ROOT_WXB0];
-            scsi_devfn = PCI_DEVFN(IA64_460GX_WXB0_SCSI_SLOT, 0);
-        }
+        ia64_vpc_seat(s, IA64_VPC_SEAT_SCSI, &scsi_bus, &scsi_devfn);
         if (s->isp_enabled) {
             ia64_vpc_init_isp(s, scsi_bus, scsi_devfn);
         } else if (!ia64_vpc_init_lsi(s, scsi_bus, scsi_devfn, errp)) {
@@ -5062,42 +4469,16 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     /*
-     * On zx1 with agp=on, give the Rage 128 a PCI AGP capability so Linux
-     * sba_iommu reserves the SBA IOVA GART half (and writes the cookie hp-agp
-     * handshakes on) and hp-agp can negotiate AGP mode.  The default VGA is
-     * created by pci_vga_init() below, which realizes it internally, so opt it
-     * in through a global property applied to the ati-vga it creates.  460gx
-     * uses the GXB GART instead and never needs this.
-     */
-    if (ia64_vpc_chipset_is_zx1(s) && s->agp_enabled) {
-        static GlobalProperty ati_agp = {
-            .driver = "ati-vga", .property = "agp", .value = "on",
-        };
-        qdev_prop_register_global(&ati_agp);
-    }
-
-    /*
-     * On zx1 the AGP graphics master sits behind the Mercury PCI host bridge,
-     * on its own root bus at slot IA64_MERCURY_VGA_SLOT -- exactly as real zx1
-     * puts the AGP adapter behind Mercury.  On 460gx it stays on PCI0 at the
-     * GXB-AGP slot.  The built-in device layout (SBA/LSI/AHCI/USB/NIC) is
-     * unchanged: those remain on PCI0.
+     * The graphics adapter sits where the board puts its AGP master: behind
+     * the Mercury bridge on zx1, behind the GXB expander on 460gx.
      */
     {
     PCIBus *vga_bus = pci_bus;
-    unsigned int vga_slot = IA64_VPC_VGA_SLOT;
+    int vga_devfn = -1;
+    unsigned int vga_slot;
 
-    if (ia64_vpc_chipset_is_zx1(s)) {
-        vga_bus = s->mercury_bus;
-        vga_slot = IA64_MERCURY_VGA_SLOT;
-    } else {
-        /*
-         * The i2000 puts its AGP Pro graphics at 03:00.0, behind the GXB
-         * expander -- the 460GX analogue of the zx1 arrangement above.
-         */
-        vga_bus = s->expander_bus[IA64_460GX_ROOT_GXB];
-        vga_slot = IA64_460GX_GXB_VGA_SLOT;
-    }
+    ia64_vpc_seat(s, IA64_VPC_SEAT_VGA, &vga_bus, &vga_devfn);
+    vga_slot = PCI_SLOT(vga_devfn);
 
     if (g_strcmp0(s->vga_model, "mach64") == 0) {
         /*
@@ -5127,7 +4508,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * The GART scoping above assumes the graphics device is the AGP master at
      * the expected slot.  pci_vga_init() auto-assigns the lowest free slot,
      * which is IA64_MERCURY_VGA_SLOT on the (empty) Mercury bus and
-     * IA64_VPC_VGA_SLOT on PCI0; fail loudly if that ever drifts.
+     * the board's VGA seat; fail loudly if that ever drifts.
      */
     if (s->vga_dev != NULL &&
         s->vga_dev->devfn != PCI_DEVFN(vga_slot, 0)) {
@@ -5150,15 +4531,20 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
 #endif
     /*
-     * Device 4 of the compatibility bus is the i2000's audio seat.  Reserve
-     * it before any auto-placed adapter is created, so that the slot map does
-     * not depend on whether the CS4281 is switched on: an add-in card must
-     * not land there, and add-in cards belong on the WXB buses in any case.
-     * The reservation is dropped again below when the CS4281 is created.
+     * Reserve the board's audio seat before any auto-placed adapter is
+     * created, so that the slot map does not depend on whether the CS4281
+     * is switched on: an add-in card must not land there.  The reservation
+     * is dropped again below when the CS4281 is created.
      */
-    if (!ia64_vpc_chipset_is_zx1(s)) {
-        pci_bus_set_slot_reserved_mask(pci_bus,
-                                       1U << IA64_460GX_AUDIO_SLOT);
+    {
+        PCIBus *audio_bus = pci_bus;
+        int audio_devfn = -1;
+
+        ia64_vpc_seat(s, IA64_VPC_SEAT_AUDIO, &audio_bus, &audio_devfn);
+        if (audio_devfn >= 0) {
+            pci_bus_set_slot_reserved_mask(audio_bus,
+                                           1U << PCI_SLOT(audio_devfn));
+        }
     }
 
 #ifdef CONFIG_IA64_VPC_NETWORK
@@ -5177,10 +4563,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         PCIBus *park_bus = pci_bus;
         int park_devfn = -1;
 
-        if (!ia64_vpc_chipset_is_zx1(s)) {
-            park_bus = s->expander_bus[IA64_460GX_ROOT_WXB1];
-            park_devfn = PCI_DEVFN(IA64_460GX_WXB1_SCSI_SLOT, 0);
-        }
+        ia64_vpc_seat(s, IA64_VPC_SEAT_SCSI_PARK, &park_bus, &park_devfn);
         if (!ia64_vpc_init_lsi(s, park_bus, park_devfn, errp)) {
             return false;
         }
@@ -5196,15 +4579,15 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      */
 #ifdef CONFIG_IA64_VPC_AUDIO
     if (s->audio_enabled) {
-        if (!ia64_vpc_chipset_is_zx1(s)) {
-            pci_bus_clear_slot_reserved_mask(pci_bus,
-                                             1U << IA64_460GX_AUDIO_SLOT);
+        PCIBus *audio_bus = pci_bus;
+        int audio_devfn = -1;
+
+        ia64_vpc_seat(s, IA64_VPC_SEAT_AUDIO, &audio_bus, &audio_devfn);
+        if (audio_devfn >= 0) {
+            pci_bus_clear_slot_reserved_mask(audio_bus,
+                                             1U << PCI_SLOT(audio_devfn));
         }
-        s->audio_dev = pci_create_simple(
-            pci_bus,
-            ia64_vpc_chipset_is_zx1(s) ? -1 :
-                PCI_DEVFN(IA64_460GX_AUDIO_SLOT, 0),
-            TYPE_CS4281);
+        s->audio_dev = pci_create_simple(audio_bus, audio_devfn, TYPE_CS4281);
         ia64_vpc_configure_audio(s->audio_dev);
     }
 #endif
@@ -5287,17 +4670,7 @@ static void ia64_vpc_machine_instance_init(Object *obj)
 
     s->fw_map_quirk_disable = IA64_VPC_FW_QUIRK_DEFAULT_DISABLE;
 
-#ifdef CONFIG_IA64_VPC_PS2
-    /*
-     * The i2000 and the other 460GX workstations carry a Super-I/O PS/2
-     * controller, and PS/2 was the input of choice on them, so 460gx keeps
-     * it.  The zx1 generation dropped PS/2 entirely: an rx2600 or zx6000
-     * has USB keyboard and mouse only, so that machine defaults to the USB
-     * HID devices instead (see ia64_vpc_init_usb).  Either default can be
-     * overridden with i8042=on|off.
-     */
-    s->i8042_enabled = !ia64_vpc_chipset_is_zx1(s);
-#endif
+    s->i8042_enabled = IA64_VPC_MACHINE_GET_CLASS(s)->i8042_default;
     s->fw_relocate = true;
 #ifdef CONFIG_IA64_VPC_STORAGE
     /*
@@ -5532,56 +4905,20 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Set the IA-64 ALAT model to 'zero' (default) or 'full'");
 }
 
-/* Concrete: Intel SDV / HP i2000 -- 460GX chipset, Merced. */
-static void ia64_460gx_machine_class_init(ObjectClass *oc, const void *data)
-{
-    MachineClass *mc = MACHINE_CLASS(oc);
-    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_CLASS(oc);
-
-    (void)data;
-    mc->desc = "Intel SDV / HP i2000 (460GX chipset, Merced)";
-    mc->default_cpu_type = IA64_CPU_TYPE_NAME("merced");
-    imc->chipset_profile = IA64_FW_CHIPSET_460GX;
-    ia64_vpc_add_compat_defaults(mc);
-}
-
-/* Concrete: HP rx2600 / zx2000 / zx6000 -- zx1 chipset, Itanium 2. Default. */
-static void ia64_zx1_machine_class_init(ObjectClass *oc, const void *data)
-{
-    MachineClass *mc = MACHINE_CLASS(oc);
-    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_CLASS(oc);
-
-    (void)data;
-    mc->desc = "HP rx2600 / zx2000 / zx6000 (zx1 chipset, Itanium 2)";
-    mc->default_cpu_type = IA64_CPU_TYPE_NAME("madison");
-    imc->chipset_profile = IA64_FW_CHIPSET_ZX1;
-    /* The zx1 machine is the default; "ia64-vpc" is a deprecated alias of it. */
-    mc->is_default = true;
-    mc->alias = "ia64-vpc";
-    ia64_vpc_add_compat_defaults(mc);
-}
-
-static const TypeInfo ia64_machine_typeinfos[] = {
-    {
-        .name = TYPE_IA64_VPC_MACHINE,
-        .parent = TYPE_MACHINE,
-        .abstract = true,
-        .instance_size = sizeof(IA64VpcMachineState),
-        .instance_init = ia64_vpc_machine_instance_init,
-        .instance_finalize = ia64_vpc_machine_instance_finalize,
-        .class_size = sizeof(IA64VpcMachineClass),
-        .class_init = ia64_vpc_machine_class_init,
-    },
-    {
-        .name = TYPE_IA64_460GX_MACHINE,
-        .parent = TYPE_IA64_VPC_MACHINE,
-        .class_init = ia64_460gx_machine_class_init,
-    },
-    {
-        .name = TYPE_IA64_ZX1_MACHINE,
-        .parent = TYPE_IA64_VPC_MACHINE,
-        .class_init = ia64_zx1_machine_class_init,
-    },
+static const TypeInfo ia64_vpc_machine_typeinfo = {
+    .name = TYPE_IA64_VPC_MACHINE,
+    .parent = TYPE_MACHINE,
+    .abstract = true,
+    .instance_size = sizeof(IA64VpcMachineState),
+    .instance_init = ia64_vpc_machine_instance_init,
+    .instance_finalize = ia64_vpc_machine_instance_finalize,
+    .class_size = sizeof(IA64VpcMachineClass),
+    .class_init = ia64_vpc_machine_class_init,
 };
 
-DEFINE_TYPES(ia64_machine_typeinfos)
+static void ia64_vpc_register_types(void)
+{
+    type_register_static(&ia64_vpc_machine_typeinfo);
+}
+
+type_init(ia64_vpc_register_types)
