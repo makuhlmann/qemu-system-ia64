@@ -119,6 +119,20 @@ static UINTN                  mProcessorCount = 1;
 static UINTN                  mSocketCount = 1;
 static UINTN                  mCoresPerSocket = 1;
 static UINTN                  mThreadsPerCore = 1;
+/* What the flash stage probed: installed DRAM and the core chipset. */
+static UINT64                 mChipsetProbed = IA64_FW_CHIPSET_DERIVE;
+/* Application processors that have entered the shadow (firmware_ap_main). */
+static volatile UINT64        mApCheckins;
+
+extern char __fw_image_start[];
+
+void fw_platform_set_probed(UINT64 RamSize, UINT64 Chipset)
+{
+    mGuestRamSize = RamSize & ~0xfffULL;
+    mGuestLowRamEnd = mGuestRamSize > FW_LOW_RAM_LIMIT ? FW_LOW_RAM_LIMIT
+                                                       : mGuestRamSize;
+    mChipsetProbed = Chipset;
+}
 
 
 /* FW_RAM_RANGE lives in fw-acpi.h. */
@@ -166,50 +180,15 @@ static BOOLEAN fw_handoff_valid(const FW_HANDOFF_HEADER *Handoff)
            Handoff->Version <= IA64_FW_HANDOFF_VERSION;
 }
 
-static BOOLEAN fw_handoff_ram_size(UINT64 *RamSize)
-{
-    FW_HANDOFF_HEADER *handoff =
-        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    UINT64 ram_size;
-
-    if (!fw_handoff_valid(handoff)) {
-        return 0;
-    }
-
-    ram_size = handoff->RamSize & ~0xfffULL;
-    *RamSize = ram_size;
-    return 1;
-}
-
-static BOOLEAN fw_handoff_low_ram_end(UINT64 *LowRamEnd)
-{
-    UINT64 ram_size;
-
-    if (!fw_handoff_ram_size(&ram_size)) {
-        return 0;
-    }
-
-    if (ram_size > FW_LOW_RAM_LIMIT) {
-        ram_size = FW_LOW_RAM_LIMIT;
-    }
-    *LowRamEnd = ram_size;
-    return 1;
-}
-
 UINT64 fw_guest_low_ram_end(void)
 {
-    UINT64 low_ram_end;
-
-    return fw_handoff_low_ram_end(&low_ram_end) ?
-        low_ram_end : FW_LOW_RAM_LIMIT;
+    return mGuestRamSize > FW_LOW_RAM_LIMIT ? FW_LOW_RAM_LIMIT
+                                            : mGuestRamSize;
 }
 
 UINT64 fw_guest_ram_size(void)
 {
-    UINT64 ram_size;
-
-    return fw_handoff_ram_size(&ram_size) ?
-        ram_size : FW_LOW_RAM_LIMIT;
+    return mGuestRamSize;
 }
 
 static void fw_add_guest_high_ram_range(UINT64 Base, UINT64 Limit,
@@ -325,8 +304,8 @@ UINT64 fw_boot_stack_top(void)
      * move it after validating the machine handoff, since this function is
      * itself called on that bootstrap stack.
      */
-    if (!fw_handoff_low_ram_end(&low_ram_end) ||
-        low_ram_end < IA64_FW_LOW_RAM_MIN) {
+    low_ram_end = fw_guest_low_ram_end();
+    if (low_ram_end < IA64_FW_LOW_RAM_MIN) {
         return IA64_FW_LOW_RAM_MIN;
     }
     return low_ram_end & ~(IA64_EFI_MEMORY_ALIGN - 1U);
@@ -413,23 +392,6 @@ BOOLEAN fw_handoff_i8042_enabled(void)
     return handoff->I8042Enabled != 0;
 }
 
-UINTN fw_handoff_processor_count(void)
-{
-    FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    IA64VpcHandoff *handoff;
-    UINT64 count;
-
-    if (!fw_handoff_valid(header) || header->Version < 8) {
-        return 1;
-    }
-    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    count = handoff->ProcessorCount;
-    if (count == 0 || count > FW_MAX_CPUS) {
-        return 1;
-    }
-    return (UINTN)count;
-}
 
 UINT64 fw_handoff_map_quirk_disable(void)
 {
@@ -458,48 +420,66 @@ UINT16 fw_handoff_boot_timeout(void)
     return (UINT16)handoff->BootTimeout;
 }
 
-static void fw_handoff_processor_topology(UINTN ProcessorCount)
+/*
+ * Release the application processors, which the flash stage parks until
+ * the shadow's data is ready, and count them as they check in.  Real SAL
+ * rendezvouses its processors the same way (SAL 3.2.3); the wait is
+ * bounded, so a machine with one processor moves on after 20 ms.
+ */
+static void fw_platform_rendezvous_processors(void)
 {
-    FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    IA64VpcHandoff *handoff;
-    UINT64 sockets;
-    UINT64 cores;
-    UINT64 threads;
-    UINT64 capacity;
+    volatile UINT64 *mailbox = (volatile UINT64 *)(UINTN)IA64_FW_SHADOW_MAILBOX;
+    UINT64 deadline;
+    UINT64 seen;
 
-    /*
-     * Version 9 and older described only a processor count.  Preserve their
-     * historical one-package interpretation when an old handoff is used.
-     */
-    mSocketCount = 1;
-    mCoresPerSocket = ProcessorCount;
+    mailbox[1] = mGuestRamSize;
+    __asm__ volatile ("mf;;" : : : "memory");
+    mailbox[0] = (UINT64)(UINTN)__fw_image_start;
+    __asm__ volatile ("mf;;" : : : "memory");
+
+    deadline = fw_read_itc() + 200000ULL * fw_itc_ticks_per_100ns;
+    do {
+        seen = mApCheckins;
+        while (fw_read_itc() < deadline && mApCheckins == seen) {
+            __asm__ volatile ("hint @pause" : : : "memory");
+        }
+    } while (mApCheckins != seen);
+
+    mProcessorCount = 1 + (UINTN)mApCheckins;
+    if (mProcessorCount > FW_MAX_CPUS) {
+        mProcessorCount = FW_MAX_CPUS;
+    }
+}
+
+/*
+ * The package geometry from PAL_LOGICAL_TO_PHYSICAL (SDM vol. 2 11.10.3):
+ * threads per core in bits 16-31 and cores per package in bits 32-47 of
+ * its first return.  Processors that do not implement it (Itanium and
+ * Itanium 2) have one core and one thread per package.
+ */
+static void fw_platform_decode_package_topology(void)
+{
+    UINT64 status, info;
+
+    mSocketCount = mProcessorCount;
+    mCoresPerSocket = 1;
     mThreadsPerCore = 1;
 
-    if (!fw_handoff_valid(header) || header->Version < 10) {
-        return;
-    }
+    status = fw_pal_logical_to_physical(&info);
+    if (status == 0) {
+        UINTN threads = (info >> 16) & 0xffff;
+        UINTN cores = (info >> 32) & 0xffff;
 
-    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    sockets = handoff->SocketCount;
-    cores = handoff->CoresPerSocket;
-    threads = handoff->ThreadsPerCore;
-    if (sockets == 0 || sockets > FW_MAX_CPUS ||
-        cores == 0 || cores > FW_MAX_CPUS ||
-        threads == 0 || threads > FW_MAX_CPUS ||
-        sockets > FW_MAX_CPUS / cores ||
-        sockets * cores > FW_MAX_CPUS / threads) {
-        return;
+        if (threads != 0 && cores != 0 && threads * cores <= FW_MAX_CPUS) {
+            mThreadsPerCore = threads;
+            mCoresPerSocket = cores;
+            mSocketCount = (mProcessorCount + threads * cores - 1) /
+                           (threads * cores);
+        }
     }
-
-    capacity = sockets * cores * threads;
-    if (capacity < ProcessorCount || capacity > FW_MAX_CPUS) {
-        return;
+    if (mSocketCount == 0) {
+        mSocketCount = 1;
     }
-
-    mSocketCount = (UINTN)sockets;
-    mCoresPerSocket = (UINTN)cores;
-    mThreadsPerCore = (UINTN)threads;
 }
 
 BOOLEAN fw_handoff_nvram_persistent(void)
@@ -578,16 +558,7 @@ UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
  */
 static UINT64 fw_platform_chipset_profile(void)
 {
-    const FW_HANDOFF_HEADER *header =
-        (const FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    const IA64VpcHandoff *handoff =
-        (const IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
-
-    if (!fw_handoff_valid(header) ||
-        header->Version < IA64_FW_HANDOFF_CHIPSET_VERSION) {
-        return IA64_FW_CHIPSET_DERIVE;
-    }
-    return handoff->ChipsetProfile;
+    return mChipsetProbed;
 }
 
 /*
@@ -2012,6 +1983,7 @@ void firmware_ap_main(UINT64 ProcessorId)
 {
     (void)ProcessorId;
 
+    __sync_fetch_and_add(&mApCheckins, 1);
     fw_ap_rendezvous();
     for (;;) {
         /* TPR is scratch on return from OS_BOOT_RENDEZ. */
@@ -2031,8 +2003,8 @@ BOOLEAN fw_data_translation_enabled(void)
 
 void fw_platform_decode_topology(void)
 {
-    mProcessorCount = fw_handoff_processor_count();
-    fw_handoff_processor_topology(mProcessorCount);
+    fw_platform_rendezvous_processors();
+    fw_platform_decode_package_topology();
 }
 
 static FW_PLATFORM_HANDOFF mPlatformHandoff = {

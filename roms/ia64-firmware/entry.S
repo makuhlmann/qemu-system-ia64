@@ -100,45 +100,28 @@ fw_flash_entry:
     sub r7 = r14, r15           /* r7 = flash base of the image body */
     ;;
 
-    /* low_ram_end from the handoff, as start_after_pal derives it. */
-    movl r14 = FW_HANDOFF_ADDR
-    ;;
-    ld8 r15 = [r14]
-    adds r18 = FW_HANDOFF_RAMSIZE_OFFSET, r14
-    ;;
-    ld8 r17 = [r18]
-    movl r18 = FW_HANDOFF_MAGIC
-    ;;
-    cmp.eq p6, p7 = r15, r18
-    movl r19 = FW_PCI_MMIO_BASE
-    ;;
-(p7) movl r17 = FW_LOW_RAM_MIN
-    movl r22 = FW_LOW_RAM_ALIGN_MASK
-    ;;
-    cmp.ltu p8, p9 = r19, r17
-    ;;
-(p8) mov r17 = r19
-    ;;
-    andcm r17 = r17, r22        /* r17 = low_ram_end */
-    ;;
-
     /*
-     * This processor's early RSE backing store, before the first alloc
-     * can spill: the per-CPU slots of the CPU-assist region, indexed by
-     * LID.id as the machine numbers its processors.
+     * A bootstrap RSE backing store and memory stack in the DRAM every
+     * machine has (the first 128 MiB, FW_LOW_RAM_MIN), laid out as the
+     * CPU-assist region of a minimum machine; the boot processor moves to
+     * the real region once it knows how much memory there is.
      */
     mov r14 = cr.lid
-    movl r23 = FW_EARLY_RSE_BELOW_END
+    movl r17 = FW_LOW_RAM_MIN
     ;;
     extr.u r21 = r14, 24, 8     /* r21 = processor index */
-    sub r26 = r17, r23
+    movl r23 = FW_EARLY_RSE_BELOW_END
     ;;
+    sub r26 = r17, r23
     shl r25 = r21, 15           /* FW_EARLY_RSE_SIZE = 32 KiB per CPU */
+    shl r27 = r21, 17           /* FW_CPU_STACK_SIZE = 128 KiB per CPU */
     ;;
     add r26 = r26, r25
+    sub r12 = r17, r27
     mov ar.rsc = r0
     ;;
     mov ar.bspstore = r26
+    adds r12 = -16, r12
     ;;
     mov ar.rnat = r0
     movl r27 = 3
@@ -149,10 +132,34 @@ fw_flash_entry:
 (p6) br.cond.sptk.few flash_wait_shadow
     ;;
 
+    /* Boot processor: ask the hardware what it is and how much DRAM it has. */
+    alloc r2 = ar.pfs, 0, 0, 1, 0
+    adds r12 = -32, r12         /* a frame of our own above the callee's */
+    ;;
+    adds r32 = 16, r12          /* &chipset, past the callee's scratch area */
+    ;;
+    br.call.sptk.many b0 = fw_flash_probe
+    ;;
+    adds r14 = 16, r12
+    mov r4 = r8                 /* r4 = installed DRAM, bytes */
+    ;;
+    ld8 r3 = [r14]              /* r3 = chipset (IA64_FW_CHIPSET_*) */
+    movl r19 = FW_PCI_MMIO_BASE
+    movl r22 = FW_LOW_RAM_ALIGN_MASK
+    ;;
+    cmp.ltu p8, p9 = r19, r8
+    mov r17 = r8
+    ;;
+(p8) mov r17 = r19
+    ;;
+    andcm r17 = r17, r22        /* r17 = low_ram_end */
+    ;;
+
     /*
-     * Boot processor: the shadow base, and a memory stack for this stage.
-     * The bases live in preserved registers (r5-r7) across the relocator
-     * call, which is free to clobber r14-r31.
+     * The shadow base, and the boot processor's real early RSE slot and
+     * boot stack at the top of low RAM.  The bases live in preserved
+     * registers (r4-r7) across the relocator call, which is free to
+     * clobber r14-r31.
      */
     movl r23 = FW_SHADOW_BELOW_END
     ;;
@@ -160,9 +167,23 @@ fw_flash_entry:
     movl r25 = 0xfffff
     ;;
     andcm r5 = r24, r25         /* r5 = shadow base */
-    adds r12 = -16, r17
+    movl r23 = FW_EARLY_RSE_BELOW_END
+    movl r16 = FW_LINK_BASE     /* the probe call clobbered r16 */
     ;;
     sub r6 = r5, r16            /* r6 = shadow base - link base */
+    sub r26 = r17, r23
+    ;;
+    flushrs
+    ;;
+    mov ar.rsc = r0
+    ;;
+    mov ar.bspstore = r26
+    ;;
+    mov ar.rnat = r0
+    movl r27 = 3
+    ;;
+    mov ar.rsc = r27
+    adds r12 = -16, r17
     ;;
 
     /* Copy the body: its byte length is patched in by fw-flash.py. */
@@ -176,7 +197,7 @@ fw_flash_entry:
     mov r29 = r7
     mov r30 = r5
     ;;
-    mov r4 = r28                /* the body length, for the relocator */
+    mov r7 = r28                /* r7 = body length (flash base is done) */
 2:
     cmp.eq p6, p7 = r28, r0
     ;;
@@ -195,7 +216,7 @@ fw_flash_entry:
     ;;
     mov r32 = r5
     mov r33 = r6
-    mov r34 = r4
+    mov r34 = r7
     ;;
     br.call.sptk.many b0 = fw_flash_relocate
     ;;
@@ -204,12 +225,11 @@ fw_flash_entry:
     srlz.i
     ;;
 
-    /* Publish the shadow, then enter it as the flat image was entered. */
-    movl r14 = FW_SHADOW_MAILBOX
-    ;;
-    mf
-    ;;
-    st8.rel [r14] = r5
+    /*
+     * Enter the shadow as the flat image was entered, with what the probe
+     * found: r4 = DRAM bytes, r3 = chipset.  The application processors
+     * stay parked until the platform layer releases them.
+     */
     movl r15 = start_after_pal
     ;;
     add r15 = r15, r6
@@ -220,6 +240,12 @@ fw_flash_entry:
     br.sptk.many b6
     ;;
 
+    /*
+     * Application processors: wait for the boot processor to publish the
+     * shadow (mailbox +0) and the DRAM size (mailbox +8), move the RSE
+     * backing store to this processor's real early slot, and run the
+     * shadow's reset entry, which sends them down start_secondary.
+     */
 flash_wait_shadow:
     movl r14 = FW_SHADOW_MAILBOX
     ;;
@@ -230,6 +256,33 @@ flash_wait_shadow:
     ;;
 (p6) br.cond.sptk.few 4b
     ;;
+    adds r16 = 8, r14
+    movl r19 = FW_PCI_MMIO_BASE
+    movl r22 = FW_LOW_RAM_ALIGN_MASK
+    ;;
+    ld8 r17 = [r16]
+    movl r23 = FW_EARLY_RSE_BELOW_END
+    ;;
+    cmp.ltu p8, p9 = r19, r17
+    ;;
+(p8) mov r17 = r19
+    ;;
+    andcm r17 = r17, r22        /* low_ram_end */
+    ;;
+    sub r26 = r17, r23
+    ;;
+    add r26 = r26, r25          /* this processor's early RSE slot */
+    ;;
+    flushrs
+    ;;
+    mov ar.rsc = r0
+    ;;
+    mov ar.bspstore = r26
+    ;;
+    mov ar.rnat = r0
+    movl r27 = 3
+    ;;
+    mov ar.rsc = r27
     mov b6 = r15                /* the shadow's _start */
     ;;
     br.sptk.many b6
@@ -369,33 +422,14 @@ fw_debug_exception_entry:
 start_after_pal:
 
     /*
-     * Derive the RAM-top boot stack from the machine handoff block (falling
-     * back to the minimum machine when the handoff is absent).  The C side
-     * (fw_boot_stack_top) recomputes the same value once it is running.
+     * A bootstrap memory stack at the top of the DRAM every machine has;
+     * the C side moves it to the top of installed low RAM once it holds
+     * what the flash stage probed (r4 = DRAM bytes, r3 = chipset).
      */
-    movl r14 = FW_HANDOFF_ADDR
-    ;;
-    ld8 r15 = [r14]
-    adds r16 = FW_HANDOFF_RAMSIZE_OFFSET, r14
-    ;;
-    ld8 r17 = [r16]
-    movl r18 = FW_HANDOFF_MAGIC
-    ;;
-    cmp.eq p6, p7 = r15, r18
-    movl r19 = FW_PCI_MMIO_BASE
-    ;;
-(p7) movl r17 = FW_LOW_RAM_MIN
-    movl r20 = FW_LOW_RAM_ALIGN_MASK
-    ;;
-    cmp.ltu p8, p9 = r19, r17
-    ;;
-(p8) mov r17 = r19
-    ;;
-    andcm r17 = r17, r20
+    movl r17 = FW_LOW_RAM_MIN
     ;;
     adds r12 = -16, r17
     ;;
-
 
     /*
      * QEMU reloads the firmware image on reset, but the raw binary does not
@@ -427,9 +461,16 @@ start_after_pal:
      * Preserve the reset return pointer across the ABI calls, then move the
      * firmware stack to the top of installed low RAM.
      */
-    mov r4 = b0
+    mov r5 = b0
     ;;
     br.call.sptk.many b0 = fw_shadow_control_registers
+    ;;
+    alloc r2 = ar.pfs, 0, 0, 2, 0
+    ;;
+    mov r32 = r4
+    mov r33 = r3
+    ;;
+    br.call.sptk.many b0 = fw_platform_set_probed
     ;;
     br.call.sptk.many b0 = fw_boot_stack_top
     ;;
@@ -439,7 +480,7 @@ start_after_pal:
      * bytes below the region top so that scratch area stays inside RAM.
      */
     adds r12 = -16, r8
-    mov r3 = r4
+    mov r3 = r5
     ;;
 
     /* Alloc: 0 ins, 13 locals, 3 outs → output regs r45-r47
@@ -509,25 +550,7 @@ start_secondary:
     extr.u r14 = r14, 24, 8
     ;;
     shl r15 = r14, 17
-    movl r16 = FW_HANDOFF_ADDR
-    ;;
-    ld8 r17 = [r16]
-    adds r18 = FW_HANDOFF_RAMSIZE_OFFSET, r16
-    ;;
-    ld8 r19 = [r18]
-    movl r20 = FW_HANDOFF_MAGIC
-    ;;
-    cmp.eq p6, p7 = r17, r20
-    movl r21 = FW_PCI_MMIO_BASE
-    ;;
-(p7) movl r19 = FW_LOW_RAM_MIN
-    movl r22 = FW_LOW_RAM_ALIGN_MASK
-    ;;
-    cmp.ltu p8, p9 = r21, r19
-    ;;
-(p8) mov r19 = r21
-    ;;
-    andcm r19 = r19, r22
+    movl r19 = FW_LOW_RAM_MIN
     ;;
     sub r12 = r19, r15
     ;;
@@ -616,6 +639,43 @@ fw_pal_freq_ratios:
     ;;
     .endp fw_pal_freq_ratios
     .size fw_pal_freq_ratios, . - fw_pal_freq_ratios
+
+    /*
+     * PAL_LOGICAL_TO_PHYSICAL (index 2Ah) for the calling processor
+     * (proc_number -1): r8 the status, *Info the first return.
+     */
+    .section .text.fw_pal_logical_to_physical, "ax"
+    .global fw_pal_logical_to_physical
+    .type fw_pal_logical_to_physical, @function
+    .proc fw_pal_logical_to_physical
+    .explicit
+fw_pal_logical_to_physical:
+    alloc r34 = ar.pfs, 1, 2, 0, 0
+    ;;
+    mov r33 = b0
+    movl r28 = 0x2a
+    mov r29 = -1
+    mov r30 = r0
+    mov r31 = r0
+    ;;
+    movl r14 = pal_proc_entry
+    ;;
+    mov b6 = r14
+    movl r14 = 1f
+    ;;
+    mov b0 = r14
+    ;;
+    br.sptk.many b6
+    ;;
+1:
+    st8 [r32] = r9
+    mov b0 = r33
+    mov ar.pfs = r34
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp fw_pal_logical_to_physical
+    .size fw_pal_logical_to_physical, . - fw_pal_logical_to_physical
 
     .section .text.fw_ebc_bridge, "ax"
 

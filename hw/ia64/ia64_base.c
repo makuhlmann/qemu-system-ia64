@@ -2793,8 +2793,12 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
                               sizeof(handoff));
     /* No shadow yet: the flash stage's application processors wait. */
-    stq_le_p(&handoff.Magic, 0);
-    cpu_physical_memory_write(IA64_FW_SHADOW_MAILBOX, &handoff.Magic, 8);
+    {
+        uint64_t mailbox[2] = { 0, 0 };
+
+        cpu_physical_memory_write(IA64_FW_SHADOW_MAILBOX, mailbox,
+                                  sizeof(mailbox));
+    }
 }
 
 /*

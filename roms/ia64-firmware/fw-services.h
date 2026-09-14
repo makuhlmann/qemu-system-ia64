@@ -55,6 +55,10 @@ extern char __fw_ivt[];
 extern UINT64 fw_itc_ticks_per_100ns;
 #define FW_ITC_TICKS_PER_100NS fw_itc_ticks_per_100ns
 void fw_pal_freq_ratios(UINT64 *Processor, UINT64 *Bus, UINT64 *Itc);
+/* PAL_LOGICAL_TO_PHYSICAL for the calling processor: status, first return. */
+UINT64 fw_pal_logical_to_physical(UINT64 *Info);
+/* What the flash stage probed, before anything derives from it. */
+void fw_platform_set_probed(UINT64 RamSize, UINT64 Chipset);
 void fw_init_itc_rate(void);
 #define FW_ITC_TICKS_PER_MICROSECOND (FW_ITC_TICKS_PER_100NS * 10ULL)
 #define FW_ITC_TICKS_PER_SECOND (FW_ITC_TICKS_PER_100NS * 10000000ULL)
