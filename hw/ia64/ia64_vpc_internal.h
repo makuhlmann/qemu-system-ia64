@@ -162,7 +162,6 @@ struct IA64VpcMachineState {
     uint64_t firmware_console;
     uint16_t firmware_boot_timeout;
     char *nvram_path;
-    char *realfw_vga_rom_path;
     uint64_t realfw_entry;
     uint64_t realfw_base;
     PFlashCFI01 *realfw_flash;

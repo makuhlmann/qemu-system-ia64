@@ -1490,51 +1490,6 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
                               sizeof(vector));
 }
 
-/*
- * When realfw-vga-rom= supplies an authentic card BIOS -- e.g. the ATI Rage 128
- * Pro the SDV shipped with -- load it into the video device's own expansion ROM,
- * so a firmware that POSTs the card's option ROM the legacy PC-AT way shadows
- * and runs the real BIOS rather than the emulated card's stock vgabios.  Called
- * before configure_vga() so the ATI table / checksum fixups act on this image.
- */
-static void ia64_vpc_load_realfw_device_rom(IA64VpcMachineState *s)
-{
-    PCIDevice *pci_dev = s->vga_dev;
-    g_autofree uint8_t *file_rom = NULL;
-    GError *gerr = NULL;
-    gsize len = 0;
-    uint8_t *rom;
-    uint64_t rom_size;
-
-    if (!s->fw_is_flash || s->realfw_vga_rom_path == NULL ||
-        pci_dev == NULL ||
-        pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
-        return;
-    }
-    if (!g_file_get_contents(s->realfw_vga_rom_path, (gchar **)&file_rom,
-                             &len, &gerr)) {
-        warn_report("realfw-vga-rom '%s': %s", s->realfw_vga_rom_path,
-                    gerr->message);
-        g_error_free(gerr);
-        return;
-    }
-    if (len < 0x400 || file_rom[0] != 0x55 || file_rom[1] != 0xaa) {
-        warn_report("realfw-vga-rom '%s': not a 55AA option ROM",
-                    s->realfw_vga_rom_path);
-        return;
-    }
-    rom = memory_region_get_ram_ptr(&pci_dev->rom);
-    rom_size = memory_region_size(&pci_dev->rom);
-    if (rom == NULL || rom_size == 0) {
-        return;
-    }
-    if (len > rom_size) {
-        len = rom_size;
-    }
-    memset(rom, 0, rom_size);
-    memcpy(rom, file_rom, len);
-}
-
 static void ia64_vpc_reset_int10(IA64VpcMachineState *s)
 {
     memset(&s->int10_request, 0, sizeof(s->int10_request));
@@ -1559,26 +1514,6 @@ static void ia64_vpc_init_int10(IA64VpcMachineState *s,
     ia64_vpc_reset_int10(s);
 }
 #endif
-
-static char *ia64_vpc_get_realfw_vga_rom(Object *obj, Error **errp)
-{
-    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
-
-    (void)errp;
-
-    return g_strdup(s->realfw_vga_rom_path ?: "");
-}
-
-static void ia64_vpc_set_realfw_vga_rom(Object *obj, const char *value,
-                                        Error **errp)
-{
-    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
-
-    (void)errp;
-
-    g_free(s->realfw_vga_rom_path);
-    s->realfw_vga_rom_path = value[0] != '\0' ? g_strdup(value) : NULL;
-}
 
 static char *ia64_vpc_get_nvram(Object *obj, Error **errp)
 {
@@ -4182,7 +4117,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (!ia64_vpc_enable_vga_legacy_switch(s->vga_dev, errp)) {
         return false;
     }
-    ia64_vpc_load_realfw_device_rom(s);
     ia64_vpc_configure_vga(s->vga_dev,
                            IA64_VGA_IO_BASE);
     ia64_vpc_map_vga_fixed_windows(s, s->vga_dev);
@@ -4534,14 +4468,6 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Default boot-manager Timeout in seconds when no NVRAM 'Timeout' "
         "variable exists: 0 boots the BootOrder immediately, 0xFFFF (the "
         "default) waits for the user like the EFI sample.");
-    object_class_property_add_str(oc, "realfw-vga-rom",
-                                  ia64_vpc_get_realfw_vga_rom,
-                                  ia64_vpc_set_realfw_vga_rom);
-    object_class_property_set_description(oc, "realfw-vga-rom",
-        "Path to a real video-card option ROM to shadow at 0xC0000 for the "
-        "firmware's video POST, instead of the emulated card's own vgabios.  "
-        "Used to run the vendor firmware against an authentic card BIOS "
-        "(e.g. the ATI Rage 128 Pro the SDV shipped with).");
     object_class_property_add_str(oc, "nvram",
                                   ia64_vpc_get_nvram,
                                   ia64_vpc_set_nvram);
