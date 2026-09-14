@@ -209,7 +209,9 @@ struct IA64VpcMachineState {
     MemoryRegion *vga_mmio_alias;
     MemoryRegion *vga_legacy_alias;
     MemoryRegion *lsapic_mmio;
-    MemoryRegion firmware_space;
+    MemoryRegion pal_rom;
+    MemoryRegion pal_reset_ivt;
+    MemoryRegion fw_scratch;
     MemoryRegion acpi_pm;
     MemoryRegion acpi_reset;
     SerialMM *debug_uart;

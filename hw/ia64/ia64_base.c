@@ -104,25 +104,27 @@
 #define IA64_REALFW_WINDOW_END    IA64_U64(0x0000000100000000)
 #define IA64_REALFW_MAX_SIZE      IA64_U64(0x0000000000800000)
 /*
- * PAL procedure entry handed to real SAL in GR34/GR36 (and recognized via
- * env->pal.pal_proc_copy_addr): a stub in the firmware address-space RAM,
- * below the flash window and clear of the watchdog/handoff pages.
+ * The PAL emulation ROM: the PAL procedure entry handed to SAL in GR34/GR36
+ * (and recognized via env->pal.pal_proc_copy_addr) is its first 32 bytes.
  */
-#define IA64_REALFW_PAL_STUB_BASE IA64_U64(0x00000000ff100000)
+#define IA64_PAL_ROM_BASE         IA64_U64(0x00000000ff100000)
+#define IA64_PAL_ROM_SIZE         0x1000
 /*
- * Capture IVT (realfw mode): a 32 KiB-aligned interruption vector table
- * whose every bundle is a branch-to-self, planted in firmware scratch RAM
- * and pointed to by cr.iva in the synthesized SALE_ENTRY entry state.  Real
- * PAL provides an IVT before entering SAL (SDM 11.2.2); we skip PAL, so
- * without this any firmware fault would vector to physical 0 (no handler)
- * and, under the bare-loader ic=0/iva=0 rule, storm.  With it, a fatal fault
- * instead freezes at IVT_BASE + vector with all GRs, the RSE frame, ISR and
- * IIPA preserved - the fault class is the offset from IVT_BASE, and the
- * interrupted state is inspectable via the monitor.  See
- * plans/phase5-real-firmware-boot.md.
+ * The reset IVT: a 32 KiB-aligned interruption vector table whose every
+ * bundle is a branch-to-self, pointed to by cr.iva in the SALE_ENTRY entry
+ * state.  Real PAL provides an IVT before entering SAL (SDM 11.2.2); the
+ * machine plays PAL, so without this any firmware fault would vector to
+ * physical 0 (no handler) and, under the bare-loader ic=0/iva=0 rule,
+ * storm.  With it, a fatal fault instead freezes at the IVT base + vector
+ * with all GRs, the RSE frame, ISR and IIPA preserved - the fault class is
+ * the offset from the IVT base, and the interrupted state is inspectable
+ * via the monitor.  See plans/phase5-real-firmware-boot.md.
  */
-#define IA64_REALFW_IVT_BASE      IA64_U64(0x00000000ff300000)
-#define IA64_REALFW_IVT_SIZE      0x8000
+#define IA64_PAL_RESET_IVT_BASE   IA64_U64(0x00000000ff300000)
+#define IA64_PAL_RESET_IVT_SIZE   0x8000
+/* The RAM page that holds IA64_FW_SHADOW_MAILBOX. */
+#define IA64_FW_SCRATCH_BASE      IA64_U64(0x00000000ff0ff000)
+#define IA64_FW_SCRATCH_SIZE      0x1000
 #define IA64_REALFW_PTR_FIT       (IA64_REALFW_WINDOW_END - 32)
 #define IA64_REALFW_PTR_SALE      (IA64_REALFW_WINDOW_END - 24)
 /* Bit 63 in firmware pointers is the uncacheable-attribute flag, not
@@ -2286,26 +2288,37 @@ static void ia64_vpc_map_lsapic(IA64VpcMachineState *s)
                                 s->lsapic_mmio);
 }
 
+/*
+ * The top 16 MiB below 4 GiB are the firmware region (SSDM Table 4-1:
+ * FF00_0000-FFFF_FFFF).  The flash decodes at its top; below it, nothing on
+ * the real boards answers.  The machine plants two things there, because it
+ * plays PAL (PAL is emulated, so its entry and its reset IVT have to exist
+ * somewhere): the PAL emulation ROM at FF10_0000, whose 32-byte stub is the
+ * PAL procedure entry handed to SAL in GR34/GR36, and the reset IVT at
+ * FF30_0000, cr.iva at SALE_ENTRY.  Both are read-only and present for every
+ * firmware.  One RAM page at FF0F_F000 still carries the shadow mailbox the
+ * project firmware's application processors wait on.
+ */
 static bool ia64_vpc_map_firmware_address_space(IA64VpcMachineState *s,
                                                 Error **errp)
 {
-    Error *local_err = NULL;
-
-    /*
-     * IA-64 reserves the top 16 MiB below 4 GiB for PAL/SAL firmware
-     * resources.  Decode it so firmware identity mappings can use the
-     * platform address space directly.
-     */
-    memory_region_init_ram(&s->firmware_space, NULL,
-                           "ia64-firmware-address-space",
-                           IA64_FIRMWARE_ADDRESS_SPACE_SIZE, &local_err);
-    if (local_err != NULL) {
-        error_propagate(errp, local_err);
+    if (!memory_region_init_rom(&s->pal_rom, NULL,
+                                "ia64-pal-emulation-rom",
+                                IA64_PAL_ROM_SIZE, errp) ||
+        !memory_region_init_rom(&s->pal_reset_ivt, NULL,
+                                "ia64-pal-reset-ivt",
+                                IA64_PAL_RESET_IVT_SIZE, errp) ||
+        !memory_region_init_ram(&s->fw_scratch, NULL,
+                                "ia64-firmware-scratch",
+                                IA64_FW_SCRATCH_SIZE, errp)) {
         return false;
     }
-    memory_region_add_subregion_overlap(get_system_memory(),
-                                        IA64_FIRMWARE_ADDRESS_SPACE_BASE,
-                                        &s->firmware_space, 1);
+    memory_region_add_subregion(get_system_memory(), IA64_PAL_ROM_BASE,
+                                &s->pal_rom);
+    memory_region_add_subregion(get_system_memory(), IA64_PAL_RESET_IVT_BASE,
+                                &s->pal_reset_ivt);
+    memory_region_add_subregion(get_system_memory(), IA64_FW_SCRATCH_BASE,
+                                &s->fw_scratch);
     return true;
 }
 
@@ -3432,7 +3445,7 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
             IA64BootInfo info = {
                 .firmware_base = s->realfw_base,
                 .firmware_entry = entry,
-                .iva = IA64_REALFW_IVT_BASE,
+                .iva = IA64_PAL_RESET_IVT_BASE,
                 .raw_entry = true,
                 .raw_proc_id = socket_lid_id[MIN(cs->cpu_index,
                                                  ARRAY_SIZE(socket_lid_id) - 1)],
@@ -3443,8 +3456,8 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                  * indices).  SAL_B stashes this in bank-0 GR18 and uses it
                  * for every static PAL call.
                  */
-                .raw_pal_proc = IA64_REALFW_PAL_STUB_BASE,
-                .raw_pal_auth = IA64_REALFW_PAL_STUB_BASE,
+                .raw_pal_proc = IA64_PAL_ROM_BASE,
+                .raw_pal_auth = IA64_PAL_ROM_BASE,
                 /*
                  * Every processor leaves reset together and runs SAL_A,
                  * which arbitrates the BSP through the SAC's write-once
@@ -3492,10 +3505,11 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
  *   break.m 0x100000 ;;  br.many b0 ;;
  * The translator services the break through ia64_pal_dispatch() when the
  * bundle sits at a recognized PAL entry address (env->pal.pal_proc_copy_addr,
- * seeded from IA64BootInfo.raw_pal_proc in realfw mode).
+ * seeded from IA64BootInfo.raw_pal_proc at SALE_ENTRY).  It is the PAL
+ * emulation ROM's content.
  */
 
-static const uint8_t ia64_realfw_pal_stub[32] = {
+static const uint8_t ia64_pal_stub[32] = {
     0x0a, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
     0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
@@ -3760,9 +3774,9 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
                                      base);
     }
 
-    rom_add_blob_fixed("ia64-realfw-palstub", ia64_realfw_pal_stub,
-                       sizeof(ia64_realfw_pal_stub),
-                       IA64_REALFW_PAL_STUB_BASE);
+    rom_add_blob_fixed("ia64-pal-stub", ia64_pal_stub,
+                       sizeof(ia64_pal_stub),
+                       IA64_PAL_ROM_BASE);
 
     {
         /* Branch-to-self bundle (MIB: nop.m; nop.i; br.few 0). */
@@ -3770,14 +3784,14 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
             0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
             0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
         };
-        g_autofree uint8_t *ivt = g_malloc(IA64_REALFW_IVT_SIZE);
+        g_autofree uint8_t *ivt = g_malloc(IA64_PAL_RESET_IVT_SIZE);
         size_t off;
 
-        for (off = 0; off < IA64_REALFW_IVT_SIZE; off += sizeof(self_branch)) {
+        for (off = 0; off < IA64_PAL_RESET_IVT_SIZE; off += sizeof(self_branch)) {
             memcpy(ivt + off, self_branch, sizeof(self_branch));
         }
-        rom_add_blob_fixed("ia64-realfw-ivt", ivt, IA64_REALFW_IVT_SIZE,
-                           IA64_REALFW_IVT_BASE);
+        rom_add_blob_fixed("ia64-pal-reset-ivt", ivt, IA64_PAL_RESET_IVT_SIZE,
+                           IA64_PAL_RESET_IVT_BASE);
     }
 
     s->realfw_base = base;

@@ -4991,8 +4991,6 @@ static void test_savevm_restores_platform_state(void)
     const uint64_t ram_addr = 0x00300000;
     const uint64_t saved_ram = 0x0123456789abcdefULL;
     const uint64_t changed_ram = 0xfedcba9876543210ULL;
-    const uint64_t saved_nvram = 0x1020304050607080ULL;
-    const uint64_t changed_nvram = 0x8877665544332211ULL;
     const uint16_t saved_pm_enable = 0x0100;
     const uint16_t changed_pm_enable = 0x0400;
     const uint32_t saved_vram = 0x00112233;
@@ -5037,7 +5035,6 @@ static void test_savevm_restores_platform_state(void)
     iosapic_path = find_unattached_child(qts, "ia64-iosapic");
 
     qtest_writeq(qts, ram_addr, saved_ram);
-    qtest_writeq(qts, IA64_NVRAM_BASE, saved_nvram);
     qtest_writew(qts, pm_enable_addr, saved_pm_enable);
     int10_regs = (TestInt10Registers) {
         .ax = 0x4f02,
@@ -5066,7 +5063,6 @@ static void test_savevm_restores_platform_state(void)
      */
     qtest_system_reset(qts);
     qtest_writeq(qts, ram_addr, changed_ram);
-    qtest_writeq(qts, IA64_NVRAM_BASE, changed_nvram);
     qtest_writew(qts, pm_enable_addr, changed_pm_enable);
     int10_regs = (TestInt10Registers) {
         .ax = 0x4f02,
@@ -5088,7 +5084,6 @@ static void test_savevm_restores_platform_state(void)
     g_assert_cmpstr(response, ==, "");
 
     g_assert_cmphex(qtest_readq(qts, ram_addr), ==, saved_ram);
-    g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, saved_nvram);
     g_assert_cmphex(qtest_readw(qts, pm_enable_addr), ==, saved_pm_enable);
     g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_XRES), ==, 800);
     g_assert_cmphex(test_vbe_read(qts, VBE_DISPI_INDEX_YRES), ==, 600);
