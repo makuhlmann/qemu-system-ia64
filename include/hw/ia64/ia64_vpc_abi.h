@@ -32,6 +32,17 @@
  * NVRAM-sector address.
  */
 #define IA64_FW_HANDOFF_ADDR          IA64_U64(0x00000000ff0ff000)
+/*
+ * Where the boot processor's flash stage publishes the RAM-top shadow base
+ * once the image is copied and fixed up: the application processors leave
+ * reset together with it (PALE_RESET exit state, every processor at
+ * SALE_ENTRY) and spin here until the shadow exists, then enter it.  Zero
+ * (cleared by the machine on every reset) means "not yet".  Lives in the
+ * handoff page; retired with the handoff block.
+ */
+#define IA64_FW_SHADOW_MAILBOX        IA64_U64(0x00000000ff0ff800)
+/* The firmware's link base; it executes from the RAM-top shadow. */
+#define IA64_FW_LINK_BASE             IA64_U64(0x0000000000100000)
 #define IA64_FW_HANDOFF_MAGIC         IA64_U64(0x4d41523436414951) /* "QIA64RAM" */
 #define IA64_FW_HANDOFF_VERSION       14ULL
 /* Handoff version that first carries IA64VpcHandoff.BootTimeout. */

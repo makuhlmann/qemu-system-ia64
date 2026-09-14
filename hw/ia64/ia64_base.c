@@ -84,9 +84,6 @@
 #include "target/ia64/cpu-qom.h"
 #include "target/ia64/cpu.h"
 
-/* The firmware's 1 MB link base; it executes from the RAM-top shadow. */
-#define IA64_FW_LINK_BASE 0x0000000000100000ULL
-#define IA64_FW_BASE    0x0000000000100000ULL
 /*
  * Firmware image loaded when no -bios is given.  It is installed beside the
  * binary (share/), so an unpacked package runs without naming it every time.
@@ -107,7 +104,7 @@
  * -24 = SALE_ENTRY pointer.  See plans/phase5-real-firmware-boot.md.
  */
 #define IA64_REALFW_WINDOW_END    IA64_U64(0x0000000100000000)
-#define IA64_REALFW_MAX_SIZE      IA64_U64(0x0000000000400000)
+#define IA64_REALFW_MAX_SIZE      IA64_U64(0x0000000000800000)
 /*
  * PAL procedure entry handed to real SAL in GR34/GR36 (and recognized via
  * env->pal.pal_proc_copy_addr): a stub in the firmware address-space RAM,
@@ -128,6 +125,8 @@
  */
 #define IA64_REALFW_IVT_BASE      IA64_U64(0x00000000ff300000)
 #define IA64_REALFW_IVT_SIZE      0x8000
+/* FIT entry type of the OEM NVRAM/variable block (SDV FIT, type 1Eh). */
+#define IA64_FIT_TYPE_NVRAM       0x1e
 #define IA64_REALFW_PTR_FIT       (IA64_REALFW_WINDOW_END - 32)
 #define IA64_REALFW_PTR_SALE      (IA64_REALFW_WINDOW_END - 24)
 /* Bit 63 in firmware pointers is the uncacheable-attribute flag, not
@@ -1515,7 +1514,7 @@ static void ia64_vpc_load_realfw_device_rom(IA64VpcMachineState *s)
     uint8_t *rom;
     uint64_t rom_size;
 
-    if (s->realfw_path == NULL || s->realfw_vga_rom_path == NULL ||
+    if (!s->fw_is_flash || s->realfw_vga_rom_path == NULL ||
         pci_dev == NULL ||
         pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
         return;
@@ -1825,7 +1824,7 @@ static void ia64_vpc_init_nvram(IA64VpcMachineState *s)
      * image, which is modelled by the pflash device (writable, in the flash
      * itself); the synthetic NVRAM MMIO would shadow it, so skip it here.
      */
-    if (s->realfw_path != NULL) {
+    if (s->fw_flash_has_nvram) {
         return;
     }
 
@@ -1868,8 +1867,13 @@ static void ia64_vpc_init_nvram(IA64VpcMachineState *s)
     memory_region_init_io(&s->nvram_mmio, OBJECT(s),
                           &ia64_vpc_nvram_ops, s, "ia64-vpc.nvram",
                           IA64_NVRAM_SIZE);
+    /*
+     * Above the flash window (priority 2): the project firmware's flash
+     * image does not yet declare an NVRAM block, so its variable store is
+     * still this window, over the erased sector the image leaves there.
+     */
     memory_region_add_subregion_overlap(get_system_memory(), IA64_NVRAM_BASE,
-                                        &s->nvram_mmio, 2);
+                                        &s->nvram_mmio, 3);
 }
 
 typedef struct IA64VpcCompatDefault {
@@ -2803,6 +2807,9 @@ static void ia64_vpc_write_firmware_handoff(IA64VpcMachineState *s)
         cpu_to_le64(IA64_VPC_MACHINE_GET_CLASS(s)->chipset_profile);
     cpu_physical_memory_write(IA64_FW_HANDOFF_ADDR, &handoff,
                               sizeof(handoff));
+    /* No shadow yet: the flash stage's application processors wait. */
+    stq_le_p(&handoff.Magic, 0);
+    cpu_physical_memory_write(IA64_FW_SHADOW_MAILBOX, &handoff.Magic, 8);
 }
 
 /*
@@ -4008,46 +4015,109 @@ static BlockBackend *ia64_realfw_open_nvram(const char *path,
     return blk;
 }
 
-static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
+/*
+ * Read the firmware file: the realfw= image, else -bios, else the shipped
+ * default beside the binary.  Not finding the default is not an error:
+ * qtest brings this machine up with no firmware at all.  The file is
+ * classified here, before the platform is built, because what it is
+ * decides what the platform provides (a flash image carrying its own
+ * NVRAM block needs no synthetic variable store).
+ */
+static bool ia64_vpc_read_firmware(IA64VpcMachineState *s,
+                                   MachineState *machine, Error **errp)
 {
-    g_autofree uint8_t *image = NULL;
-    gsize image_size = 0;
+    g_autofree char *path = NULL;
+    const char *name;
     GError *gerr = NULL;
-    uint64_t base, fit_ptr, sale_ptr;
-    char fit_sig[8];
+    gsize size = 0;
 
-    if (!g_file_get_contents(s->realfw_path, (gchar **)&image,
-                             &image_size, &gerr)) {
-        error_setg(errp, "failed to read realfw image '%s': %s",
-                   s->realfw_path, gerr->message);
+    if (s->realfw_path != NULL) {
+        name = s->realfw_path;
+        path = g_strdup(name);
+    } else if (machine->firmware != NULL) {
+        name = machine->firmware;
+        path = qemu_find_file(QEMU_FILE_TYPE_BIOS, name);
+        if (path == NULL) {
+            path = g_strdup(name);
+        }
+    } else {
+        name = IA64_VPC_DEFAULT_FIRMWARE;
+        path = qemu_find_file(QEMU_FILE_TYPE_BIOS, name);
+        if (path == NULL) {
+            return true;
+        }
+    }
+    if (!g_file_get_contents(path, (gchar **)&s->fw_image, &size, &gerr)) {
+        error_setg(errp, "failed to read firmware '%s': %s", name,
+                   gerr->message);
         g_error_free(gerr);
         return false;
     }
-    if (image_size == 0 || image_size > IA64_REALFW_MAX_SIZE ||
-        (image_size & 0xffff) != 0) {
-        error_setg(errp, "realfw image '%s' must be a whole number of "
-                   "64 KiB flash blocks, at most 4 MiB", s->realfw_path);
-        return false;
-    }
-    base = IA64_REALFW_WINDOW_END - image_size;
+    s->fw_image_size = size;
+    s->fw_image_name = g_strdup(name);
 
-    fit_ptr = ldq_le_p(image + (IA64_REALFW_PTR_FIT - base)) &
-              IA64_REALFW_PTR_ADDR_MASK;
-    sale_ptr = ldq_le_p(image + (IA64_REALFW_PTR_SALE - base)) &
-               IA64_REALFW_PTR_ADDR_MASK;
-    if (fit_ptr < base || fit_ptr + sizeof(fit_sig) > IA64_REALFW_WINDOW_END ||
-        sale_ptr < base || sale_ptr >= IA64_REALFW_WINDOW_END) {
-        error_setg(errp, "realfw image '%s': reset pointer block does not "
-                   "point into the image (FIT 0x%" PRIx64 ", SALE_ENTRY "
-                   "0x%" PRIx64 ")", s->realfw_path, fit_ptr, sale_ptr);
+    /*
+     * A flash image is a whole number of 64 KiB blocks that ends at 4 GiB
+     * with the architected reset pointer block in its last 48 bytes (SAL
+     * sec 2.5): the FIT pointer at 4 GiB-32 and the SALE_ENTRY pointer at
+     * 4 GiB-24 both point into it, and the FIT carries its signature.
+     * Anything else is the flat relocatable image the project firmware
+     * used to be.
+     */
+    if (size != 0 && size <= IA64_REALFW_MAX_SIZE && (size & 0xffff) == 0) {
+        uint64_t base = IA64_REALFW_WINDOW_END - size;
+        uint64_t fit_ptr = ldq_le_p(s->fw_image + (IA64_REALFW_PTR_FIT - base))
+                           & IA64_REALFW_PTR_ADDR_MASK;
+        uint64_t sale_ptr = ldq_le_p(s->fw_image +
+                                     (IA64_REALFW_PTR_SALE - base))
+                            & IA64_REALFW_PTR_ADDR_MASK;
+
+        if (fit_ptr >= base && fit_ptr + 16 <= IA64_REALFW_WINDOW_END &&
+            sale_ptr >= base && sale_ptr < IA64_REALFW_WINDOW_END &&
+            memcmp(s->fw_image + (fit_ptr - base), "_FIT_   ", 8) == 0) {
+            /*
+             * The FIT header's size field counts its entries (16 bytes
+             * each, the header included); walk them for an NVRAM block.
+             */
+            const uint8_t *fit = s->fw_image + (fit_ptr - base);
+            uint32_t entries = ldl_le_p(fit + 8) & 0xffffff;
+            uint32_t i;
+
+            s->fw_is_flash = true;
+            s->fw_fit_ptr = fit_ptr;
+            s->fw_sale_ptr = sale_ptr;
+            for (i = 1; i < entries &&
+                        fit_ptr + (uint64_t)(i + 1) * 16 <=
+                        IA64_REALFW_WINDOW_END; i++) {
+                if ((fit[i * 16 + 14] & 0x7f) == IA64_FIT_TYPE_NVRAM) {
+                    s->fw_flash_has_nvram = true;
+                }
+            }
+        }
+    }
+    if (s->realfw_path != NULL && !s->fw_is_flash) {
+        error_setg(errp, "realfw image '%s' is not a flash image: a whole "
+                   "number of 64 KiB blocks, at most 8 MiB, with a reset "
+                   "pointer block and a _FIT_ table", name);
         return false;
     }
-    memcpy(fit_sig, image + (fit_ptr - base), sizeof(fit_sig));
-    if (memcmp(fit_sig, "_FIT_   ", sizeof(fit_sig)) != 0) {
-        error_setg(errp, "realfw image '%s': no _FIT_ signature at the "
-                   "FIT pointer target 0x%" PRIx64, s->realfw_path, fit_ptr);
+    if (!s->fw_is_flash && size > IA64_FW_IMAGE_SPAN) {
+        error_setg(errp, "invalid firmware image size for '%s'", name);
         return false;
     }
+    return true;
+}
+
+/*
+ * Map a flash image so that its end lands exactly at 4 GiB, and take the
+ * boot entry from the architected SALE_ENTRY pointer at 4 GiB-24.  The
+ * flash window lies inside the ia64-firmware-address-space RAM region.
+ * The vendor SDV image and the project firmware's flash image both come
+ * through here.
+ */
+static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
+{
+    uint64_t base = IA64_REALFW_WINDOW_END - s->fw_image_size;
 
     /*
      * The flash is a real Intel-CFI (command-set 0x0001) part: SDV firmware
@@ -4066,15 +4136,15 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
         BlockBackend *flash_blk = NULL;
 
         if (s->realfw_nvram_path != NULL) {
-            flash_blk = ia64_realfw_open_nvram(s->realfw_nvram_path, image,
-                                               image_size, errp);
+            flash_blk = ia64_realfw_open_nvram(s->realfw_nvram_path, s->fw_image,
+                                               s->fw_image_size, errp);
             if (flash_blk == NULL) {
                 return false;
             }
             qdev_prop_set_drive(dev, "drive", flash_blk);
         }
 
-        qdev_prop_set_uint32(dev, "num-blocks", image_size / 0x10000);
+        qdev_prop_set_uint32(dev, "num-blocks", s->fw_image_size / 0x10000);
         qdev_prop_set_uint64(dev, "sector-length", 0x10000);
         qdev_prop_set_uint8(dev, "width", 1);
         qdev_prop_set_bit(dev, "big-endian", 0);
@@ -4114,7 +4184,7 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
          * image copy would clobber them.
          */
         if (flash_blk == NULL) {
-            memcpy(memory_region_get_ram_ptr(flash_mr), image, image_size);
+            memcpy(memory_region_get_ram_ptr(flash_mr), s->fw_image, s->fw_image_size);
         }
     }
 
@@ -4139,76 +4209,37 @@ static bool ia64_vpc_load_realfw(IA64VpcMachineState *s, Error **errp)
     }
 
     s->realfw_base = base;
-    s->realfw_entry = sale_ptr;
-    /* No project firmware image: machine_done must not parse a PE plabel. */
+    s->realfw_entry = s->fw_sale_ptr;
+    /* No flat image: machine_done must not parse a PE plabel. */
     s->firmware_size = 0;
+    return true;
+}
+
+/* The flat relocatable image: shadowed at the RAM top, fixups applied here. */
+static bool ia64_vpc_load_flat(IA64VpcMachineState *s, MachineState *machine,
+                               Error **errp)
+{
+    uint64_t fw_base = ia64_vpc_fw_base(s, machine->ram_size);
+
+    if (fw_base != IA64_FW_LINK_BASE &&
+        !ia64_vpc_relocate_firmware(s->fw_image, s->fw_image_size,
+                                    fw_base - IA64_FW_LINK_BASE, errp)) {
+        return false;
+    }
+    rom_add_blob_fixed("ia64-firmware", s->fw_image, s->fw_image_size,
+                       fw_base);
+    s->firmware_size = s->fw_image_size;
     return true;
 }
 
 static bool ia64_vpc_load_firmware(IA64VpcMachineState *s,
                                    MachineState *machine, Error **errp)
 {
-    g_autofree char *firmware_path = NULL;
-    const char *firmware = machine->firmware;
-    Error *local_err = NULL;
-    int64_t firmware_size;
-
-    if (s->realfw_path != NULL) {
-        return ia64_vpc_load_realfw(s, errp);
+    if (s->fw_image == NULL) {
+        return true;
     }
-
-    if (firmware == NULL) {
-        /*
-         * Fall back to the shipped image.  Not finding it is not an error:
-         * qtest brings this machine up with no firmware at all.
-         */
-        firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS,
-                                       IA64_VPC_DEFAULT_FIRMWARE);
-        if (firmware_path == NULL) {
-            return true;
-        }
-        firmware = IA64_VPC_DEFAULT_FIRMWARE;
-    } else {
-        firmware_path = qemu_find_file(QEMU_FILE_TYPE_BIOS, firmware);
-        if (firmware_path == NULL) {
-            firmware_path = g_strdup(firmware);
-        }
-    }
-    firmware_size = get_image_size(firmware_path, &local_err);
-    if (local_err != NULL) {
-        error_prepend(&local_err, "failed to inspect firmware '%s': ",
-                      firmware);
-        error_propagate(errp, local_err);
-        return false;
-    }
-    {
-        uint64_t fw_base = ia64_vpc_fw_base(s, machine->ram_size);
-        g_autofree uint8_t *image = NULL;
-        gsize image_size = 0;
-        GError *gerr = NULL;
-
-        if (firmware_size <= 0 ||
-            (uint64_t)firmware_size > IA64_FW_IMAGE_SPAN) {
-            error_setg(errp, "invalid firmware image size for '%s'",
-                       firmware);
-            return false;
-        }
-        if (!g_file_get_contents(firmware_path, (gchar **)&image,
-                                 &image_size, &gerr)) {
-            error_setg(errp, "failed to read firmware '%s': %s", firmware,
-                       gerr->message);
-            g_error_free(gerr);
-            return false;
-        }
-        if (fw_base != IA64_FW_LINK_BASE &&
-            !ia64_vpc_relocate_firmware(image, image_size,
-                                        fw_base - IA64_FW_LINK_BASE, errp)) {
-            return false;
-        }
-        rom_add_blob_fixed("ia64-firmware", image, image_size, fw_base);
-        s->firmware_size = firmware_size;
-    }
-    return true;
+    return s->fw_is_flash ? ia64_vpc_load_flash(s, errp)
+                          : ia64_vpc_load_flat(s, machine, errp);
 }
 
 static bool ia64_vpc_build(MachineState *machine, Error **errp)
@@ -4236,6 +4267,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         return false;
     }
     ia64_vpc_init_watchdog(s);
+    if (!ia64_vpc_read_firmware(s, machine, errp)) {
+        return false;
+    }
     ia64_vpc_init_nvram(s);
     ia64_vpc_write_firmware_handoff(s);
 
@@ -4725,6 +4759,8 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
     g_free(s->nvram_resolved_path);
     g_free(s->vga_model);
     g_free(s->realfw_path);
+    g_free(s->fw_image);
+    g_free(s->fw_image_name);
 }
 
 /*

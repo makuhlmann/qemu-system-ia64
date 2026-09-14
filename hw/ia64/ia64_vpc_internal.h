@@ -159,6 +159,16 @@ struct IA64VpcMachineState {
     uint64_t realfw_entry;
     uint64_t realfw_base;
     PFlashCFI01 *realfw_flash;
+    /* The firmware file, read before the platform is built. */
+    uint8_t *fw_image;
+    size_t fw_image_size;
+    char *fw_image_name;
+    /* A flash image: reset pointer block, FIT, mapped to end at 4 GiB. */
+    bool fw_is_flash;
+    /* The flash image's FIT declares an NVRAM block (type 1Eh). */
+    bool fw_flash_has_nvram;
+    uint64_t fw_fit_ptr;
+    uint64_t fw_sale_ptr;
     qemu_irq extint;
     /* 460gx: the chipset (SAC, CF8/CFC, config store, SPD rows). */
     IA64460GXState *chipset;
