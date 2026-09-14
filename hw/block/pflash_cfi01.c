@@ -96,11 +96,14 @@ struct PFlashCFI01 {
     uint8_t *block_lock;        /* one lock register per block, or NULL */
     VMChangeStateEntry *vmstate;
     /*
-     * Backing-file writes the part owes, merged into one range and written
-     * shortly after the last program or erase (and whenever the VM stops).
+     * With x-flush-delay-ms > 0, backing-file writes the part owes are
+     * merged into one range and written when the part returns to read-array
+     * mode, that long after the last program or erase, or when the VM stops.
      * The array itself is always current; only the host file lags, so a
      * byte-at-a-time program sequence costs one host write, not one each.
+     * The default 0 writes each change at once, as the part always did.
      */
+    uint32_t flush_delay_ms;
     uint64_t dirty_start;
     uint64_t dirty_end;         /* 0 = nothing pending */
     QEMUTimer *flush_timer;
@@ -444,8 +447,6 @@ static uint32_t pflash_read(PFlashCFI01 *pfl, hwaddr offset,
 }
 
 /* update flash content on disk */
-#define PFLASH_FLUSH_DELAY_MS 50
-
 static void pflash_flush(PFlashCFI01 *pfl)
 {
     uint64_t offset, offset_end;
@@ -496,7 +497,7 @@ static void pflash_update(PFlashCFI01 *pfl, int offset,
     if (pfl->flush_timer != NULL) {
         timer_mod(pfl->flush_timer,
                   qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
-                  PFLASH_FLUSH_DELAY_MS);
+                  pfl->flush_delay_ms);
     } else {
         pflash_flush(pfl);
     }
@@ -1021,7 +1022,7 @@ static void pflash_cfi01_realize(DeviceState *dev, Error **errp)
     pfl->blk_bytes = g_malloc(pfl->writeblock_size);
     pfl->blk_offset = -1;
 
-    if (pfl->blk && !pfl->ro) {
+    if (pfl->blk && !pfl->ro && pfl->flush_delay_ms > 0) {
         pfl->flush_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
                                         pflash_flush_timer_cb, pfl);
         pfl->flush_vmstate =
@@ -1056,6 +1057,7 @@ static void pflash_cfi01_system_reset(DeviceState *dev)
 
 static const Property pflash_cfi01_properties[] = {
     DEFINE_PROP_DRIVE("drive", PFlashCFI01, blk),
+    DEFINE_PROP_UINT32("x-flush-delay-ms", PFlashCFI01, flush_delay_ms, 0),
     /* num-blocks is the number of blocks actually visible to the guest,
      * ie the total size of the device divided by the sector length.
      * If we're emulating flash devices wired in parallel the actual

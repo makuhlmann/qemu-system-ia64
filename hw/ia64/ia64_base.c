@@ -3754,6 +3754,11 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
          * clear the lock register before programming (datasheet 290658).
          */
         qdev_prop_set_bit(dev, "block-locking", true);
+        /*
+         * Firmware programs the NVRAM sector a byte at a time; batch the
+         * backing file's writes rather than paying one host write per byte.
+         */
+        qdev_prop_set_uint32(dev, "x-flush-delay-ms", 50);
         qdev_prop_set_string(dev, "name", "ia64-realfw-flash");
         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 
