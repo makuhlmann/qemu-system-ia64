@@ -1,13 +1,15 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * IA-64 virtual PC platform.
+ * IA-64 machine, the abstract base ("ia64-base") of the two boards.
  *
- * Provides RAM, a bootstrap CPU, a memory-mapped serial console,
- * firmware ROM loading via -bios, a PCI host bridge, SCSI and AHCI storage
- * controllers, an Ethernet controller, OHCI/UHCI USB,
- * local SAPIC/I/O SAPIC wiring,
- * and ACPI fixed power-management registers.
+ * Provides RAM, the CPUs, the memory-mapped serial console, firmware
+ * loading via -bios, the primary PCI host bridge, SCSI and AHCI storage
+ * controllers, an Ethernet controller, OHCI/UHCI USB, local SAPIC/I/O SAPIC
+ * wiring, and ACPI fixed power-management registers.  What differs between
+ * the boards -- the core chipset and its further PCI roots, the south
+ * bridge, INTx wiring, device seats -- comes from the concrete class
+ * (sdv.c for "460gx", longspeak.c for "zx1"; see ia64_vpc_internal.h).
  */
 
 #include "qemu/osdep.h"

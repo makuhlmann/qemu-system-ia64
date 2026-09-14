@@ -255,7 +255,7 @@ void fw_init_guest_high_ram_ranges(UINT64 RamSize)
      * aperture), so its low band holds IA64_SBA_IOVA_SIZE fewer bytes and that
      * much more DRAM is displaced above 4 GiB.  In that regime mGuestLowRamEnd
      * is the aperture, so subtracting the hole size is exact.  (Keep this in
-     * lockstep with ia64_vpc_map_ram() in hw/ia64/ia64_vpc.c and
+     * lockstep with ia64_vpc_map_ram() in hw/ia64/ia64_base.c and
      * efi_add_low_ram_band() above.)
      */
     {

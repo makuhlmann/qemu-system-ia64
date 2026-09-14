@@ -380,7 +380,7 @@ void efi_add_conventional_with_system_pointer(UINTN *Index,
  * efi_add_conventional_with_system_pointer().  In the hole-active regime the
  * low band always reaches the aperture, so it fully spans the window and this
  * split is exact.  Keep in lockstep with ia64_vpc_map_ram() in
- * hw/ia64/ia64_vpc.c.
+ * hw/ia64/ia64_base.c.
  */
 static void efi_add_low_ram_band(UINTN *Index, UINT64 Start, UINT64 End)
 {

@@ -1,6 +1,6 @@
 ia64_ss = ss.source_set()
 ia64_ss.add(when: 'CONFIG_IA64_VPC', if_true: files(
-  'ia64_vpc.c',
+  'ia64_base.c',
   'ia64_460gx.c',
   'sdv.c',
   'longspeak.c',

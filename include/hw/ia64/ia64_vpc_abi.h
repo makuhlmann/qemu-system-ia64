@@ -265,11 +265,11 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * The hole is only carved when installed RAM exceeds the PCI aperture
  * (IA64_PCI_MMIO_BASE), i.e. when there is already RAM displaced above 4 GiB and
  * the low band fills to the aperture regardless of the hole (see the gate in
- * hw/ia64/ia64_vpc.c and fw_zx1_iova_hole_active() in the firmware).  Carving it
+ * hw/ia64/longspeak.c and fw_zx1_iova_hole_active() in the firmware).  Carving it
  * for a smaller guest would move the top of low RAM -- and the firmware image,
  * CPU-assist region and SRAT/SMBIOS ranges pinned near it -- which needs a
  * hole-aware low_ram_end the firmware does not yet compute; see
- * plans/zx1-chipset-port-plan.md.  hw/ia64/ia64_vpc.c (RAM map),
+ * plans/zx1-chipset-port-plan.md.  hw/ia64/longspeak.c (RAM map),
  * roms/ia64-firmware/efi_memmap.c (EFI map) and platform.c (high-RAM ranges)
  * carve this hole in lockstep.
  */

@@ -25,7 +25,7 @@
 
 /*
  * Fixed NVIDIA BAR windows inside the PCI0 MMIO aperture, matching
- * hw/ia64/ia64_vpc.c: FB at 0xF0000000 (128 MiB, BAR1), MMIO register aperture
+ * hw/ia64/ia64_base.c: FB at 0xF0000000 (128 MiB, BAR1), MMIO register aperture
  * at 0xF8000000 (16 MiB, BAR0), expansion ROM at 0xF9000000 (BAR6).
  */
 #define IA64_NV15_FB_BASE     (IA64_PCI_MMIO_BASE + 0x02000000ULL)

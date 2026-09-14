@@ -42,7 +42,7 @@
 #define IA64_INT10_ROM_BASE          0x000c0000ULL
 /*
  * 2 KB: the XP inbox Rage 128 miniport rejects option ROMs whose size byte
- * declares less than 2048 bytes.  Keep in sync with hw/ia64/ia64_vpc.c.
+ * declares less than 2048 bytes.  Keep in sync with hw/ia64/ia64_base.c.
  */
 #define IA64_INT10_ROM_SIZE          0x00000800U
 #define IA64_INT10_VECTOR_ADDR       0x00000040ULL

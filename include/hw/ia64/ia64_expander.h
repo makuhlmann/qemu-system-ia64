@@ -12,7 +12,7 @@
  *
  * This models one such downstream root bus.  The bridge's own configuration
  * registers live on the chipset's bus CBN and are answered separately (the
- * realfw configuration space in ia64_vpc.c); a guest sees only the root bus
+ * configuration space of the 460GX chipset device, ia64_460gx.c); a guest sees only the root bus
  * presented here, exactly as it sees the compatibility bus today.
  */
 

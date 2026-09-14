@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * IA-64 machine internals shared between the abstract base machine
- * (ia64_vpc.c) and the concrete boards (sdv.c, longspeak.c).  Nothing
+ * (ia64_base.c) and the concrete boards (sdv.c, longspeak.c).  Nothing
  * outside hw/ia64/ includes this.
  */
 
