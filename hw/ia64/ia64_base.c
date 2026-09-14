@@ -3665,7 +3665,7 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
      * The firmware's CPU-assist region (SAL re-entry slots, debug
      * contexts/stacks, early RSE backing stores, boot memory stacks) sits at
      * the top of installed low RAM, as real IA-64 firmware places its SAL
-     * scratch; the firmware derives the same base from the handoff block.
+     * scratch; the firmware derives the same base from the memory it probes.
      */
     uint64_t assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(machine->ram_size);
     IA64BootInfo info = {
@@ -4581,7 +4581,7 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
 /*
  * Shared class-init for the abstract "ia64-base": everything common to both
  * concrete machines.  The concrete 460gx/zx1 class-inits (below) run after this
- * and set the fields that differ -- desc, default CPU, and chipset_profile.
+ * and set the fields that differ -- desc, default CPU, and the board hooks.
  */
 static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 {

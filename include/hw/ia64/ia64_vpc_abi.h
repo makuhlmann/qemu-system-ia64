@@ -90,7 +90,7 @@
  * exactly with the historical fixed [126 MiB, 128 MiB) region.
  *
  * entry.S includes this header (it is assembled with the C preprocessor)
- * and re-derives the region base from the handoff block with these
+ * and re-derives the region base from the probed memory size with these
  * constants; its AP stack stride shift must match IA64_FW_CPU_STACK_SIZE.
  */
 #define IA64_FW_LOW_RAM_MIN            IA64_U64(0x0000000008000000)

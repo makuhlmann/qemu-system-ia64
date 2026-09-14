@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * The platform half of the firmware: guest state decoded from the
- * machine handoff block, the SAL procedure set and dispatcher, PCI
+ * NVRAM defaults record, the SAL procedure set and dispatcher, PCI
  * config-space access, the CPU register / SAL-handoff assembly bridge,
  * and AP bring-up.  Together with efi_memmap.c and platform_tables.c
  * this is the producer side of the plan's milestone-6
