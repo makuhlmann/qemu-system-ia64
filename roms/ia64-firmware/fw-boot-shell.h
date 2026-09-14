@@ -196,7 +196,6 @@ UINT32 fw_graphics_width(VOID);
 UINT32 fw_graphics_height(VOID);
 void graphics_set_text_cursor(UINT16 Location, BOOLEAN Visible);
 const CHAR8 *fw_storage_description(BOOLEAN boot_device);
-BOOLEAN fw_handoff_nvram_persistent(VOID);
 UINT16 fw_handoff_boot_timeout(VOID);
 void fw_reset_cold(VOID);
 

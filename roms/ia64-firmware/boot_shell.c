@@ -1186,8 +1186,7 @@ static void fw_shell_system_info(void)
     fw_shell_puts("\r\nFile systems:   ");
     fw_shell_put_uint64(mShellFileSystemCount);
     fw_shell_puts("\r\nNVRAM backing:  ");
-    fw_shell_puts(fw_handoff_nvram_persistent() ?
-                  "persistent" : "volatile");
+    fw_shell_puts("nonvolatile variable store");
     fw_shell_puts("\r\nDate and time:  ");
     fw_shell_show_date_time();
 }
@@ -1299,9 +1298,7 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
             status = fw_shell_set_boot_order(ArgumentCount - 1U,
                                              Arguments + 1U);
             if (status == EFI_SUCCESS) {
-                fw_shell_puts(fw_handoff_nvram_persistent() ?
-                              "BootOrder saved to persistent NVRAM.\r\n" :
-                              "BootOrder saved for this session.\r\n");
+                fw_shell_puts("BootOrder saved to NVRAM.\r\n");
                 fw_shell_show_boot_order();
             }
         }
@@ -1313,9 +1310,7 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
                      fw_shell_set_boot_next(Arguments[1]) :
                      EFI_INVALID_PARAMETER;
             if (status == EFI_SUCCESS) {
-                fw_shell_puts(fw_handoff_nvram_persistent() ?
-                              "BootNext saved to persistent NVRAM.\r\n" :
-                              "BootNext saved for this session.\r\n");
+                fw_shell_puts("BootNext saved to NVRAM.\r\n");
             }
         }
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "boot")) {

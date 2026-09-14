@@ -126,6 +126,63 @@ static volatile UINT64        mApCheckins;
 
 extern char __fw_image_start[];
 
+/*
+ * The PS/2 controller: an i8042 answers the controller self-test (command
+ * AAh) with 55h on its data port; open bus does not.  Probed once, on the
+ * first question, since the console and pointer code ask repeatedly.
+ */
+static UINT8 mI8042Present = 2;
+
+BOOLEAN fw_handoff_i8042_enabled(void)
+{
+    if (mI8042Present == 2) {
+        volatile UINT8 *status = (volatile UINT8 *)(UINTN)PS2_STATUS_PORT;
+        volatile UINT8 *data = (volatile UINT8 *)(UINTN)PS2_DATA_PORT;
+        UINTN limit;
+
+        mI8042Present = 0;
+        for (limit = 0; limit < 100000 && (*status & PS2_STATUS_IBF); limit++) {
+        }
+        if ((*status & PS2_STATUS_IBF) == 0) {
+            /* Drain stale output before asking, then wait for the answer. */
+            for (limit = 0; limit < 16 && (*status & PS2_STATUS_OBF); limit++) {
+                (void)*data;
+            }
+            *status = 0xaa;
+            for (limit = 0; limit < 100000; limit++) {
+                if (*status & PS2_STATUS_OBF) {
+                    mI8042Present = *data == 0x55;
+                    break;
+                }
+            }
+        }
+    }
+    return mI8042Present != 0;
+}
+
+/*
+ * The debug UART: a 16550 at the machine's debug window keeps what is
+ * written to its scratch register (offset 7); open bus keeps nothing.
+ * Zero means no debug port.
+ */
+UINT64 fw_handoff_debug_port_base(void)
+{
+    static UINT64 base = ~0ULL;
+
+    if (base == ~0ULL) {
+        volatile UINT8 *scratch =
+            (volatile UINT8 *)(UINTN)(IA64_DEBUG_UART_BASE + 7);
+
+        *scratch = 0xa5;
+        base = *scratch == 0xa5 ? IA64_DEBUG_UART_BASE : 0;
+        if (base != 0) {
+            *scratch = 0x5a;
+            base = *scratch == 0x5a ? IA64_DEBUG_UART_BASE : 0;
+        }
+    }
+    return base;
+}
+
 void fw_platform_set_probed(UINT64 RamSize, UINT64 Chipset)
 {
     mGuestRamSize = RamSize & ~0xfffULL;
@@ -332,65 +389,8 @@ BOOLEAN fw_handoff_vga_console_primary(void)
     }
 }
 
-BOOLEAN fw_handoff_ide_dma_enabled(void)
-{
-    FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
 
-    if (!fw_handoff_valid(header) || header->Version < 4) {
-        return 1;
-    }
-    if (header->Version >= 6) {
-        IA64VpcHandoff *handoff =
-            (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
 
-        return handoff->IdeDmaEnabled != 0;
-    } else {
-        FW_HANDOFF_LEGACY *handoff =
-            (FW_HANDOFF_LEGACY *)(UINTN)IA64_FW_HANDOFF_ADDR;
-
-        return handoff->IdeDmaEnabled != 0;
-    }
-}
-
-UINT64 fw_handoff_debug_port_base(void)
-{
-    FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    UINT64 flags;
-    UINT64 base;
-
-    if (!fw_handoff_valid(header) || header->Version < 5) {
-        return 0;
-    }
-    if (header->Version >= 6) {
-        IA64VpcHandoff *handoff =
-            (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
-
-        flags = handoff->DebugPortFlags;
-        base = handoff->DebugPortBase;
-    } else {
-        FW_HANDOFF_LEGACY *handoff =
-            (FW_HANDOFF_LEGACY *)(UINTN)IA64_FW_HANDOFF_ADDR;
-
-        flags = handoff->DebugPortFlags;
-        base = handoff->DebugPortBase;
-    }
-    return (flags & IA64_FW_DEBUG_PORT_PRESENT) != 0 ? base : 0;
-}
-
-BOOLEAN fw_handoff_i8042_enabled(void)
-{
-    FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    IA64VpcHandoff *handoff;
-
-    if (!fw_handoff_valid(header) || header->Version < 7) {
-        return 1;
-    }
-    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    return handoff->I8042Enabled != 0;
-}
 
 
 UINT64 fw_handoff_map_quirk_disable(void)
@@ -404,6 +404,20 @@ UINT64 fw_handoff_map_quirk_disable(void)
         return 0;
     }
     return handoff->MapQuirkDisable & IA64_FW_QUIRK_ALL;
+}
+
+/* IDE bus-master DMA policy; moves to the NVRAM defaults block next. */
+BOOLEAN fw_handoff_ide_dma_enabled(void)
+{
+    FW_HANDOFF_HEADER *header =
+        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    IA64VpcHandoff *handoff;
+
+    if (!fw_handoff_valid(header) || header->Version < 6) {
+        return 1;
+    }
+    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
+    return handoff->IdeDmaEnabled != 0;
 }
 
 UINT16 fw_handoff_boot_timeout(void)
@@ -482,18 +496,6 @@ static void fw_platform_decode_package_topology(void)
     }
 }
 
-BOOLEAN fw_handoff_nvram_persistent(void)
-{
-    FW_HANDOFF_HEADER *header =
-        (FW_HANDOFF_HEADER *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    IA64VpcHandoff *handoff;
-
-    if (!fw_handoff_valid(header) || header->Version < 9) {
-        return 0;
-    }
-    handoff = (IA64VpcHandoff *)(UINTN)IA64_FW_HANDOFF_ADDR;
-    return handoff->NvramPersistent != 0;
-}
 
 UINT64 fw_ap_stack_top(UINT64 ProcessorId)
 {

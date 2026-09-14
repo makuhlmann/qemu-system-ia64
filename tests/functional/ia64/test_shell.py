@@ -44,15 +44,15 @@ class Ia64BootShell(Ia64FirmwareTest):
             name="shell-first", media=disk, boot_timeout=None,
             machine_options=f"firmware-console=serial,nvram={nvram}")
         self._open_shell(vm)
-        self._command(vm, "info", "NVRAM backing:  persistent")
+        self._command(vm, "info", "NVRAM backing:  nonvolatile variable store")
         self._command(vm, "map", "fs0:")
         self._command(vm, r"ls fs0:\EFI\BOOT", "BOOTIA64.EFI")
         self._command(vm, "date 2024-02-29", "2024-02-29")
         self._command(vm, "time 12:34:56", "12:34:56")
         self._command(vm, "bootorder Boot0000",
-                      "BootOrder saved to persistent NVRAM")
+                      "BootOrder saved to NVRAM")
         self._command(vm, "bootnext Boot0000",
-                      "BootNext saved to persistent NVRAM")
+                      "BootNext saved to NVRAM")
         self._command(vm, r"cd fs0:\EFI\BOOT", r"fs0:\EFI\BOOT>")
         self._command(vm, "pwd", r"fs0:\EFI\BOOT")
         self._command(vm, "run BOOTIA64.EFI",

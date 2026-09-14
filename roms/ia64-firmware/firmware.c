@@ -14399,7 +14399,9 @@ static void fw_phase_protocols_and_selftests(void)
               "verification failed\r\n");
     uart_puts("Console In:           ");
     uart_puts(uefi_conin_wait_key_selftest() ?
-              "Serial/PS2/USB WaitForKey ready\r\n" :
+              (fw_handoff_i8042_enabled() ?
+               "Serial/PS2/USB WaitForKey ready\r\n" :
+               "Serial/USB WaitForKey ready (no PS/2 controller)\r\n") :
               "verification failed\r\n");
     uart_puts("Console In Buffer:    ");
     uart_puts(uefi_conin_buffer_selftest() ?
