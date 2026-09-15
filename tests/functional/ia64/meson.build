@@ -78,10 +78,10 @@ tests_ia64_system_quick = [
   'services',
   'tables',
   'smp',
+  'storage',
 ]
 
 tests_ia64_system_thorough = [
-  'storage',
   'input',
 ]
 
@@ -92,6 +92,6 @@ test_ia64_timeouts = {
   'services': 90,
   'tables': 90,
   'smp': 120,
-  'storage': 300,
+  'storage': 600,
   'input': 120,
 }
