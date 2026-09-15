@@ -135,7 +135,7 @@
  * firmware binary at IA64_FW_IMAGE_BASE_FOR(ram_size) - 1 MB aligned, sized
  * for the image plus bss with headroom (the linker asserts the real span
  * fits) - applies the image's self-relocation fixup table for the delta from
- * the 1 MB link base, and seeds each CPU's fw_image_base.  Above the image
+ * the 1 MB link base.  Above the image
  * sit the ACPI staging region and the CPU-assist region, ending exactly at
  * the end of installed low RAM, mirroring how real 460GX/E8870 firmware
  * shadows itself near the top of memory.
@@ -143,6 +143,47 @@
 #define IA64_FW_IMAGE_SPAN            IA64_U64(0x0000000000400000)
 /* The firmware IVT lives inside the image at this fixed link offset. */
 #define IA64_FW_IVT_OFFSET            IA64_U64(0x0000000000008000)
+/*
+ * The SAL runtime stub trio at fixed offsets in the image (entry.S
+ * .text.sal_runtime, pinned by firmware.lds), and the PAL procedure entry
+ * stub.  Only the firmware's link layout and the machine's no-firmware test
+ * entry state use these; the CPU learns the addresses from the firmware's
+ * registration below.
+ */
+#define IA64_FW_SAL_RUNTIME_ENTRY_OFF  0x2000
+#define IA64_FW_SAL_RUNTIME_RETURN_OFF 0x2020
+#define IA64_FW_SAL_DISPATCH_BLOCK_OFF 0x2040
+/* The low part of the image a firmware context reaches identity-mapped. */
+#define IA64_FW_IDENTITY_WINDOW_SIZE   IA64_U64(0x0000000000100000)
+
+/*
+ * PAL_FIRMWARE_REGISTER: an implementation-specific static PAL procedure
+ * (index range 512-767, SDM vol. 2 table 11-11) of the PAL emulation.  The
+ * project firmware calls it on every processor once it runs from its RAM
+ * shadow, the way SAL registers its PMI entry with PAL (SAL 3.2.3 step 12),
+ * to hand over what the emulator's firmware assists need: its IVT, the
+ * image window that a firmware context reaches identity-mapped, the SAL
+ * runtime stubs and dispatch block, and the CPU-assist region.  A processor
+ * that never registers -- under any other firmware -- gets none of those
+ * assists.
+ *
+ *   r28 = IA64_PAL_FIRMWARE_REGISTER, r29 = physical address of the record,
+ *   r30 = record size in bytes.  Returns r8 = 0, or -1 (not implemented)
+ *   for a record this emulator does not recognise.
+ *
+ * The record: little-endian 64-bit words at the offsets below.
+ */
+#define IA64_PAL_FIRMWARE_REGISTER          0x200
+#define IA64_FW_REGISTRATION_MAGIC          IA64_U64(0x4752574634364149) /* "IA64FWRG" */
+#define IA64_FW_REGISTRATION_SIZE           64
+#define IA64_FW_REGISTRATION_MAGIC_OFF      0x00
+#define IA64_FW_REGISTRATION_IMAGE_BASE_OFF 0x08
+#define IA64_FW_REGISTRATION_IMAGE_SIZE_OFF 0x10
+#define IA64_FW_REGISTRATION_IVT_OFF        0x18
+#define IA64_FW_REGISTRATION_SAL_ENTRY_OFF  0x20
+#define IA64_FW_REGISTRATION_SAL_RETURN_OFF 0x28
+#define IA64_FW_REGISTRATION_SAL_BLOCK_OFF  0x30
+#define IA64_FW_REGISTRATION_ASSIST_OFF     0x38
 #define IA64_FW_ACPI_REGION_SIZE      IA64_U64(0x0000000000020000)
 
 /* low_ram_end for an installed RAM size, as both QEMU and the firmware see it. */

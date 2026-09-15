@@ -24,6 +24,7 @@
 #include "exec/translation-block.h"
 #include "hw/core/sysemu-cpu-ops.h"
 #include "hw/core/boards.h"
+#include "exec/tb-flush.h"
 #include "accel/tcg/cpu-ops.h"
 #include "tcg/debug-assert.h"
 #include "exec/translator.h"
@@ -447,7 +448,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
         goto raise_exception;
     }
 
-    if (ia64_firmware_identity_pa(cpu->env.fw_image_base, cpu->env.cr_iva,
+    if (ia64_firmware_identity_pa(&cpu->env.firmware, cpu->env.cr_iva,
                                   is_ifetch ? addr : cpu->env.ip,
                                   cpu->env.psr, addr, &pa)) {
         int prot = is_ifetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
@@ -846,6 +847,7 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
 {
     IA64CPUClass *icc = IA64_CPU_GET_CLASS(obj);
     IA64CPU *cpu = IA64_CPU(obj);
+    IA64FirmwareRegistration old_firmware = cpu->env.firmware;
 
     if (icc->parent_phases.hold) {
         icc->parent_phases.hold(obj, type);
@@ -887,12 +889,6 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.mmu.region7_directmap_limit = IA64_FW_REGION7_DIRECTMAP_BASE +
         MIN(current_machine ? current_machine->ram_size : 0,
             IA64_FW_REGION7_DIRECTMAP_SIZE);
-    /*
-     * Where the firmware image executes.  The machine may relocate it (the
-     * phase-2.2 RAM-top shadow); zero means the historical 1 MB link home.
-     */
-    cpu->env.fw_image_base = cpu->fw_image_base ? cpu->fw_image_base
-                                                : IA64_FW_IDENTITY_BASE;
     cpu->env.alat_state.alat_full = cpu->alat_full;
     cpu->env.fp.fr[IA64_FR_ONE_INDEX] = IA64_FR_ONE;
     cpu->env.pr[IA64_PR_TRUE] = 1;
@@ -917,7 +913,23 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.pal.pal_proc_copy_addr = 0;
     cpu->env.pal.pal_interrupt_block_addr = IA64_LOCAL_SAPIC_PA;
     cpu->env.pal.pal_io_block_addr = IA64_PAL_IO_BLOCK_PA;
+    /*
+     * The no-firmware entry state stands in for a firmware that has
+     * registered, on every reset; a firmware entry leaves this zero.
+     */
+    if (cpu->boot_info_valid) {
+        cpu->env.firmware = cpu->boot_info.firmware;
+    }
     ia64_cpu_apply_boot_info(cpu);
+    /*
+     * Translations decided with an earlier firmware registration (PAL and
+     * SAL break recognition) must not outlive it.  Before the first one
+     * there is nothing to drop.
+     */
+    if (ia64_firmware_registered(&old_firmware) &&
+        memcmp(&old_firmware, &cpu->env.firmware, sizeof(old_firmware))) {
+        queue_tb_flush(CPU(cpu));
+    }
 }
 
 static ObjectClass *ia64_cpu_class_by_name(const char *cpu_model)

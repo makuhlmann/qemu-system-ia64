@@ -153,25 +153,11 @@
 #define IA64_IP_BUNDLE_MASK (~(IA64_BUNDLE_SIZE - 1))
 #define IA64_REGION7_PHYS_MASK ((1ULL << IA64_REGION_SHIFT) - 1)
 #define IA64_PHYS_UC_BIT (1ULL << 63)
-#define IA64_FW_IDENTITY_BASE 0x00100000ULL
-#define IA64_FW_IDENTITY_SIZE 0x00100000ULL
 /*
- * Fixed physical addresses of the SAL runtime stub trio (entry.S,
- * .text.sal_runtime, pinned by firmware.lds).  The machine recognises the
- * bridge breaks by entry address so they work for both a physical and a
- * virtual fetch.  Windows Server 2003's HAL only derives a virtual SAL entry
- * from the EfiRuntimeServicesCode descriptor containing the SST SalProc
- * address, so the stubs live in runtime-services code, not the PAL page.
+ * PAL procedure entry stub offset in the project firmware image.  Recognised
+ * only in a registered image (see IA64FirmwareRegistration).
  */
-#define IA64_FW_SAL_RUNTIME_ENTRY_OFF  0x2000
-#define IA64_FW_SAL_RUNTIME_RETURN_OFF 0x2020
-#define IA64_FW_SAL_DISPATCH_BLOCK_OFF 0x2040
 #define IA64_FW_PAL_PROC_ENTRY_OFF     0x60
-#define IA64_FW_SAL_RUNTIME_ENTRY_PA  (IA64_FW_IDENTITY_BASE + 0x2000)
-#define IA64_FW_SAL_RUNTIME_RETURN_PA (IA64_FW_IDENTITY_BASE + 0x2020)
-#define IA64_FW_SAL_DISPATCH_BLOCK_PA (IA64_FW_IDENTITY_BASE + 0x2040)
-/* The firmware IVT sits inside the image at IA64_FW_IVT_OFFSET. */
-#define IA64_FIRMWARE_IVT_BASE (IA64_FW_IDENTITY_BASE + IA64_FW_IVT_OFFSET)
 #define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
 /*
  * IA-64 OS loaders alias physical memory through region 7 with a fixed
@@ -225,22 +211,51 @@ static inline uint32_t ia64_rr_rid(uint64_t rr)
     return (rr & IA64_RR_RID_MASK) >> IA64_RR_RID_SHIFT;
 }
 
-static inline bool ia64_firmware_owns_iva(uint64_t fw_base, uint64_t iva)
+/*
+ * What the project firmware told the PAL emulation about itself
+ * (IA64_PAL_FIRMWARE_REGISTER, hw/ia64/ia64_vpc_abi.h), per processor.  All
+ * zero until the firmware registers, and for any firmware that does not:
+ * then none of the emulator's firmware assists applies.  Registration
+ * flushes the translation caches, so translate-time use is safe.
+ */
+typedef struct IA64FirmwareRegistration {
+    uint64_t image_base;    /* firmware identity window */
+    uint64_t image_size;
+    uint64_t ivt;           /* the firmware's IVT: SAL owns interruptions */
+    uint64_t sal_entry;     /* break 0x100005 stub */
+    uint64_t sal_return;    /* break 0x100006 stub */
+    uint64_t sal_block;     /* dispatch block: entry, gp, stack, bstore */
+    uint64_t assist_base;   /* CPU-assist region */
+} IA64FirmwareRegistration;
+
+static inline bool ia64_firmware_registered(const IA64FirmwareRegistration *fw)
 {
-    return iva == 0 || iva == fw_base + IA64_FW_IVT_OFFSET;
+    return fw->ivt != 0;
 }
 
-static inline bool ia64_firmware_identity_pa(uint64_t fw_base, uint64_t iva,
-                                             uint64_t ip, uint64_t psr,
-                                             uint64_t va, uint64_t *pa)
+static inline bool ia64_firmware_in_image(const IA64FirmwareRegistration *fw,
+                                          uint64_t address)
+{
+    return fw->image_size != 0 && address >= fw->image_base &&
+           address - fw->image_base < fw->image_size;
+}
+
+static inline bool ia64_firmware_owns_iva(const IA64FirmwareRegistration *fw,
+                                          uint64_t iva)
+{
+    return ia64_firmware_registered(fw) && (iva == 0 || iva == fw->ivt);
+}
+
+static inline bool ia64_firmware_identity_pa(const IA64FirmwareRegistration *fw,
+                                             uint64_t iva, uint64_t ip,
+                                             uint64_t psr, uint64_t va,
+                                             uint64_t *pa)
 {
     bool firmware_context =
         (psr & IA64_PSR_CPL_MASK) == 0 &&
-        (ia64_firmware_owns_iva(fw_base, iva) ||
-         (ip >= fw_base && ip < fw_base + IA64_FW_IDENTITY_SIZE));
+        (ia64_firmware_owns_iva(fw, iva) || ia64_firmware_in_image(fw, ip));
 
-    if (firmware_context &&
-        va >= fw_base && va < fw_base + IA64_FW_IDENTITY_SIZE) {
+    if (firmware_context && ia64_firmware_in_image(fw, va)) {
         *pa = va;
         return true;
     }
@@ -1038,16 +1053,8 @@ typedef struct CPUArchState {
     uint8_t impl_rid_bits;
     uint8_t impl_key_bits;
 
-    /*
-     * Physical base the firmware image executes from, seeded at reset from
-     * the machine (default IA64_FW_IDENTITY_BASE = the historical 1 MB link
-     * address).  The identity window, the SAL runtime stub trio and the PAL
-     * entry are all fixed link-layout offsets from it; phase 2.2 of the
-     * firmware rework relocates the image to the top of low RAM, where this
-     * becomes a function of RAM size.  Constant for the life of a boot, so
-     * translate-time use is safe.
-     */
-    uint64_t fw_image_base;
+    /* The firmware's registration with the PAL emulation; zero = none. */
+    IA64FirmwareRegistration firmware;
 
 } CPUIA64State;
 
@@ -1370,7 +1377,8 @@ static inline uint64_t ia64_region_itir(const CPUIA64State *env, uint64_t va)
 
 static inline bool ia64_sal_boot_environment_active(const CPUIA64State *env)
 {
-    return env->cr_iva == env->fw_image_base + IA64_FW_IVT_OFFSET &&
+    return ia64_firmware_registered(&env->firmware) &&
+           env->cr_iva == env->firmware.ivt &&
            (env->psr & IA64_PSR_IC) != 0;
 }
 
@@ -1656,11 +1664,11 @@ typedef struct IA64BootInfo {
     uint64_t stack_pointer;
     uint64_t rsc;
     /*
-     * Base of the firmware's RAM-top CPU-assist region (per-CPU SAL re-entry
-     * slots, debug contexts/stacks, early RSE; IA64_FW_CPU_ASSIST_BASE_FOR).
-     * The machine derives it from installed RAM exactly as the firmware does.
+     * The no-firmware entry state (microprogram battery, qtests) stands in
+     * for a firmware that has already registered; a real firmware entry
+     * leaves this zero and registers itself.
      */
-    uint64_t fw_cpu_assist_base;
+    IA64FirmwareRegistration firmware;
     bool powered_off;
     /*
      * Real-firmware entry (machine realfw mode): instead of the project
@@ -1687,8 +1695,6 @@ struct ArchCPU {
     bool boot_info_valid;
     bool boot_info_pending;
     bool alat_full;
-    /* Machine-set firmware execution base; 0 = IA64_FW_IDENTITY_BASE. */
-    uint64_t fw_image_base;
     uint32_t socket_id;
     uint32_t core_id;
     uint32_t thread_id;
@@ -1846,7 +1852,7 @@ ia64_firmware_debug_state_const(const CPUIA64State *env)
 /* Base of the firmware's RAM-top CPU-assist region for this machine. */
 static inline uint64_t ia64_fw_cpu_assist_base(CPUIA64State *env)
 {
-    return ia64_cpu_from_cpu_state(env_cpu(env))->boot_info.fw_cpu_assist_base;
+    return env->firmware.assist_base;
 }
 
 static inline IA64CPUClass *ia64_env_cpu_class(CPUIA64State *env)

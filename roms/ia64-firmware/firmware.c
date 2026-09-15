@@ -14997,6 +14997,12 @@ void fw_init_itc_rate(void)
 
 void firmware_main(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 {
+    /*
+     * First, before any PAL call through this image's own stub: the PAL
+     * emulation recognises that stub, the SAL runtime stubs and the IVT only
+     * once they are registered.  The CPU-assist region ends at stack_top.
+     */
+    fw_platform_register_firmware(stack_top - IA64_FW_CPU_ASSIST_SIZE);
     fw_init_itc_rate();
     fw_phase_platform_init(gp, stack_top, boot_b0);
     fw_phase_efi_core_init();

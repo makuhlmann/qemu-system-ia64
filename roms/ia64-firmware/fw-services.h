@@ -57,6 +57,9 @@ extern UINT64 fw_itc_ticks_per_100ns;
 void fw_pal_freq_ratios(UINT64 *Processor, UINT64 *Bus, UINT64 *Itc);
 /* PAL_LOGICAL_TO_PHYSICAL for the calling processor: status, first return. */
 UINT64 fw_pal_logical_to_physical(UINT64 *Info);
+/* Register this image with the PAL emulation (IA64_PAL_FIRMWARE_REGISTER). */
+BOOLEAN fw_platform_register_firmware(UINT64 CpuAssistBase);
+BOOLEAN fw_platform_register_processor(UINT64 ResetPalProc);
 /* What the flash stage probed, before anything derives from it. */
 void fw_platform_set_probed(UINT64 RamSize, UINT64 Chipset);
 void fw_init_itc_rate(void);

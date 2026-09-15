@@ -150,7 +150,7 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
         return true;
     }
 
-    if (ia64_firmware_identity_pa(env->fw_image_base, env->cr_iva, address, env->psr,
+    if (ia64_firmware_identity_pa(&env->firmware, env->cr_iva, address, env->psr,
                                   address, &pa) ||
         ia64_sal_boot_virtual_pa(env, address, &pa)) {
         return pa == entry_pa;
@@ -175,11 +175,11 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
 
 bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address)
 {
-    const uint64_t pal_proc_entry_pa =
-        env->fw_image_base + IA64_FW_PAL_PROC_ENTRY_OFF;
+    const IA64FirmwareRegistration *fw = &env->firmware;
 
-    if (ia64_instruction_address_matches_physical_entry(
-            env, address, pal_proc_entry_pa)) {
+    if (ia64_firmware_registered(fw) &&
+        ia64_instruction_address_matches_physical_entry(
+            env, address, fw->image_base + IA64_FW_PAL_PROC_ENTRY_OFF)) {
         return true;
     }
 
@@ -191,25 +191,27 @@ bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address)
 bool ia64_is_sal_runtime_break(CPUIA64State *env, uint64_t address,
                                uint64_t imm)
 {
-    uint64_t entry_pa = env->fw_image_base +
-        (imm == 0x100005 ? IA64_FW_SAL_RUNTIME_ENTRY_OFF
-                         : IA64_FW_SAL_RUNTIME_RETURN_OFF);
+    uint64_t entry_pa = imm == 0x100005 ? env->firmware.sal_entry
+                                        : env->firmware.sal_return;
 
-    return ia64_instruction_address_matches_physical_entry(env, address,
+    return entry_pa != 0 &&
+           ia64_instruction_address_matches_physical_entry(env, address,
                                                            entry_pa);
 }
 
 bool ia64_is_firmware_debug_break(CPUIA64State *env, uint64_t address,
                                   uint64_t imm)
 {
-    if (imm == 0x100002) {
-        uint64_t ivt = env->fw_image_base + IA64_FW_IVT_OFFSET;
+    const IA64FirmwareRegistration *fw = &env->firmware;
 
-        return address >= ivt && address < ivt + 0x8000;
+    if (!ia64_firmware_registered(fw)) {
+        return false;
+    }
+    if (imm == 0x100002) {
+        return address >= fw->ivt && address - fw->ivt < 0x8000;
     }
     if (imm == 0x100003 || imm == 0x100004) {
-        return address >= env->fw_image_base &&
-               address < env->fw_image_base + IA64_FW_IDENTITY_SIZE;
+        return ia64_firmware_in_image(fw, address);
     }
     return false;
 }

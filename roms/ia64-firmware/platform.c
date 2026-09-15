@@ -500,6 +500,52 @@ UINT64 fw_boot_stack_top(void)
 
 
 /*
+ * The PAL_PROC address PAL handed the boot processor at SALE_ENTRY (GR34),
+ * stored by start_after_pal.
+ */
+UINT64 mFwResetPalProc;
+
+/*
+ * What the PAL emulation's firmware assists need to know about this image
+ * (IA64_PAL_FIRMWARE_REGISTER, hw/ia64/ia64_vpc_abi.h): the IVT, the image
+ * window a firmware context reaches identity-mapped, the SAL runtime stubs
+ * and dispatch block, and the CPU-assist region.  The boot processor fills
+ * it before it releases the others; each processor registers it itself.
+ */
+static UINT64 mFwRegistration[IA64_FW_REGISTRATION_SIZE / 8]
+    __attribute__((aligned(16)));
+
+UINT64 fw_pal_call_at(UINT64 Entry, UINT64 Index, UINT64 Arg1, UINT64 Arg2,
+                      UINT64 Arg3);
+
+BOOLEAN fw_platform_register_processor(UINT64 ResetPalProc)
+{
+    return ResetPalProc != 0 &&
+           fw_pal_call_at(ResetPalProc, IA64_PAL_FIRMWARE_REGISTER,
+                          (UINTN)mFwRegistration, sizeof(mFwRegistration),
+                          0) == 0;
+}
+
+BOOLEAN fw_platform_register_firmware(UINT64 CpuAssistBase)
+{
+    mFwRegistration[IA64_FW_REGISTRATION_MAGIC_OFF / 8] =
+        IA64_FW_REGISTRATION_MAGIC;
+    mFwRegistration[IA64_FW_REGISTRATION_IMAGE_BASE_OFF / 8] =
+        (UINTN)__fw_image_start;
+    mFwRegistration[IA64_FW_REGISTRATION_IMAGE_SIZE_OFF / 8] =
+        IA64_FW_IDENTITY_WINDOW_SIZE;
+    mFwRegistration[IA64_FW_REGISTRATION_IVT_OFF / 8] = (UINTN)__fw_ivt;
+    mFwRegistration[IA64_FW_REGISTRATION_SAL_ENTRY_OFF / 8] =
+        (UINTN)sal_runtime_entry;
+    mFwRegistration[IA64_FW_REGISTRATION_SAL_RETURN_OFF / 8] =
+        (UINTN)sal_runtime_return;
+    mFwRegistration[IA64_FW_REGISTRATION_SAL_BLOCK_OFF / 8] =
+        (UINTN)sal_dispatch_block;
+    mFwRegistration[IA64_FW_REGISTRATION_ASSIST_OFF / 8] = CpuAssistBase;
+    return fw_platform_register_processor(mFwResetPalProc);
+}
+
+/*
  * Release the application processors, which the flash stage parks until
  * the shadow's data is ready, and count them as they check in.  Real SAL
  * rendezvouses its processors the same way (SAL 3.2.3); the wait is
@@ -2108,10 +2154,11 @@ static void fw_ap_rendezvous(void)
                           saved_psr, saved_rsc);
 }
 
-void firmware_ap_main(UINT64 ProcessorId)
+void firmware_ap_main(UINT64 ProcessorId, UINT64 ResetPalProc)
 {
     (void)ProcessorId;
 
+    fw_platform_register_processor(ResetPalProc);
     __sync_fetch_and_add(&mApCheckins, 1);
     fw_ap_rendezvous();
     for (;;) {

@@ -85,6 +85,13 @@ pal_proc_entry:
 fw_flash_entry:
     bsw.0
     ;;
+    /*
+     * GR34 is the PAL_PROC address PAL hands every processor here.  Keep it
+     * in b2, which this stage and every C callee preserve: the shadow calls
+     * PAL through it to register itself with PAL.
+     */
+    mov b2 = r34
+    ;;
 1:
     mov r14 = ip
     ;;
@@ -454,6 +461,13 @@ start_after_pal:
     movl r1 = __gp
     ;;
 
+    /* The reset PAL_PROC address (b2, from fw_flash_entry), for the C side. */
+    movl r14 = mFwResetPalProc
+    mov r15 = b2
+    ;;
+    st8 [r14] = r15
+    ;;
+
     /*
      * Preserve the reset return pointer across the ABI calls, then move the
      * firmware stack to the top of installed low RAM.
@@ -553,7 +567,7 @@ start_secondary:
     ;;
     adds r12 = -16, r12
     ;;
-    alloc r2 = ar.pfs, 0, 3, 1, 0
+    alloc r2 = ar.pfs, 0, 3, 2, 0
     ;;
     mov r32 = r14
     mov r35 = r14
@@ -562,6 +576,7 @@ start_secondary:
     ;;
     adds r12 = -16, r8
     mov r35 = r32
+    mov r36 = b2                /* the reset PAL_PROC address */
     ;;
     br.call.sptk.many b0 = firmware_ap_main
     ;;
@@ -636,6 +651,40 @@ fw_pal_freq_ratios:
     ;;
     .endp fw_pal_freq_ratios
     .size fw_pal_freq_ratios, . - fw_pal_freq_ratios
+
+    /*
+     * A static PAL procedure call through a given PAL_PROC address:
+     * fw_pal_call_at(entry, index, arg1, arg2, arg3) returns r8, the status.
+     */
+    .section .text.fw_pal_call_at, "ax"
+    .global fw_pal_call_at
+    .type fw_pal_call_at, @function
+    .proc fw_pal_call_at
+    .explicit
+fw_pal_call_at:
+    alloc r37 = ar.pfs, 5, 2, 0, 0
+    ;;
+    mov r38 = b0
+    mov r28 = r33
+    mov r29 = r34
+    mov r30 = r35
+    mov r31 = r36
+    ;;
+    mov b6 = r32
+    movl r14 = 1f
+    ;;
+    mov b0 = r14
+    ;;
+    br.sptk.many b6
+    ;;
+1:
+    mov b0 = r38
+    mov ar.pfs = r37
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp fw_pal_call_at
+    .size fw_pal_call_at, . - fw_pal_call_at
 
     /*
      * PAL_LOGICAL_TO_PHYSICAL (index 2Ah) for the calling processor

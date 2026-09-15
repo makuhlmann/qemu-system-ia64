@@ -3384,7 +3384,20 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
         .stack_pointer = assist_base + IA64_FW_CPU_ASSIST_SIZE - 16 -
             cpu_index * IA64_FW_CPU_STACK_SIZE,
         .rsc = IA64_RSC_MODE,
-        .fw_cpu_assist_base = assist_base,
+        /*
+         * What the project firmware registers with the PAL emulation once it
+         * runs (IA64_PAL_FIRMWARE_REGISTER), for an image at firmware_base:
+         * the tests entered here run without one.
+         */
+        .firmware = {
+            .image_base = firmware_base,
+            .image_size = IA64_FW_IDENTITY_WINDOW_SIZE,
+            .ivt = firmware_base + IA64_FW_IVT_OFFSET,
+            .sal_entry = firmware_base + IA64_FW_SAL_RUNTIME_ENTRY_OFF,
+            .sal_return = firmware_base + IA64_FW_SAL_RUNTIME_RETURN_OFF,
+            .sal_block = firmware_base + IA64_FW_SAL_DISPATCH_BLOCK_OFF,
+            .assist_base = assist_base,
+        },
         .powered_off = cpu_index != 0,
     };
 
@@ -3458,15 +3471,6 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                  */
                 .raw_pal_proc = IA64_PAL_ROM_BASE,
                 .raw_pal_auth = IA64_PAL_ROM_BASE,
-                /*
-                 * Where the project firmware keeps its CPU-assist region
-                 * (IA64_FW_CPU_ASSIST_BASE_FOR): the SAL runtime bridge
-                 * gives each processor its own re-entry slot there, and the
-                 * debug handler its context and stack.  Seeded like
-                 * cpu->fw_image_base until the firmware registers it.
-                 */
-                .fw_cpu_assist_base =
-                    IA64_FW_CPU_ASSIST_BASE_FOR(MACHINE(s)->ram_size),
                 /*
                  * Every processor leaves reset together and runs SAL_A,
                  * which arbitrates the BSP through the SAC's write-once
@@ -3858,12 +3862,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         uint32_t package_base = (i / per_socket) * per_socket;
         cpu = IA64_CPU(object_new(machine->cpu_type));
         cpu->alat_full = s->alat_full;
-        /*
-         * Where the project firmware shadows itself (IA64_FW_IMAGE_BASE_FOR):
-         * the CPU recognises the image's PAL and SAL stubs by this base.
-         * A coupling to one firmware's layout, retired with the handoff.
-         */
-        cpu->fw_image_base = ia64_vpc_fw_base(s, machine->ram_size);
         cpu->socket_id = i / per_socket;
         cpu->core_id = (i / threads) % cores;
         cpu->thread_id = i % threads;

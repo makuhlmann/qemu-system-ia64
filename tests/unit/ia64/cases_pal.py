@@ -1216,6 +1216,64 @@ test_pal_copy_info_platform_for_ia64 = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+# PAL_FIRMWARE_REGISTER (hw/ia64/ia64_vpc_abi.h): the project firmware's
+# registration with the PAL emulation.  A record without the magic -- any
+# other firmware using the index for its own PAL -- reads as not implemented.
+PAL_FIRMWARE_REGISTER = 0x200
+FW_REGISTRATION_MAGIC = 0x4752574634364149
+FW_REGISTRATION_ADDR = 0x4000
+
+test_pal_firmware_register_rejects_unknown_record = require_registers(
+    "pal_firmware_register_rejects_unknown_record",
+    pal_call_program(PAL_FIRMWARE_REGISTER, [(29, 0x10), (30, 64), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_FIRMWARE_REGISTER,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+
+def _pal_firmware_register_program(words, size):
+    program = [(0x10, *movl_mlx(16, FW_REGISTRATION_ADDR))]
+    addr = 0x20
+    for word in words:
+        program.append((addr, *movl_mlx(17, word)))
+        program.append((addr + 0x10, 0x00, st8(16, 17), adds(16, 8, 16),
+                        nop_i()))
+        addr += 0x20
+    program += [
+        (addr, 0x00, nop_m(), addl(28, PAL_FIRMWARE_REGISTER, 0), nop_i()),
+        (addr + 0x10, *movl_mlx(29, FW_REGISTRATION_ADDR)),
+        (addr + 0x20, 0x00, nop_m(), addl(30, size, 0), addl(31, 0, 0)),
+        (addr + 0x30, 0x10, nop_m(), nop_i(),
+         br_call(0, addr + 0x30, PAL_PROC_ENTRY)),
+        (addr + 0x40, 0x10, nop_m(), nop_i(),
+         br_cond(addr + 0x40, addr + 0x40)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ]
+    return program, addr + 0x40
+
+
+# The layout the machine's no-firmware entry state already registers.
+_FW_REGISTRATION_WORDS = [
+    FW_REGISTRATION_MAGIC, 0x100000, 0x100000, 0x108000,
+    0x102000, 0x102020, 0x102040, 0x07e00000,
+]
+_register_ok, _register_ok_ip = _pal_firmware_register_program(
+    _FW_REGISTRATION_WORDS, 64)
+test_pal_firmware_register_accepts_record = require_registers(
+    "pal_firmware_register_accepts_record", _register_ok,
+    {"ip": _register_ok_ip, "r28": PAL_FIRMWARE_REGISTER,
+     "r8": 0, "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+_register_short, _register_short_ip = _pal_firmware_register_program(
+    _FW_REGISTRATION_WORDS, 56)
+test_pal_firmware_register_rejects_short_record = require_registers(
+    "pal_firmware_register_rejects_short_record", _register_short,
+    {"ip": _register_short_ip, "r28": PAL_FIRMWARE_REGISTER,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
 test_pal_copy_pal_entry_callable = require_registers(
     "pal_copy_pal_entry_callable", [
         (0x10, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
@@ -1587,6 +1645,9 @@ CASE_NAMES = (
     'pal_debug_info_reserved_arg',
     'pal_fixed_addr',
     'pal_fixed_addr_reserved_arg',
+    'pal_firmware_register_accepts_record',
+    'pal_firmware_register_rejects_short_record',
+    'pal_firmware_register_rejects_unknown_record',
     'pal_freq_base',
     'pal_freq_base_reserved_arg',
     'pal_freq_ratios',

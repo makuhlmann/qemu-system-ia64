@@ -14,6 +14,7 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "hw/core/boards.h"
 #include "exec/cputlb.h"
 #include "migration/vmstate.h"
 
@@ -170,9 +171,24 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
         return -EINVAL;
     }
 
-    if (env->fw_image_base == 0) {
+    if (version_id < 2) {
         /* Pre-v2 snapshot: the image always ran at the 1 MB link home. */
-        env->fw_image_base = IA64_FW_IDENTITY_BASE;
+        env->firmware.image_base = IA64_FW_LINK_BASE;
+    }
+    if (version_id < 5 && env->firmware.image_base != 0) {
+        /*
+         * Before v5 the CPU knew the project firmware's layout from its image
+         * base alone; that firmware was the only one whose base was set.
+         */
+        uint64_t base = env->firmware.image_base;
+        uint64_t ram = current_machine ? current_machine->ram_size : 0;
+
+        env->firmware.image_size = IA64_FW_IDENTITY_WINDOW_SIZE;
+        env->firmware.ivt = base + IA64_FW_IVT_OFFSET;
+        env->firmware.sal_entry = base + IA64_FW_SAL_RUNTIME_ENTRY_OFF;
+        env->firmware.sal_return = base + IA64_FW_SAL_RUNTIME_RETURN_OFF;
+        env->firmware.sal_block = base + IA64_FW_SAL_DISPATCH_BLOCK_OFF;
+        env->firmware.assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(ram);
     }
 
     memset(env->mmu.tlb_data_micro, 0,
@@ -209,7 +225,7 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 1,
     .pre_save = ia64_cpu_pre_save,
     .post_load = ia64_cpu_post_load,
@@ -271,7 +287,13 @@ const VMStateDescription vmstate_ia64_cpu = {
         VMSTATE_UINT16(env.mmu.pending_purge_data_count, IA64CPU),
         VMSTATE_UINT16(env.mmu.pending_purge_inst_count, IA64CPU),
         VMSTATE_UINT64(env.mmu.region7_directmap_limit, IA64CPU),
-        VMSTATE_UINT64_V(env.fw_image_base, IA64CPU, 2),
+        VMSTATE_UINT64_V(env.firmware.image_base, IA64CPU, 2),
+        VMSTATE_UINT64_V(env.firmware.image_size, IA64CPU, 5),
+        VMSTATE_UINT64_V(env.firmware.ivt, IA64CPU, 5),
+        VMSTATE_UINT64_V(env.firmware.sal_entry, IA64CPU, 5),
+        VMSTATE_UINT64_V(env.firmware.sal_return, IA64CPU, 5),
+        VMSTATE_UINT64_V(env.firmware.sal_block, IA64CPU, 5),
+        VMSTATE_UINT64_V(env.firmware.assist_base, IA64CPU, 5),
 
         /* Local SAPIC and interval timer. */
         VMSTATE_UINT8(env.interrupt.pending_extint, IA64CPU),

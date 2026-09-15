@@ -911,6 +911,69 @@ static void pal_pmi_entrypoint(CPUIA64State *env)
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
+static void pal_return_not_implemented(CPUIA64State *env);
+
+/*
+ * PAL_FIRMWARE_REGISTER (hw/ia64/ia64_vpc_abi.h): the project firmware names
+ * its IVT, identity window, SAL runtime stubs and CPU-assist region for this
+ * processor.  A record this emulator does not recognise -- another firmware
+ * calling an implementation-specific index of its own real PAL -- reads as
+ * not implemented and changes nothing.
+ */
+static void pal_firmware_register(CPUIA64State *env)
+{
+    uint64_t record[IA64_FW_REGISTRATION_SIZE / 8];
+    IA64FirmwareRegistration fw;
+    uint64_t address = env->gr[IA64_PAL_GR_ARG1];
+    uint64_t size = env->gr[IA64_PAL_GR_ARG2];
+    unsigned int i;
+
+    if (size < IA64_FW_REGISTRATION_SIZE ||
+        env->gr[IA64_PAL_GR_ARG3] != 0 ||
+        !ia64_exec_physical_rw(address, record, sizeof(record), false)) {
+        pal_return_not_implemented(env);
+        return;
+    }
+    for (i = 0; i < ARRAY_SIZE(record); i++) {
+        record[i] = le64_to_cpu(record[i]);
+    }
+    fw = (IA64FirmwareRegistration) {
+        .image_base = record[IA64_FW_REGISTRATION_IMAGE_BASE_OFF / 8],
+        .image_size = record[IA64_FW_REGISTRATION_IMAGE_SIZE_OFF / 8],
+        .ivt = record[IA64_FW_REGISTRATION_IVT_OFF / 8],
+        .sal_entry = record[IA64_FW_REGISTRATION_SAL_ENTRY_OFF / 8],
+        .sal_return = record[IA64_FW_REGISTRATION_SAL_RETURN_OFF / 8],
+        .sal_block = record[IA64_FW_REGISTRATION_SAL_BLOCK_OFF / 8],
+        .assist_base = record[IA64_FW_REGISTRATION_ASSIST_OFF / 8],
+    };
+    if (record[IA64_FW_REGISTRATION_MAGIC_OFF / 8] !=
+            IA64_FW_REGISTRATION_MAGIC ||
+        fw.ivt == 0 || (fw.ivt & 0xfff) != 0 ||
+        fw.image_size == 0 || fw.image_base + fw.image_size < fw.image_base ||
+        (fw.sal_entry & (IA64_BUNDLE_SIZE - 1)) != 0 ||
+        (fw.sal_return & (IA64_BUNDLE_SIZE - 1)) != 0 ||
+        (fw.sal_block & 7) != 0 || (fw.assist_base & 0xfff) != 0) {
+        pal_return_not_implemented(env);
+        return;
+    }
+
+    if (memcmp(&env->firmware, &fw, sizeof(fw)) != 0) {
+        env->firmware = fw;
+        /*
+         * Break recognition and the identity window are decided at translate
+         * and fill time; drop what was built without this registration.
+         */
+        tlb_flush(env_cpu(env));
+        queue_tb_flush(env_cpu(env));
+        ia64_tlb_bump_generation(env, false);
+        ia64_tlb_bump_generation(env, true);
+    }
+    env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
+    env->gr[IA64_PAL_GR_RESULT1] = 0;
+    env->gr[IA64_PAL_GR_RESULT2] = 0;
+    env->gr[IA64_PAL_GR_RESULT3] = 0;
+}
+
 static void pal_mem_for_test(CPUIA64State *env)
 {
     env->gr[IA64_PAL_GR_STATUS] = pal_reserved_args_are_zero(env) ?
@@ -1564,6 +1627,10 @@ uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
         break;
     case PAL_MEM_FOR_TEST:
         pal_mem_for_test(env);
+        break;
+    case IA64_PAL_FIRMWARE_REGISTER:
+        pal_firmware_register(env);
+        flags |= IA64_PAL_DISPATCH_EXIT_TB;
         break;
     case PAL_PMI_ENTRYPOINT:
         pal_pmi_entrypoint(env);

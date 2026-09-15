@@ -529,9 +529,9 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
         ia64_itm_update(env, value);
         break;
     case 2:
-        if (ia64_firmware_owns_iva(env->fw_image_base,
+        if (ia64_firmware_owns_iva(&env->firmware,
                                    env->cr[IA64_CR_IVA]) !=
-            ia64_firmware_owns_iva(env->fw_image_base, value)) {
+            ia64_firmware_owns_iva(&env->firmware, value)) {
             /*
              * The firmware identity window is an emulator boot facility,
              * not an architectural translation.  Drop cached mappings when
