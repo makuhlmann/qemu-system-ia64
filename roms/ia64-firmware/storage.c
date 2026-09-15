@@ -759,7 +759,16 @@ static BOOLEAN scsi_reset_device(SCSI_DEVICE *Dev,
     UINT8 *inquiry = mScsiBounce;
     UINT8 type;
 
-    if (Dev == NULL || !Dev->present ||
+    if (Dev == NULL || !Dev->present) {
+        return 0;
+    }
+    /*
+     * The LSI resets the one target with a BUS DEVICE RESET message.  Of the
+     * QLogic's reset commands the ISP12160 model answers only BUS RESET,
+     * which would leave a unit attention on every device, the boot disk
+     * included; there the reset is the re-identification below.
+     */
+    if (mScsiTransport != SCSI_TRANSPORT_ISP12160 &&
         lsi_reset_scsi_target(Dev->target, 300000000ULL) !=
             LsiScriptSuccess) {
         return 0;
