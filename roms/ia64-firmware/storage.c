@@ -961,14 +961,34 @@ static void ahci_port_write32(UINT8 Port, UINT32 Offset, UINT32 Value)
     ahci_write32(AHCI_PORT_BASE(Port) + Offset, Value);
 }
 
-static BOOLEAN ahci_wait_clear(UINT32 Offset, UINT32 Mask, UINTN Timeout)
+/*
+ * AHCI and IDE waits are bounded in time, read from the ITC, not in poll
+ * iterations: a count ends after however long the host takes to spin it,
+ * and the 20,000,000 PORT_CI reads lasted about 4 s.  The disk finishes a
+ * command on QEMU's schedule, once the block layer has the data, so commands
+ * get the SCSI transports' 30 s.  Resets get 5 s; the AHCI specification
+ * gives GHC.HR 1 s and PxCMD.CR/FR 500 ms.
+ */
+#define AHCI_COMMAND_TIMEOUT_US    30000000ULL
+#define STORAGE_RESET_TIMEOUT_US   5000000ULL
+
+/* Has a wait that began at ITC value Start run for Microseconds? */
+static BOOLEAN storage_wait_expired(UINT64 Start, UINT64 Microseconds)
 {
-    while (Timeout-- != 0) {
-        if ((ahci_read32(Offset) & Mask) == 0) {
-            return 1;
-        }
+    return fw_read_itc() - Start >=
+           Microseconds * FW_ITC_TICKS_PER_MICROSECOND;
+}
+
+static BOOLEAN ahci_wait_clear(UINT32 Offset, UINT32 Mask,
+                               UINT64 Microseconds)
+{
+    UINT64 start = fw_read_itc();
+
+    while ((ahci_read32(Offset) & Mask) != 0 &&
+           !storage_wait_expired(start, Microseconds)) {
     }
-    return 0;
+    /* Look once more: the bits may have cleared as the time ran out. */
+    return (ahci_read32(Offset) & Mask) == 0;
 }
 
 static BOOLEAN ahci_find_controller(PCI_DEVICE_LOCATION *Location)
@@ -1014,7 +1034,6 @@ static BOOLEAN ahci_init_controller(void)
     PCI_DEVICE_LOCATION location;
     UINT32 bar;
     UINT16 command;
-    UINTN timeout;
 
     if (mAhciPresent) {
         return 1;
@@ -1039,11 +1058,8 @@ static BOOLEAN ahci_init_controller(void)
 
     mAhciMmioBase = bar;
     ahci_write32(AHCI_HOST_GHC, AHCI_HOST_GHC_AE | AHCI_HOST_GHC_HR);
-    timeout = 10000000U;
-    while (timeout-- != 0 &&
-           (ahci_read32(AHCI_HOST_GHC) & AHCI_HOST_GHC_HR) != 0) {
-    }
-    if ((ahci_read32(AHCI_HOST_GHC) & AHCI_HOST_GHC_HR) != 0) {
+    if (!ahci_wait_clear(AHCI_HOST_GHC, AHCI_HOST_GHC_HR,
+                         STORAGE_RESET_TIMEOUT_US)) {
         mAhciMmioBase = 0;
         return 0;
     }
@@ -1072,12 +1088,14 @@ static BOOLEAN ahci_port_stop(UINT8 Port)
     command = ahci_read32(offset);
     command &= ~AHCI_PORT_CMD_ST;
     ahci_write32(offset, command);
-    if (!ahci_wait_clear(offset, AHCI_PORT_CMD_CR, 10000000U)) {
+    if (!ahci_wait_clear(offset, AHCI_PORT_CMD_CR,
+                         STORAGE_RESET_TIMEOUT_US)) {
         return 0;
     }
     command = ahci_read32(offset) & ~AHCI_PORT_CMD_FRE;
     ahci_write32(offset, command);
-    return ahci_wait_clear(offset, AHCI_PORT_CMD_FR, 10000000U);
+    return ahci_wait_clear(offset, AHCI_PORT_CMD_FR,
+                           STORAGE_RESET_TIMEOUT_US);
 }
 
 static BOOLEAN ahci_port_configure(UINT8 Port)
@@ -1148,7 +1166,7 @@ static BOOLEAN ahci_issue_command(AHCI_DEVICE *Device, UINT8 Command,
     AHCI_COMMAND_HEADER *header = &mAhciCommandList[0];
     UINT64 table_address = (UINT64)(UINTN)&mAhciCommandTable;
     UINT64 data_address = (UINT64)(UINTN)Data;
-    UINTN timeout;
+    UINT64 start;
     UINT32 interrupt_status;
     UINT16 flags = 5U;
 
@@ -1161,13 +1179,8 @@ static BOOLEAN ahci_issue_command(AHCI_DEVICE *Device, UINT8 Command,
     if (!ahci_port_configure(Device->port)) {
         return 0;
     }
-    timeout = 10000000U;
-    while (timeout-- != 0 &&
-           (ahci_port_read32(Device->port, AHCI_PORT_TFD) &
-            (ATA_SR_BSY | ATA_SR_DRQ)) != 0) {
-    }
-    if ((ahci_port_read32(Device->port, AHCI_PORT_TFD) &
-         (ATA_SR_BSY | ATA_SR_DRQ)) != 0) {
+    if (!ahci_wait_clear(AHCI_PORT_BASE(Device->port) + AHCI_PORT_TFD,
+                         ATA_SR_BSY | ATA_SR_DRQ, AHCI_COMMAND_TIMEOUT_US)) {
         return 0;
     }
 
@@ -1196,9 +1209,18 @@ static BOOLEAN ahci_issue_command(AHCI_DEVICE *Device, UINT8 Command,
     ahci_port_write32(Device->port, AHCI_PORT_SERR, 0xffffffffU);
     __asm__ __volatile__("mf" ::: "memory");
     ahci_port_write32(Device->port, AHCI_PORT_CI, 1U);
-    timeout = 20000000U;
-    while (timeout-- != 0 &&
-           (ahci_port_read32(Device->port, AHCI_PORT_CI) & 1U) != 0) {
+    /*
+     * A command that fails leaves its PxCI bit set -- the HBA reports the
+     * task file error in PxIS and stops until the port is restarted (QEMU's
+     * ahci_clear_cmd_issue keeps the bit while ERR is set) -- so an error
+     * ends the wait as well; an ATAPI command to an empty drive fails so.
+     * The checks below read both once more.
+     */
+    start = fw_read_itc();
+    while ((ahci_port_read32(Device->port, AHCI_PORT_CI) & 1U) != 0 &&
+           (ahci_port_read32(Device->port, AHCI_PORT_IS) &
+            AHCI_PORT_ERROR_MASK) == 0 &&
+           !storage_wait_expired(start, AHCI_COMMAND_TIMEOUT_US)) {
     }
     __asm__ __volatile__("mf" ::: "memory");
     interrupt_status = ahci_port_read32(Device->port, AHCI_PORT_IS);
@@ -1834,10 +1856,10 @@ BOOLEAN storage_reset(const FW_STORAGE_DEVICE *Device,
 
     storage_invalidate_cache(Device);
     if (Device->Kind == FW_STORAGE_IDE) {
-        UINTN timeout = 1000000U;
         UINT16 identify[256];
         UINT8 command = Device->Ide->is_atapi ?
                         ATA_CMD_IDENTIFY_PACKET : ATA_CMD_IDENTIFY;
+        UINT64 start;
 
         ide_activate(Device->Ide);
         /* ATA Device Control: assert and then release software reset. */
@@ -1845,7 +1867,11 @@ BOOLEAN storage_reset(const FW_STORAGE_DEVICE *Device,
         (void)bs_stall(5U);
         ata_pio_write8(gIde.ctrl_base, 0);
         (void)bs_stall(2000U);
-        do {
+        /* Take the time first, so the last status read follows the bound. */
+        start = fw_read_itc();
+        for (;;) {
+            BOOLEAN expired = storage_wait_expired(start,
+                                                   STORAGE_RESET_TIMEOUT_US);
             UINT8 status = ata_pio_read8(gIde.ctrl_base);
 
             if (status == 0xffU) {
@@ -1854,10 +1880,10 @@ BOOLEAN storage_reset(const FW_STORAGE_DEVICE *Device,
             if ((status & ATA_SR_BSY) == 0) {
                 break;
             }
+            if (expired) {
+                return 0;
+            }
             ata_pio_poll_delay();
-        } while (--timeout != 0);
-        if (timeout == 0) {
-            return 0;
         }
         if (!ata_pio_identify(Device->Ide, command, identify)) {
             return 0;

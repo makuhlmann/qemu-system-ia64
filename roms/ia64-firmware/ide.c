@@ -89,6 +89,29 @@ void ide_activate(const IDE_DEVICE *dev)
 #define IDE_BMDMA_PRD_EOT       0x80000000U
 #define IDE_BMDMA_PRD_MAX       8U
 
+/*
+ * Waits are bounded in time, read from the ITC, not in poll iterations.  A
+ * pass costs whatever the host takes for its five port reads, so 1,000,000
+ * passes ended after 1.3-2.0 s, while single commands under a throttled disk
+ * took up to 822 ms.  The drive finishes a command on QEMU's schedule, once
+ * the block layer has the data, so commands get the bound of the other
+ * storage transports: 30 s (lsi_run_scsi_script, isp12160_command).
+ * IDENTIFY also asks for units that are not there, which never answer, and
+ * each empty unit costs its bound twice at POST, so that bound is short.
+ * The device model answers IDENTIFY as the command is written; on a loaded
+ * host the processor still stalled up to 34 ms between the command and the
+ * status read, so the bound is 100 ms rather than the old count's 15 ms.
+ */
+#define IDE_COMMAND_TIMEOUT_US   30000000ULL
+#define IDE_IDENTIFY_TIMEOUT_US  100000ULL
+
+/* Has a wait that began at ITC value Start run for Microseconds? */
+static BOOLEAN ide_wait_expired(UINT64 Start, UINT64 Microseconds)
+{
+    return fw_read_itc() - Start >=
+           Microseconds * FW_ITC_TICKS_PER_MICROSECOND;
+}
+
 typedef struct {
     UINT32 BaseAddress;
     UINT32 ByteCount;
@@ -436,25 +459,36 @@ static BOOLEAN ide_configure_channels_from_pci(void)
     return 1;
 }
 
-static BOOLEAN ata_pio_wait_ready_timeout(UINT64 cmd_port, UINTN timeout)
+/*
+ * The IDE waits take the time before they read the status, so the last read
+ * always comes after the bound has run out: an answer that lands as the time
+ * runs out is still seen.  The waits that follow a command make the 400 ns
+ * delay before each status read, as ATA-5 9.7 asks of a host after it writes
+ * a command.  That matters for a single read after the bound: the 460gx
+ * board's drives show BSY on the first status read after a command, and the
+ * delay's Alternate Status reads take it.
+ */
+static BOOLEAN ata_pio_wait_ready_timeout(UINT64 cmd_port, UINT64 microseconds)
 {
+    UINT64 start = fw_read_itc();
+    BOOLEAN expired;
     UINT8 status;
 
     do {
+        ata_pio_poll_delay();
+        expired = ide_wait_expired(start, microseconds);
         status = ata_pio_read8(cmd_port);
         if (status & (ATA_SR_ERR | ATA_SR_DF))
             return 0;
         if (!(status & ATA_SR_BSY) && (status & ATA_SR_DRQ))
             return 1;
-        ata_pio_poll_delay();
-        timeout--;
-    } while (timeout > 0);
+    } while (!expired);
     return 0;
 }
 
 static BOOLEAN ata_pio_wait_ready(UINT64 cmd_port)
 {
-    return ata_pio_wait_ready_timeout(cmd_port, 1000000);
+    return ata_pio_wait_ready_timeout(cmd_port, IDE_COMMAND_TIMEOUT_US);
 }
 
 static const char *ide_unit_name(const IDE_DEVICE *dev)
@@ -498,7 +532,8 @@ BOOLEAN ata_pio_identify(IDE_DEVICE *dev, UINT8 command,
     ata_pio_write8(gIde.data_base + IDE_LBAHI_OFF, 0);
     ata_pio_write8(gIde.data_base + IDE_CMD_OFF, command);
 
-    if (!ata_pio_wait_ready_timeout(gIde.data_base + IDE_CMD_OFF, 10000)) {
+    if (!ata_pio_wait_ready_timeout(gIde.data_base + IDE_CMD_OFF,
+                                    IDE_IDENTIFY_TIMEOUT_US)) {
         return 0;
     }
 
@@ -629,17 +664,18 @@ BOOLEAN ata_pio_read_sectors(IDE_DEVICE *dev, UINT8 *buf, UINT32 lba,
 
 BOOLEAN ata_pio_wait_not_busy(VOID)
 {
-    UINTN timeout = 1000000;
+    UINT64 start = fw_read_itc();
+    BOOLEAN expired;
     UINT8 status;
 
     do {
+        ata_pio_poll_delay();
+        expired = ide_wait_expired(start, IDE_COMMAND_TIMEOUT_US);
         status = ata_pio_read8(gIde.data_base + IDE_CMD_OFF);
         if ((status & ATA_SR_BSY) == 0) {
             return (status & (ATA_SR_ERR | ATA_SR_DF)) == 0;
         }
-        ata_pio_poll_delay();
-        timeout--;
-    } while (timeout > 0);
+    } while (!expired);
     return 0;
 }
 
@@ -872,13 +908,16 @@ static void atapi_build_read10_cdb(UINT16 cdb[6], UINT32 lba, UINT32 count)
 static BOOLEAN atapi_pio_wait_data(UINT32 lba, UINT32 chunk,
                                    UINTN remaining, UINTN *byte_count)
 {
-    UINTN timeout = 1000000;
+    UINT64 start = fw_read_itc();
+    UINTN passes = 0;
+    BOOLEAN expired;
     UINT8 status;
 
     (void)lba;
     (void)chunk;
 
     do {
+        expired = ide_wait_expired(start, IDE_COMMAND_TIMEOUT_US);
         status = ata_pio_read8(gIde.data_base + IDE_CMD_OFF);
         if (status & (ATA_SR_ERR | ATA_SR_DF)) {
             return 0;
@@ -901,23 +940,25 @@ static BOOLEAN atapi_pio_wait_data(UINT32 lba, UINT32 chunk,
             return 1;
         }
         ata_pio_poll_delay();
-        if ((timeout & 0x3FF) == 0) {
+        if ((++passes & 0x3FF) == 0) {
             __asm__ __volatile__ ("mf" ::: "memory");
         }
-        timeout--;
-    } while (timeout > 0);
+    } while (!expired);
     return 0;
 }
 
 static BOOLEAN atapi_pio_wait_complete(UINT32 lba, UINT32 chunk)
 {
-    UINTN timeout = 1000000;
+    UINT64 start = fw_read_itc();
+    UINTN passes = 0;
+    BOOLEAN expired;
     UINT8 status;
 
     (void)lba;
     (void)chunk;
 
     do {
+        expired = ide_wait_expired(start, IDE_COMMAND_TIMEOUT_US);
         status = ata_pio_read8(gIde.data_base + IDE_CMD_OFF);
         if (status & (ATA_SR_ERR | ATA_SR_DF)) {
             return 0;
@@ -926,11 +967,10 @@ static BOOLEAN atapi_pio_wait_complete(UINT32 lba, UINT32 chunk)
             return 1;
         }
         ata_pio_poll_delay();
-        if ((timeout & 0x3FF) == 0) {
+        if ((++passes & 0x3FF) == 0) {
             __asm__ __volatile__ ("mf" ::: "memory");
         }
-        timeout--;
-    } while (timeout > 0);
+    } while (!expired);
     return 0;
 }
 
@@ -1135,13 +1175,15 @@ static void ide_bmdma_stop(void)
 
 static BOOLEAN ide_bmdma_wait(UINT32 lba, UINT32 chunk)
 {
-    UINTN timeout = 1000000;
+    UINT64 start = fw_read_itc();
+    BOOLEAN expired;
     UINT8 status;
 
     (void)lba;
     (void)chunk;
 
     do {
+        expired = ide_wait_expired(start, IDE_COMMAND_TIMEOUT_US);
         status = ata_pio_read8(gIde.bmdma_base + IDE_BMDMA_STATUS_OFF);
         if ((status & IDE_BMDMA_STATUS_ERROR) != 0) {
             ide_bmdma_stop();
@@ -1160,8 +1202,7 @@ static BOOLEAN ide_bmdma_wait(UINT32 lba, UINT32 chunk)
             return 1;
         }
         ata_pio_poll_delay();
-        timeout--;
-    } while (timeout > 0);
+    } while (!expired);
 
     ide_bmdma_stop();
     return 0;
