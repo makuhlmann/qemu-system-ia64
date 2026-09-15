@@ -126,11 +126,18 @@ fw_flash_entry:
      * machine has (the first 128 MiB, FW_LOW_RAM_MIN), laid out as the
      * CPU-assist region of a minimum machine; the boot processor moves to
      * the real region once it knows how much memory there is.
+     *
+     * The processor's LID is the geographic id PAL hands over in GR33, as
+     * the vendor SDV firmware sets it (ids 0 and 3 on that board).
+     * The id indexes this processor's bootstrap slots, and id 0 is the
+     * boot processor.
      */
-    mov r14 = cr.lid
+    dep r14 = r33, r0, 24, 8
+    ;;
+    mov cr.lid = r14
     movl r17 = FW_LOW_RAM_MIN
     ;;
-    extr.u r21 = r14, 24, 8     /* r21 = processor index */
+    extr.u r21 = r14, 24, 8     /* r21 = processor id */
     movl r23 = FW_EARLY_RSE_BELOW_END
     ;;
     sub r26 = r17, r23

@@ -3422,19 +3422,7 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
      */
     {
         uint64_t entry = s->realfw_entry;
-        /*
-         * The i2000/SDV is a two-socket board whose processors answer to
-         * bus-agent ids 0 and 3: the vendor firmware's MADT template
-         * declares exactly those two Local SAPIC slots (ids 0 and 3, the
-         * second enabled once its processor checks in), and the OS's
-         * AP wake-up IPI is addressed to that LID.  SAL_A derives the LID
-         * from the geographic id PAL hands it in GR33 ("dep r2=r33,r0,0,3;
-         * shl r2=r2,24; mov cr.lid=r2" at 0xFFFF3608), so the id has to
-         * travel there: a second CPU announced as id 1 checks in, is
-         * published as id 3, and never hears the IPI.  The configuration
-         * check caps the board at two processors.
-         */
-        static const uint8_t socket_lid_id[] = { 0, 3 };
+        IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
 
         CPU_FOREACH(cs) {
             IA64BootInfo info = {
@@ -3442,8 +3430,11 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                 .firmware_entry = entry,
                 .iva = IA64_PAL_RESET_IVT_BASE,
                 .raw_entry = true,
-                .raw_proc_id = socket_lid_id[MIN(cs->cpu_index,
-                                                 ARRAY_SIZE(socket_lid_id) - 1)],
+                /* Both firmwares make this the processor's LID. */
+                .raw_proc_id = imc->processor_ids ?
+                    imc->processor_ids[MIN(cs->cpu_index,
+                                           imc->nprocessor_ids - 1)] :
+                    cs->cpu_index,
                 /*
                  * SAL calls PAL procedures through the machine-planted stub
                  * (GR34; GR36's authentication procedure lands on the same

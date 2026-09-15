@@ -23,13 +23,13 @@ class Ia64FirmwareTest(QemuSystemTest):
         return path
 
     def launch_ia64(self, *, name: str = "default", media: Path | None = None,
-                    optical: bool = False, machine_options: str = "",
+                    optical: bool = False, machine: str = "ia64-vpc",
+                    machine_options: str = "",
                     memory: str = "512M", smp: int = 1,
                     boot_timeout: int | None = 1,
                     extra_args: tuple[str, ...] = (),
                     drive_args: tuple[str, ...] | None = None):
         vm = self.get_vm(name=name)
-        machine = "ia64-vpc"
         if machine_options:
             machine += "," + machine_options
         # By default give the boot manager a short auto-boot countdown

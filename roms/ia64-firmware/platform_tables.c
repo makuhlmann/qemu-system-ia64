@@ -853,7 +853,7 @@ static void efi_init_acpi_tables(void)
         mMadt.Lsapic[i].Type = 7;
         mMadt.Lsapic[i].Length = sizeof(mMadt.Lsapic[i]);
         mMadt.Lsapic[i].ProcessorId = i;
-        mMadt.Lsapic[i].Id = i;
+        mMadt.Lsapic[i].Id = fw_processor_lsapic_id(i);
         mMadt.Lsapic[i].Eid = 0;
         mMadt.Lsapic[i].Reserved[0] = 0;
         mMadt.Lsapic[i].Reserved[1] = 0;
@@ -1445,12 +1445,12 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         if (mAcpiMadt->Lsapic[i].Type != 7 ||
             mAcpiMadt->Lsapic[i].Length != 12 ||
             mAcpiMadt->Lsapic[i].ProcessorId != i ||
-            mAcpiMadt->Lsapic[i].Id != i ||
+            mAcpiMadt->Lsapic[i].Id != fw_processor_lsapic_id(i) ||
             mAcpiMadt->Lsapic[i].Eid != 0 ||
             mAcpiMadt->Lsapic[i].Flags != expected_flags ||
             mAcpiSrat->Processor[i].Length !=
                 sizeof(mAcpiSrat->Processor[i]) ||
-            mAcpiSrat->Processor[i].ApicId != i ||
+            mAcpiSrat->Processor[i].ApicId != fw_processor_lsapic_id(i) ||
             mAcpiSrat->Processor[i].LsapicEid != 0 ||
             mAcpiSrat->Processor[i].Flags != expected_flags) {
             return 0;

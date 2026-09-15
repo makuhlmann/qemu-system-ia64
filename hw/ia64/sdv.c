@@ -110,12 +110,23 @@ static void ia64_vpc_460gx_window_moved(void *opaque, uint64_t base)
     ia64_vpc_set_low_ram_limit(opaque, MIN(base, IA64_LOW_RAM_LIMIT));
 }
 
+/*
+ * The i2000/SDV is a two-socket board whose processors answer to bus-agent
+ * ids 0 and 3: the vendor firmware's MADT template declares exactly those
+ * two Local SAPIC slots (ids 0 and 3, the second enabled once its processor
+ * checks in), and the OS's AP wake-up IPI is addressed to that LID.  SAL_A
+ * derives the LID from the geographic id PAL hands it in GR33 (at
+ * 0xFFFF3608), so the id has to travel there: a second CPU announced as id 1
+ * checks in, is published as id 3, and never hears the IPI.
+ */
+static const uint8_t sdv_processor_ids[] = { 0, 3 };
+
 static bool sdv_validate(IA64VpcMachineState *s, Error **errp)
 {
     MachineState *machine = MACHINE(s);
 
     /* The i2000 is a two-socket board: its firmware declares two LSAPICs. */
-    if (machine->smp.cpus > 2) {
+    if (machine->smp.cpus > ARRAY_SIZE(sdv_processor_ids)) {
         error_setg(errp, "the 460gx machine has at most 2 CPUs: the i2000/SDV "
                    "is a two-socket board");
         return false;
@@ -447,6 +458,8 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
      */
     imc->i8042_default = true;
     imc->legacy_com1_console = true;
+    imc->processor_ids = sdv_processor_ids;
+    imc->nprocessor_ids = ARRAY_SIZE(sdv_processor_ids);
     imc->validate = sdv_validate;
     imc->build_chipset = sdv_build_chipset;
     imc->wire_intx = sdv_wire_intx;

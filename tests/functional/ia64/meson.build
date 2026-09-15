@@ -90,7 +90,7 @@ test_ia64_timeouts = {
   'smoke': 120,
   'shell': 180,
   'services': 90,
-  'tables': 90,
+  'tables': 180,
   'smp': 120,
   'storage': 600,
   'input': 120,

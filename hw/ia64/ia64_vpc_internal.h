@@ -107,6 +107,13 @@ struct IA64VpcMachineClass {
     bool i8042_default;
     /* The console is COM1 (3F8h, IRQ 4); a debug port is COM2 (2F8h, IRQ 3). */
     bool legacy_com1_console;
+    /*
+     * The geographic processor id of each socket, by CPU index: PAL hands
+     * it to SAL in GR33 at SALE_ENTRY, and SAL makes it the processor's
+     * LID.  NULL = the CPU index.
+     */
+    const uint8_t *processor_ids;
+    unsigned int nprocessor_ids;
 
     /* Board-specific configuration checks; NULL = none. */
     bool (*validate)(IA64VpcMachineState *s, Error **errp);

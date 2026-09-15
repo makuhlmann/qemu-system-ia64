@@ -123,6 +123,10 @@ static UINTN                  mThreadsPerCore = 1;
 static UINT64                 mChipsetProbed = IA64_FW_CHIPSET_DERIVE;
 /* Application processors that have entered the shadow (firmware_ap_main). */
 static volatile UINT64        mApCheckins;
+/* Bit n: the processor with LID id n has checked in (boot processor too). */
+static volatile UINT64        mProcessorIdsSeen;
+/* mProcessorIdsSeen when the rendezvous ended: what the tables publish. */
+static UINT64                 mProcessorIds = 1;
 
 extern char __fw_image_start[];
 extern char _start[];
@@ -614,6 +618,9 @@ static void fw_platform_rendezvous_processors(void)
 
     __asm__ volatile ("mov %0 = cr.lid;;" : "=r"(own_id) : : "memory");
     own_id = (own_id >> 24) & 0xff;
+    if (own_id < FW_MAX_CPUS) {
+        __sync_fetch_and_or(&mProcessorIdsSeen, 1ULL << own_id);
+    }
 
     /* The shadow's reset entry; its first page is PAL's buffer. */
     release[0] = (UINT64)(UINTN)_start;
@@ -635,10 +642,37 @@ static void fw_platform_rendezvous_processors(void)
         }
     } while (mApCheckins != seen);
 
-    mProcessorCount = 1 + (UINTN)mApCheckins;
-    if (mProcessorCount > FW_MAX_CPUS) {
-        mProcessorCount = FW_MAX_CPUS;
+    mProcessorIds = mProcessorIdsSeen;
+    mProcessorCount = 0;
+    for (id = 0; id < FW_MAX_CPUS; id++) {
+        mProcessorCount += (mProcessorIds >> id) & 1U;
     }
+}
+
+/*
+ * The LSAPIC id of ACPI processor Index: first the ids of the processors
+ * that checked in, in ascending order (the enabled entries), then the ids
+ * that no processor holds (the disabled entries), so that every entry has
+ * its own id.
+ */
+UINT8 fw_processor_lsapic_id(UINTN Index)
+{
+    UINT64 ids = mProcessorIds;
+    UINTN id;
+
+    if (Index >= mProcessorCount) {
+        Index -= mProcessorCount;
+        ids = ~ids;
+    }
+    for (id = 0; id < FW_MAX_CPUS; id++) {
+        if ((ids >> id) & 1U) {
+            if (Index == 0) {
+                return (UINT8)id;
+            }
+            Index--;
+        }
+    }
+    return 0;
 }
 
 /*
@@ -2221,10 +2255,11 @@ static void fw_ap_rendezvous(void)
 
 void firmware_ap_main(UINT64 ProcessorId, UINT64 ResetPalProc)
 {
-    (void)ProcessorId;
-
     fw_platform_install_pal(1, ResetPalProc);
     fw_platform_register_processor(ResetPalProc);
+    if (ProcessorId < FW_MAX_CPUS) {
+        __sync_fetch_and_or(&mProcessorIdsSeen, 1ULL << ProcessorId);
+    }
     __sync_fetch_and_add(&mApCheckins, 1);
     fw_ap_rendezvous();
     for (;;) {
