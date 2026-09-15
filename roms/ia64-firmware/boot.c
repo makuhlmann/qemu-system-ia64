@@ -71,6 +71,62 @@ static void fw_clear_boot_current(void)
     (void)rs_set_variable(name, (void *)mEfiGlobalVariableGuid, 0, 0, NULL);
 }
 
+/*
+ * The firmware's own "Removable Media Boot" option names the boot device by a
+ * fixed-shape path -- a SCSI or ATAPI node, then a CD-ROM node, then the
+ * file -- and LoadImage resolves it only when the boot Block I/O handle's path
+ * is a prefix of it and that handle carries the file system.  On a
+ * partitioned disk the file system is on a partition handle, and an AHCI
+ * handle's path has a SATA node, so there LoadImage finds nothing.  EFI 1.10
+ * 3.4.1.1 has the firmware find the file system on the removable device, so
+ * look for the option's file on each file system of the boot device.
+ */
+static BOOLEAN fw_is_removable_media_path(const FW_DEVICE_PATH_NODE *FilePath,
+                                          UINTN Size)
+{
+    const UINT8 *a = (const UINT8 *)FilePath;
+    const UINT8 *b = (const UINT8 *)&mOpticalSetupLoaderDevicePath;
+    UINTN i;
+
+    if (Size != sizeof(mOpticalSetupLoaderDevicePath)) {
+        return 0;
+    }
+    for (i = 0; i < Size; i++) {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static EFI_STATUS fw_load_removable_media_image(FW_DEVICE_PATH_NODE *FilePath,
+                                                EFI_HANDLE *Image)
+{
+    static UINT8 full_path[256];
+    FW_DEVICE_PATH_NODE *file_node;
+    EFI_HANDLE volume;
+    EFI_STATUS st = EFI_NOT_FOUND;
+    UINTN i;
+
+    file_node = (FW_DEVICE_PATH_NODE *)fw_loaded_image_file_path(FilePath);
+    if (file_node == NULL || file_node->Type != 0x04 ||
+        file_node->SubType != 0x04) {
+        return EFI_NOT_FOUND;
+    }
+    for (i = 0; (volume = fw_boot_media_file_system(i)) != NULL; i++) {
+        if (fw_build_file_device_path(volume, file_node, full_path,
+                                      sizeof(full_path)) != EFI_SUCCESS) {
+            continue;
+        }
+        st = mBootServices.LoadImage(1, mImageHandle, full_path,
+                                     NULL, 0, Image);
+        if (st == EFI_SUCCESS) {
+            break;
+        }
+    }
+    return st;
+}
+
 static EFI_STATUS boot_image_from_load_option(UINT16 OptionNumber,
                                               const UINT8 *Option,
                                               UINTN OptionSize)
@@ -131,6 +187,10 @@ static EFI_STATUS boot_image_from_load_option(UINT16 OptionNumber,
 
     st = mBootServices.LoadImage(1, mImageHandle, file_path,
                                  NULL, 0, &image);
+    if (st == EFI_NOT_FOUND &&
+        fw_is_removable_media_path(file_path, file_path_list_length)) {
+        st = fw_load_removable_media_image(file_path, &image);
+    }
     if (st != EFI_SUCCESS) {
         return st;
     }

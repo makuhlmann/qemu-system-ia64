@@ -147,21 +147,24 @@ class Ia64Storage(Ia64FirmwareTest):
             tag, media, optical=True, machine_options="ide=on",
             drive_args=tuple(drive_args))
 
-    def run_ahci(self):
+    def run_ahci(self, layout):
         app = app_path("storage")
-        media = Path(self.scratch_file("ahci.img"))
-        make_fat_disk(
-            media, app, layout="gpt",
-            extra_boot_files=((b"START   EFI",
-                               app_path("start-image-child")),))
+        name = "ahci" if layout == "gpt" else f"ahci-{layout}"
+        media = Path(self.scratch_file(name + ".img"))
+        required = ()
+        extra_files = ()
+        if layout != "whole":
+            required = ("logical-partition-handle",
+                        "short-form-hard-drive-path",
+                        "partition-driver-contracts")
+            extra_files = ((b"START   EFI", app_path("start-image-child")),)
+        make_fat_disk(media, app, layout=layout, extra_boot_files=extra_files)
         drive_args = (
             "-drive", f"file={media},format=raw,if=ide,index=0",
         )
         self.run_scenario(
-            "ahci", media, drive_args=drive_args, machine_options="ahci=on",
-            required_cases=("logical-partition-handle",
-                            "short-form-hard-drive-path",
-                            "partition-driver-contracts"))
+            name, media, drive_args=drive_args, machine_options="ahci=on",
+            required_cases=required)
 
     def run_empty_cd(self, transport):
         app = app_path("storage")
@@ -251,7 +254,10 @@ class Ia64Storage(Ia64FirmwareTest):
         self.run_ide_optical(secondary=True)
 
     def test_ahci(self):
-        self.run_ahci()
+        self.run_ahci("gpt")
+
+    def test_ahci_whole_disk(self):
+        self.run_ahci("whole")
 
     def test_scsi_empty_cd(self):
         self.run_empty_cd("scsi")

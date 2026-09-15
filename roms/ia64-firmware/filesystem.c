@@ -1840,6 +1840,54 @@ static BOOLEAN fw_guid_is_zero(const UINT8 *Guid)
     return 1;
 }
 
+/*
+ * The Index'th handle that carries a file system for the boot device, in the
+ * order a removable-media boot searches them (EFI 1.10 3.4.1.1): the boot
+ * Block I/O handle itself, then the partitions on it, EFI system partitions
+ * first.  NULL past the last one.
+ */
+EFI_HANDLE fw_boot_media_file_system(UINTN Index)
+{
+    UINTN pass;
+    UINTN i;
+
+    if (mBlockIoHandle == NULL) {
+        return NULL;
+    }
+    if (handle_supports_protocol(mBlockIoHandle,
+                                 (void *)mSimpleFileSystemProtocolGuid,
+                                 NULL)) {
+        if (Index == 0) {
+            return mBlockIoHandle;
+        }
+        Index--;
+    }
+    for (pass = 0; pass < 2; pass++) {
+        for (i = 0; i < FW_ARRAY_SIZE(mPartitions); i++) {
+            const FW_PARTITION_RECORD *partition = &mPartitions[i];
+            BOOLEAN esp;
+
+            if (!partition->in_use ||
+                partition->parent_handle != mBlockIoHandle ||
+                !handle_supports_protocol(partition->handle,
+                                          (void *)mSimpleFileSystemProtocolGuid,
+                                          NULL)) {
+                continue;
+            }
+            esp = fw_guid_equal(partition->partition_type_guid,
+                                mEfiSystemPartitionGuid);
+            if (esp != (pass == 0)) {
+                continue;
+            }
+            if (Index == 0) {
+                return partition->handle;
+            }
+            Index--;
+        }
+    }
+    return NULL;
+}
+
 static UINT32 fw_crc32_update(UINT32 Crc, const UINT8 *Data, UINTN Size)
 {
     UINTN i;

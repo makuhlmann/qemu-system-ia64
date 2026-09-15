@@ -349,6 +349,7 @@ BOOLEAN loaded_image_file_path_selftest(void);
 BOOLEAN optical_raw_device_path_selftest(void);
 BOOLEAN optical_setup_boot_option_selftest(void);
 BOOLEAN partition_component_name_selftest(VOID);
+EFI_HANDLE fw_boot_media_file_system(UINTN Index);
 extern FW_BLOCK_DEVICE_PATH mBlockDevicePath;
 extern EFI_DISK_IO_PROTOCOL  mBlockDiskIoProto;
 extern EFI_BLOCK_IO_MEDIA    mBlockIoMedia;
