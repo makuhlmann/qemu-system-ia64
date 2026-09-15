@@ -20,20 +20,6 @@
 #define IA64_U64(x) x##ULL
 #endif
 
-/*
- * The firmware scratch page at 0xFF0FF000: inside the machine-RAM-backed
- * firmware address-space window, clear of the flash range.  It holds the
- * shadow mailbox below; nothing else.  Retired with the invented window.
- */
-/*
- * Where the boot processor's flash stage publishes the RAM-top shadow base
- * once the image is copied and fixed up: the application processors leave
- * reset together with it (PALE_RESET exit state, every processor at
- * SALE_ENTRY) and spin here until the shadow exists, then enter it.  Zero
- * (cleared by the machine on every reset) means "not yet".  Lives in the
- * firmware scratch page; retired with the invented firmware window.
- */
-#define IA64_FW_SHADOW_MAILBOX        IA64_U64(0x00000000ff0ff800)
 /* The firmware's link base; it executes from the RAM-top shadow. */
 #define IA64_FW_LINK_BASE             IA64_U64(0x0000000000100000)
 /*
@@ -122,6 +108,23 @@
 #define IA64_FW_EARLY_RSE_END_OFFSET \
     (IA64_FW_EARLY_RSE_OFFSET + \
      IA64_VPC_MAX_CPUS * IA64_FW_EARLY_RSE_SIZE)
+
+/*
+ * The application-processor release block, in the gap between the debug
+ * contexts and the debug stacks.  The flash stage's application processors
+ * leave reset together with the boot processor (PALE_RESET exit state, every
+ * processor at SALE_ENTRY) and wait for an IPI with
+ * IA64_FW_AP_RELEASE_VECTOR.  Before it sends that IPI, the boot processor
+ * writes the shadow's _start (+0) and the installed DRAM size (+8) here, in
+ * the region of a minimum machine (IA64_FW_AP_RELEASE_BLOCK), which every
+ * machine has and which the flash stage already uses.  Nothing reads the
+ * block after the release, so it needs no clearing on reset.
+ */
+#define IA64_FW_AP_RELEASE_OFFSET      0x0000000000044000ULL
+#define IA64_FW_AP_RELEASE_SIZE        0x0000000000000010ULL
+#define IA64_FW_AP_RELEASE_BLOCK \
+    (IA64_FW_LOW_RAM_MIN - IA64_FW_CPU_ASSIST_SIZE + IA64_FW_AP_RELEASE_OFFSET)
+#define IA64_FW_AP_RELEASE_VECTOR      0xf0
 
 #define IA64_FW_CPU_STACK_SIZE         0x0000000000020000ULL
 #define IA64_FW_BOOT_STACK_SIZE \

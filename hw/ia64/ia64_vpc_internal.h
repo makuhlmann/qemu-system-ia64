@@ -211,7 +211,6 @@ struct IA64VpcMachineState {
     MemoryRegion *lsapic_mmio;
     MemoryRegion pal_rom;
     MemoryRegion pal_reset_ivt;
-    MemoryRegion fw_scratch;
     MemoryRegion acpi_pm;
     MemoryRegion acpi_reset;
     SerialMM *debug_uart;

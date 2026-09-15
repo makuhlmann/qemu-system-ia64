@@ -28,7 +28,9 @@ fw_pal_buffer:
     .equ FW_PCI_MMIO_BASE, IA64_PCI_MMIO_BASE
     .equ FW_LOW_RAM_MIN, IA64_FW_LOW_RAM_MIN
     .equ FW_LOW_RAM_ALIGN_MASK, (IA64_FW_LOW_RAM_ALIGN - 1)
-    .equ FW_SHADOW_MAILBOX, IA64_FW_SHADOW_MAILBOX
+    .equ FW_AP_RELEASE_BLOCK, IA64_FW_AP_RELEASE_BLOCK
+    /* The release vector's bit in cr.irr3 (vectors 192-255). */
+    .equ FW_AP_RELEASE_IRR3_BIT, (IA64_FW_AP_RELEASE_VECTOR - 192)
     .equ FW_LINK_BASE, IA64_FW_LINK_BASE
     /* The shadow sits this far below low_ram_end (IA64_FW_IMAGE_BASE_FOR). */
     .equ FW_SHADOW_BELOW_END, (IA64_FW_CPU_ASSIST_SIZE + \
@@ -86,9 +88,9 @@ fw_fit_pal:
      *
      * The boot processor copies the image body to its RAM-top shadow
      * (IA64_FW_IMAGE_BASE_FOR), applies the self-relocation fixup table
-     * there, publishes the shadow through the mailbox and enters it at
-     * start_after_pal.  The others wait for the mailbox and enter the
-     * shadow's _start, which sends them down start_secondary.  Nothing
+     * there and enters it at start_after_pal.  The others wait for the
+     * release IPI the shadow sends (IA64_FW_AP_RELEASE_VECTOR) and enter
+     * the shadow's _start, which sends them down start_secondary.  Nothing
      * here reaches for an absolute address of its own: link-time values
      * are turned into flash offsets against the link base.
      */
@@ -260,21 +262,32 @@ fw_flash_entry:
     ;;
 
     /*
-     * Application processors: wait for the boot processor to publish the
-     * shadow's _start (mailbox +0) and the DRAM size (mailbox +8), move the RSE
-     * backing store to this processor's real early slot, and run the
-     * shadow's reset entry, which sends them down start_secondary.
+     * Application processors: wait for the boot processor's release IPI,
+     * read the shadow's _start (release block +0) and the DRAM size (+8),
+     * move the RSE backing store to this processor's real early slot, and
+     * run the shadow's reset entry, which sends them down start_secondary.
+     * External interrupts are disabled here, so poll the vector's request
+     * bit; then acknowledge it (cr.ivr, cr.eoi), so that it is not still
+     * pending when the shadow's rendezvous loop reads cr.ivr.
      */
 flash_wait_shadow:
-    movl r14 = FW_SHADOW_MAILBOX
-    ;;
 4:
-    ld8.acq r15 = [r14]
+    mov r15 = cr.irr3
     ;;
-    cmp.eq p6, p7 = r15, r0
+    tbit.z p6, p7 = r15, FW_AP_RELEASE_IRR3_BIT
     ;;
 (p6) br.cond.sptk.few 4b
     ;;
+    mov r15 = cr.ivr
+    ;;
+    srlz.d
+    ;;
+    mov cr.eoi = r0
+    ;;
+    srlz.d
+    movl r14 = FW_AP_RELEASE_BLOCK
+    ;;
+    ld8 r15 = [r14]
     adds r16 = 8, r14
     movl r19 = FW_PCI_MMIO_BASE
     movl r22 = FW_LOW_RAM_ALIGN_MASK

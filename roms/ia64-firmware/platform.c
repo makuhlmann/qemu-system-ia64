@@ -598,18 +598,34 @@ BOOLEAN fw_platform_register_firmware(UINT64 CpuAssistBase)
  * the shadow's data is ready, and count them as they check in.  Real SAL
  * rendezvouses its processors the same way (SAL 3.2.3); the wait is
  * bounded, so a machine with one processor moves on after 20 ms.
+ *
+ * The release is an IPI to every processor id this firmware supports.
+ * The processor interrupt block ignores an IPI to an id that no processor
+ * has, so the boot processor does not need to know which ids exist.
  */
 static void fw_platform_rendezvous_processors(void)
 {
-    volatile UINT64 *mailbox = (volatile UINT64 *)(UINTN)IA64_FW_SHADOW_MAILBOX;
+    volatile UINT64 *release =
+        (volatile UINT64 *)(UINTN)IA64_FW_AP_RELEASE_BLOCK;
+    UINT64 own_id;
     UINT64 deadline;
     UINT64 seen;
+    UINTN id;
 
-    mailbox[1] = mGuestRamSize;
-    __asm__ volatile ("mf;;" : : : "memory");
+    __asm__ volatile ("mov %0 = cr.lid;;" : "=r"(own_id) : : "memory");
+    own_id = (own_id >> 24) & 0xff;
+
     /* The shadow's reset entry; its first page is PAL's buffer. */
-    mailbox[0] = (UINT64)(UINTN)_start;
-    __asm__ volatile ("mf;;" : : : "memory");
+    release[0] = (UINT64)(UINTN)_start;
+    release[1] = mGuestRamSize;
+    for (id = 0; id < FW_MAX_CPUS; id++) {
+        if (id != own_id) {
+            volatile UINT64 *ipi = (volatile UINT64 *)(UINTN)
+                (FW_LOCAL_SAPIC_BASE + ((UINT64)id << 12));
+
+            *ipi = IA64_FW_AP_RELEASE_VECTOR;
+        }
+    }
 
     deadline = fw_read_itc() + 200000ULL * fw_itc_ticks_per_100ns;
     do {

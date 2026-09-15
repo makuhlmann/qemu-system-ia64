@@ -122,9 +122,6 @@
  */
 #define IA64_PAL_RESET_IVT_BASE   IA64_U64(0x00000000ff300000)
 #define IA64_PAL_RESET_IVT_SIZE   0x8000
-/* The RAM page that holds IA64_FW_SHADOW_MAILBOX. */
-#define IA64_FW_SCRATCH_BASE      IA64_U64(0x00000000ff0ff000)
-#define IA64_FW_SCRATCH_SIZE      0x1000
 #define IA64_REALFW_PTR_FIT       (IA64_REALFW_WINDOW_END - 32)
 #define IA64_REALFW_PTR_SALE      (IA64_REALFW_WINDOW_END - 24)
 /* Bit 63 in firmware pointers is the uncacheable-attribute flag, not
@@ -2296,8 +2293,7 @@ static void ia64_vpc_map_lsapic(IA64VpcMachineState *s)
  * somewhere): the PAL emulation ROM at FF10_0000, whose 32-byte stub is the
  * PAL procedure entry handed to SAL in GR34/GR36, and the reset IVT at
  * FF30_0000, cr.iva at SALE_ENTRY.  Both are read-only and present for every
- * firmware.  One RAM page at FF0F_F000 still carries the shadow mailbox the
- * project firmware's application processors wait on.
+ * firmware.
  */
 static bool ia64_vpc_map_firmware_address_space(IA64VpcMachineState *s,
                                                 Error **errp)
@@ -2307,18 +2303,13 @@ static bool ia64_vpc_map_firmware_address_space(IA64VpcMachineState *s,
                                 IA64_PAL_ROM_SIZE, errp) ||
         !memory_region_init_rom(&s->pal_reset_ivt, NULL,
                                 "ia64-pal-reset-ivt",
-                                IA64_PAL_RESET_IVT_SIZE, errp) ||
-        !memory_region_init_ram(&s->fw_scratch, NULL,
-                                "ia64-firmware-scratch",
-                                IA64_FW_SCRATCH_SIZE, errp)) {
+                                IA64_PAL_RESET_IVT_SIZE, errp)) {
         return false;
     }
     memory_region_add_subregion(get_system_memory(), IA64_PAL_ROM_BASE,
                                 &s->pal_rom);
     memory_region_add_subregion(get_system_memory(), IA64_PAL_RESET_IVT_BASE,
                                 &s->pal_reset_ivt);
-    memory_region_add_subregion(get_system_memory(), IA64_FW_SCRATCH_BASE,
-                                &s->fw_scratch);
     return true;
 }
 
@@ -2432,18 +2423,6 @@ void ia64_vpc_set_low_ram_limit(IA64VpcMachineState *s, uint64_t limit)
     s->low_ram_limit = limit;
     ia64_vpc_map_ram(s);
     memory_region_transaction_commit();
-}
-
-/*
- * The shadow mailbox: no shadow yet, so the flash stage's application
- * processors wait for the boot processor.
- */
-static void ia64_vpc_clear_shadow_mailbox(void)
-{
-    uint64_t mailbox[2] = { 0, 0 };
-
-    cpu_physical_memory_write(IA64_FW_SHADOW_MAILBOX, mailbox,
-                              sizeof(mailbox));
 }
 
 /*
@@ -3326,8 +3305,6 @@ static void ia64_vpc_reset(void *opaque)
     IA64VpcMachineState *s = opaque;
     CPUState *cs;
 
-    ia64_vpc_clear_shadow_mailbox();
-
     CPU_FOREACH(cs) {
         /* The CPUs are not children of the platform system bus. */
         ia64_cpu_reset_to_boot_info(IA64_CPU(cs));
@@ -3858,7 +3835,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (!ia64_vpc_read_firmware(s, machine, errp)) {
         return false;
     }
-    ia64_vpc_clear_shadow_mailbox();
 
     for (i = 0; i < machine->smp.cpus; i++) {
         uint32_t threads = MAX(machine->smp.threads, 1U);
