@@ -3459,6 +3459,15 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                 .raw_pal_proc = IA64_PAL_ROM_BASE,
                 .raw_pal_auth = IA64_PAL_ROM_BASE,
                 /*
+                 * Where the project firmware keeps its CPU-assist region
+                 * (IA64_FW_CPU_ASSIST_BASE_FOR): the SAL runtime bridge
+                 * gives each processor its own re-entry slot there, and the
+                 * debug handler its context and stack.  Seeded like
+                 * cpu->fw_image_base until the firmware registers it.
+                 */
+                .fw_cpu_assist_base =
+                    IA64_FW_CPU_ASSIST_BASE_FOR(MACHINE(s)->ram_size),
+                /*
                  * Every processor leaves reset together and runs SAL_A,
                  * which arbitrates the BSP through the SAC's write-once
                  * word at FEB0_0CC0h; the losers wait at FEB0_0CB0h for

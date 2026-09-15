@@ -50,6 +50,19 @@
 #define TEST_HIGH_TRANSLATION_ITIR (24ULL << 2)
 #define TEST_TRANSLATION_WRITE_VA_BASE 0xe000020005000000ULL
 #define TEST_TRANSLATION_WRITE_OFFSET 0x84cULL
+#define TEST_SAL_REENTRY_COMMAND 3U
+/* A config read passes the address of its decoded fields: stack writes. */
+#define TEST_SAL_PCI_CONFIG_READ 0x01000010ULL
+/*
+ * The firmware's SAL_PROC stub is followed, 0x40 bytes on, by its dispatch
+ * block: C entry, GP, CPU 0's physical stack top, CPU 0's backing store.
+ * Each processor re-enters SAL on its own slot, one slot size further up.
+ */
+#define TEST_SAL_DISPATCH_BLOCK_OFFSET 0x40U
+#define TEST_SAL_RUNTIME_SLOT_SIZE 0x8000ULL
+#define TEST_SAL_CANARY_BYTES 512U
+#define TEST_SAL_CANARY 0x5a1c0ffee0c1a5a5ULL
+#define TEST_SAL_REENTRY_CALLS 64U
 
 typedef struct {
     UINT64 Status;
@@ -121,6 +134,9 @@ static volatile UINT64 translation_mismatch[TEST_PROCESSOR_COUNT];
 static volatile UINT64 translation_churn_mismatch[TEST_PROCESSOR_COUNT];
 static volatile UINT64 translation_write_mismatch[TEST_PROCESSOR_COUNT];
 static volatile UINT64 translation_command;
+static UINT64 sal_reentry_descriptor[2] __attribute__((aligned(16)));
+static volatile UINT64 sal_reentry_done[TEST_PROCESSOR_COUNT];
+static volatile UINT64 sal_reentry_failures[TEST_PROCESSOR_COUNT];
 static volatile UINT64 global_translation_release;
 static volatile UINT64 global_translation_ready[TEST_PROCESSOR_COUNT];
 static volatile UINT64 global_translation_mismatch[TEST_PROCESSOR_COUNT];
@@ -1533,13 +1549,39 @@ static VOID global_translation_remote(UINTN Id)
         translation_present();
 }
 
+static VOID sal_reentry_calls(UINTN Id)
+{
+    TEST_SAL_PROC sal_proc = (TEST_SAL_PROC)(UINTN)sal_reentry_descriptor;
+    UINTN i;
+
+    for (i = 0; i < TEST_SAL_REENTRY_CALLS; i++) {
+        /* Vendor ID of bus 0, device 0, function 0: a 2-byte read. */
+        TEST_SAL_RETURN result = sal_proc(TEST_SAL_PCI_CONFIG_READ,
+                                          0, 2, 0, 0, 0, 0, 0);
+
+        if (result.Status != TEST_SAL_SUCCESS) {
+            sal_reentry_failures[Id]++;
+        }
+    }
+    __asm__ volatile ("mf;;" : : : "memory");
+    sal_reentry_done[Id] = 1;
+}
+
+static volatile UINT64 *sal_reentry_canary(UINT64 StackTop, UINTN Id)
+{
+    return (volatile UINT64 *)(UINTN)
+        (StackTop + Id * TEST_SAL_RUNTIME_SLOT_SIZE - TEST_SAL_CANARY_BYTES);
+}
+
 static VOID ap_rendezvous(void)
 {
     UINTN id = (read_lid() >> 24) & 0xffU;
     UINT64 masked = 1ULL << 16;
 
     if (id > 0 && id < TEST_PROCESSOR_COUNT) {
-        if (translation_command == TEST_TRANSLATION_GLOBAL_COMMAND ||
+        if (translation_command == TEST_SAL_REENTRY_COMMAND) {
+            sal_reentry_calls(id);
+        } else if (translation_command == TEST_TRANSLATION_GLOBAL_COMMAND ||
             translation_command == TEST_TRANSLATION_GLOBAL_HIGH_COMMAND) {
             global_translation_remote(id);
         } else {
@@ -1625,6 +1667,72 @@ static BOOLEAN wait_for_round(UINT64 Round)
         }
         __asm__ volatile ("hint @pause" : : : "memory");
     }
+}
+
+/*
+ * Application processors call SAL_PROC while the boot processor stays out of
+ * SAL.  Each call's dispatcher frame lands below the caller's slot stack
+ * top, so after the round slot 0's canary must be intact and every
+ * application processor's own slot must show its frames.
+ */
+static BOOLEAN sal_reentry_check(VOID)
+{
+    UINT64 stack_top = get_u64((UINT8 *)(UINTN)sal_reentry_descriptor[0] +
+                               TEST_SAL_DISPATCH_BLOCK_OFFSET + 16U);
+    UINT64 deadline;
+    UINTN id;
+    UINTN i;
+    BOOLEAN complete = 0;
+    BOOLEAN own_slots = 1;
+    BOOLEAN slot0_intact = 1;
+
+    if (stack_top == 0 || (stack_top & 0xfULL) != 0) {
+        return 0;
+    }
+    for (id = 0; id < TEST_PROCESSOR_COUNT; id++) {
+        volatile UINT64 *canary = sal_reentry_canary(stack_top, id);
+
+        for (i = 0; i < TEST_SAL_CANARY_BYTES / 8U; i++) {
+            canary[i] = TEST_SAL_CANARY;
+        }
+        sal_reentry_done[id] = 0;
+        sal_reentry_failures[id] = 0;
+    }
+    translation_command = TEST_SAL_REENTRY_COMMAND;
+    __asm__ volatile ("mf;;" : : : "memory");
+    for (id = 1; id < TEST_PROCESSOR_COUNT; id++) {
+        send_wake_ipi(id, TEST_AP_WAKE_VECTOR);
+    }
+    deadline = read_itc() + TEST_WAIT_TICKS;
+    while ((INTN)(read_itc() - deadline) < 0) {
+        __asm__ volatile ("mf;;" : : : "memory");
+        complete = 1;
+        for (id = 1; id < TEST_PROCESSOR_COUNT; id++) {
+            complete = complete && sal_reentry_done[id] != 0;
+        }
+        if (complete) {
+            break;
+        }
+        __asm__ volatile ("hint @pause" : : : "memory");
+    }
+    if (!complete) {
+        return 0;
+    }
+    for (id = 0; id < TEST_PROCESSOR_COUNT; id++) {
+        volatile UINT64 *canary = sal_reentry_canary(stack_top, id);
+        BOOLEAN written = 0;
+
+        for (i = 0; i < TEST_SAL_CANARY_BYTES / 8U; i++) {
+            written = written || canary[i] != TEST_SAL_CANARY;
+        }
+        if (id == 0) {
+            slot0_intact = !written;
+        } else {
+            own_slots = own_slots && written &&
+                        sal_reentry_failures[id] == 0;
+        }
+    }
+    return slot0_intact && own_slots;
 }
 
 static BOOLEAN wait_for_global_translation_ready(VOID)
@@ -1713,6 +1821,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     BOOLEAN partial_translation_purge;
     BOOLEAN rid_translation_switch;
     BOOLEAN big_endian_atomic;
+    BOOLEAN sal_reentry = 0;
 
     (void)ImageHandle;
     for (id = 0; id < TEST_PROCESSOR_COUNT; id++) {
@@ -1762,6 +1871,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
                     EFI_DEVICE_ERROR, "missing-rendezvous-descriptor");
     if (descriptors) {
         sal_proc = (TEST_SAL_PROC)(UINTN)sal_descriptor;
+        sal_reentry_descriptor[0] = sal_descriptor[0];
+        sal_reentry_descriptor[1] = sal_descriptor[1];
         result = sal_proc(TEST_SAL_SET_VECTORS,
                           TEST_SAL_VECTOR_BOOT_RENDEZ,
                           handler_descriptor[0], handler_descriptor[1],
@@ -1918,6 +2029,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             }
         }
     }
+    if (repeat_rounds) {
+        wait_for_rendezvous_return();
+        sal_reentry = sal_reentry_check();
+    }
+    ia64_test_check(&context, "sal-per-processor-reentry", sal_reentry,
+                    EFI_DEVICE_ERROR, "shared-sal-reentry-slot");
     ia64_test_check(&context, "four-processor-rendezvous", first_round,
                     EFI_TIMEOUT, "secondary-start-timeout");
     ia64_test_check(&context, "repeat-rendezvous", repeat_rounds,

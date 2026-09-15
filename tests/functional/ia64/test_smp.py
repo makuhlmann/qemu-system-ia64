@@ -13,7 +13,8 @@ from ia64.media import make_fat_disk
 
 
 SMP_CASES = {
-    "sal-ap-wake", "four-processor-rendezvous", "repeat-rendezvous",
+    "sal-ap-wake", "sal-per-processor-reentry",
+    "four-processor-rendezvous", "repeat-rendezvous",
     "local-tc-shootdown", "global-tc-source-purge",
     "global-tc-remote-purge", "partial-tc-overlap-purge",
     "global-large-tc-source-purge-no-alat",
