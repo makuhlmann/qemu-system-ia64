@@ -24,8 +24,20 @@
  */
 #define ISP_QUEUE_ENTRIES     8U
 #define ISP_QUEUE_BYTES       (ISP_QUEUE_ENTRIES * ISP12160_QUEUE_ENTRY_BYTES)
-#define ISP_MAILBOX_TIMEOUT   1000000U
-#define ISP_RESPONSE_TIMEOUT  4000000U
+
+/*
+ * Waits are bounded in time, read from the ITC, not in poll iterations.
+ * The adapter finishes a mailbox command and a command IOCB on its own
+ * schedule -- on QEMU, in the main loop once the block layer has the data --
+ * so an iteration count ends after however long the host takes to spin it,
+ * which on a loaded host is shorter than a disk read.  The bounds are the
+ * LSI transport's: 30 s for a command that moves data (lsi_run_scsi_script)
+ * and 10 s for control traffic (the target reset in legacy_io.c).  The ITC
+ * rate is calibrated first thing in firmware_main, before storage bring-up
+ * can reach this driver, so no spin-count fallback is needed.
+ */
+#define ISP_MAILBOX_TIMEOUT_US   10000000ULL
+#define ISP_COMMAND_TIMEOUT_US   30000000ULL
 
 static UINT8 mIspRequestRing[ISP_QUEUE_BYTES] __attribute__((aligned(64)));
 static UINT8 mIspResponseRing[ISP_QUEUE_BYTES] __attribute__((aligned(64)));
@@ -85,6 +97,19 @@ static void isp_mailbox_write(unsigned int Index, UINT16 Value)
     isp_write16(ISP12160_REG_MAILBOX0 + Index * 2U, Value);
 }
 
+static BOOLEAN isp_semaphore_locked(void)
+{
+    return (isp_read16(ISP12160_REG_SEMAPHORE) &
+            ISP12160_SEMAPHORE_LOCK) != 0;
+}
+
+/* Has a wait that began at ITC value Start run for Microseconds? */
+static BOOLEAN isp_wait_expired(UINT64 Start, UINT64 Microseconds)
+{
+    return fw_read_itc() - Start >=
+           Microseconds * FW_ITC_TICKS_PER_MICROSECOND;
+}
+
 /*
  * Run one mailbox command.  The RISC answers by taking the semaphore and
  * leaving its status in mailbox 0; the host releases the semaphore and
@@ -94,6 +119,7 @@ static BOOLEAN isp_mailbox_command(const UINT16 *In, unsigned int InCount,
                                    UINT16 *Out, unsigned int OutCount)
 {
     UINT16 status;
+    UINT64 start;
     unsigned int i;
 
     if (In == NULL || InCount == 0 || InCount > ISP12160_MAILBOX_COUNT) {
@@ -109,16 +135,14 @@ static BOOLEAN isp_mailbox_command(const UINT16 *In, unsigned int InCount,
         isp_mailbox_write(i, In[i]);
     }
     __asm__ __volatile__ ("mf" : : : "memory");
+    start = fw_read_itc();
     isp_write16(ISP12160_REG_HOST_COMMAND, ISP12160_HC_SET_HOST_INT);
 
-    for (i = 0; i < ISP_MAILBOX_TIMEOUT; i++) {
-        if ((isp_read16(ISP12160_REG_SEMAPHORE) &
-             ISP12160_SEMAPHORE_LOCK) != 0) {
-            break;
-        }
+    while (!isp_semaphore_locked() &&
+           !isp_wait_expired(start, ISP_MAILBOX_TIMEOUT_US)) {
     }
-    if ((isp_read16(ISP12160_REG_SEMAPHORE) &
-         ISP12160_SEMAPHORE_LOCK) == 0) {
+    /* Look once more: the answer may have landed as the time ran out. */
+    if (!isp_semaphore_locked()) {
         return 0;
     }
 
@@ -345,6 +369,7 @@ BOOLEAN isp12160_command(UINT8 Target, const UINT8 *Cdb, UINTN CdbLength,
     UINT16 control;
     UINT16 next;
     UINTN address;
+    UINT64 start;
     UINT32 i;
 
     if (!mIspPresent || Cdb == NULL || CdbLength == 0 ||
@@ -391,16 +416,24 @@ BOOLEAN isp12160_command(UINT8 Target, const UINT8 *Cdb, UINTN CdbLength,
 
     next = (UINT16)((mIspRequestProducer + 1U) % ISP_QUEUE_ENTRIES);
     __asm__ __volatile__ ("mf" : : : "memory");
+    start = fw_read_itc();
     isp_mailbox_write(ISP12160_MBOX_REQUEST_INDEX, next);
     mIspRequestProducer = next;
 
-    for (i = 0; i < ISP_RESPONSE_TIMEOUT; i++) {
+    /*
+     * The status entry arrives in host memory, so this loop reads no
+     * adapter register and each pass costs next to nothing: only the ITC
+     * can bound it.
+     */
+    for (;;) {
         __asm__ __volatile__ ("mf" : : : "memory");
         if (response[ISP12160_IOCB_HEADER_TYPE_OFFSET] ==
-            ISP12160_IOCB_STATUS_TYPE) {
+                ISP12160_IOCB_STATUS_TYPE ||
+            isp_wait_expired(start, ISP_COMMAND_TIMEOUT_US)) {
             break;
         }
     }
+    __asm__ __volatile__ ("mf" : : : "memory");
     if (response[ISP12160_IOCB_HEADER_TYPE_OFFSET] !=
         ISP12160_IOCB_STATUS_TYPE) {
         return 0;
