@@ -80,13 +80,19 @@ class Ia64Storage(Ia64FirmwareTest):
         self.run_scenario(f"scsi-{layout}{suffix}", media,
                           required_cases=required)
 
+    # A hand-attached CMD646 goes to slot 0 of the compatibility bus ("pci"),
+    # the seat ide=on also uses.  It must name that bus: the zx1 machine has a
+    # second PCI root behind Mercury, and without bus= the device lands there,
+    # on the slot the graphics adapter holds.
+    CMD646_DEVICE = "cmd646-ide,id=ide,secondary=1,bus=pci,addr=0"
+
     def run_ide(self, mode):
         app = app_path("storage")
         media = Path(self.scratch_file(f"ide-{mode}.img"))
         make_fat_disk(media, app)
         drive_args = (
             "-drive", f"file={media},format=raw,if=none,id=testdisk",
-            "-device", "cmd646-ide,id=ide,secondary=1,addr=0",
+            "-device", self.CMD646_DEVICE,
             "-device", "ide-hd,drive=testdisk,bus=ide.0,unit=0",
         )
         self.run_scenario(
@@ -165,8 +171,10 @@ class Ia64Storage(Ia64FirmwareTest):
             "-drive", f"file={media},format=raw,if=scsi,index=0",
         ]
         if transport == "scsi":
+            # An empty if=scsi CD at ID 1 joins the disk on whichever adapter
+            # holds the SCSI seat; the qdev bus name changes with the adapter.
             drive_args.extend((
-                "-device", "scsi-cd,bus=scsi.0,scsi-id=1",
+                "-drive", "if=scsi,index=1,media=cdrom",
             ))
         elif transport == "ahci":
             drive_args.extend((
@@ -174,7 +182,7 @@ class Ia64Storage(Ia64FirmwareTest):
             ))
         elif transport == "ide":
             drive_args.extend((
-                "-device", "cmd646-ide,id=ide,secondary=1,addr=0",
+                "-device", self.CMD646_DEVICE,
                 "-device", "ide-cd,bus=ide.0,unit=0",
             ))
         else:
