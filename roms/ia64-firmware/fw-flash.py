@@ -71,7 +71,7 @@ def main():
     link_base = symbol(elf, '__fw_image_start')
     entry = symbol(elf, 'fw_flash_entry') - link_base
     body_size_slot = symbol(elf, 'fw_flash_body_size') - link_base
-    pal_stub = symbol(elf, 'pal_proc_entry') - link_base
+    pal_stub = symbol(elf, 'fw_fit_pal') - link_base
     nvram_off = size - NVRAM_OFFSET_FROM_END
     fit_off = size - FIT_OFFSET_FROM_END
     if len(body) > nvram_off:

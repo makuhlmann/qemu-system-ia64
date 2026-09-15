@@ -479,9 +479,8 @@ static void pal_copy_info(CPUIA64State *env)
 static void pal_copy_pal(CPUIA64State *env)
 {
     /*
-     * The relocated PAL procedure entry: break.m 0x100000 ;; br.many b0.
-     * This must match roms/ia64-firmware/entry.S pal_proc_entry byte for
-     * byte.  The return branch is br.many (a plain branch, no register-stack
+     * The relocated PAL procedure entry: break.m 0x100000 ;; br.many b0,
+     * the same stub as the machine's PAL emulation ROM.  The return branch is br.many (a plain branch, no register-stack
      * pop), NOT br.ret: the PAL static-procedure convention runs in the
      * caller's frame without an alloc, so the caller reaches PAL_PROC by a
      * plain branch with the return address in b0.  A br.ret here would pop a

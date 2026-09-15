@@ -175,11 +175,9 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
 
 bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address)
 {
-    const IA64FirmwareRegistration *fw = &env->firmware;
-
-    if (ia64_firmware_registered(fw) &&
+    if (env->pal.pal_proc_reset_addr != 0 &&
         ia64_instruction_address_matches_physical_entry(
-            env, address, fw->image_base + IA64_FW_PAL_PROC_ENTRY_OFF)) {
+            env, address, env->pal.pal_proc_reset_addr)) {
         return true;
     }
 

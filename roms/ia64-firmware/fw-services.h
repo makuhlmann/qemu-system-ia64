@@ -59,6 +59,10 @@ void fw_pal_freq_ratios(UINT64 *Processor, UINT64 *Bus, UINT64 *Itc);
 UINT64 fw_pal_logical_to_physical(UINT64 *Info);
 /* Register this image with the PAL emulation (IA64_PAL_FIRMWARE_REGISTER). */
 BOOLEAN fw_platform_register_firmware(UINT64 CpuAssistBase);
+/* SAL 3.2.3 step 9: PAL_COPY_PAL into the image's first page. */
+BOOLEAN fw_platform_install_pal(UINT64 Processor, UINT64 ResetPalProc);
+extern UINT64 mFwPalProc;
+extern UINT64 mFwResetPalProc;
 BOOLEAN fw_platform_register_processor(UINT64 ResetPalProc);
 /* What the flash stage probed, before anything derives from it. */
 void fw_platform_set_probed(UINT64 RamSize, UINT64 Chipset);

@@ -59,15 +59,16 @@ def run_checks(binary: str, elf: str):
     yield "firmware has no unresolved symbols"
 
     sym = symbols(elf)
-    required = ("_start", "_end", "__gp", "pal_proc_entry",
+    required = ("__fw_image_start", "_start", "_end", "__gp", "fw_pal_buffer",
                 "__runtime_code_start", "__runtime_data_start")
     missing = [name for name in required if name not in sym]
     if missing:
         raise RuntimeError("missing ABI linker symbols: " + ", ".join(missing))
-    if sym["_start"] != FW_LOAD_BASE or not (
+    if sym["__fw_image_start"] != FW_LOAD_BASE or not (
             FW_LOAD_BASE < sym["_end"] <= FW_RECLAIM_BASE):
         raise RuntimeError(
-            f"firmware address range {sym['_start']:#x}-{sym['_end']:#x} "
+            f"firmware address range {sym['__fw_image_start']:#x}-"
+            f"{sym['_end']:#x} "
             "exceeds the reserved low-memory image window")
     if os.path.getsize(binary) > FW_RECLAIM_BASE - FW_LOAD_BASE:
         raise RuntimeError("flat firmware binary exceeds its reserved window")
@@ -86,12 +87,14 @@ def run_checks(binary: str, elf: str):
         raise RuntimeError("entry does not establish the linked IA-64 GP")
     yield "entry address and GP handoff are valid"
 
-    if sym["pal_proc_entry"] & 0xf or \
-            not (FW_LOAD_BASE <= sym["pal_proc_entry"] < sym["_end"]):
-        raise RuntimeError("PAL entry is misaligned or outside firmware")
+    # PAL_COPY_PAL copies PAL into the image's first, page-aligned page.
+    if sym["fw_pal_buffer"] != sym["__fw_image_start"] or \
+            sym["fw_pal_buffer"] & 0xfff or \
+            sym["_start"] < sym["fw_pal_buffer"] + 0x1000:
+        raise RuntimeError("PAL buffer is not the image's first page")
     if sym["__runtime_code_start"] % RUNTIME_ALIGNMENT or \
             sym["__runtime_data_start"] % RUNTIME_ALIGNMENT or \
-            not (sym["pal_proc_entry"] < sym["__runtime_code_start"] <=
+            not (sym["fw_pal_buffer"] < sym["__runtime_code_start"] <=
                  sym["__runtime_data_start"] < sym["_end"]):
         raise RuntimeError("runtime section boundary/alignment is invalid")
     yield "PAL and runtime boundaries are valid"

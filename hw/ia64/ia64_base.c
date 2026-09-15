@@ -105,7 +105,7 @@
 #define IA64_REALFW_MAX_SIZE      IA64_U64(0x0000000000800000)
 /*
  * The PAL emulation ROM: the PAL procedure entry handed to SAL in GR34/GR36
- * (and recognized via env->pal.pal_proc_copy_addr) is its first 32 bytes.
+ * (and recognized via env->pal.pal_proc_reset_addr) is its first 32 bytes.
  */
 #define IA64_PAL_ROM_BASE         IA64_U64(0x00000000ff100000)
 #define IA64_PAL_ROM_SIZE         0x1000
@@ -3385,6 +3385,11 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
             cpu_index * IA64_FW_CPU_STACK_SIZE,
         .rsc = IA64_RSC_MODE,
         /*
+         * The PAL_PROC entry of this entry state: the microprogram battery
+         * places its PAL stub at firmware_base + 0x60 (PAL_PROC_ENTRY).
+         */
+        .raw_pal_proc = firmware_base + 0x60,
+        /*
          * What the project firmware registers with the PAL emulation once it
          * runs (IA64_PAL_FIRMWARE_REGISTER), for an image at firmware_base:
          * the tests entered here run without one.
@@ -3513,13 +3518,13 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
 
 
 /*
- * The same two-bundle PAL procedure entry stub the project firmware carries
- * at IA64_FW_PAL_PROC_ENTRY_OFF (roms/ia64-firmware/entry.S pal_proc_entry):
+ * The PAL procedure entry stub, PAL_COPY_PAL's copy of it included
+ * (target/ia64/arch/pal.c pal_copy_pal):
  *   break.m 0x100000 ;;  br.many b0 ;;
  * The translator services the break through ia64_pal_dispatch() when the
- * bundle sits at a recognized PAL entry address (env->pal.pal_proc_copy_addr,
- * seeded from IA64BootInfo.raw_pal_proc at SALE_ENTRY).  It is the PAL
- * emulation ROM's content.
+ * bundle sits at a recognized PAL entry address (env->pal.pal_proc_reset_addr,
+ * seeded from IA64BootInfo.raw_pal_proc on every reset, or the copy).  It is
+ * the PAL emulation ROM's content.
  */
 
 static const uint8_t ia64_pal_stub[32] = {

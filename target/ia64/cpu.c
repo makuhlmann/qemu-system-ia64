@@ -795,15 +795,6 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
             info->raw_pal_proc;
         env->rse.rse_pgr[IA64_SALE_GR_PAL_RETURN - IA64_SALE_GR_FROM_PAL] =
             info->raw_pal_auth;
-        /*
-         * Recognize the machine-planted PAL stub as a PAL procedure entry so
-         * its break instruction dispatches into the PAL emulation
-         * (ia64_is_pal_proc_break checks pal_proc_copy_addr).
-         */
-        if (info->raw_pal_proc != 0) {
-            env->pal.pal_proc_copy_valid = true;
-            env->pal.pal_proc_copy_addr = info->raw_pal_proc;
-        }
         env->interrupt.pal_halt_wake = info->powered_off;
         env->ar_fpsr = IA64_FPSR_DEFAULT;
         set_float_rounding_mode(float_round_nearest_even, &env->fp.fp_status);
@@ -919,6 +910,11 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
      */
     if (cpu->boot_info_valid) {
         cpu->env.firmware = cpu->boot_info.firmware;
+        /*
+         * The PAL_PROC address PAL hands over at reset (GR34 on a firmware
+         * entry): its break instruction dispatches into the PAL emulation.
+         */
+        cpu->env.pal.pal_proc_reset_addr = cpu->boot_info.raw_pal_proc;
     }
     ia64_cpu_apply_boot_info(cpu);
     /*

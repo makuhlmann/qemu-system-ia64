@@ -428,7 +428,7 @@ static void efi_add_firmware_image(UINTN *Index)
      */
     UINTN pal_align = fw_map_quirk_enabled(IA64_FW_QUIRK_PAL_8K_PAGE) ?
                       0x1FFFULL : 0xFFFULL;
-    UINTN pal_start = (UINTN)pal_proc_entry & ~pal_align;
+    UINTN pal_start = (UINTN)fw_pal_buffer & ~pal_align;
     UINTN pal_end = pal_start + pal_align + 1U;
 
     if (pal_start >= image_start && pal_end <= firmware_end) {

@@ -171,6 +171,10 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
         return -EINVAL;
     }
 
+    /* Not migrated: the reset PAL entry comes from the boot info. */
+    env->pal.pal_proc_reset_addr =
+        cpu->boot_info_valid ? cpu->boot_info.raw_pal_proc : 0;
+
     if (version_id < 2) {
         /* Pre-v2 snapshot: the image always ran at the 1 MB link home. */
         env->firmware.image_base = IA64_FW_LINK_BASE;

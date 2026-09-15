@@ -469,7 +469,8 @@ static void efi_init_sal_system_table(void)
     for (i = 0; i < sizeof(mSalSystemTable.Entrypoint.Reserved0); i++) {
         mSalSystemTable.Entrypoint.Reserved0[i] = 0;
     }
-    mSalSystemTable.Entrypoint.PalProc = (UINTN)pal_proc_entry;
+    /* PAL_PROC is PAL's copy of itself in the image's first page. */
+    mSalSystemTable.Entrypoint.PalProc = mFwPalProc;
     /*
      * SAL_PROC points at the mode-agnostic runtime stub (entry.S): the
      * machine re-enters the C dispatcher physically so the OS may call
@@ -493,7 +494,7 @@ static void efi_init_sal_system_table(void)
     }
     {
         IA64_SAL_MEMORY_DESCRIPTOR *md = mSalSystemTable.MemoryDescriptors;
-        UINTN image_base = (UINTN)pal_proc_entry & ~0xFFFULL;
+        UINTN image_base = (UINTN)fw_pal_buffer & ~0xFFFULL;
         UINTN data_start = (UINTN)&__runtime_data_start;
         UINTN image_end = ((UINTN)&_end + 0xFFFULL) & ~0xFFFULL;
         UINTN n;

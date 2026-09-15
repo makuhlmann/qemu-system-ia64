@@ -125,6 +125,7 @@ static UINT64                 mChipsetProbed = IA64_FW_CHIPSET_DERIVE;
 static volatile UINT64        mApCheckins;
 
 extern char __fw_image_start[];
+extern char _start[];
 
 /*
  * The PS/2 controller: an i8042 answers the controller self-test (command
@@ -516,14 +517,61 @@ static UINT64 mFwRegistration[IA64_FW_REGISTRATION_SIZE / 8]
     __attribute__((aligned(16)));
 
 UINT64 fw_pal_call_at(UINT64 Entry, UINT64 Index, UINT64 Arg1, UINT64 Arg2,
-                      UINT64 Arg3);
+                      UINT64 Arg3, UINT64 *Results);
+UINT64 fw_pal_stacked_call_at(UINT64 Entry, UINT64 Index, UINT64 Arg1,
+                              UINT64 Arg2, UINT64 Arg3, UINT64 *Results);
+
+#define FW_PAL_COPY_INFO 0x01e
+#define FW_PAL_COPY_PAL  0x100
+
+/*
+ * PAL_PROC in RAM: PAL's copy of itself in the image's first page, what
+ * every PAL call of this firmware and the SAL system table use.
+ */
+UINT64 mFwPalProc;
+
+/*
+ * SAL 3.2.3 step 9: copy PAL into RAM.  The boot processor asks PAL for the
+ * buffer it needs (PAL_COPY_INFO) and has it copied (PAL_COPY_PAL, processor
+ * 0); every other processor makes the same call with processor 1, which
+ * installs the copy's entry in that processor without copying again.  If
+ * PAL refuses, the firmware keeps calling the PAL_PROC it got at reset.
+ */
+BOOLEAN fw_platform_install_pal(UINT64 Processor, UINT64 ResetPalProc)
+{
+    UINT64 results[3];
+    UINT64 buffer = (UINTN)fw_pal_buffer;
+
+    if (ResetPalProc == 0) {
+        return 0;
+    }
+    if (Processor == 0) {
+        mFwPalProc = ResetPalProc;
+        if (fw_pal_call_at(ResetPalProc, FW_PAL_COPY_INFO, 0, 0, 0,
+                           results) != 0 ||
+            results[0] > IA64_FW_PAL_BUFFER_SIZE || results[1] == 0 ||
+            (buffer & (results[1] - 1)) != 0) {
+            return 0;
+        }
+    }
+    if (fw_pal_stacked_call_at(ResetPalProc, FW_PAL_COPY_PAL, buffer,
+                               IA64_FW_PAL_BUFFER_SIZE, Processor,
+                               results) != 0 ||
+        results[0] >= IA64_FW_PAL_BUFFER_SIZE) {
+        return 0;
+    }
+    if (Processor == 0) {
+        mFwPalProc = buffer + results[0];
+    }
+    return 1;
+}
 
 BOOLEAN fw_platform_register_processor(UINT64 ResetPalProc)
 {
     return ResetPalProc != 0 &&
            fw_pal_call_at(ResetPalProc, IA64_PAL_FIRMWARE_REGISTER,
                           (UINTN)mFwRegistration, sizeof(mFwRegistration),
-                          0) == 0;
+                          0, NULL) == 0;
 }
 
 BOOLEAN fw_platform_register_firmware(UINT64 CpuAssistBase)
@@ -559,7 +607,8 @@ static void fw_platform_rendezvous_processors(void)
 
     mailbox[1] = mGuestRamSize;
     __asm__ volatile ("mf;;" : : : "memory");
-    mailbox[0] = (UINT64)(UINTN)__fw_image_start;
+    /* The shadow's reset entry; its first page is PAL's buffer. */
+    mailbox[0] = (UINT64)(UINTN)_start;
     __asm__ volatile ("mf;;" : : : "memory");
 
     deadline = fw_read_itc() + 200000ULL * fw_itc_ticks_per_100ns;
@@ -2158,6 +2207,7 @@ void firmware_ap_main(UINT64 ProcessorId, UINT64 ResetPalProc)
 {
     (void)ProcessorId;
 
+    fw_platform_install_pal(1, ResetPalProc);
     fw_platform_register_processor(ResetPalProc);
     __sync_fetch_and_add(&mApCheckins, 1);
     fw_ap_rendezvous();

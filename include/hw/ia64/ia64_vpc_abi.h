@@ -153,6 +153,12 @@
 #define IA64_FW_SAL_RUNTIME_ENTRY_OFF  0x2000
 #define IA64_FW_SAL_RUNTIME_RETURN_OFF 0x2020
 #define IA64_FW_SAL_DISPATCH_BLOCK_OFF 0x2040
+/*
+ * The first page of the image is the buffer PAL copies itself into
+ * (PAL_COPY_PAL, SAL 3.2.3 step 9); the firmware publishes the copy as the
+ * SAL system table's PAL_PROC.
+ */
+#define IA64_FW_PAL_BUFFER_SIZE        0x1000
 /* The low part of the image a firmware context reaches identity-mapped. */
 #define IA64_FW_IDENTITY_WINDOW_SIZE   IA64_U64(0x0000000000100000)
 

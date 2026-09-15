@@ -8,6 +8,16 @@
 
 #include "hw/ia64/ia64_vpc_abi.h"
 
+    /*
+     * The buffer PAL copies itself into (PAL_COPY_PAL, SAL 3.2.3 step 9):
+     * the image's first page, which the memory map's EfiPalCode descriptor
+     * covers.  The SAL system table's PAL_PROC is the copy.
+     */
+    .section .text.pal_buffer, "ax"
+    .global fw_pal_buffer
+fw_pal_buffer:
+    .skip IA64_FW_PAL_BUFFER_SIZE
+
     .section .text._start, "ax"
     /*
      * The boot memory stacks live at the top of installed low RAM.  The ABI
@@ -48,18 +58,23 @@ _start:
     .endp _start
     .size _start, . - _start
 
-    .section .text.pal_proc_entry, "ax"
-    .global pal_proc_entry
-    .type pal_proc_entry, @function
-    .proc pal_proc_entry
+    /*
+     * The PAL component the flash image's FIT names (its PAL_A and PAL_B
+     * entries): the PAL emulation's entry stub.  Nothing here calls it; PAL
+     * is the emulator's, reached through GR34 and PAL_COPY_PAL.
+     */
+    .section .text.fit_pal, "ax"
+    .global fw_fit_pal
+    .type fw_fit_pal, @function
+    .proc fw_fit_pal
     .explicit
-pal_proc_entry:
+fw_fit_pal:
     break.m 0x100000
     ;;
     br.many b0
     ;;
-    .endp pal_proc_entry
-    .size pal_proc_entry, . - pal_proc_entry
+    .endp fw_fit_pal
+    .size fw_fit_pal, . - fw_fit_pal
 
     /*
      * SALE_ENTRY (the flash image's reset pointer block names this): the
@@ -246,7 +261,7 @@ fw_flash_entry:
 
     /*
      * Application processors: wait for the boot processor to publish the
-     * shadow (mailbox +0) and the DRAM size (mailbox +8), move the RSE
+     * shadow's _start (mailbox +0) and the DRAM size (mailbox +8), move the RSE
      * backing store to this processor's real early slot, and run the
      * shadow's reset entry, which sends them down start_secondary.
      */
@@ -596,7 +611,9 @@ fw_pal_halt_light:
     mov r32 = b0
     movl r28 = 0x1d
     ;;
-    movl r14 = pal_proc_entry
+    movl r14 = mFwPalProc
+    ;;
+    ld8 r14 = [r14]
     ;;
     mov b6 = r14
     movl r14 = 1f
@@ -630,7 +647,9 @@ fw_pal_freq_ratios:
     mov r30 = r0
     mov r31 = r0
     ;;
-    movl r14 = pal_proc_entry
+    movl r14 = mFwPalProc
+    ;;
+    ld8 r14 = [r14]
     ;;
     mov b6 = r14
     movl r14 = 1f
@@ -653,8 +672,12 @@ fw_pal_freq_ratios:
     .size fw_pal_freq_ratios, . - fw_pal_freq_ratios
 
     /*
-     * A static PAL procedure call through a given PAL_PROC address:
-     * fw_pal_call_at(entry, index, arg1, arg2, arg3) returns r8, the status.
+     * PAL procedure calls through a given PAL_PROC address:
+     * fw_pal_call_at(entry, index, arg1, arg2, arg3, results) for a static
+     * procedure (a plain branch, SDM vol. 2 11.10.2), and
+     * fw_pal_stacked_call_at with the same arguments for a stacked one (a
+     * br.call with the index and arguments as outputs).  Both return r8,
+     * the status, and store r9-r11 through results unless it is NULL.
      */
     .section .text.fw_pal_call_at, "ax"
     .global fw_pal_call_at
@@ -662,9 +685,9 @@ fw_pal_freq_ratios:
     .proc fw_pal_call_at
     .explicit
 fw_pal_call_at:
-    alloc r37 = ar.pfs, 5, 2, 0, 0
+    alloc r38 = ar.pfs, 6, 2, 0, 0
     ;;
-    mov r38 = b0
+    mov r39 = b0
     mov r28 = r33
     mov r29 = r34
     mov r30 = r35
@@ -678,13 +701,66 @@ fw_pal_call_at:
     br.sptk.many b6
     ;;
 1:
-    mov b0 = r38
-    mov ar.pfs = r37
+    cmp.eq p6, p7 = r37, r0
+    ;;
+(p6) br.cond.dpnt.few 2f
+    ;;
+    st8 [r37] = r9
+    adds r15 = 8, r37
+    ;;
+    st8 [r15] = r10
+    adds r15 = 16, r37
+    ;;
+    st8 [r15] = r11
+    ;;
+2:
+    mov b0 = r39
+    mov ar.pfs = r38
     ;;
     br.ret.sptk.many b0
     ;;
     .endp fw_pal_call_at
     .size fw_pal_call_at, . - fw_pal_call_at
+
+    .section .text.fw_pal_stacked_call_at, "ax"
+    .global fw_pal_stacked_call_at
+    .type fw_pal_stacked_call_at, @function
+    .proc fw_pal_stacked_call_at
+    .explicit
+fw_pal_stacked_call_at:
+    alloc r38 = ar.pfs, 6, 2, 4, 0
+    ;;
+    mov r39 = b0
+    mov r28 = r33
+    mov r40 = r33
+    mov r41 = r34
+    mov r42 = r35
+    mov r43 = r36
+    ;;
+    mov b6 = r32
+    ;;
+    br.call.sptk.many b0 = b6
+    ;;
+    cmp.eq p6, p7 = r37, r0
+    ;;
+(p6) br.cond.dpnt.few 2f
+    ;;
+    st8 [r37] = r9
+    adds r15 = 8, r37
+    ;;
+    st8 [r15] = r10
+    adds r15 = 16, r37
+    ;;
+    st8 [r15] = r11
+    ;;
+2:
+    mov b0 = r39
+    mov ar.pfs = r38
+    ;;
+    br.ret.sptk.many b0
+    ;;
+    .endp fw_pal_stacked_call_at
+    .size fw_pal_stacked_call_at, . - fw_pal_stacked_call_at
 
     /*
      * PAL_LOGICAL_TO_PHYSICAL (index 2Ah) for the calling processor
@@ -704,7 +780,9 @@ fw_pal_logical_to_physical:
     mov r30 = r0
     mov r31 = r0
     ;;
-    movl r14 = pal_proc_entry
+    movl r14 = mFwPalProc
+    ;;
+    ld8 r14 = [r14]
     ;;
     mov b6 = r14
     movl r14 = 1f

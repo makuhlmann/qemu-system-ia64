@@ -153,11 +153,6 @@
 #define IA64_IP_BUNDLE_MASK (~(IA64_BUNDLE_SIZE - 1))
 #define IA64_REGION7_PHYS_MASK ((1ULL << IA64_REGION_SHIFT) - 1)
 #define IA64_PHYS_UC_BIT (1ULL << 63)
-/*
- * PAL procedure entry stub offset in the project firmware image.  Recognised
- * only in a registered image (see IA64FirmwareRegistration).
- */
-#define IA64_FW_PAL_PROC_ENTRY_OFF     0x60
 #define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
 /*
  * IA-64 OS loaders alias physical memory through region 7 with a fixed

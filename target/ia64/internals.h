@@ -83,6 +83,13 @@ typedef struct IA64PalState {
     bool pal_mc_expected;
     uint64_t pal_mc_save_addr;
     uint64_t pal_pmi_entry;
+    /*
+     * PAL_PROC entries this processor recognises: the one PAL handed over at
+     * reset (from the boot info on every reset), and the copy PAL_COPY_PAL
+     * made in RAM.  The reset entry stays callable after a copy, as a ROM
+     * PAL does.
+     */
+    uint64_t pal_proc_reset_addr;
     bool pal_proc_copy_valid;
     uint64_t pal_proc_copy_addr;
     uint64_t pal_interrupt_block_addr;

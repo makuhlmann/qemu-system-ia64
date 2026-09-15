@@ -18,8 +18,9 @@ SECTIONS
     __fw_image_start = .;
 
     .text.boot : {
+        *(.text.pal_buffer)
         *(.text._start)
-        *(.text.pal_proc_entry)
+        *(.text.fit_pal)
         *(.text.flash_entry)
         *(.text.start_after_pal)
         *(.text.start_secondary)
