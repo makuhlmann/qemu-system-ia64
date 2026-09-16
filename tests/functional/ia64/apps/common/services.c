@@ -1741,45 +1741,40 @@ static BOOLEAN test_pci_root_resources(EFI_SYSTEM_TABLE *SystemTable)
 static BOOLEAN test_pci_io_protocol(EFI_SYSTEM_TABLE *SystemTable)
 {
     EFI_PCI_IO_PROTOCOL *pci = NULL;
+    EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *root = NULL;
     UINTN segment = ~(UINTN)0;
     UINTN bus = ~(UINTN)0;
     UINTN device = ~(UINTN)0;
     UINTN function = ~(UINTN)0;
     UINT32 identifier = 0;
-    UINT32 expected;
+    UINT32 at_location = 0;
 
+    /*
+     * The first PCI I/O controller must report where it is: its own
+     * configuration space and the root bridge's configuration space at the
+     * GetLocation() address must name the same controller.  Which controller
+     * comes first, and on which bus, depends on the board and the machine
+     * options (zx1 carries the graphics behind the Mercury root, bus 0x10).
+     */
     if (SystemTable->BootServices->LocateProtocol(
             pci_io_guid, NULL, (VOID **)&pci) != EFI_SUCCESS ||
         pci == NULL || pci->GetLocation == NULL || pci->Pci.Read == NULL ||
         pci->GetLocation(pci, &segment, &bus, &device, &function) !=
-            EFI_SUCCESS || segment != 0 || bus != 0 || function != 0) {
-        return 0;
-    }
-    switch (device) {
-    case 0:
-        expected = 0x06461095U;
-        break;
-    case 1:
-        expected = 0x29228086U;
-        break;
-    case 2:
-        expected = 0x003f106bU;
-        break;
-    case 3:
-        expected = 0x70208086U;
-        break;
-    case 4:
-        expected = 0x12161077U;
-        break;
-    case 5:
-        expected = 0x50461002U;
-        break;
-    default:
+            EFI_SUCCESS || segment != 0 || bus > 0xffU || device > 0x1fU ||
+        function > 7U ||
+        SystemTable->BootServices->LocateProtocol(
+            pci_root_guid, NULL, (VOID **)&root) != EFI_SUCCESS ||
+        root == NULL || root->Pci.Read == NULL) {
         return 0;
     }
     return pci->Pci.Read(pci, EfiPciWidthUint32, 0, 1, &identifier) ==
                EFI_SUCCESS &&
-           identifier == expected;
+           root->Pci.Read(root, EfiPciWidthUint32,
+                          ((UINT64)bus << 24) | ((UINT64)device << 16) |
+                          ((UINT64)function << 8), 1, &at_location) ==
+               EFI_SUCCESS &&
+           identifier == at_location &&
+           identifier != 0 && identifier != 0xffffffffU;
 }
 
 static BOOLEAN test_gop_protocol(EFI_SYSTEM_TABLE *SystemTable)

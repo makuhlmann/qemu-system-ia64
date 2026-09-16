@@ -45,6 +45,7 @@ EFI_STATUS fw_pci_root_free_buffer(UINTN pages, VOID *host_address);
 EFI_STATUS fw_pci_root_flush(VOID);
 EFI_STATUS fw_pci_copy_device_path(UINT8 bus, UINT8 device, UINT8 function,
                                    FW_DEVICE_PATH_NODE **path);
+BOOLEAN fw_pci_io_first_present_address(UINT64 *PciAddress);
 EFI_HANDLE fw_pci_root_handle(VOID);
 
 BOOLEAN fw_scsi_controller_present(VOID);

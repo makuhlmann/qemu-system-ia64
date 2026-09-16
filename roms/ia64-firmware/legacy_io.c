@@ -967,20 +967,19 @@ BOOLEAN fw_legacy_io_protocols_selftest(VOID)
     EFI_PHYSICAL_ADDRESS host_address = (EFI_PHYSICAL_ADDRESS)(UINTN)&id;
     VOID *mapping = NULL;
     UINTN bytes = sizeof(id);
+    UINT64 pci_address;
 
     /*
-     * Build a device path for an always-present controller.  The IDE (dev 0)
-     * and AHCI (dev 1) storage controllers are opt-in and absent from the
-     * default machine, where fw_pci_copy_device_path() would return
-     * EFI_UNSUPPORTED and fail the self-test.  The LSI SCSI controller at
-     * bus 0 / device 4 / function 0 is instantiated unconditionally, so
-     * exercise PciDevicePath against it to keep the DeviceIo path meaningful
-     * on every configuration.
+     * Build a device path for a controller this machine has.  Which PCI I/O
+     * controllers exist, and on which bus and slot, depends on the board and
+     * the machine options (the LSI is opt-in, the IDE and AHCI can be left
+     * out), so take the first one present.  Every machine has one.
      */
-    if (mDeviceIoProtocol.Pci.Read(&mDeviceIoProtocol, EfiIoWidthUint32,
+    if (!fw_pci_io_first_present_address(&pci_address) ||
+        mDeviceIoProtocol.Pci.Read(&mDeviceIoProtocol, EfiIoWidthUint32,
                                    0, 1, &id) != EFI_SUCCESS || id == 0 ||
         mDeviceIoProtocol.PciDevicePath(&mDeviceIoProtocol,
-                                        4ULL << 16, &path) != EFI_SUCCESS ||
+                                        pci_address, &path) != EFI_SUCCESS ||
         path == NULL || bs_free_pool(path) != EFI_SUCCESS ||
         mDeviceIoProtocol.Map(&mDeviceIoProtocol, EfiBusMasterRead,
                               &host_address, &bytes,

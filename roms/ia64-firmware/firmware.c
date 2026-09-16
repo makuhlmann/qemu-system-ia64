@@ -7119,13 +7119,21 @@ static BOOLEAN __attribute__((noinline)) uefi_event_services_selftest(void)
                 ok = 0;
             }
 
+            /*
+             * One 100 ns of ITC ticks across the counter wrap.  The tick
+             * rate comes from PAL (fw_init_itc_rate), so the step is
+             * computed, not a constant.
+             */
             timer_rec->timer_active = 1;
             timer_rec->timer_type = TIMER_RELATIVE;
-            timer_rec->timer_last_tick = ~(UINT64)0 - 9U;
+            timer_rec->timer_last_tick =
+                0ULL - (FW_ITC_TICKS_PER_100NS / 2U + 1U);
             timer_rec->timer_remaining_100ns = 1;
             timer_rec->timer_partial_ticks = 0;
             timer_rec->timer_period_100ns = 0;
-            if (!fw_event_timer_consume(timer_rec, 10) ||
+            if (!fw_event_timer_consume(
+                    timer_rec, FW_ITC_TICKS_PER_100NS -
+                               (FW_ITC_TICKS_PER_100NS / 2U + 1U)) ||
                 timer_rec->timer_active ||
                 timer_rec->timer_remaining_100ns != 0) {
                 ok = 0;
@@ -9586,10 +9594,15 @@ static UINT64 fw_pci_io_expected_bar_length(const FW_PCI_IO_DEVICE *Dev)
  * config space reads back all-ones.  Every other device in mPciIoDevices is
  * always present and must self-test.
  */
+/*
+ * Controllers a machine may leave out: IDE and AHCI (ide=, ahci=) and the
+ * LSI (lsi=on).  The LSI's seat holds the QLogic ISP12160 by default.
+ */
 static BOOLEAN fw_pci_io_device_optional(const FW_PCI_IO_DEVICE *Dev)
 {
     return Dev->Protocol == &mPciIdeIoProto ||
-           Dev->Protocol == &mPciAhciIoProto;
+           Dev->Protocol == &mPciAhciIoProto ||
+           Dev->Protocol == &mPciLsiIoProto;
 }
 
 static BOOLEAN fw_pci_io_device_present(const FW_PCI_IO_DEVICE *Dev)
@@ -10344,11 +10357,14 @@ static EFI_PCI_IO_PROTOCOL mPciVgaIoProto = FW_PCI_IO_PROTOCOL_INIT;
 static BOOLEAN __attribute__((noinline)) pci_poll_timer_selftest(void)
 {
     FW_PCI_POLL_TIMER timer;
+    /* Ticks before the wrap: 100 ns of ticks cross it (rate from PAL). */
+    UINT64 before_wrap = FW_ITC_TICKS_PER_100NS / 2U + 1U;
 
-    timer.last_tick = ~0ULL - 9U;
+    timer.last_tick = 0ULL - before_wrap;
     timer.remaining_100ns = 1;
     timer.partial_ticks = 0;
-    if (!pci_poll_timer_consume(&timer, 10) ||
+    if (!pci_poll_timer_consume(&timer,
+                                FW_ITC_TICKS_PER_100NS - before_wrap) ||
         timer.remaining_100ns != 0) {
         return 0;
     }
@@ -10766,7 +10782,8 @@ static BOOLEAN __attribute__((noinline)) pci_io_protocol_selftest(void)
                             &id) != EFI_SUCCESS) {
             return 0;
         }
-        if (id == 0xffffffffU && fw_pci_io_device_optional(dev)) {
+        /* An optional seat can be empty or hold another controller. */
+        if (fw_pci_io_device_optional(dev) && id != expected_id) {
             continue;
         }
         if (id != expected_id) {
@@ -13916,6 +13933,27 @@ EFI_STATUS fw_pci_root_flush(VOID)
     return pci_root_flush(&mPciRootBridgeIoProto);
 }
 
+/*
+ * The EFI_DEVICE_IO address (bus << 24 | device << 16 | function << 8) of
+ * the first PCI I/O controller that is present; FALSE if there is none.
+ */
+BOOLEAN fw_pci_io_first_present_address(UINT64 *PciAddress)
+{
+    UINTN i;
+
+    for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
+        const FW_PCI_IO_DEVICE *dev = &mPciIoDevices[i];
+
+        if (fw_pci_io_device_present(dev) && dev->DevicePath != NULL) {
+            *PciAddress = ((UINT64)dev->Bus << 24) |
+                          ((UINT64)dev->Device << 16) |
+                          ((UINT64)dev->Function << 8);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 EFI_STATUS fw_pci_copy_device_path(UINT8 bus, UINT8 device, UINT8 function,
                                    FW_DEVICE_PATH_NODE **path)
 {
@@ -14129,14 +14167,25 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 static void fw_retarget_vga_device_paths(void)
 {
     UINT32 uid;
+    UINT8 bus;
     UINT8 device;
+    UINTN i;
 
     if (fw_platform_is_zx1()) {
         uid = 1;
+        bus = IA64_MERCURY_BUS;
         device = IA64_MERCURY_VGA_SLOT;
     } else {
         uid = IA64_460GX_GXB_BUS;
+        bus = IA64_460GX_GXB_BUS;
         device = IA64_460GX_GXB_VGA_SLOT;
+    }
+    /* The graphics PCI I/O protocol reaches the adapter at the same place. */
+    for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
+        if (mPciIoDevices[i].Protocol == &mPciVgaIoProto) {
+            mPciIoDevices[i].Bus = bus;
+            mPciIoDevices[i].Device = device;
+        }
     }
     mGraphicsDevicePath.Acpi.Uid = uid;
     mGraphicsDevicePath.Pci.Device = device;
@@ -14175,10 +14224,35 @@ static void fw_retarget_south_bridge_device_paths(void)
     mPciIdeDevicePath.Pci.Function = IA64_460GX_IFB_IDE_FUNCTION;
 }
 
+/*
+ * The LSI (lsi=on) takes the board's SCSI seat: device 4 of the single root
+ * on zx1, the SCSI slot of the first WXB expander root (ACPI _UID
+ * IA64_460GX_WXB0_BUS) on the i2000.  fw_storage_pci_device() in
+ * filesystem.c names the same seat for the boot paths.  Retarget the LSI's
+ * PCI I/O table entry and its device path together.  Same timing rule as
+ * fw_retarget_vga_device_paths().
+ */
+static void fw_retarget_scsi_device_paths(void)
+{
+    UINT8 bus = fw_platform_is_zx1() ? 0 : IA64_460GX_WXB0_BUS;
+    UINT8 device = fw_platform_is_zx1() ? 4 : IA64_460GX_WXB0_SCSI_SLOT;
+    UINTN i;
+
+    for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
+        if (mPciIoDevices[i].Protocol == &mPciLsiIoProto) {
+            mPciIoDevices[i].Bus = bus;
+            mPciIoDevices[i].Device = device;
+        }
+    }
+    mPciLsiDevicePath.Acpi.Uid = bus;
+    mPciLsiDevicePath.Pci.Device = device;
+}
+
 static void fw_phase_efi_core_init(void)
 {
     fw_retarget_vga_device_paths();
     fw_retarget_south_bridge_device_paths();
+    fw_retarget_scsi_device_paths();
     efi_init_boot_services();
     efi_init_runtime_services();
     uart_puts("UEFI Time Services:   ");

@@ -24,13 +24,29 @@ class Ia64FirmwareSmoke(Ia64FirmwareTest):
         make_fat_disk(path, app_path("smoke"))
         return path
 
+    def assert_post_self_tests_pass(self, console: str) -> None:
+        # The firmware checks its own protocols during POST and prints one
+        # line per check; nothing else reads those lines.
+        failed = [line.strip() for line in console.replace("\r", "").splitlines()
+                  if "verification failed" in line or
+                  "installation failed" in line]
+        self.assertEqual(failed, [])
+
     def test_cold_boot_and_reset(self):
         vm = self.launch_ia64(
             media=self.make_disk(),
             machine_options="firmware-console=serial,nvram=none")
-        self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
+        result = self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
+        self.assert_post_self_tests_pass(result.raw_console)
         vm.cmd("system_reset")
         self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
+
+    def test_460gx_cold_boot(self):
+        vm = self.launch_ia64(
+            machine="460gx", media=self.make_disk("460gx.img"),
+            machine_options="firmware-console=serial,nvram=none")
+        result = self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
+        self.assert_post_self_tests_pass(result.raw_console)
 
     def test_slow_console_reader(self):
         # The serial backend refuses bytes while its reader is behind, and
