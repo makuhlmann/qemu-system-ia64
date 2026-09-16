@@ -55,7 +55,7 @@ def run_program(qemu, bundles, entry=0x10, alat="full",
                 terminal_ip=None, expected=None, timeout=2.0,
                 name="ia64-microprogram", poll_initial_s=0.001,
                 poll_max_s=0.020, cpu=None, smp="1", memory=None,
-                machine="ia64-vpc"):
+                machine="ia64-vpc", icount=None):
     """Run until an explicit architectural terminal state."""
     expected = dict(expected or {})
     if terminal_ip is None:
@@ -80,6 +80,7 @@ def run_program(qemu, bundles, entry=0x10, alat="full",
         cpu=cpu,
         smp=smp,
         memory=memory,
+        icount=icount,
     )
     return run_microprogram(qemu, program)
 

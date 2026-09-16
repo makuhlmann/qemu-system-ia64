@@ -70,8 +70,17 @@ typedef struct IA64InterruptState {
     uint64_t sapic_irr[4];
     uint64_t sapic_isr[4];
 
-    /* Derived host timer state for architected ITC/ITM registers. */
-    int64_t itc_delta;
+    /*
+     * Derived host timer state for architected ITC/ITM registers.  ITC is
+     * itc_base plus the ticks in the QEMU_CLOCK_VIRTUAL time since
+     * itc_base_ns (both set by an ITC write), so it depends on elapsed
+     * virtual time only and not on how often it is read.  ar.itc holds the
+     * last value the guest could see, and never goes back: after an ITM
+     * match it can be ahead of that count until the clock catches up
+     * (ia64_itc_advance_pending_itm()).
+     */
+    int64_t itc_base_ns;
+    uint64_t itc_base;
     uint64_t itm_armed_value;
     uint64_t itm_last_match;
     bool itm_armed;

@@ -173,10 +173,11 @@ void ia64_itc_advance_pending_itm(CPUIA64State *env)
         env->interrupt.itm_last_match_valid &&
         ia64_itm_interrupt_active(env) &&
         (int64_t)(env->ar_itc - (env->interrupt.itm_last_match + 1)) < 0) {
-        uint64_t ticks = env->interrupt.itm_last_match + 1 - env->ar_itc;
-
-        env->ar_itc += ticks;
-        env->interrupt.itc_delta += ia64_itc_ticks_to_ns(env, ticks);
+        /*
+         * The ITC base stays: ia64_itc_sync() holds ar.itc here until the
+         * clock catches up, so this adds no lasting offset to ITC.
+         */
+        env->ar_itc = env->interrupt.itm_last_match + 1;
     }
 }
 
@@ -415,6 +416,7 @@ void ia64_itm_update(CPUIA64State *env, uint64_t itm_value)
 {
     IA64CPU *cpu = container_of(env, IA64CPU, env);
     uint64_t itc;
+    uint64_t base_to_match;
     int64_t delta_ticks;
     int64_t delay_ns;
     int64_t deadline_ns;
@@ -433,15 +435,23 @@ void ia64_itm_update(CPUIA64State *env, uint64_t itm_value)
         return;
     }
 
-    if (delta_ticks > muldiv64(INT64_MAX, env->itc_hz, NANOSECONDS_PER_SECOND)) {
+    /*
+     * Expire at the first virtual nanosecond at which ia64_itc_sync() yields
+     * the match value.  Count from the ITC base, not from now: ITC is the
+     * base plus the ticks since then, and ar.itc can be ahead of the clock.
+     * ITC is at or past the base, so a sum below delta_ticks has wrapped.
+     */
+    base_to_match = itm_value - env->interrupt.itc_base;
+    if (base_to_match < (uint64_t)delta_ticks ||
+        base_to_match > ia64_itc_ns_to_ticks(env, INT64_MAX)) {
         delay_ns = INT64_MAX;
     } else {
-        delay_ns = ia64_itc_ticks_to_ns(env, delta_ticks);
+        delay_ns = ia64_itc_ticks_to_ns(env, base_to_match);
     }
     env->interrupt.itm_armed = true;
     env->interrupt.itm_armed_value = itm_value;
-    deadline_ns = delay_ns > INT64_MAX - env->interrupt.itc_delta ?
-                  INT64_MAX : env->interrupt.itc_delta + delay_ns;
+    deadline_ns = delay_ns > INT64_MAX - env->interrupt.itc_base_ns ?
+                  INT64_MAX : env->interrupt.itc_base_ns + delay_ns;
     trace_ia64_itm(CPU(cpu)->cpu_index, "arm", itc, itm_value,
                    ia64_itv_vector(env));
     timer_mod(cpu->itm_timer, deadline_ns);
@@ -449,16 +459,25 @@ void ia64_itm_update(CPUIA64State *env, uint64_t itm_value)
 
 void ia64_itc_sync(CPUIA64State *env)
 {
-    int64_t now = ia64_itc_clock_ns();
-    int64_t elapsed = now - env->interrupt.itc_delta;
+    int64_t elapsed = ia64_itc_clock_ns() - env->interrupt.itc_base_ns;
+    uint64_t itc;
 
-    if (elapsed > 0) {
-        uint64_t ticks = ia64_itc_ns_to_ticks(env, elapsed);
+    if (elapsed <= 0) {
+        return;
+    }
 
-        if (ticks != 0) {
-            env->ar_itc += ticks;
-            env->interrupt.itc_delta += ia64_itc_ticks_to_ns(env, ticks);
-        }
+    /*
+     * Count all ticks from the base again on every sync.  Adding the ticks
+     * since the previous sync and moving a base on by their length, rounded
+     * down to whole nanoseconds, gained up to a tick per sync: at 1.6 GHz
+     * one tick rounds down to 0 ns, so ITC advanced on each read even while
+     * the clock stood still.
+     */
+    itc = env->interrupt.itc_base + ia64_itc_ns_to_ticks(env, elapsed);
+
+    /* ia64_itc_advance_pending_itm() can hold ar.itc ahead of the clock. */
+    if ((int64_t)(itc - env->ar_itc) > 0) {
+        env->ar_itc = itc;
     }
 }
 

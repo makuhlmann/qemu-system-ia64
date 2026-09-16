@@ -194,6 +194,13 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
         env->firmware.sal_block = base + IA64_FW_SAL_DISPATCH_BLOCK_OFF;
         env->firmware.assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(ram);
     }
+    if (version_id < 6) {
+        /*
+         * Before v6 the ITC base moved with each sync: pre_save synced
+         * ar.itc to the time in the base-ns field, which is a valid base.
+         */
+        env->interrupt.itc_base = env->ar_itc;
+    }
 
     memset(env->mmu.tlb_data_micro, 0,
            sizeof(env->mmu.tlb_data_micro));
@@ -229,7 +236,7 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
-    .version_id = 5,
+    .version_id = 6,
     .minimum_version_id = 1,
     .pre_save = ia64_cpu_pre_save,
     .post_load = ia64_cpu_post_load,
@@ -305,7 +312,8 @@ const VMStateDescription vmstate_ia64_cpu = {
         VMSTATE_BOOL_ARRAY_V(env.interrupt.lint_level, IA64CPU, 2, 4),
         VMSTATE_UINT64_ARRAY(env.interrupt.sapic_irr, IA64CPU, 4),
         VMSTATE_UINT64_ARRAY(env.interrupt.sapic_isr, IA64CPU, 4),
-        VMSTATE_INT64(env.interrupt.itc_delta, IA64CPU),
+        VMSTATE_INT64(env.interrupt.itc_base_ns, IA64CPU),
+        VMSTATE_UINT64_V(env.interrupt.itc_base, IA64CPU, 6),
         VMSTATE_UINT64(env.interrupt.itm_armed_value, IA64CPU),
         VMSTATE_UINT64(env.interrupt.itm_last_match, IA64CPU),
         VMSTATE_BOOL(env.interrupt.itm_armed, IA64CPU),

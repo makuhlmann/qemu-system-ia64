@@ -145,6 +145,7 @@ from .encoding import (
     ssm,
     setf_sig,
     st1_postinc,
+    sub_reg,
     tbit_z,
     ld1,
     st2,
@@ -291,6 +292,92 @@ def test_ar_itc_advances_in_guest_loop(qemu):
             f"r16={state.gr[16]!r} r17={state.gr[17]!r} "
             f"attempts={attempts!r} polls={result.polls!r}\n"
             f"{result.register_output}")
+
+# ITC must be a function of elapsed QEMU_CLOCK_VIRTUAL time only.  These cases
+# run under -icount, where virtual time is the executed instruction count: the
+# stop/cont polls of the harness do not move it, and two reads in one TB see
+# the same clock.  An ITC sync that added the ticks since the last sync but
+# moved its base on by their rounded-down length gained up to a tick per read:
+# at 1.6 GHz a nanosecond is 1.6 ticks and one tick rounds down to 0 ns, at
+# 800 MHz three nanoseconds are 2 ticks and 2 ticks round down to 2 ns.
+ITC_ICOUNT = "shift=0"
+ITC_STORM_PASSES = 4095
+ITC_SAME_CLOCK_PAIRS = 1000
+
+def _require_itc_read_storm_keeps_virtual_time_rate(qemu, name, cpu):
+    """One counted loop runs twice: it reads ITC, then the read is suppressed.
+
+    The loop is the same code in both passes, so the passes execute the same
+    TBs and take the same virtual time.  A predicate turns the read off: a
+    second loop without the read would end its TBs elsewhere (an ITC read
+    under icount ends its TB), and so take a different instruction count.
+    """
+    result = run_program(qemu, [
+        (0x10, 0x02, mov_m_ar_gr(16, 44), nop_i(),
+         addl(8, ITC_STORM_PASSES, 0)),
+        (0x20, 0x00, nop_m(), cmp_eq_imm(6, 7, 0, 0), nop_i()),
+        (0x30, 0x02, nop_m(), mov_lc_gr(8), nop_i()),
+        (0x40, 0x10, mov_m_ar_gr(18, 44, qp=6), nop_i(),
+         br_cloop(0x40, 0x40)),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x70, qp=7)),
+        (0x60, 0x10, mov_m_ar_gr(17, 44), cmp_eq_imm(6, 7, 1, 0),
+         br_cond(0x60, 0x30)),
+        (0x70, 0x02, mov_m_ar_gr(19, 44), nop_i(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], entry=0x10, terminal_ip=0x80, cpu=cpu, icount=ITC_ICOUNT,
+        timeout=8.0)
+    state = result.state
+    mask = (1 << 64) - 1
+    reading = (state.gr[17] - state.gr[16]) & mask
+    quiet = (state.gr[19] - state.gr[17]) & mask
+    # Both passes advanced ITC by the same count when this was written.  The
+    # margin allows a few bundles of difference if TB ends move; the defect
+    # added more than 800 ticks at either rate.
+    if quiet < ITC_STORM_PASSES // 2 or abs(reading - quiet) > 16:
+        raise RuntimeError(
+            f"{name} failed: ITC advanced {reading} ticks over the pass "
+            f"that reads it and {quiet} over the pass that does not\n"
+            f"{result.register_output}")
+
+def test_itc_read_storm_keeps_virtual_time_rate(qemu):
+    _require_itc_read_storm_keeps_virtual_time_rate(
+        qemu, "itc_read_storm_keeps_virtual_time_rate", None)
+
+def test_itc_read_storm_keeps_virtual_time_rate_merced(qemu):
+    _require_itc_read_storm_keeps_virtual_time_rate(
+        qemu, "itc_read_storm_keeps_virtual_time_rate_merced", "merced")
+
+def _require_itc_reads_at_one_virtual_instant_agree(qemu, name, cpu):
+    """Two ITC reads in one bundle, repeated: every pair must be equal.
+
+    Both reads are in one TB, and icount charges a TB's instructions when
+    the TB starts, so both see the same virtual time.  r20 sums the
+    differences; r21 and the last r17 show that ITC advanced over the loop.
+    """
+    result = run_program(qemu, [
+        (0x10, 0x00, mov_m_ar_gr(21, 44), addl(8, ITC_SAME_CLOCK_PAIRS, 0),
+         adds(20, 0, 0)),
+        (0x20, 0x02, nop_m(), mov_lc_gr(8), nop_i()),
+        (0x30, 0x09, mov_m_ar_gr(17, 44), mov_m_ar_gr(18, 44), nop_i()),
+        (0x40, 0x03, nop_m(), sub_reg(19, 18, 17), add(20, 20, 19)),
+        (0x50, 0x10, nop_m(), nop_i(), br_cloop(0x50, 0x30)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], entry=0x10, terminal_ip=0x60, cpu=cpu, icount=ITC_ICOUNT,
+        timeout=8.0)
+    state = result.state
+    if state.gr[20] != 0 or state.gr[17] <= state.gr[21]:
+        raise RuntimeError(
+            f"{name} failed: pair differences sum to {state.gr[20]:#x}, "
+            f"ITC {state.gr[21]:#x} before the loop and {state.gr[17]:#x} "
+            f"in its last pass\n{result.register_output}")
+
+def test_itc_reads_at_one_virtual_instant_agree(qemu):
+    _require_itc_reads_at_one_virtual_instant_agree(
+        qemu, "itc_reads_at_one_virtual_instant_agree", None)
+
+def test_itc_reads_at_one_virtual_instant_agree_merced(qemu):
+    _require_itc_reads_at_one_virtual_instant_agree(
+        qemu, "itc_reads_at_one_virtual_instant_agree_merced", "merced")
 
 def test_cloop_zero_st1_timer_interrupts_batched_loop(qemu):
     result = run_program(qemu, [
@@ -5116,6 +5203,10 @@ CASE_NAMES = (
     'pending_interrupt_taken_after_ssm',
     'pending_interrupt_taken_after_mov_psr_l',
     'pending_interrupt_taken_after_rfi',
+    'itc_read_storm_keeps_virtual_time_rate',
+    'itc_read_storm_keeps_virtual_time_rate_merced',
+    'itc_reads_at_one_virtual_instant_agree',
+    'itc_reads_at_one_virtual_instant_agree_merced',
 )
 
 CASE_METADATA = {
@@ -5124,6 +5215,14 @@ CASE_METADATA = {
     'async_timer_interrupt_records_boundary_ri': CaseMetadata(nonterminal_effect_loop=True),
     'future_itm_rearm_preserves_pended_timer_irr': CaseMetadata(nonterminal_effect_loop=True),
     'invalid_itv_vector_is_ignored': CaseMetadata(nonterminal_effect_loop=True),
+    'itc_read_storm_keeps_virtual_time_rate': CaseMetadata(
+        required_features=frozenset({"icount"})),
+    'itc_read_storm_keeps_virtual_time_rate_merced': CaseMetadata(
+        required_features=frozenset({"icount", "cpu-model:merced"})),
+    'itc_reads_at_one_virtual_instant_agree': CaseMetadata(
+        required_features=frozenset({"icount"})),
+    'itc_reads_at_one_virtual_instant_agree_merced': CaseMetadata(
+        required_features=frozenset({"icount", "cpu-model:merced"})),
     'masked_itv_discards_due_timer': CaseMetadata(nonterminal_effect_loop=True),
     'masking_itv_preserves_pended_timer_irr': CaseMetadata(nonterminal_effect_loop=True),
     'past_itm_does_not_fire': CaseMetadata(nonterminal_effect_loop=True),

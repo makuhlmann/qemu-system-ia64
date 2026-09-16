@@ -56,6 +56,7 @@ class MicroProgram:
     cpu: str | None = None
     smp: str = "1"
     memory: str | None = None
+    icount: str | None = None
     expected_exit: ExpectedExit | None = None
 
 
@@ -121,6 +122,8 @@ def _command(qemu: str, program: MicroProgram) -> list[str]:
     ]
     if program.memory is not None:
         command += ["-m", program.memory]
+    if program.icount is not None:
+        command += ["-icount", program.icount]
     # The battery was authored against Montecito behaviour for every case
     # that does not name a model.  Pin it so the cases keep their meaning
     # independently of the machine's default CPU type.

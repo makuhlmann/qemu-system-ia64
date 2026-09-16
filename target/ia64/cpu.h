@@ -1622,9 +1622,17 @@ static inline uint64_t ia64_itc_ns_to_ticks(const CPUIA64State *env, int64_t ns)
     return muldiv64(ns, env->itc_hz, NANOSECONDS_PER_SECOND);
 }
 
+/*
+ * The fewest nanoseconds in which ITC advances by @ticks: the inverse of
+ * ia64_itc_ns_to_ticks() rounds up, so a deadline computed with it does not
+ * expire while ITC is still short of its match value.  @ticks must not
+ * exceed ia64_itc_ns_to_ticks(env, INT64_MAX).
+ */
 static inline int64_t ia64_itc_ticks_to_ns(const CPUIA64State *env, uint64_t ticks)
 {
-    return muldiv64(ticks, NANOSECONDS_PER_SECOND, env->itc_hz);
+    uint64_t ns = muldiv64(ticks, NANOSECONDS_PER_SECOND, env->itc_hz);
+
+    return ns + (ia64_itc_ns_to_ticks(env, ns) < ticks);
 }
 
 static inline bool ia64_external_interrupt_vector_valid(uint8_t vector)
@@ -1646,7 +1654,8 @@ static inline uint64_t ia64_itc_read(CPUIA64State *env)
 static inline void ia64_itc_write(CPUIA64State *env, uint64_t value)
 {
     env->ar_itc = value;
-    env->interrupt.itc_delta = ia64_itc_clock_ns();
+    env->interrupt.itc_base = value;
+    env->interrupt.itc_base_ns = ia64_itc_clock_ns();
     env->interrupt.itm_last_match_valid = false;
 }
 
