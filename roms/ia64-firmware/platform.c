@@ -121,12 +121,12 @@ static UINTN                  mCoresPerSocket = 1;
 static UINTN                  mThreadsPerCore = 1;
 /* What the flash stage probed: installed DRAM and the core chipset. */
 static UINT64                 mChipsetProbed = IA64_FW_CHIPSET_DERIVE;
-/* Application processors that have entered the shadow (firmware_ap_main). */
-static volatile UINT64        mApCheckins;
 /* Bit n: the processor with LID id n has checked in (boot processor too). */
 static volatile UINT64        mProcessorIdsSeen;
 /* mProcessorIdsSeen when the rendezvous ended: what the tables publish. */
 static UINT64                 mProcessorIds = 1;
+/* Processors that waited for the release but did not check in in time. */
+static UINT64                 mProcessorIdsLate;
 
 extern char __fw_image_start[];
 extern char _start[];
@@ -599,21 +599,36 @@ BOOLEAN fw_platform_register_firmware(UINT64 CpuAssistBase)
 
 /*
  * Release the application processors, which the flash stage parks until
- * the shadow's data is ready, and count them as they check in.  Real SAL
- * rendezvouses its processors the same way (SAL 3.2.3); the wait is
- * bounded, so a machine with one processor moves on after 20 ms.
+ * the shadow's data is ready, and wait for them to check in.  Real SAL
+ * rendezvouses its processors the same way (SAL 3.2.3), and bounds the wait
+ * (the E8870 generic SAL_A reports "AP Timeout Expired").
  *
  * The release is an IPI to every processor id this firmware supports.
  * The processor interrupt block ignores an IPI to an id that no processor
- * has, so the boot processor does not need to know which ids exist.
+ * has, so the boot processor does not need to know which ids exist.  It
+ * does know which processors wait for the release: they mark themselves in
+ * the release block's present word, which the boot processor's reset entry
+ * cleared.  So the wait ends when every marked processor has checked in,
+ * bounded by FW_AP_CHECKIN_LIMIT_100NS.  It also lasts at least
+ * FW_AP_CHECKIN_WINDOW_100NS after the release and after each check-in, for
+ * a processor that started to wait only after the release; a machine with
+ * one processor therefore moves on after 20 ms.
  */
+#define FW_AP_CHECKIN_WINDOW_100NS 200000ULL      /* 20 ms */
+#define FW_AP_CHECKIN_LIMIT_100NS  50000000ULL    /* 5 s */
+
 static void fw_platform_rendezvous_processors(void)
 {
     volatile UINT64 *release =
         (volatile UINT64 *)(UINTN)IA64_FW_AP_RELEASE_BLOCK;
+    UINT64 all_ids = (1ULL << FW_MAX_CPUS) - 1U;
     UINT64 own_id;
-    UINT64 deadline;
+    UINT64 start;
+    UINT64 now;
+    UINT64 window_end;
+    UINT64 present;
     UINT64 seen;
+    UINT64 last_seen;
     UINTN id;
 
     __asm__ volatile ("mov %0 = cr.lid;;" : "=r"(own_id) : : "memory");
@@ -634,19 +649,45 @@ static void fw_platform_rendezvous_processors(void)
         }
     }
 
-    deadline = fw_read_itc() + 200000ULL * fw_itc_ticks_per_100ns;
-    do {
-        seen = mApCheckins;
-        while (fw_read_itc() < deadline && mApCheckins == seen) {
-            __asm__ volatile ("hint @pause" : : : "memory");
+    start = fw_read_itc();
+    window_end = start + FW_AP_CHECKIN_WINDOW_100NS * fw_itc_ticks_per_100ns;
+    last_seen = mProcessorIdsSeen;
+    for (;;) {
+        __asm__ volatile ("mf;;" : : : "memory");
+        seen = mProcessorIdsSeen;
+        present = release[IA64_FW_AP_PRESENT_OFF / 8];
+        now = fw_read_itc();
+        if (seen != last_seen) {
+            last_seen = seen;
+            window_end = now +
+                FW_AP_CHECKIN_WINDOW_100NS * fw_itc_ticks_per_100ns;
         }
-    } while (mApCheckins != seen);
+        if (now >= window_end && (present & all_ids & ~seen) == 0) {
+            break;
+        }
+        if (now - start >= FW_AP_CHECKIN_LIMIT_100NS *
+                           fw_itc_ticks_per_100ns) {
+            break;
+        }
+        __asm__ volatile ("hint @pause" : : : "memory");
+    }
 
+    /*
+     * The tables publish this snapshot.  A processor that checks in later
+     * still runs and waits in fw_ap_rendezvous, but no OS learns of it.
+     */
     mProcessorIds = mProcessorIdsSeen;
+    mProcessorIdsLate = release[IA64_FW_AP_PRESENT_OFF / 8] & all_ids &
+                        ~mProcessorIds;
     mProcessorCount = 0;
     for (id = 0; id < FW_MAX_CPUS; id++) {
         mProcessorCount += (mProcessorIds >> id) & 1U;
     }
+}
+
+UINT64 fw_processor_ids_late(void)
+{
+    return mProcessorIdsLate;
 }
 
 /*
@@ -2255,12 +2296,16 @@ static void fw_ap_rendezvous(void)
 
 void firmware_ap_main(UINT64 ProcessorId, UINT64 ResetPalProc)
 {
-    fw_platform_install_pal(1, ResetPalProc);
-    fw_platform_register_processor(ResetPalProc);
+    /*
+     * Check in first: the PAL calls below can end the processor's time
+     * slice (the registration flushes translations), and the boot
+     * processor is waiting.  Nothing else reads the check-in state.
+     */
     if (ProcessorId < FW_MAX_CPUS) {
         __sync_fetch_and_or(&mProcessorIdsSeen, 1ULL << ProcessorId);
     }
-    __sync_fetch_and_add(&mApCheckins, 1);
+    fw_platform_install_pal(1, ResetPalProc);
+    fw_platform_register_processor(ResetPalProc);
     fw_ap_rendezvous();
     for (;;) {
         /* TPR is scratch on return from OS_BOOT_RENDEZ. */

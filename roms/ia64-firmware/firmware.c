@@ -14905,6 +14905,19 @@ static void fw_phase_post_summary(void)
     efi_conout_ascii("h model ");
     fw_post_emit_hex2(model);
     efi_conout_ascii("h)\r\n");
+    {
+        UINT64 late = fw_processor_ids_late();
+        UINTN id;
+
+        for (id = 0; late != 0; id++, late >>= 1) {
+            if ((late & 1U) != 0) {
+                efi_conout_ascii("               AP Timeout Expired: "
+                                 "processor id ");
+                fw_post_emit_udec(id);
+                efi_conout_ascii(" did not check in\r\n");
+            }
+        }
+    }
 
     efi_conout_ascii("System Memory  ");
     fw_post_emit_udec(fw_installed_ram_size() / (1024U * 1024U));

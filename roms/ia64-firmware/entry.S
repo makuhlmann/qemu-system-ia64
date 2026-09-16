@@ -29,6 +29,7 @@ fw_pal_buffer:
     .equ FW_LOW_RAM_MIN, IA64_FW_LOW_RAM_MIN
     .equ FW_LOW_RAM_ALIGN_MASK, (IA64_FW_LOW_RAM_ALIGN - 1)
     .equ FW_AP_RELEASE_BLOCK, IA64_FW_AP_RELEASE_BLOCK
+    .equ FW_AP_PRESENT_WORD, (IA64_FW_AP_RELEASE_BLOCK + IA64_FW_AP_PRESENT_OFF)
     /* The release vector's bit in cr.irr3 (vectors 192-255). */
     .equ FW_AP_RELEASE_IRR3_BIT, (IA64_FW_AP_RELEASE_VECTOR - 192)
     .equ FW_LINK_BASE, IA64_FW_LINK_BASE
@@ -160,7 +161,16 @@ fw_flash_entry:
 (p6) br.cond.sptk.few flash_wait_shadow
     ;;
 
-    /* Boot processor: ask the hardware what it is and how much DRAM it has. */
+    /*
+     * Boot processor: forget which processors waited before this reset.
+     * The waiting processors mark themselves again (flash_wait_shadow).
+     */
+    movl r14 = FW_AP_PRESENT_WORD
+    ;;
+    st8 [r14] = r0
+    ;;
+
+    /* Ask the hardware what this machine is and how much DRAM it has. */
     alloc r2 = ar.pfs, 0, 0, 1, 0
     adds r12 = -32, r12         /* a frame of our own above the callee's */
     ;;
@@ -276,15 +286,41 @@ fw_flash_entry:
      * External interrupts are disabled here, so poll the vector's request
      * bit; then acknowledge it (cr.ivr, cr.eoi), so that it is not still
      * pending when the shadow's rendezvous loop reads cr.ivr.
+     *
+     * While it waits, the processor keeps its bit set in the release block's
+     * present word (IA64_FW_AP_PRESENT_OFF): the boot processor clears the
+     * word at its reset entry and then waits for every marked processor to
+     * check in.  The bit is set with cmpxchg8, because the other waiting
+     * processors update the same word.
      */
 flash_wait_shadow:
+    movl r14 = FW_AP_PRESENT_WORD
+    movl r24 = 1
+    ;;
+    shl r24 = r24, r21          /* this processor's present bit */
 4:
     mov r15 = cr.irr3
     ;;
-    tbit.z p6, p7 = r15, FW_AP_RELEASE_IRR3_BIT
+    tbit.nz p6, p7 = r15, FW_AP_RELEASE_IRR3_BIT
+    ;;
+(p6) br.cond.dpnt.few 5f
+    ;;
+    ld8 r16 = [r14]
+    ;;
+    and r17 = r16, r24
+    ;;
+    cmp.ne p6, p7 = r17, r0
     ;;
 (p6) br.cond.sptk.few 4b
     ;;
+    or r18 = r16, r24
+    mov ar.ccv = r16
+    ;;
+    cmpxchg8.acq r17 = [r14], r18, ar.ccv
+    ;;
+    br.cond.sptk.few 4b
+    ;;
+5:
     mov r15 = cr.ivr
     ;;
     srlz.d

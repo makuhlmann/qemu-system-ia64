@@ -172,6 +172,7 @@ UINT64 fw_guest_low_ram_end(void);
 BOOLEAN fw_zx1_iova_hole_active(void);
 UINTN fw_guest_processor_count(void);
 UINT8 fw_processor_lsapic_id(UINTN Index);
+UINT64 fw_processor_ids_late(void);
 UINTN fw_guest_socket_count(void);
 UINTN fw_guest_cores_per_socket(void);
 UINTN fw_guest_threads_per_core(void);

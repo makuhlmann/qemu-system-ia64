@@ -117,11 +117,17 @@
  * IA64_FW_AP_RELEASE_VECTOR.  Before it sends that IPI, the boot processor
  * writes the shadow's _start (+0) and the installed DRAM size (+8) here, in
  * the region of a minimum machine (IA64_FW_AP_RELEASE_BLOCK), which every
- * machine has and which the flash stage already uses.  Nothing reads the
- * block after the release, so it needs no clearing on reset.
+ * machine has and which the flash stage already uses.  cr.irr is clear after
+ * a reset, so stale contents cannot start a processor.
+ *
+ * The word at +16 (IA64_FW_AP_PRESENT_OFF) has bit n set for each processor
+ * id n that waits for the release.  The boot processor's reset entry clears
+ * it, and every waiting processor sets its bit again while it polls, so the
+ * boot processor knows which processors exist before it releases them.
  */
 #define IA64_FW_AP_RELEASE_OFFSET      0x0000000000044000ULL
-#define IA64_FW_AP_RELEASE_SIZE        0x0000000000000010ULL
+#define IA64_FW_AP_RELEASE_SIZE        0x0000000000000018ULL
+#define IA64_FW_AP_PRESENT_OFF         0x10
 #define IA64_FW_AP_RELEASE_BLOCK \
     (IA64_FW_LOW_RAM_MIN - IA64_FW_CPU_ASSIST_SIZE + IA64_FW_AP_RELEASE_OFFSET)
 #define IA64_FW_AP_RELEASE_VECTOR      0xf0
