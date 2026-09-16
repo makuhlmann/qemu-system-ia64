@@ -32,6 +32,16 @@ class Ia64FirmwareSmoke(Ia64FirmwareTest):
         vm.cmd("system_reset")
         self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
 
+    def test_slow_console_reader(self):
+        # The serial backend refuses bytes while its reader is behind, and
+        # QEMU's 16550 then holds THRE clear; firmware that writes THR without
+        # waiting overwrites the pending byte and loses output (this flaked
+        # func-ia64-smp under gate load).  Read slowly and require all of it.
+        vm = self.launch_ia64(
+            media=self.make_disk("slow-reader.img"),
+            machine_options="firmware-console=serial,nvram=none")
+        self.wait_ia64_suite(vm, "smoke", SMOKE_CASES, read_pause=0.05)
+
     def test_icount_boot(self):
         vm = self.launch_ia64(
             media=self.make_disk("icount.img"),

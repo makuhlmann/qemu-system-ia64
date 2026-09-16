@@ -91,14 +91,51 @@ void fw_flush_instruction_cache(VOID *start, UINTN bytes)
 }
 
 
+/*
+ * How long one byte may wait for the transmitter.  A real 16550 empties its
+ * holding register within a character time; QEMU's keeps THRE clear while
+ * its character backend cannot take the byte (a console reader that falls
+ * behind), and every THR write in that window overwrites the byte before it.
+ * Such stalls last milliseconds, so one second is a generous bound.
+ */
+#define UART_TRANSMIT_TIMEOUT_MICROSECONDS 1000000ULL
+
+/*
+ * Set when a wait expired: a transmitter that never drains (a console nobody
+ * reads) then costs one timeout, not one per byte, until THRE shows again.
+ */
+static BOOLEAN mUartTransmitterStuck;
+
+static void uart_wait_transmitter(void)
+{
+    UINT64 timeout = UART_TRANSMIT_TIMEOUT_MICROSECONDS *
+                     FW_ITC_TICKS_PER_MICROSECOND;
+    UINT64 start;
+
+    if ((*fw_uart_reg(UART_LSR) & UART_LSR_THRE) != 0) {
+        mUartTransmitterStuck = 0;
+        return;
+    }
+    if (mUartTransmitterStuck) {
+        return;
+    }
+    start = fw_read_itc();
+    while ((*fw_uart_reg(UART_LSR) & UART_LSR_THRE) == 0) {
+        if (fw_read_itc() - start >= timeout) {
+            mUartTransmitterStuck = 1;
+            return;
+        }
+        __asm__ volatile ("hint @pause" ::: "memory");
+    }
+}
+
 static void uart_putc(char c)
 {
     if (fw_data_translation_enabled()) {
         return;
     }
 
-    /* Some emulated paths don't expose a stable LSR_THRE bit early in boot. */
-    (void)*fw_uart_reg(UART_LSR);
+    uart_wait_transmitter();
     *fw_uart_reg(UART_THR) = (UINT8)c;
 }
 

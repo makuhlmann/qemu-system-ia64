@@ -217,12 +217,18 @@ def open_menu_entry(console_socket, send_navigation, banner: str,
 def wait_for_suite(console_socket, suite: str, required_cases: Iterable[str],
                    timeout: float,
                    on_case: Callable[[CaseResult], None] | None = None,
-                   process_alive: Callable[[], bool] | None = None
-                   ) -> SuiteResult:
+                   process_alive: Callable[[], bool] | None = None,
+                   read_pause: float = 0.0) -> SuiteResult:
+    """Collect and validate one suite's IA64TEST lines.
+
+    ``read_pause`` stops reading for that many seconds after each read, so
+    the console backend fills and the guest has to wait for the transmitter:
+    a console reader that falls behind must not lose output.
+    """
     parser = ProtocolParser(suite)
     try:
         return _wait_for_suite(parser, console_socket, required_cases,
-                               timeout, on_case, process_alive)
+                               timeout, on_case, process_alive, read_pause)
     except ProtocolError as error:
         # Keep what arrived so the caller can log it: a lost or garbled
         # line is only visible in the console stream itself.
@@ -233,8 +239,8 @@ def wait_for_suite(console_socket, suite: str, required_cases: Iterable[str],
 def _wait_for_suite(parser: ProtocolParser, console_socket,
                     required_cases: Iterable[str], timeout: float,
                     on_case: Callable[[CaseResult], None] | None,
-                    process_alive: Callable[[], bool] | None
-                    ) -> SuiteResult:
+                    process_alive: Callable[[], bool] | None,
+                    read_pause: float) -> SuiteResult:
     suite = parser.result.suite
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -257,6 +263,8 @@ def _wait_for_suite(parser: ProtocolParser, console_socket,
         for case in parser.feed(data):
             if on_case is not None:
                 on_case(case)
+        if read_pause:
+            time.sleep(read_pause)
     raise ProtocolError(
         f"timed out waiting for suite {suite!r}\n"
         f"{parser.result.raw_console[-4000:]}")

@@ -69,13 +69,15 @@ class Ia64FirmwareTest(QemuSystemTest):
             logger.debug(line)
 
     def wait_ia64_suite(self, vm, suite: str, required_cases,
-                        timeout: float = 25.0, on_case=None):
+                        timeout: float = 25.0, on_case=None,
+                        read_pause: float = 0.0):
         # launch_ia64() sets a short firmware-boot-timeout, so the medium
         # auto-boots; no menu interaction is needed here.
         try:
             result = wait_for_suite(
                 vm.console_socket, suite, required_cases, timeout,
-                on_case=on_case, process_alive=vm.is_running)
+                on_case=on_case, process_alive=vm.is_running,
+                read_pause=read_pause)
         except ProtocolError as error:
             self.log_console(getattr(error, "raw_console", ""))
             raise
