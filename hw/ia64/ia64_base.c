@@ -3422,7 +3422,6 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
      */
     {
         uint64_t entry = s->realfw_entry;
-        IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
 
         CPU_FOREACH(cs) {
             IA64BootInfo info = {
@@ -3430,11 +3429,6 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                 .firmware_entry = entry,
                 .iva = IA64_PAL_RESET_IVT_BASE,
                 .raw_entry = true,
-                /* Both firmwares make this the processor's LID. */
-                .raw_proc_id = imc->processor_ids ?
-                    imc->processor_ids[MIN(cs->cpu_index,
-                                           imc->nprocessor_ids - 1)] :
-                    cs->cpu_index,
                 /*
                  * SAL calls PAL procedures through the machine-planted stub
                  * (GR34; GR36's authentication procedure lands on the same
@@ -3842,6 +3836,15 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         cpu->package_base = package_base;
         cpu->package_cpus = MIN(per_socket,
                                 machine->smp.cpus - package_base);
+        /*
+         * GR33 at SALE_ENTRY and PAL_FIXED_ADDR; both firmwares make it the
+         * processor's LID.  Boards without a table use the CPU index.
+         */
+        if (imc->processor_ids != NULL) {
+            qdev_prop_set_uint32(DEVICE(cpu), "geographic-id",
+                                 imc->processor_ids[MIN(i,
+                                                        imc->nprocessor_ids - 1)]);
+        }
         if (!qdev_realize_and_unref(DEVICE(cpu), NULL, errp)) {
             return false;
         }

@@ -57,6 +57,8 @@ class MicroProgram:
     smp: str = "1"
     memory: str | None = None
     icount: str | None = None
+    # Further QEMU arguments, e.g. ("-global", "ia64-cpu.geographic-id=3").
+    extra_args: tuple[str, ...] = ()
     expected_exit: ExpectedExit | None = None
 
 
@@ -129,6 +131,7 @@ def _command(qemu: str, program: MicroProgram) -> list[str]:
     # independently of the machine's default CPU type.
     command += ["-cpu", program.cpu if program.cpu is not None
                 else "montecito"]
+    command += list(program.extra_args)
     return command + _loader_args(program)
 
 

@@ -24,6 +24,7 @@
 #include "exec/translation-block.h"
 #include "hw/core/sysemu-cpu-ops.h"
 #include "hw/core/boards.h"
+#include "hw/core/qdev-properties.h"
 #include "exec/tb-flush.h"
 #include "accel/tcg/cpu-ops.h"
 #include "tcg/debug-assert.h"
@@ -784,13 +785,13 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
          * path below) — encode the minimal valid dont-care.
          */
         env->cr_pta = 15ULL << 2;
-        env->gr[IA64_SALE_GR_PROC_ID] = info->raw_proc_id;
+        env->gr[IA64_SALE_GR_PROC_ID] = ia64_cpu_geographic_id(cpu);
         env->gr[IA64_SALE_GR_PAL_PROC] = info->raw_pal_proc;
         env->gr[IA64_SALE_GR_PAL_RETURN] = info->raw_pal_auth;
         /* Keep the physical stacked file coherent with the virtual view
          * (rse_bol = 0, no rotation: GR32+n maps to rse_pgr[n]). */
         env->rse.rse_pgr[IA64_SALE_GR_PROC_ID - IA64_SALE_GR_FROM_PAL] =
-            info->raw_proc_id;
+            ia64_cpu_geographic_id(cpu);
         env->rse.rse_pgr[IA64_SALE_GR_PAL_PROC - IA64_SALE_GR_FROM_PAL] =
             info->raw_pal_proc;
         env->rse.rse_pgr[IA64_SALE_GR_PAL_RETURN - IA64_SALE_GR_FROM_PAL] =
@@ -1218,6 +1219,10 @@ static const IA64PalProfile ia64_pal_profile_merced = {
     },
 };
 
+static const Property ia64_cpu_properties[] = {
+    DEFINE_PROP_UINT32("geographic-id", IA64CPU, geographic_id, UINT32_MAX),
+};
+
 static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -1231,6 +1236,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
                                        &icc->parent_phases);
 
     dc->vmsd = &vmstate_ia64_cpu;
+    device_class_set_props(dc, ia64_cpu_properties);
     cc->class_by_name = ia64_cpu_class_by_name;
     cc->dump_state = ia64_cpu_dump_state;
     cc->set_pc = ia64_cpu_set_pc;

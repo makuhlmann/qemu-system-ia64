@@ -1136,6 +1136,16 @@ test_pal_fixed_addr = require_registers("pal_fixed_addr",
     {"ip": 0x30, "r28": PAL_FIXED_ADDR, "r8": 0,
      "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
 
+# PAL_FIXED_ADDR returns the processor's geographic id, the value PALE_RESET
+# hands SAL in GR33 (SDM vol. 2 11.2.2).  The board sets it per socket (the
+# 460gx board's second socket is id 3); here the command line sets it.
+test_pal_fixed_addr_geographic_id = require_registers(
+    "pal_fixed_addr_geographic_id",
+    pal_call_program(PAL_FIXED_ADDR),
+    {"ip": 0x30, "r28": PAL_FIXED_ADDR, "r8": 0,
+     "r9": 3, "r10": 0, "r11": 0}, entry=0x10,
+    extra_args=("-global", "ia64-cpu.geographic-id=3"))
+
 test_pal_fixed_addr_reserved_arg = require_registers(
     "pal_fixed_addr_reserved_arg",
     pal_call_program(PAL_FIXED_ADDR, [(29, 1), (30, 0), (31, 0)]),
@@ -1644,6 +1654,7 @@ CASE_NAMES = (
     'pal_debug_info',
     'pal_debug_info_reserved_arg',
     'pal_fixed_addr',
+    'pal_fixed_addr_geographic_id',
     'pal_fixed_addr_reserved_arg',
     'pal_firmware_register_accepts_record',
     'pal_firmware_register_rejects_short_record',

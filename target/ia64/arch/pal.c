@@ -1436,13 +1436,16 @@ static void pal_debug_info(CPUIA64State *env)
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
+/*
+ * The processor's geographic id on its bus: the value PALE_RESET hands SAL
+ * in GR33 (SDM vol. 2 11.2.2), which the board chooses per socket.
+ */
 static void pal_fixed_addr(CPUIA64State *env)
 {
-    CPUState *cs = env_cpu(env);
-
     if (pal_reserved_args_are_zero(env)) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->gr[IA64_PAL_GR_RESULT1] = cs->cpu_index & 0xffff;
+        env->gr[IA64_PAL_GR_RESULT1] =
+            ia64_cpu_geographic_id(env_archcpu(env));
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;

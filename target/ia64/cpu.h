@@ -1685,7 +1685,7 @@ typedef struct IA64BootInfo {
      * CFM.sof = 96, AR.RSC = 0, PSR = {bn=1}, DCR = 0.
      */
     bool raw_entry;
-    uint64_t raw_proc_id;   /* GR33 */
+    /* GR33 is the processor's geographic id: ia64_cpu_geographic_id(). */
     uint64_t raw_pal_proc;  /* GR34 */
     uint64_t raw_pal_auth;  /* GR36 */
 } IA64BootInfo;
@@ -1699,6 +1699,11 @@ struct ArchCPU {
     bool boot_info_valid;
     bool boot_info_pending;
     bool alat_full;
+    /*
+     * The processor's geographic id on its bus ("geographic-id"): the board
+     * sets it per socket; UINT32_MAX (unset) means the CPU index.
+     */
+    uint32_t geographic_id;
     uint32_t socket_id;
     uint32_t core_id;
     uint32_t thread_id;
@@ -1707,6 +1712,16 @@ struct ArchCPU {
     uint32_t package_base;
     uint32_t package_cpus;
 };
+
+/*
+ * The processor's geographic id: PALE_RESET hands it to SAL in GR33, and
+ * PAL_FIXED_ADDR returns the same value (SDM vol. 2 11.2.2).
+ */
+static inline uint64_t ia64_cpu_geographic_id(const IA64CPU *cpu)
+{
+    return cpu->geographic_id != UINT32_MAX ? cpu->geographic_id :
+           (uint64_t)MAX(CPU(cpu)->cpu_index, 0);
+}
 
 void ia64_cpu_set_boot_info(IA64CPU *cpu, const IA64BootInfo *info);
 void ia64_cpu_reset_to_boot_info(IA64CPU *cpu);
