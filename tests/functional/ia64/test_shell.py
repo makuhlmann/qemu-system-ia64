@@ -13,6 +13,12 @@ from ia64.media import make_fat_disk
 from ia64.protocol import open_menu_entry
 
 
+SMOKE_CASES = {
+    "entry", "system-table", "loaded-image", "device-path",
+    "console-output",
+}
+
+
 class Ia64BootShell(Ia64FirmwareTest):
     # 'EFI Shell [Built-in]' is the second boot-menu entry (after 'Removable
     # Media Boot'); the third is the maintenance menu.
@@ -64,18 +70,17 @@ class Ia64BootShell(Ia64FirmwareTest):
         self.assertIn("BootOrder".encode("utf-16le") + b"\0\0", contents)
         self.assertIn(b"IRT64OFT", contents)
 
-        # A timed auto-boot (1s countdown) runs boot_image_from_boot_order(),
-        # which honours BootNext=Boot0000 and -- per the UEFI spec -- deletes
-        # it, so the smoke app boots once from BootNext.
+        # BootNext=Boot0000 boots before the menu, even with the default
+        # Timeout (wait for the user), and is deleted first: the smoke app
+        # boots once with no menu input at all.
         vm = self.launch_ia64(
-            name="shell-bootnext", media=disk, boot_timeout=1,
+            name="shell-bootnext", media=disk, boot_timeout=None,
             machine_options=f"firmware-console=serial,nvram={nvram}")
-        wait_for_console_pattern(
-            self, "IA64TEST suite=smoke status=DONE", vm=vm)
+        self.wait_ia64_suite(vm, "smoke", SMOKE_CASES, timeout=60.0)
         vm.shutdown()
 
         # Reopen the shell: the date/time/BootOrder settings persisted, and the
-        # one-shot BootNext was consumed by the auto-boot above.
+        # one-shot BootNext was consumed by the boot above, so the menu shows.
         vm = self.launch_ia64(
             name="shell-verify", media=disk, boot_timeout=None,
             machine_options=f"firmware-console=serial,nvram={nvram}")

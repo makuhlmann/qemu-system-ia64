@@ -258,35 +258,51 @@ EFI_STATUS fw_boot_image_from_boot_option(UINT16 OptionNumber)
     return boot_image_from_load_option(OptionNumber, option, option_size);
 }
 
+/*
+ * BootNext names the option for this boot only.  Delete it, then boot that
+ * option; the boot manager does this before the BootOrder list and before
+ * the menu, whatever the Timeout (as the EFI 1.10 sample boot manager does).
+ * EFI_NOT_FOUND: BootNext is not set.
+ */
+static EFI_STATUS __attribute__((noinline)) fw_boot_next_option(void)
+{
+    static CHAR16 boot_next_name[] = {
+        'B', 'o', 'o', 't', 'N', 'e', 'x', 't', 0
+    };
+    UINT16 boot_next;
+    UINTN boot_next_size = sizeof(boot_next);
+    UINT32 attributes = 0;
+
+    if (rs_get_variable(boot_next_name, (void *)mEfiGlobalVariableGuid,
+                        &attributes, &boot_next_size, &boot_next) !=
+            EFI_SUCCESS ||
+        boot_next_size != sizeof(boot_next) ||
+        (attributes & EFI_VARIABLE_BOOTSERVICE_ACCESS) == 0) {
+        return EFI_NOT_FOUND;
+    }
+    /* A one-shot request is consumed before it is used. */
+    (void)rs_set_variable(boot_next_name, (void *)mEfiGlobalVariableGuid,
+                          0, 0, NULL);
+    (void)fw_console_clear();
+    return fw_boot_image_from_boot_option(boot_next);
+}
+
 /* Keep address-taken buffers in a bounded IA-64 register-stack frame. */
 EFI_STATUS __attribute__((noinline)) boot_image_from_boot_order(void)
 {
     static CHAR16 boot_order_name[] = {
         'B', 'o', 'o', 't', 'O', 'r', 'd', 'e', 'r', 0
     };
-    static CHAR16 boot_next_name[] = {
-        'B', 'o', 'o', 't', 'N', 'e', 'x', 't', 0
-    };
     UINT16 order[16];
-    UINT16 boot_next;
     UINTN order_size = sizeof(order);
-    UINTN boot_next_size = sizeof(boot_next);
     UINT32 attributes = 0;
     EFI_STATUS st;
-    EFI_STATUS last = EFI_NOT_FOUND;
+    EFI_STATUS last;
     UINTN i;
 
-    st = rs_get_variable(boot_next_name, (void *)mEfiGlobalVariableGuid,
-                         &attributes, &boot_next_size, &boot_next);
-    if (st == EFI_SUCCESS && boot_next_size == sizeof(boot_next) &&
-        (attributes & EFI_VARIABLE_BOOTSERVICE_ACCESS) != 0) {
-        /* BootNext is a one-shot request and must be consumed before use. */
-        (void)rs_set_variable(boot_next_name,
-                              (void *)mEfiGlobalVariableGuid, 0, 0, NULL);
-        last = fw_boot_image_from_boot_option(boot_next);
-        if (last == EFI_SUCCESS || mBootServicesExited) {
-            return last;
-        }
+    last = fw_boot_next_option();
+    if (last == EFI_SUCCESS || mBootServicesExited) {
+        return last;
     }
 
     st = rs_get_variable(boot_order_name, (void *)mEfiGlobalVariableGuid,
@@ -685,6 +701,16 @@ void fw_boot_menu_run(void)
     BOOLEAN counting;
     BOOLEAN dirty = 1;
 
+    /*
+     * BootNext first, before the menu and whatever the Timeout: with the
+     * default Timeout (0xFFFF, wait for the user) the menu alone would never
+     * boot it.  If that boot fails or its image returns, the menu follows.
+     */
+    (void)fw_boot_next_option();
+    if (mBootServicesExited) {
+        return;
+    }
+
     count = fw_menu_build(entries);
     if (count == 0) {
         return;
@@ -692,7 +718,7 @@ void fw_boot_menu_run(void)
     timeout = fw_menu_read_timeout();
     if (timeout == 0) {
         /* Timeout 0 means boot immediately, without a menu; use the full
-         * engine so BootNext and the whole BootOrder are honoured. */
+         * engine so the whole BootOrder is honoured. */
         (void)boot_image_from_boot_order();
         return;
     }
