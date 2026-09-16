@@ -84,6 +84,12 @@ void fw_init_itc_rate(void);
 #define PS2_MODE_KCC                  0x40U
 #define PS2_STATUS_IBF       0x02U
 #define PS2_STATUS_MOUSE_OBF 0x20U
+/*
+ * How long a PS/2 wait may take: the controller answers within
+ * milliseconds, a keyboard or mouse reset (its self-test) within about half
+ * a second.
+ */
+#define PS2_WAIT_TIMEOUT_US  1000000ULL
 
 #define TPL_CALLBACK   8U
 #define TPL_NOTIFY     16U
@@ -105,6 +111,17 @@ void fw_copy_mem_fast(VOID *Destination, const VOID *Source,
                       UINTN Length);
 BOOLEAN fw_handoff_ide_dma_enabled(void);
 UINT64 fw_read_itc(void);
+
+/*
+ * Has a wait that began at ITC value Start run for Microseconds?  Device
+ * waits are bounded in time, read from the ITC, not in poll iterations: a
+ * count ends after however long the host takes to spin it.
+ */
+static inline BOOLEAN fw_wait_expired(UINT64 Start, UINT64 Microseconds)
+{
+    return fw_read_itc() - Start >=
+           Microseconds * FW_ITC_TICKS_PER_MICROSECOND;
+}
 volatile UINT8 *fw_uart_reg(UINTN offset);
 UINT64 fw_read_psr(void);
 UINT64 fw_read_cpuid3(void);

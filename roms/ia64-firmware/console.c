@@ -162,28 +162,30 @@ UINT8 ps2_read_status(void)
     return *ps2_reg(PS2_STATUS_PORT);
 }
 
-static BOOLEAN ps2_wait_input_clear(void)
+static BOOLEAN ps2_wait_status(UINT8 Mask, UINT8 Value)
 {
-    UINTN limit;
+    UINT64 start = fw_read_itc();
 
-    for (limit = 0; limit < 100000; limit++) {
-        if ((ps2_read_status() & PS2_STATUS_IBF) == 0) {
+    for (;;) {
+        BOOLEAN expired = fw_wait_expired(start, PS2_WAIT_TIMEOUT_US);
+
+        if ((ps2_read_status() & Mask) == Value) {
             return 1;
         }
+        if (expired) {
+            return 0;
+        }
     }
-    return 0;
+}
+
+static BOOLEAN ps2_wait_input_clear(void)
+{
+    return ps2_wait_status(PS2_STATUS_IBF, 0);
 }
 
 static BOOLEAN ps2_wait_output_full(void)
 {
-    UINTN limit;
-
-    for (limit = 0; limit < 100000; limit++) {
-        if ((ps2_read_status() & PS2_STATUS_OBF) != 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return ps2_wait_status(PS2_STATUS_OBF, PS2_STATUS_OBF);
 }
 
 BOOLEAN ps2_write_command(UINT8 command)
@@ -230,24 +232,24 @@ static BOOLEAN ps2_keyboard_raw_pop(UINT8 *Data)
 
 static BOOLEAN ps2_keyboard_wait_response(UINT8 expected)
 {
-    UINTN limit;
+    UINT64 start = fw_read_itc();
 
-    for (limit = 0; limit < 100000; limit++) {
+    for (;;) {
+        BOOLEAN expired = fw_wait_expired(start, PS2_WAIT_TIMEOUT_US);
         UINT8 status;
         UINT8 data;
 
         status = ps2_read_status();
-        if ((status & PS2_STATUS_OBF) == 0) {
-            continue;
+        if ((status & PS2_STATUS_OBF) != 0) {
+            data = *ps2_reg(PS2_DATA_PORT);
+            if ((status & PS2_STATUS_MOUSE_OBF) == 0) {
+                return data == expected;
+            }
         }
-
-        data = *ps2_reg(PS2_DATA_PORT);
-        if ((status & PS2_STATUS_MOUSE_OBF) != 0) {
-            continue;
+        if (expired) {
+            return 0;
         }
-        return data == expected;
     }
-    return 0;
 }
 
 static BOOLEAN __attribute__((noinline, used)) ps2_keyboard_enable_scanning(void)
@@ -1338,20 +1340,26 @@ static EFI_STATUS ps2_read_key(EFI_INPUT_KEY *Key)
 
 /*
  * Wait briefly for the next serial byte.  Escape-sequence bytes for a single
- * key (e.g. ESC '[' 'B') arrive as a burst, so a bounded spin suffices to tell
- * a multi-byte sequence apart from a lone ESC keypress without hanging ConIn.
+ * key (e.g. ESC '[' 'B') arrive as a burst, so a short wait tells a
+ * multi-byte sequence apart from a lone ESC keypress without hanging ConIn.
  */
+#define UART_ESCAPE_WAIT_US 100000ULL
+
 static BOOLEAN conin_uart_read_wait(UINT8 *ch)
 {
-    UINT32 spin;
+    UINT64 start = fw_read_itc();
 
-    for (spin = 0; spin < 200000U; spin++) {
+    for (;;) {
+        BOOLEAN expired = fw_wait_expired(start, UART_ESCAPE_WAIT_US);
+
         if (uart_can_read()) {
             *ch = uart_getc();
             return 1;
         }
+        if (expired) {
+            return 0;
+        }
     }
-    return 0;
 }
 
 UINT16 conin_ansi_numeric_scan(UINTN Number)

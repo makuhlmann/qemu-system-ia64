@@ -225,7 +225,7 @@ static BOOLEAN isp_start_risc(void)
 {
     UINT16 mailbox[ISP12160_MAILBOX_COUNT];
     UINT16 out[ISP12160_MAILBOX_COUNT];
-    unsigned int i;
+    UINT64 start;
 
     isp_store16(mIspToken + 0, ISP12160_QEMU_SCSI_TOKEN_WORD0);
     isp_store16(mIspToken + 2, ISP12160_QEMU_SCSI_TOKEN_WORD1);
@@ -233,7 +233,9 @@ static BOOLEAN isp_start_risc(void)
     isp_store16(mIspToken + 6, ISP12160_QEMU_SCSI_TOKEN_WORD3);
 
     isp_write16(ISP12160_REG_HOST_COMMAND, ISP12160_HC_RESET_RISC);
-    for (i = 0; i < 1000; i++) {
+    /* Hold the RISC in reset for 1 ms before releasing it. */
+    start = fw_read_itc();
+    while (!fw_wait_expired(start, 1000ULL)) {
         (void)isp_read16(ISP12160_REG_ISTATUS);
     }
     isp_write16(ISP12160_REG_HOST_COMMAND, ISP12160_HC_RELEASE_RISC);

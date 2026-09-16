@@ -229,15 +229,25 @@ void fw_platform_init_south_bridge(void)
                            IA64_460GX_IFB_LPC_FUNCTION, 0x44, 1, 1);
 }
 
+/*
+ * How long the presence probe waits for each step.  A machine without an
+ * i8042 (zx1 by default) spends it twice at POST, so it stays short; a real
+ * controller answers its self-test within milliseconds.
+ */
+#define I8042_PROBE_TIMEOUT_US 100000ULL
+
 BOOLEAN fw_handoff_i8042_enabled(void)
 {
     if (mI8042Present == 2) {
         volatile UINT8 *status = (volatile UINT8 *)(UINTN)PS2_STATUS_PORT;
         volatile UINT8 *data = (volatile UINT8 *)(UINTN)PS2_DATA_PORT;
+        UINT64 start;
         UINTN limit;
 
         mI8042Present = 0;
-        for (limit = 0; limit < 100000 && (*status & PS2_STATUS_IBF); limit++) {
+        start = fw_read_itc();
+        while ((*status & PS2_STATUS_IBF) != 0 &&
+               !fw_wait_expired(start, I8042_PROBE_TIMEOUT_US)) {
         }
         if ((*status & PS2_STATUS_IBF) == 0) {
             /* Drain stale output before asking, then wait for the answer. */
@@ -245,9 +255,16 @@ BOOLEAN fw_handoff_i8042_enabled(void)
                 (void)*data;
             }
             *status = 0xaa;
-            for (limit = 0; limit < 100000; limit++) {
+            start = fw_read_itc();
+            for (;;) {
+                BOOLEAN expired = fw_wait_expired(start,
+                                                  I8042_PROBE_TIMEOUT_US);
+
                 if (*status & PS2_STATUS_OBF) {
                     mI8042Present = *data == 0x55;
+                    break;
+                }
+                if (expired) {
                     break;
                 }
             }

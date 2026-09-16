@@ -164,23 +164,24 @@ static VOID ps2_pointer_poll(VOID)
 
 static BOOLEAN ps2_mouse_wait_byte(UINT8 Expected)
 {
-    UINTN limit;
+    UINT64 start = fw_read_itc();
 
-    for (limit = 0; limit < 1000000U; limit++) {
+    for (;;) {
+        BOOLEAN expired = fw_wait_expired(start, PS2_WAIT_TIMEOUT_US);
         UINT8 status = ps2_read_status();
         UINT8 data;
 
-        if ((status & PS2_STATUS_OBF) == 0) {
-            continue;
-        }
-        data = *ps2_reg(PS2_DATA_PORT);
-        if ((status & PS2_STATUS_MOUSE_OBF) == 0) {
+        if ((status & PS2_STATUS_OBF) != 0) {
+            data = *ps2_reg(PS2_DATA_PORT);
+            if ((status & PS2_STATUS_MOUSE_OBF) != 0) {
+                return data == Expected;
+            }
             (void)ps2_keyboard_raw_push(data);
-            continue;
         }
-        return data == Expected;
+        if (expired) {
+            return 0;
+        }
     }
-    return 0;
 }
 
 static BOOLEAN ps2_mouse_send(UINT8 Command)

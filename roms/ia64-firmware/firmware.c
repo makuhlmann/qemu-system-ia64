@@ -5808,13 +5808,17 @@ static BOOLEAN fw_rtc_read_seconds(INT64 *Seconds)
         BOOLEAN hours24;
         UINT64 sec, min, hour, day, month, year;
         UINT8 raw_hour;
-        UINTN spin;
+        UINT64 start;
         UINT64 era, yoe, doy, doe, days;
 
-        for (spin = 0; spin < 100000U; spin++) {
-            if ((fw_cmos_read(0x0AU) & 0x80U) == 0) {
-                break;
-            }
+        /*
+         * An update keeps UIP set for about 2 ms (244 us warning plus the
+         * update).  If it has not cleared in 10 ms, read anyway: the double
+         * read below and the retries catch an update between fields.
+         */
+        start = fw_read_itc();
+        while ((fw_cmos_read(0x0AU) & 0x80U) != 0 &&
+               !fw_wait_expired(start, 10000ULL)) {
         }
 
         reg_b = fw_cmos_read(0x0BU);
@@ -8422,15 +8426,17 @@ static BOOLEAN rs_firmware_variable_enabled(const FW_FIRMWARE_VARIABLE *Var)
 #define FW_FLASH_LOCK_REGISTER     2U
 #define FW_FLASH_LOCK_WRITE        0x01U
 
+/* A block erase takes about a second on the 82802AC; allow ten. */
+#define FW_FLASH_READY_TIMEOUT_US 10000000ULL
+
 static void fw_flash_wait_ready(volatile UINT8 *flash)
 {
-    UINTN spins;
+    UINT64 start;
 
     flash[0] = FW_FLASH_CMD_READ_STATUS;
-    for (spins = 0; spins < 1000000U; spins++) {
-        if (flash[0] & FW_FLASH_STATUS_READY) {
-            break;
-        }
+    start = fw_read_itc();
+    while ((flash[0] & FW_FLASH_STATUS_READY) == 0 &&
+           !fw_wait_expired(start, FW_FLASH_READY_TIMEOUT_US)) {
     }
 }
 

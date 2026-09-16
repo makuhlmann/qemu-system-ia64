@@ -189,19 +189,30 @@ BOOLEAN usb_ohci_controller_present(void)
     return revision != 0xffffffffU && (revision & 0xffU) == 0x10U;
 }
 
+/*
+ * A controller reset and a root-port reset complete within milliseconds; the
+ * bound leaves room for a host that stalls the guest.
+ */
+#define OHCI_RESET_TIMEOUT_US 1000000ULL
+
 BOOLEAN usb_ohci_reset_controller(void)
 {
-    UINTN spin;
+    UINT64 start;
 
     usb_ohci_write(OHCI_REG_INTERRUPT_DISABLE, 0xffffffffU);
     usb_ohci_write(OHCI_REG_INTERRUPT_STATUS, 0xffffffffU);
     usb_ohci_write(OHCI_REG_COMMAND_STATUS, OHCI_STATUS_HCR);
-    for (spin = 0; spin < 1000000U; spin++) {
+    start = fw_read_itc();
+    for (;;) {
+        BOOLEAN expired = fw_wait_expired(start, OHCI_RESET_TIMEOUT_US);
+
         if ((usb_ohci_read(OHCI_REG_COMMAND_STATUS) & OHCI_STATUS_HCR) == 0) {
             return 1;
         }
+        if (expired) {
+            return 0;
+        }
     }
-    return 0;
 }
 
 static BOOLEAN usb_ohci_enable_keyboard_port(void)
@@ -220,7 +231,7 @@ static BOOLEAN usb_ohci_enable_keyboard_port(void)
     for (port = 0; port < port_count; port++) {
         UINTN reg = OHCI_REG_RH_PORT_STATUS_BASE + port * 4U;
         UINT32 status = usb_ohci_read(reg);
-        UINTN spin;
+        UINT64 start;
 
         usb_ohci_write(reg, OHCI_PORT_WTC | OHCI_PORT_PPS);
         if ((status & OHCI_PORT_CCS) == 0) {
@@ -228,7 +239,10 @@ static BOOLEAN usb_ohci_enable_keyboard_port(void)
         }
 
         usb_ohci_write(reg, OHCI_PORT_WTC | OHCI_PORT_PRS);
-        for (spin = 0; spin < 1000000U; spin++) {
+        start = fw_read_itc();
+        for (;;) {
+            BOOLEAN expired = fw_wait_expired(start, OHCI_RESET_TIMEOUT_US);
+
             status = usb_ohci_read(reg);
             if ((status & OHCI_PORT_PRS) == 0 &&
                 (status & OHCI_PORT_PES) != 0) {
@@ -236,6 +250,9 @@ static BOOLEAN usb_ohci_enable_keyboard_port(void)
                 mUsbKeyboardLowSpeed = (status & OHCI_PORT_LSDA) != 0;
                 mUsbKeyboardPort = (UINT8)port;
                 return 1;
+            }
+            if (expired) {
+                break;
             }
         }
     }
