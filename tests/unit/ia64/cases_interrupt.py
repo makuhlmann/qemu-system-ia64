@@ -97,6 +97,7 @@ from .encoding import (
     cmp4_eq_unc_imm,
     cmp4_ltu_imm,
     cmp_eq_and,
+    cmp_eq_imm,
     cmp_ltu_unc,
     cover_b,
     dep,
@@ -247,24 +248,48 @@ test_unimplemented_physical_instruction_traps = require_registers(
         "r9": IA64_GENEX_UNIMPL_INST_ADDR | IA64_ISR_X,
     }, entry=0x10)
 
+# A QMP stop freezes QEMU_CLOCK_VIRTUAL (system/cpus.c do_vm_stop:
+# cpu_disable_ticks) before it kicks the vCPU, and the vCPU sees the kick only
+# at a TB entry.  Both ITC reads and the counted loop between them are one TB,
+# so if the vCPU enters it in that window (the battery's first poll landing as
+# the vCPU starts the program), both reads return the same value.  So repeat
+# the counted loop and the second read while ITC has not advanced: each retry
+# enters a new TB, the vCPU pauses there, and cont enables the clock again
+# before the vCPU resumes.  A retry is legitimate only across such a stop, so
+# it must come with a second poll.  At about 13 us per attempt the budget
+# outlasts a ~200 ms window; an ITC that never advances still exhausts it and
+# fails.
+ITC_ADVANCE_ATTEMPTS = 0x4000
+
 def test_ar_itc_advances_in_guest_loop(qemu):
     result = run_program(qemu, [
         (0x10, 0x02, mov_m_ar_gr(16, 44), nop_i(),
          addl(8, 4095, 0)),
-        (0x20, 0x02, nop_m(), mov_lc_gr(8),
+        (0x20, *movl_mlx(9, ITC_ADVANCE_ATTEMPTS)),
+        (0x30, 0x02, nop_m(), mov_lc_gr(8),
          nop_i()),
-        (0x30, 0x10, nop_m(), nop_i(),
-         br_cloop(0x30, 0x30)),
-        (0x40, 0x02, mov_m_ar_gr(17, 44), nop_i(),
+        (0x40, 0x10, nop_m(), nop_i(),
+         br_cloop(0x40, 0x40)),
+        (0x50, 0x02, mov_m_ar_gr(17, 44), nop_i(),
+         adds(9, -1, 9)),
+        (0x60, 0x01, nop_m(), cmp_ltu_unc(6, 7, 16, 17),
          nop_i()),
-        (0x50, 0x10, nop_m(), nop_i(),
-         br_cond(0x50, 0x50)),
-    ], entry=0x10, terminal_ip=0x50)
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_cond(0x70, 0xa0, qp=6)),
+        (0x80, 0x01, nop_m(), cmp_eq_imm(6, 7, 0, 9),
+         nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(),
+         br_cond(0x90, 0x30, qp=7)),
+        (0xa0, 0x10, nop_m(), nop_i(),
+         br_cond(0xa0, 0xa0)),
+    ], entry=0x10, terminal_ip=0xa0)
     state = result.state
-    if state.gr[17] <= state.gr[16]:
+    attempts = ITC_ADVANCE_ATTEMPTS - state.gr[9]
+    if state.gr[17] <= state.gr[16] or (attempts > 1 and result.polls < 2):
         raise RuntimeError(
             "ar_itc_advances_in_guest_loop failed: "
-            f"r16={state.gr[16]!r} r17={state.gr[17]!r}\n"
+            f"r16={state.gr[16]!r} r17={state.gr[17]!r} "
+            f"attempts={attempts!r} polls={result.polls!r}\n"
             f"{result.register_output}")
 
 def test_cloop_zero_st1_timer_interrupts_batched_loop(qemu):
