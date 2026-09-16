@@ -510,6 +510,11 @@ def hint_m(qp=0):
 def hint_i(qp=0):
     return bitfield(1, 27, 6) | bitfield(64, 20, 7) | bitfield(qp, 0, 6)
 
+def hint_b(imm=0):
+    """hint.b (B9): op 2, x6 1."""
+    return (op(2) | bitfield(1, 27, 6) | bitfield(imm & 0xfffff, 6, 20)
+            | bitfield((imm >> 20) & 1, 36, 1))
+
 def mov_grpmc_indexed(r3, r2, qp=0, bit36=0):
     return (
         op(1)
@@ -694,6 +699,7 @@ __all__ = (
     'fchkf',
     'hint_m',
     'hint_i',
+    'hint_b',
     'mov_grpmc_indexed',
     'mov_pmcgr_indexed',
     'mov_grpmd_indexed',

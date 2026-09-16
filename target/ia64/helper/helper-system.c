@@ -8,6 +8,19 @@
 #include "arch/system.h"
 
 /*
+ * hint @pause under round-robin TCG (ia64_insn_is_yielding_pause): the
+ * translator has stored the state after the hint, so return to the vCPU loop,
+ * which runs the next vCPU.
+ */
+void helper_yield(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+
+    cs->exception_index = EXCP_YIELD;
+    cpu_loop_exit(cs);
+}
+
+/*
  * Full-speed IP trace (debug facility).  When the environment variable
  * IA64_IPTRACE lists bundle IPs (comma-separated hex), the translator plants
  * a call to this helper on those bundles; it logs the IP and a general

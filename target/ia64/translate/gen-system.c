@@ -659,21 +659,33 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         ctx->restart.exit_after_bundle = true;
         break;
     case IA64_OP_NOP:
+        break;
+    case IA64_OP_HINT_M:
     case IA64_OP_HINT_I:
     case IA64_OP_HINT_B:
     case IA64_OP_HINT_F:
     case IA64_OP_HINT_X:
-        break;
-    case IA64_OP_HINT_M:
-        if (insn->hint_m_reg_increment && op->register_index != 0) {
+        if (insn->opcode == IA64_OP_HINT_M &&
+            insn->hint_m_reg_increment && op->register_index != 0) {
             tcg_gen_add_i64(cpu_gr[op->register_index],
                             cpu_gr[op->register_index],
                             cpu_gr[op->source]);
             ia64_gen_note_stacked_gr_write(op->register_index);
-        } else if (insn->imm_base_update && op->register_index != 0) {
+        } else if (insn->opcode == IA64_OP_HINT_M &&
+                   insn->imm_base_update && op->register_index != 0) {
             tcg_gen_addi_i64(cpu_gr[op->register_index],
                              cpu_gr[op->register_index], op->immediate);
             ia64_gen_note_stacked_gr_write(op->register_index);
+        }
+        if (ia64_insn_is_yielding_pause(ctx, insn)) {
+            /* An L+X hint.x ends the bundle. */
+            ia64_gen_yield_to_slot_completed(
+                ctx, insn->address,
+                insn->unit == IA64_UNIT_X ? 3 : insn->slot + 1,
+                insn->address, record_iipa, track_psr_suppression);
+            if (skip == NULL) {
+                return IA64_GEN_NORETURN;
+            }
         }
         break;
     case IA64_OP_CLRRRB:

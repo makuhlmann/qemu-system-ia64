@@ -100,20 +100,38 @@ class Ia64PlatformTables(Ia64FirmwareTest):
         # in GR33, the firmware makes it the LID, and the MADT and SRAT must
         # publish the LIDs the processors checked in with, or an OS sends
         # its wake-up IPI to a processor that does not exist.
+        self.check_460gx_processor_ids()
+
+    def test_460gx_processor_ids_round_robin(self):
+        # One host thread runs both vCPUs in turn.  The firmware waits 20 ms
+        # for the application processors to check in, spinning on hint
+        # @pause; a pause that did not yield let the boot processor use the
+        # whole wait before processor 3 ran again, so the tables showed one
+        # processor and Windows never started the other.  Whether a boot
+        # lost the processor depended on the round-robin kick timer (7 of 10
+        # boots did), so check three boots.
+        self.check_460gx_processor_ids("-accel", "tcg,thread=single",
+                                       boots=3)
+
+    def check_460gx_processor_ids(self, *extra_args, boots=1):
         vm = self.launch_ia64(
             machine="460gx", smp=2, memory="1G",
-            machine_options="firmware-console=serial,nvram=none")
-        wait_for_console_pattern(self, "ACPI Table Checks:", vm=vm)
+            machine_options="firmware-console=serial,nvram=none",
+            extra_args=extra_args)
         dump = Path(self.scratch_file("ram-top.bin"))
-        vm.cmd("pmemsave", val=0x3c000000, size=0x4000000,
-               filename=str(dump))
-        tables = xsdt_tables(dump.read_bytes(), 0x3c000000)
-        self.assertIn(b"APIC", tables)
-        self.assertIn(b"SRAT", tables)
-        self.assertEqual(enabled_madt_lsapic_ids(tables[b"APIC"]),
-                         [(0, 0), (3, 0)])
-        self.assertEqual(enabled_srat_processor_ids(tables[b"SRAT"]),
-                         [(0, 0), (3, 0)])
+        for boot in range(boots):
+            if boot:
+                vm.cmd("system_reset")
+            wait_for_console_pattern(self, "ACPI Table Checks:", vm=vm)
+            vm.cmd("pmemsave", val=0x3c000000, size=0x4000000,
+                   filename=str(dump))
+            tables = xsdt_tables(dump.read_bytes(), 0x3c000000)
+            self.assertIn(b"APIC", tables)
+            self.assertIn(b"SRAT", tables)
+            self.assertEqual(enabled_madt_lsapic_ids(tables[b"APIC"]),
+                             [(0, 0), (3, 0)], f"boot {boot + 1}")
+            self.assertEqual(enabled_srat_processor_ids(tables[b"SRAT"]),
+                             [(0, 0), (3, 0)], f"boot {boot + 1}")
 
 
 if __name__ == "__main__":

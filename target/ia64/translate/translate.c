@@ -1474,17 +1474,19 @@ void ia64_gen_lookup_current_completed(DisasContext *ctx,
     tcg_gen_lookup_and_goto_ptr();
 }
 
-static void ia64_gen_exit_to_slot(DisasContext *ctx, uint64_t ip, uint8_t slot)
+/* Store the IP, RI and fault slot that resume execution at (ip, slot). */
+static void ia64_gen_set_resume_slot(uint64_t ip, uint8_t slot)
 {
     if (slot >= 3) {
-        ia64_gen_exit_to(ctx, ip + 16);
+        ia64_gen_save_fault_slot_from_ri();
+        ia64_gen_clear_ri();
+        tcg_gen_movi_i64(cpu_ip, ip + 16);
         return;
     }
 
     ia64_gen_set_fault_slot(slot);
     ia64_gen_set_ri(slot);
     tcg_gen_movi_i64(cpu_ip, ip);
-    tcg_gen_exit_tb(NULL, 0);
 }
 
 void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
@@ -1497,7 +1499,52 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
                                     track_psr_suppression);
     ia64_gen_store_instruction_group_start(
         ctx->restart.next_instruction_group_start);
-    ia64_gen_exit_to_slot(ctx, ip, slot);
+    ia64_gen_set_resume_slot(ip, slot);
+    tcg_gen_exit_tb(NULL, 0);
+}
+
+/*
+ * hint @pause (immediate 0, in any unit) marks a spin-wait loop.  When one
+ * host thread runs every vCPU in turn (round-robin TCG), the loop usually
+ * waits for a vCPU that cannot run until this one leaves cpu_exec, so the
+ * pause yields to the next vCPU.  A time-bounded wait otherwise uses its
+ * whole bound before the other vCPU gets a turn: the firmware's processor
+ * rendezvous (20 ms) published one processor.  Under MTTCG every vCPU has
+ * its own thread, and a gdb single step must end in its debug exception,
+ * so the pause is a no-op there.
+ */
+bool ia64_insn_is_yielding_pause(const DisasContext *ctx,
+                                 const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_HINT_M:
+    case IA64_OP_HINT_I:
+    case IA64_OP_HINT_B:
+    case IA64_OP_HINT_F:
+    case IA64_OP_HINT_X:
+        return insn->operands.common.immediate == 0 &&
+               !(tb_cflags(ctx->base.tb) & (CF_PARALLEL | CF_SINGLE_STEP));
+    default:
+        return false;
+    }
+}
+
+/*
+ * Complete the instruction at completed_ip, store the state that resumes at
+ * (ip, slot), and return to the round-robin loop (EXCP_YIELD).
+ */
+void ia64_gen_yield_to_slot_completed(DisasContext *ctx, uint64_t ip,
+                                      uint8_t slot,
+                                      uint64_t completed_ip,
+                                      bool record_iipa,
+                                      bool track_psr_suppression)
+{
+    ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
+                                    track_psr_suppression);
+    ia64_gen_store_instruction_group_start(
+        ctx->restart.next_instruction_group_start);
+    ia64_gen_set_resume_slot(ip, slot);
+    gen_helper_yield(tcg_env);
 }
 
 void ia64_gen_goto_completed(DisasContext *ctx, uint64_t ip,
@@ -3047,6 +3094,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         }
         track_iipa_for_insn = ctx->restart.track_iipa;
         if (ia64_insn_is_empty_hint(&insn) &&
+            !ia64_insn_is_yielding_pause(ctx, &insn) &&
             !(record_iipa && track_iipa_for_insn) &&
             !ctx->restart.track_psr_suppression) {
             ia64_gen_advance_restart_point(ctx, bundle_ip, slot,

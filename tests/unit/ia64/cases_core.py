@@ -100,6 +100,7 @@ from .encoding import (
     extr_u,
     fc_i,
     fwb,
+    hint_b,
     hint_i,
     hint_m,
     hint_x_mlx,
@@ -410,6 +411,40 @@ test_hint_i_decode = require_registers("hint_i_decode", [
     (0x20, 0x10, nop_m(), nop_i(),
      br_cond(0x20, 0x20)),
 ], {"ip": 0x20, "exception": IA64_EXCP_NONE, "r31": 0x66}, entry=0x10)
+
+# hint @pause yields to the next vCPU when TBs are not CF_PARALLEL, which
+# includes this battery's single processor: the yield stores the state after
+# the hint and leaves cpu_exec.  Each pass pauses in slot 0 (hint.m), slot 2
+# (hint.i), the L+X slots (hint.x) and slot 1 of an MBB (hint.b), and counts
+# around the pauses: resuming at a wrong slot runs an increment twice or not
+# at all, or loops.  These two cases guard the resume point, not the yield:
+# they also pass when the pause is a no-op.  They take the yield only because
+# -smp 1 TBs lack CF_PARALLEL (tcg_cpu_init_cflags); if that changes, they
+# pass without testing it.  The fix itself is guarded by the functional test
+# test_460gx_processor_ids_round_robin.
+test_hint_pause_resumes_after_each_slot = require_registers(
+    "hint_pause_resumes_after_each_slot", [
+        (0x10, 0x01, adds(8, 0, 0), adds(9, 0, 0), adds(10, 64, 0)),
+        (0x20, 0x00, hint_m(), adds(8, 1, 8), hint_i()),
+        (0x30, *hint_x_mlx(0)),
+        (0x40, 0x0b, adds(9, 1, 9), nop_m(), cmp_ltu_unc(6, 7, 9, 10)),
+        (0x50, 0x13, nop_m(), hint_b(), br_cond(0x50, 0x20, qp=6)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {"ip": 0x60, "exception": IA64_EXCP_NONE, "r8": 64, "r9": 64},
+    entry=0x10)
+
+# A br.cloop to its own bundle runs as a counted loop inside one TB; a pause
+# in its body yields on every pass instead, and the count must still be exact
+# (LC + 1 passes: br.cloop branches while LC is nonzero before the decrement).
+test_hint_pause_in_counted_self_loop = require_registers(
+    "hint_pause_in_counted_self_loop", [
+        (0x10, 0x01, adds(8, 0, 0), adds(9, 63, 0), nop_i()),
+        (0x20, 0x01, nop_m(), mov_m_gr_ar(9, 65), nop_i()),
+        (0x30, 0x11, adds(8, 1, 8), hint_i(), br_cloop(0x30, 0x30)),
+        (0x40, 0x01, nop_m(), mov_m_ar_gr(11, 65), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {"ip": 0x50, "exception": IA64_EXCP_NONE, "r8": 64, "r11": 0},
+    entry=0x10)
 
 test_cmp_lt_unc_imm_decode = require_registers("cmp_lt_unc_imm_decode", [
     (0x10, 0x00, adds(3, 20, 0), cmp_lt_unc_imm(7, 8, 15, 3),
@@ -2916,6 +2951,8 @@ CASE_NAMES = (
     'fwb_decode',
     'hint_i_decode',
     'hint_m_decode',
+    'hint_pause_in_counted_self_loop',
+    'hint_pause_resumes_after_each_slot',
     'hint_x_mlx_decode',
     'mf_ignored_bit_decode',
     'mix_decode',
