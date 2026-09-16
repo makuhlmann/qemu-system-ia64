@@ -8,7 +8,7 @@ from pathlib import Path
 from qemu_test import QemuSystemTest
 
 from ia64.efi_build import firmware_path
-from ia64.protocol import wait_for_suite
+from ia64.protocol import ProtocolError, wait_for_suite
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
@@ -63,16 +63,23 @@ class Ia64FirmwareTest(QemuSystemTest):
         vm.launch()
         return vm
 
+    def log_console(self, raw_console: str) -> None:
+        logger = logging.getLogger("console")
+        for line in raw_console.replace("\r", "").splitlines():
+            logger.debug(line)
+
     def wait_ia64_suite(self, vm, suite: str, required_cases,
                         timeout: float = 25.0, on_case=None):
         # launch_ia64() sets a short firmware-boot-timeout, so the medium
         # auto-boots; no menu interaction is needed here.
-        result = wait_for_suite(
-            vm.console_socket, suite, required_cases, timeout,
-            on_case=on_case, process_alive=vm.is_running)
-        logger = logging.getLogger("console")
-        for line in result.raw_console.replace("\r", "").splitlines():
-            logger.debug(line)
+        try:
+            result = wait_for_suite(
+                vm.console_socket, suite, required_cases, timeout,
+                on_case=on_case, process_alive=vm.is_running)
+        except ProtocolError as error:
+            self.log_console(getattr(error, "raw_console", ""))
+            raise
+        self.log_console(result.raw_console)
         # Deliberately no liveness assertion here.  wait_for_suite() already
         # fails if the process exits before the suite completes, and it
         # validates every required case plus DONE, so the result is known

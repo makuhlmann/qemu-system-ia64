@@ -220,6 +220,22 @@ def wait_for_suite(console_socket, suite: str, required_cases: Iterable[str],
                    process_alive: Callable[[], bool] | None = None
                    ) -> SuiteResult:
     parser = ProtocolParser(suite)
+    try:
+        return _wait_for_suite(parser, console_socket, required_cases,
+                               timeout, on_case, process_alive)
+    except ProtocolError as error:
+        # Keep what arrived so the caller can log it: a lost or garbled
+        # line is only visible in the console stream itself.
+        error.raw_console = parser.result.raw_console
+        raise
+
+
+def _wait_for_suite(parser: ProtocolParser, console_socket,
+                    required_cases: Iterable[str], timeout: float,
+                    on_case: Callable[[CaseResult], None] | None,
+                    process_alive: Callable[[], bool] | None
+                    ) -> SuiteResult:
+    suite = parser.result.suite
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if parser.result.done:
