@@ -392,6 +392,126 @@ test_async_timer_interrupt_records_boundary_ri = require_registers(
         "r31": (1 << 13) | (1 << 14),
     }, entry=0x10)
 
+def _pending_interrupt_unmask_program(unmask):
+    """A timer vector pends while PSR.i is 0, then `unmask` sets PSR.i.
+
+    XP's KeTryToAcquireQueuedSpinLock retry loop (rsm psr.i, lock busy,
+    ssm psr.i) wedged SMP guests: an IPI whose kick the TCG loop saw while
+    PSR.i was 0 stayed pending after the ssm.  Only a warm path shows it:
+    the first pass through new code leaves each TB through the main loop,
+    which checks interrupts anyway, so three passes without a pending
+    interrupt link the TBs first.  On the last pass the timer pends during
+    a PSR.i = 0 wait loop; the interrupt must be taken before the first
+    instruction after the unmask, so the counting loop behind it must not
+    have run (r8 == 0 and IIP == loop in the handler).  A late delivery
+    (at the harness' next stop/cont poll) leaves r8 above 0.
+
+    If TB linking changes (upstream TCG, or this translator's TB ends),
+    these cases can pass without testing anything.  After such a change,
+    run them on a binary without the PSR.i kick in ia64_set_psr(): they
+    must fail there.
+    """
+    warm_passes = 3
+    unmask_ip = 0x120
+    # rfi writes CR.IPSR/IIP/IFS, which PSR.ic = 1 does not allow.
+    initial_psr = 0 if unmask == "rfi" else IA64_PSR_IC
+    remask = IA64_PSR_IC | IA64_PSR_I if unmask == "rfi" else IA64_PSR_I
+    program = [
+        (0x10, *movl_mlx(19, initial_psr)),
+        (0x20, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0x30, 0x00, adds(3, 0xef, 0), adds(9, warm_passes, 0),
+         adds(10, 4, 0)),
+        (0x40, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), adds(8, 0, 0), nop_i()),
+        # Pass start: warm passes (r9 != 0) go straight to the unmask.
+        (0x50, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 9), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, unmask_ip, qp=7)),
+        (0x70, *movl_mlx(10, 1 << 40)),
+        # HAL-style arm (WSRV03 halia64 i64itm.s retry_itm_read): re-read
+        # ITC after the ITM write and retry while the deadline is no
+        # longer in the future.
+        (0x80, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
+        (0x90, 0x00, addl(4, IA64_ITC_TICKS_PER_MILLISECOND, 3),
+         nop_i(), nop_i()),
+        (0xa0, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(), nop_i()),
+        (0xb0, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
+        (0xc0, 0x01, nop_m(), cmp_ltu_unc(6, 7, 3, 4), nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0x80, qp=7)),
+        # Wait with PSR.i = 0 until vector 0xef is in IRR3 (bit 47).  Leave
+        # through a taken branch: the translator continues a TB through a
+        # branch that is not taken, and the unmask must run in the TB (and
+        # through the exits) the warm passes linked.
+        (0xe0, 0x01, mov_m_cr_gr(5, IA64_CR_SAPIC_IRR3), nop_i(), nop_i()),
+        (0xf0, 0x01, nop_m(), tbit_z(6, 7, 5, 47), nop_i()),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, unmask_ip, qp=7)),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0xe0)),
+    ]
+    # The unmask TB holds nothing else (srlz.d, for one, would leave the TB
+    # through the main loop), and the counting loop follows it.
+    if unmask == "ssm":
+        loop = 0x130
+        program += [
+            (0x120, 0x00, ssm(IA64_PSR_I), nop_i(), nop_i()),
+        ]
+    elif unmask == "mov_psr_l":
+        loop = 0x140
+        program += [
+            (0x120, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
+            (0x130, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        ]
+    elif unmask == "rfi":
+        loop = 0x200
+        program += [
+            (0x120, *movl_mlx(20, IA64_PSR_IC | IA64_PSR_I)),
+            (0x130, 0x00, mov_m_gr_cr(20, 16), nop_i(), nop_i()),
+            (0x140, *movl_mlx(20, loop)),
+            (0x150, 0x00, mov_m_gr_cr(20, 19), nop_i(), nop_i()),
+            (0x160, 0x00, mov_m_gr_cr(0, 23), nop_i(), nop_i()),
+            (0x170, 0x10, nop_m(), nop_i(), rfi_b()),
+        ]
+    else:
+        raise ValueError(unmask)
+    program += [
+        (loop, 0x01, nop_m(), adds(8, 1, 8), nop_i()),
+        (loop + 0x10, 0x01, nop_m(), cmp_ltu_unc(6, 7, 8, 10), nop_i()),
+        (loop + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(loop + 0x20, loop, qp=6)),
+        # Warm pass done: mask again and start the next pass.
+        (loop + 0x30, 0x00, rsm(remask), adds(8, 0, 0), adds(9, -1, 9)),
+        (loop + 0x40, 0x08, srlz_d(), nop_m(), nop_i()),
+        (loop + 0x50, 0x10, nop_m(), nop_i(), br_cond(loop + 0x50, 0x50)),
+        (0x3000, 0x00, mov_m_cr_gr(31, 19), adds(30, 0, 8), adds(29, 0, 9)),
+        (0x3010, 0x10, nop_m(), nop_i(), br_cond(0x3010, 0x3010)),
+    ]
+    return program, loop
+
+
+def _require_pending_interrupt_taken_after_unmask(qemu, unmask):
+    name = f"pending_interrupt_taken_after_{unmask}"
+    program, loop = _pending_interrupt_unmask_program(unmask)
+    result = run_program(qemu, program, entry=0x10, terminal_ip=0x3010,
+                         timeout=4.0)
+    state = result.state
+    if (state.exception != IA64_EXCP_NONE or state.gr[29] != 0 or
+            state.gr[30] != 0 or state.gr[31] != loop):
+        raise RuntimeError(
+            f"{name} failed: warm passes left r29={state.gr[29]:#x} "
+            f"loop passes before delivery r30={state.gr[30]:#x} "
+            f"iip={state.gr[31]:#x} ip={state.ip:#x} "
+            f"exception={state.exception!r}\n{result.register_output}")
+
+
+def test_pending_interrupt_taken_after_ssm(qemu):
+    _require_pending_interrupt_taken_after_unmask(qemu, "ssm")
+
+
+def test_pending_interrupt_taken_after_mov_psr_l(qemu):
+    _require_pending_interrupt_taken_after_unmask(qemu, "mov_psr_l")
+
+
+def test_pending_interrupt_taken_after_rfi(qemu):
+    _require_pending_interrupt_taken_after_unmask(qemu, "rfi")
+
+
 def test_async_timer_interrupt_never_resumes_mlx_slot2(qemu):
     program = [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
@@ -4968,6 +5088,9 @@ CASE_NAMES = (
     'tpr_mmi_masks_timer_until_cleared',
     'tpr_preserves_mmi_and_mic',
     'unimplemented_physical_instruction_traps',
+    'pending_interrupt_taken_after_ssm',
+    'pending_interrupt_taken_after_mov_psr_l',
+    'pending_interrupt_taken_after_rfi',
 )
 
 CASE_METADATA = {

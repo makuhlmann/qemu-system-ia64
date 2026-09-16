@@ -603,7 +603,10 @@ bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
      * executes cover or an rfi resumes the loads, and delivering an
      * asynchronous interrupt on top of a partially materialized frame
      * would let the nested handler spill registers that were never
-     * loaded.
+     * loaded.  No kick marks the frame becoming complete: the loads end in
+     * the helper that started them, or in an rfi whose PSR.i write has
+     * kicked already (ia64_set_psr()); only a handler that set PSR.i before
+     * its cover would need one.
      */
     bool rse_frame_complete = !cpu->env.rse.rse_cfle &&
         cpu->env.rse.rse_dirty >= 0 && cpu->env.rse.rse_dirty_nat >= 0;

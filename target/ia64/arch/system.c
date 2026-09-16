@@ -712,6 +712,8 @@ static void ia64_swap_banked_gr(CPUIA64State *env)
 
 void ia64_set_psr(CPUIA64State *env, uint64_t value)
 {
+    bool unmasks = !(env->psr & IA64_PSR_I) && (value & IA64_PSR_I);
+
     if ((env->psr ^ value) & IA64_PSR_IC) {
         env->exception_state.psr_ic_inflight = true;
     }
@@ -719,6 +721,20 @@ void ia64_set_psr(CPUIA64State *env, uint64_t value)
         ia64_swap_banked_gr(env);
     }
     env->psr = value;
+    /*
+     * An interrupt that became pending while PSR.i was 0 is taken right after
+     * the instruction that sets PSR.i (ssm, mov psr.l, rfi).  The TCG loop
+     * asks ia64_cpu_exec_interrupt() only after a kick, and it clears the
+     * kick first; if the kick was seen while PSR.i was 0, nothing looks at
+     * the pending interrupt again: these instructions chain to the next TB,
+     * whose entry check finds no kick.  Kick again, like every IRR, ISR and
+     * TPR change does.  Without this, XP's KeTryToAcquireQueuedSpinLock
+     * retry loop (rsm psr.i, lock busy, ssm psr.i) held an IPI pending
+     * until the sender's KiIpiStallOnPacketTargets wedged the guest.
+     */
+    if (unmasks) {
+        ia64_sapic_update_interrupt(env);
+    }
 }
 
 void ia64_flush_on_pk_change(CPUIA64State *env, uint64_t old_psr)
