@@ -1952,6 +1952,131 @@ static void test_nvram_commit_and_restart(void)
 }
 
 /*
+ * Start the machine on @flash with nvram=@nvram and expect it to refuse the
+ * file: exit status 1, @needle in the error, and the file byte-identical.
+ */
+static void ia64_expect_nvram_refused(const char *nvram, const char *flash,
+                                      const char *needle)
+{
+    g_autofree char *machine = g_strdup_printf("460gx,nvram=%s", nvram);
+    const char *argv[] = {
+        qtest_qemu_binary(NULL),
+        "-machine", machine,
+        "-bios", flash,
+        "-m", "256M",
+        "-display", "none",
+        "-S",
+        NULL,
+    };
+    g_autofree char *before = NULL;
+    g_autofree char *after = NULL;
+    g_autofree char *stderr_text = NULL;
+    g_autoptr(GError) error = NULL;
+    gsize before_len = 0;
+    gsize after_len = 0;
+    int wait_status;
+
+    g_assert_true(g_file_get_contents(nvram, &before, &before_len, &error));
+    g_assert_no_error(error);
+    g_assert_true(g_spawn_sync(NULL, (char **)argv, NULL,
+                               G_SPAWN_STDOUT_TO_DEV_NULL,
+                               NULL, NULL, NULL, &stderr_text,
+                               &wait_status, &error));
+    g_assert_no_error(error);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), ==, 1);
+    g_assert_nonnull(strstr(stderr_text, needle));
+    g_assert_true(g_file_get_contents(nvram, &after, &after_len, &error));
+    g_assert_no_error(error);
+    g_assert_cmpuint(after_len, ==, before_len);
+    g_assert_true(memcmp(before, after, before_len) == 0);
+}
+
+/*
+ * nvram= never overwrites a file it cannot keep: one of another size, a
+ * flash image with other NVRAM blocks than -bios (another firmware's
+ * flash), a non-blank file with no FIT, and a 64 KiB store for an image
+ * with no NVRAM block to import it into.  A blank image-size file is
+ * accepted and starts from the image.
+ */
+static void test_nvram_refuses_mismatched_file(void)
+{
+    const uint64_t image_size = 0x80000;
+    const uint64_t base = 0x100000000ULL - image_size;
+    const uint64_t fit_nvram_entry = 0x100000000ULL - 0x10000 + 40;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *flash = NULL;
+    g_autofree char *other = NULL;
+    g_autofree char *path = NULL;
+    g_autofree char *image = NULL;
+    g_autofree uint8_t *buf = NULL;
+    g_autoptr(GError) error = NULL;
+    gsize image_len = 0;
+    QTestState *qts;
+
+    tmpdir = g_dir_make_tmp("ia64-vpc-nvram-guard-XXXXXX", &error);
+    g_assert_no_error(error);
+    flash = ia64_make_nvram_flash_image(tmpdir);
+    path = g_build_filename(tmpdir, "nvram.bin", NULL);
+    g_assert_true(g_file_get_contents(flash, &image, &image_len, &error));
+    g_assert_no_error(error);
+    g_assert_cmpuint(image_len, ==, image_size);
+
+    /* Another size. */
+    buf = g_malloc(0x19000);
+    memset(buf, 0x5a, 0x19000);
+    g_assert_true(g_file_set_contents(path, (char *)buf, 0x19000, &error));
+    g_assert_no_error(error);
+    ia64_expect_nvram_refused(path, flash, "bytes, but firmware");
+
+    /* The image with a 128 KiB NVRAM block: another firmware's flash. */
+    g_free(buf);
+    buf = g_memdup2(image, image_size);
+    stq_le_p(buf + (fit_nvram_entry - base), 0x019e010000002000ULL);
+    g_assert_true(g_file_set_contents(path, (char *)buf, image_size, &error));
+    g_assert_no_error(error);
+    ia64_expect_nvram_refused(path, flash, "other NVRAM blocks");
+
+    /* Image-size, no FIT, not blank. */
+    memset(buf, 0x5a, image_size);
+    g_assert_true(g_file_set_contents(path, (char *)buf, image_size, &error));
+    g_assert_no_error(error);
+    ia64_expect_nvram_refused(path, flash, "not a flash image");
+
+    /* A 64 KiB store, for an image whose FIT has no NVRAM block. */
+    memcpy(buf, image, image_size);
+    stq_le_p(buf + (fit_nvram_entry - base), 0x01ff010000001000ULL);
+    other = g_build_filename(tmpdir, "no-nvram-block.bin", NULL);
+    g_assert_true(g_file_set_contents(other, (char *)buf, image_size,
+                                      &error));
+    g_assert_no_error(error);
+    memset(buf, 0, IA64_NVRAM_SIZE);
+    g_assert_true(g_file_set_contents(path, (char *)buf, IA64_NVRAM_SIZE,
+                                      &error));
+    g_assert_no_error(error);
+    ia64_expect_nvram_refused(path, other, "no 64 KiB NVRAM block");
+
+    /* A blank image-size file starts from the image. */
+    memset(buf, 0xff, image_size);
+    g_assert_true(g_file_set_contents(path, (char *)buf, image_size, &error));
+    g_assert_no_error(error);
+    {
+        g_autofree char *quoted_path = g_shell_quote(path);
+        g_autofree char *quoted_flash = g_shell_quote(flash);
+
+        qts = qtest_initf("-machine 460gx,nvram=%s -bios %s -m 256M -S",
+                          quoted_path, quoted_flash);
+    }
+    g_assert_cmphex(qtest_readq(qts, base), ==, 0x0123456789abcdefULL);
+    qtest_quit(qts);
+
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_unlink(other), ==, 0);
+    g_assert_cmpint(g_unlink(flash), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+/*
  * realfw mode (phase 5): a synthetic 128 KiB flash image with the
  * architected reset pointer block must be mapped ending at 4 GiB, and the
  * machine-planted PAL stub must appear at its fixed home.  The image places
@@ -6409,6 +6534,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/rtc/aligned-read", test_rtc_aligned_read);
     qtest_add_func("/ia64-vpc/nvram/commit-and-restart",
                    test_nvram_commit_and_restart);
+    qtest_add_func("/ia64-vpc/nvram/refuses-mismatched-file",
+                   test_nvram_refuses_mismatched_file);
     qtest_add_func("/ia64-vpc/pci/default-layout", test_pci_default_layout);
     qtest_add_func("/ia64-vpc/pci/explicit-cmd646-slot0",
                    test_pci_explicit_cmd646_slot0);

@@ -3511,9 +3511,16 @@ static const uint8_t ia64_pal_stub[32] = {
  * firmware writes at run time persist: the vendor SDV firmware programs its
  * FIT-1Eh NVRAM block and five undeclared blocks, never a component.
  *
- * A missing file, or one of another size, is created from the image; a
- * file holding just the 64 KiB variable store of the earlier NVRAM window
- * is imported into the NVRAM sector.
+ * A missing or empty file is created from the image, and a file holding
+ * just the 64 KiB variable store of the earlier NVRAM window is imported
+ * into the NVRAM sector.  Every other file is refused and left unchanged,
+ * as a flash update tool refuses to keep NVRAM it cannot keep (WFlash64:
+ * "NVRAM not found or size mismatch.  Unable to preserve NVRAM"): one of
+ * another size, a 64 KiB store the image has no NVRAM block for, and a
+ * flash image whose FIT declares other NVRAM blocks than the image does --
+ * programming this image's components into it would overwrite the data
+ * another firmware keeps outside its NVRAM blocks (the vendor SDV
+ * firmware's record store below 0xFFD00000).
  */
 static void ia64_vpc_flash_refresh_components(uint8_t *contents,
                                               const uint8_t *image,
@@ -3558,6 +3565,111 @@ static void ia64_vpc_flash_refresh_components(uint8_t *contents,
     }
 }
 
+/* The NVRAM (type 1Eh) blocks a flash image's FIT declares. */
+#define IA64_FLASH_NVRAM_BLOCKS_MAX 16
+
+typedef struct IA64FlashNvramLayout {
+    unsigned count;
+    uint64_t addr[IA64_FLASH_NVRAM_BLOCKS_MAX];
+    uint64_t size[IA64_FLASH_NVRAM_BLOCKS_MAX];
+} IA64FlashNvramLayout;
+
+/*
+ * Read the NVRAM blocks from an image ending at 4 GiB.  False when it has no
+ * reset pointer block naming a _FIT_ table inside it (the check
+ * ia64_vpc_read_firmware makes of -bios), or more NVRAM blocks than fit.
+ */
+static bool ia64_vpc_flash_nvram_layout(const uint8_t *image,
+                                        uint64_t image_size,
+                                        IA64FlashNvramLayout *layout)
+{
+    uint64_t base = IA64_REALFW_WINDOW_END - image_size;
+    uint64_t fit_ptr;
+    const uint8_t *fit;
+    uint32_t entries;
+    uint32_t i;
+
+    layout->count = 0;
+    fit_ptr = ldq_le_p(image + (IA64_REALFW_PTR_FIT - base)) &
+              IA64_REALFW_PTR_ADDR_MASK;
+    if (fit_ptr < base || fit_ptr + 16 > IA64_REALFW_WINDOW_END) {
+        return false;
+    }
+    fit = image + (fit_ptr - base);
+    if (memcmp(fit, "_FIT_   ", 8) != 0) {
+        return false;
+    }
+    entries = ldl_le_p(fit + 8) & 0xffffff;
+    entries = MIN(entries, (IA64_REALFW_WINDOW_END - fit_ptr) / 16);
+    for (i = 1; i < entries; i++) {
+        const uint8_t *e = fit + i * 16;
+
+        if ((e[14] & 0x7f) != IA64_FIT_TYPE_NVRAM) {
+            continue;
+        }
+        if (layout->count == IA64_FLASH_NVRAM_BLOCKS_MAX) {
+            return false;
+        }
+        layout->addr[layout->count] = ldq_le_p(e) & IA64_REALFW_PTR_ADDR_MASK;
+        layout->size[layout->count] = (uint64_t)(ldl_le_p(e + 8) & 0xffffff) *
+                                      16;
+        layout->count++;
+    }
+    return true;
+}
+
+static bool ia64_vpc_flash_nvram_layout_has(const IA64FlashNvramLayout *l,
+                                            uint64_t addr, uint64_t size)
+{
+    unsigned i;
+
+    for (i = 0; i < l->count; i++) {
+        if (l->addr[i] == addr && l->size[i] == size) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ia64_vpc_flash_nvram_layout_equal(const IA64FlashNvramLayout *a,
+                                              const IA64FlashNvramLayout *b)
+{
+    unsigned i;
+
+    if (a->count != b->count) {
+        return false;
+    }
+    for (i = 0; i < a->count; i++) {
+        if (!ia64_vpc_flash_nvram_layout_has(b, a->addr[i], a->size[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* "0xfff90000+0x20000, ..." for an error message, "none" when empty. */
+static char *ia64_vpc_flash_nvram_layout_str(const IA64FlashNvramLayout *l)
+{
+    GString *str = g_string_new(NULL);
+    unsigned i;
+
+    for (i = 0; i < l->count; i++) {
+        g_string_append_printf(str, "%s0x%" PRIx64 "+0x%" PRIx64,
+                               i ? ", " : "", l->addr[i], l->size[i]);
+    }
+    if (l->count == 0) {
+        g_string_append(str, "none");
+    }
+    return g_string_free(str, false);
+}
+
+static bool ia64_vpc_buffer_is_filled(const uint8_t *buf, size_t len,
+                                      uint8_t value)
+{
+    return len == 0 ||
+           (buf[0] == value && memcmp(buf, buf + 1, len - 1) == 0);
+}
+
 static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
                                                  const char *path,
                                                  Error **errp)
@@ -3565,6 +3677,7 @@ static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
     const uint8_t *image = s->fw_image;
     uint64_t image_size = s->fw_image_size;
     uint64_t sector = IA64_NVRAM_BASE - (IA64_REALFW_WINDOW_END - image_size);
+    IA64FlashNvramLayout image_layout;
     g_autofree uint8_t *contents = NULL;
     g_autofree char *existing = NULL;
     gsize existing_size = 0;
@@ -3572,19 +3685,67 @@ static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
     QDict *options;
     BlockBackend *blk;
 
-    if (!g_file_get_contents(path, &existing, &existing_size, NULL)) {
-        existing_size = 0;
+    /* -bios passed ia64_vpc_read_firmware, so its FIT is valid. */
+    ia64_vpc_flash_nvram_layout(image, image_size, &image_layout);
+
+    if (g_file_test(path, G_FILE_TEST_EXISTS) &&
+        !g_file_get_contents(path, &existing, &existing_size, &gerr)) {
+        error_setg(errp, "nvram '%s': cannot read: %s", path, gerr->message);
+        g_error_free(gerr);
+        return NULL;
     }
     if (existing_size == image_size) {
-        contents = (uint8_t *)g_steal_pointer(&existing);
-        ia64_vpc_flash_refresh_components(contents, image, image_size,
-                                          s->fw_fit_ptr);
-    } else {
-        contents = g_memdup2(image, image_size);
-        if (existing_size == IA64_NVRAM_SIZE &&
-            sector + IA64_NVRAM_SIZE <= image_size) {
-            memcpy(contents + sector, existing, IA64_NVRAM_SIZE);
+        IA64FlashNvramLayout file_layout;
+        const uint8_t *file = (const uint8_t *)existing;
+
+        if (ia64_vpc_flash_nvram_layout(file, image_size, &file_layout)) {
+            if (!ia64_vpc_flash_nvram_layout_equal(&file_layout,
+                                                   &image_layout)) {
+                g_autofree char *file_str =
+                    ia64_vpc_flash_nvram_layout_str(&file_layout);
+                g_autofree char *image_str =
+                    ia64_vpc_flash_nvram_layout_str(&image_layout);
+
+                error_setg(errp, "nvram '%s' was written by a firmware with "
+                           "other NVRAM blocks (file: %s; firmware '%s': %s); "
+                           "the file was not changed, use a separate nvram "
+                           "file for each firmware", path, file_str,
+                           s->fw_image_name, image_str);
+                return NULL;
+            }
+            contents = (uint8_t *)g_steal_pointer(&existing);
+            ia64_vpc_flash_refresh_components(contents, image, image_size,
+                                              s->fw_fit_ptr);
+        } else if (ia64_vpc_buffer_is_filled(file, existing_size, 0x00) ||
+                   ia64_vpc_buffer_is_filled(file, existing_size, 0xff)) {
+            contents = g_memdup2(image, image_size);
+        } else {
+            error_setg(errp, "nvram '%s' is not a flash image: it has no "
+                       "firmware interface table and is not blank; the file "
+                       "was not changed", path);
+            return NULL;
         }
+    } else if (existing_size == IA64_NVRAM_SIZE) {
+        if (sector + IA64_NVRAM_SIZE > image_size ||
+            !ia64_vpc_flash_nvram_layout_has(&image_layout, IA64_NVRAM_BASE,
+                                             IA64_NVRAM_SIZE)) {
+            error_setg(errp, "nvram '%s' is a 64 KiB variable store, but "
+                       "firmware '%s' has no 64 KiB NVRAM block at 0x%" PRIx64
+                       " to import it into; the file was not changed", path,
+                       s->fw_image_name, (uint64_t)IA64_NVRAM_BASE);
+            return NULL;
+        }
+        contents = g_memdup2(image, image_size);
+        memcpy(contents + sector, existing, IA64_NVRAM_SIZE);
+    } else if (existing_size == 0) {
+        contents = g_memdup2(image, image_size);
+    } else {
+        error_setg(errp, "nvram '%s' is %" G_GSIZE_FORMAT " bytes, but "
+                   "firmware '%s' is a flash image of %" PRIu64 " bytes; the "
+                   "file was not changed, use a separate nvram file for each "
+                   "firmware", path, existing_size, s->fw_image_name,
+                   image_size);
+        return NULL;
     }
     if (!g_file_set_contents(path, (const gchar *)contents, image_size,
                              &gerr)) {
@@ -4478,7 +4639,9 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "default; 'auto' is accepted too) for a flash that starts from the "
         "-bios image every run.  The image's FIT-declared components are "
         "programmed from -bios at every start; the other blocks persist.  "
-        "A 64 KiB variable store from the earlier NVRAM window is imported.");
+        "A 64 KiB variable store from the earlier NVRAM window is imported.  "
+        "A file of another size, or one written by a firmware with other "
+        "NVRAM blocks, is refused and left unchanged.");
     object_class_property_add_str(oc, "alat",
                                   ia64_vpc_get_alat,
                                   ia64_vpc_set_alat);
