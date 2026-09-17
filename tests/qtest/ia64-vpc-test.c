@@ -1845,6 +1845,79 @@ static void assert_cpu_model_type(const char *cpu_arg, const char *expect_type)
     qtest_quit(qts);
 }
 
+/*
+ * The geographic id PAL hands SAL in GR33 at SALE_ENTRY, which both firmwares
+ * make the processor's LID: the board's own table, read back through QOM.
+ */
+static uint32_t assert_geographic_id(QTestState *qts, int64_t cpu_index)
+{
+    g_autoptr(QDict) cpus_resp = qtest_qmp(qts,
+                                           "{'execute':'query-cpus-fast'}");
+    QList *cpus;
+    QListEntry *entry;
+    g_autofree char *qom_path = NULL;
+
+    g_assert(qdict_haskey(cpus_resp, "return"));
+    cpus = qdict_get_qlist(cpus_resp, "return");
+    QLIST_FOREACH_ENTRY(cpus, entry) {
+        QDict *cpu = qobject_to(QDict, qlist_entry_obj(entry));
+
+        if (qdict_get_int(cpu, "cpu-index") == cpu_index) {
+            qom_path = g_strdup(qdict_get_str(cpu, "qom-path"));
+            break;
+        }
+    }
+    g_assert_nonnull(qom_path);
+
+    {
+        g_autoptr(QDict) resp = qtest_qmp(qts,
+            "{'execute':'qom-get','arguments':"
+            "{'path':%s,'property':'geographic-id'}}", qom_path);
+
+        g_assert(qdict_haskey(resp, "return"));
+        return qdict_get_int(resp, "return");
+    }
+}
+
+static void test_cpu_geographic_ids(void)
+{
+    QTestState *qts;
+    unsigned i;
+    /*
+     * longspeak: (module << 1) | core, the two sockets first, then their
+     * second cores (mx2), then two more modules.  The vendor SAL_A derives
+     * the id it publishes with czx2.r(GR33 >> 1), so two processors have to
+     * arrive as 0 and 2 to rendezvous as two.
+     */
+    static const uint32_t zx1_ids[] = { 0, 2, 1, 3, 4, 6, 5, 7 };
+    /* The i2000/SDV is a two-socket board: its processors are 0 and 3. */
+    static const uint32_t sdv_ids[] = { 0, 3 };
+
+    qts = qtest_init("-machine zx1 -smp 8 -m 256M -S");
+    for (i = 0; i < ARRAY_SIZE(zx1_ids); i++) {
+        g_assert_cmpuint(assert_geographic_id(qts, i), ==, zx1_ids[i]);
+    }
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -smp 2 -m 256M -S");
+    g_assert_cmpuint(assert_geographic_id(qts, 0), ==, 0);
+    g_assert_cmpuint(assert_geographic_id(qts, 1), ==, 2);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine 460gx -cpu merced -smp 2 -m 256M -S");
+    for (i = 0; i < ARRAY_SIZE(sdv_ids); i++) {
+        g_assert_cmpuint(assert_geographic_id(qts, i), ==, sdv_ids[i]);
+    }
+    qtest_quit(qts);
+
+    /* A hand-set id survives the board's table (a debugging knob). */
+    qts = qtest_init("-machine zx1 -smp 2 -m 256M -S "
+                     "-global ia64-cpu.geographic-id=5");
+    g_assert_cmpuint(assert_geographic_id(qts, 0), ==, 5);
+    g_assert_cmpuint(assert_geographic_id(qts, 1), ==, 5);
+    qtest_quit(qts);
+}
+
 static void test_cpu_merced(void)
 {
     /* -cpu merced instantiates the original-Itanium model and boots. */
@@ -6673,6 +6746,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);
     qtest_add_func("/ia64-vpc/ahci/off-default", test_ahci_off_default);
     qtest_add_func("/ia64-vpc/ahci/on", test_ahci_on);
+    qtest_add_func("/ia64-vpc/cpu/geographic-ids", test_cpu_geographic_ids);
     qtest_add_func("/ia64-vpc/cpu/merced", test_cpu_merced);
     qtest_add_func("/ia64-vpc/cpu/itanium-alias", test_cpu_itanium_alias);
     qtest_add_func("/ia64-vpc/nvram/defaults-options",

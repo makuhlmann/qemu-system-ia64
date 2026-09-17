@@ -4028,9 +4028,14 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
                                 machine->smp.cpus - package_base);
         /*
          * GR33 at SALE_ENTRY and PAL_FIXED_ADDR; both firmwares make it the
-         * processor's LID.  Boards without a table use the CPU index.
+         * processor's LID.  Boards without a table use the CPU index.  A
+         * geographic id the user set by hand (-global ia64-cpu.geographic-id,
+         * applied when the object is created) stays: it is a debugging knob,
+         * and every board has a table now.
          */
-        if (imc->processor_ids != NULL) {
+        if (imc->processor_ids != NULL &&
+            object_property_get_uint(OBJECT(cpu), "geographic-id",
+                                     &error_abort) == UINT32_MAX) {
             qdev_prop_set_uint32(DEVICE(cpu), "geographic-id",
                                  imc->processor_ids[MIN(i,
                                                         imc->nprocessor_ids - 1)]);

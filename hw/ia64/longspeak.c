@@ -239,6 +239,24 @@ static unsigned int longspeak_root_gsi_base(const IA64VpcMachineState *s,
     return IA64_PCI_INTX_GSI_BASE;
 }
 
+/*
+ * A Longs Peak processor's geographic id is its position on the bus:
+ * (module << 1) | core.  The vendor SAL_A derives the id it publishes from
+ * it with czx2.r(GR33 >> 1) -- the module -- and takes the core from the
+ * module-layout register at FF5F_1010 (ref sec 6), so two single-core
+ * processors have to arrive as ids 0 and 2, not 0 and 1: with 0 and 1 SAL_A
+ * gives both the id 0, and its recovery-check rendezvous then has the two
+ * processors sharing one check-in bit
+ * (plans/phase6-zx1-real-firmware-boot.md session 1, finding 5).
+ *
+ * The board has two sockets, so the first two processors fill the two
+ * modules and the next two are those modules' second cores (an mx2 pair).
+ * Processors 4-7, which no Longs Peak has, continue the same geography over
+ * two more modules; every id stays below the eight per-processor slots the
+ * project firmware carries (FW_MAX_CPUS), which it indexes by id.
+ */
+static const uint8_t longspeak_processor_ids[] = { 0, 2, 1, 3, 4, 6, 5, 7 };
+
 /* Concrete: HP rx2600 / zx2000 / zx6000 -- zx1 chipset, Itanium 2. Default. */
 static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
 {
@@ -261,6 +279,8 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
      * the record the pass leaves in the PDH SRAM (ref sec 5.3, sec 6).
      */
     imc->sale_recovery_check = true;
+    imc->processor_ids = longspeak_processor_ids;
+    imc->nprocessor_ids = ARRAY_SIZE(longspeak_processor_ids);
     imc->map_low_ram = longspeak_map_low_ram;
     imc->build_chipset = longspeak_build_chipset;
     imc->wire_intx = longspeak_wire_intx;
