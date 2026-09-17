@@ -3685,8 +3685,16 @@ static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
     QDict *options;
     BlockBackend *blk;
 
-    /* -bios passed ia64_vpc_read_firmware, so its FIT is valid. */
-    ia64_vpc_flash_nvram_layout(image, image_size, &image_layout);
+    /*
+     * -bios passed ia64_vpc_read_firmware, so its FIT is valid; only a
+     * table with too many NVRAM blocks is left to refuse.
+     */
+    if (!ia64_vpc_flash_nvram_layout(image, image_size, &image_layout)) {
+        error_setg(errp, "firmware '%s' declares more than %d NVRAM blocks; "
+                   "nvram '%s' was not opened", s->fw_image_name,
+                   IA64_FLASH_NVRAM_BLOCKS_MAX, path);
+        return NULL;
+    }
 
     if (g_file_test(path, G_FILE_TEST_EXISTS) &&
         !g_file_get_contents(path, &existing, &existing_size, &gerr)) {
