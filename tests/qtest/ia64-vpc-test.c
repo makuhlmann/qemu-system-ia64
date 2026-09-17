@@ -922,6 +922,162 @@ static void test_sba_ioc_identity(void)
     qtest_quit(qts);
 }
 
+#define IA64_PDH_SEMAPHORE_ADDR(id) \
+    (IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_SEMAPHORE + 8 * (id))
+
+/*
+ * Longs Peak PDH devices below the flash (plans/zx1-real-firmware-reference.md
+ * sec 7.3): NVM and SRAM are memory, the presence byte is active low per
+ * socket, the POST byte and the two scratch latches read back, and the
+ * semaphore is claimed by a read and freed by writing 0 at the holder's slot.
+ */
+static void test_pdh_longspeak_map(void)
+{
+    QTestState *qts = qtest_init("-machine zx1 -smp 2 -m 256M -S");
+
+    qtest_writeq(qts, IA64_PDH_NVM_BASE, 0x4e564d2054494e49ULL);
+    qtest_writeq(qts, IA64_PDH_NVM_BASE + IA64_PDH_NVM_SIZE - 8,
+                 0x1122334455667788ULL);
+    qtest_writeq(qts, IA64_PDH_SRAM_BASE, 0x5555555555555555ULL);
+    qtest_writeq(qts, IA64_PDH_SRAM_BASE + IA64_PDH_SRAM_SIZE - 8,
+                 0xaaaaaaaaaaaaaaaaULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_NVM_BASE), ==,
+                    0x4e564d2054494e49ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_NVM_BASE + IA64_PDH_NVM_SIZE - 8),
+                    ==, 0x1122334455667788ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_SRAM_BASE), ==,
+                    0x5555555555555555ULL);
+    g_assert_cmphex(qtest_readq(qts,
+                                IA64_PDH_SRAM_BASE + IA64_PDH_SRAM_SIZE - 8),
+                    ==, 0xaaaaaaaaaaaaaaaaULL);
+    /* Above the SRAM nothing decodes: a write does not stick. */
+    qtest_writeq(qts, IA64_PDH_SRAM_BASE + IA64_PDH_SRAM_SIZE,
+                 0x5555555555555555ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_SRAM_BASE + IA64_PDH_SRAM_SIZE),
+                    ==, 0);
+
+    /* Two sockets populated: bits 1:0 low. */
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_PRESENCE_BASE +
+                                IA64_PDH_PRESENCE), ==, 0xfc);
+    qtest_writeb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST, 0x13);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST),
+                    ==, 0x13);
+
+    qtest_writeb(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_SCRATCH0, 0x40);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_SCRATCH0), ==, 0x40);
+    qtest_writel(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_CHECKIN,
+                 0x00010000);
+    g_assert_cmphex(qtest_readl(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_CHECKIN), ==, 0x00010000);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_CHECKIN + 2), ==, 0x01);
+    qtest_writeb(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_CHECKIN + 2,
+                 0x03);
+    g_assert_cmphex(qtest_readl(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_CHECKIN), ==, 0x00030000);
+    /* No mx2 modules. */
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_MODULE_LAYOUT), ==, 0);
+
+    /* Id 1 claims the free semaphore; id 0 and id 1 then see it held by 1. */
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(1)), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(0)), ==, 0x03);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(1)), ==, 0x03);
+    /* Writing 0 at a slot that does not hold it changes nothing. */
+    qtest_writeb(qts, IA64_PDH_SEMAPHORE_ADDR(0), 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(0)), ==, 0x03);
+    /* The holder frees it; the next reader (id 0) claims it. */
+    qtest_writeb(qts, IA64_PDH_SEMAPHORE_ADDR(1), 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(0)), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(1)), ==, 0x01);
+
+    /* Reset: no processor checked in, semaphore free, POST 0; NVM kept. */
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_CHECKIN), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_SCRATCH0), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST),
+                    ==, 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(1)), ==, 0);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_NVM_BASE), ==,
+                    0x4e564d2054494e49ULL);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -smp 1 -m 256M -S");
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_PRESENCE_BASE +
+                                IA64_PDH_PRESENCE), ==, 0xfe);
+    qtest_quit(qts);
+
+    /* The SDV board has none of these devices. */
+    qts = qtest_init("-machine 460gx -m 256M -S");
+    qtest_writeq(qts, IA64_PDH_NVM_BASE, 0x4e564d2054494e49ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_NVM_BASE), ==, 0);
+    qtest_writeb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST, 0x13);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST),
+                    ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * Unmodelled PDH and SBA offsets are reported once per offset and direction,
+ * so a firmware loop that polls one cannot fill the log.
+ */
+static void test_pdh_unimp_logged_once(void)
+{
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *log = NULL;
+    g_autofree char *quoted_log = NULL;
+    g_autofree char *contents = NULL;
+    g_autoptr(GError) error = NULL;
+    g_auto(GStrv) lines = NULL;
+    const uint64_t rtc = IA64_PDH_DEV5B_BASE + 0x8000;
+    const uint64_t sba = IA64_SBA_CSR_BASE + 0x0100;
+    unsigned rtc_reads = 0, rtc_writes = 0, sba_reads = 0, sba_writes = 0;
+    QTestState *qts;
+    int i;
+
+    tmpdir = g_dir_make_tmp("ia64-vpc-unimp-XXXXXX", &error);
+    g_assert_no_error(error);
+    log = g_build_filename(tmpdir, "unimp.log", NULL);
+    quoted_log = g_shell_quote(log);
+
+    qts = qtest_initf("-machine zx1 -m 256M -S -d unimp -D %s", quoted_log);
+    for (i = 0; i < 1000; i++) {
+        g_assert_cmphex(qtest_readb(qts, rtc), ==, 0);
+        qtest_writeb(qts, rtc, i);
+        g_assert_cmphex(qtest_readq(qts, sba), ==, 0);
+        qtest_writeq(qts, sba, i);
+    }
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(log, &contents, NULL, &error));
+    lines = g_strsplit(contents, "\n", -1);
+    for (i = 0; lines[i] != NULL; i++) {
+        if (strstr(lines[i],
+                   "longspeak-pdh: unimplemented read at 0xff5b8000")) {
+            rtc_reads++;
+        } else if (strstr(lines[i],
+                          "longspeak-pdh: unimplemented write at 0xff5b8000")) {
+            rtc_writes++;
+        } else if (strstr(lines[i],
+                          "ia64-sba: unimplemented read at 0xfed00100")) {
+            sba_reads++;
+        } else if (strstr(lines[i],
+                          "ia64-sba: unimplemented write at 0xfed00100")) {
+            sba_writes++;
+        }
+    }
+    g_assert_cmpuint(rtc_reads, ==, 1);
+    g_assert_cmpuint(rtc_writes, ==, 1);
+    g_assert_cmpuint(sba_reads, ==, 1);
+    g_assert_cmpuint(sba_writes, ==, 1);
+
+    g_unlink(log);
+    g_rmdir(tmpdir);
+}
+
 /*
  * The HP zx1 Mercury (LBA) presents a second PCI root bus.  It is reached
  * through the single segment-0 ECAM window by bus-number dispatch in
@@ -6495,6 +6651,9 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/nvram/defaults", test_nvram_defaults);
     qtest_add_func("/ia64-vpc/lba/agp-capability", test_lba_agp_capability);
     qtest_add_func("/ia64-vpc/sba/ioc-identity", test_sba_ioc_identity);
+    qtest_add_func("/ia64-vpc/pdh/longspeak-map", test_pdh_longspeak_map);
+    qtest_add_func("/ia64-vpc/pdh/unimp-logged-once",
+                   test_pdh_unimp_logged_once);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",
                    test_mercury_config_dispatch);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);

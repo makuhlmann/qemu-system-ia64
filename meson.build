@@ -3635,6 +3635,7 @@ if have_system
     'hw/i386',
     'hw/i386/xen',
     'hw/i386/kvm',
+    'hw/ia64',
     'hw/ide',
     'hw/input',
     'hw/intc',

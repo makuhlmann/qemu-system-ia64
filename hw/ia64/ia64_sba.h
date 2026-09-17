@@ -28,6 +28,9 @@ struct IA64SBAState {
     HPZX1IOMMUFrontend fe;         /* adopted zx1 IOC frontend (ibase/.../TLB)  */
 
     uint64_t csr_base;             /* fixed chipset MMIO base (IA64_SBA_CSR_BASE) */
+    /* CSR offsets already reported as unimplemented, one bit per offset. */
+    unsigned long *unimp_read;
+    unsigned long *unimp_write;
 };
 
 /*

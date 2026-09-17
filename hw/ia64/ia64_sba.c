@@ -23,6 +23,8 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "qemu/bswap.h"
+#include "qemu/bitmap.h"
+#include "qemu/bitops.h"
 #include "qemu/log.h"
 #include "hw/ia64/ia64_sba.h"
 #include "hw/ia64/ia64_vpc_abi.h"
@@ -220,8 +222,16 @@ static MemTxResult ia64_sba_csr_read(void *opaque, hwaddr addr, uint64_t *data,
     }
 
     if (!ok) {
-        /* Unmodeled IOC registers read as zero (do not fault the guest). */
+        /*
+         * Unmodeled mio registers read as zero (do not fault the guest).
+         * Report each offset once: firmware polls some of them in loops.
+         */
         *data = 0;
+        if (!test_and_set_bit(addr, s->unimp_read)) {
+            qemu_log_mask(LOG_UNIMP, "ia64-sba: unimplemented read at 0x%"
+                          HWADDR_PRIx " (size %u)\n", s->csr_base + addr,
+                          size);
+        }
     }
     return MEMTX_OK;
 }
@@ -231,7 +241,9 @@ static MemTxResult ia64_sba_csr_write(void *opaque, hwaddr addr, uint64_t value,
 {
     IA64SBAState *s = opaque;
     HPSBAIOMMUPurge unmap = { 0 };
+    uint64_t ident;
     bool notify = false;
+    bool handled = false;
 
     (void)attrs;
     qemu_rec_mutex_lock(&s->iommu_lock);
@@ -246,6 +258,7 @@ static MemTxResult ia64_sba_csr_write(void *opaque, hwaddr addr, uint64_t value,
             reg_offset = base - IA64_SBA_IOC_FUNCTION_OFFSET;
             if (hp_zx1_iommu_frontend_reg_write(&s->fe, reg_offset, reg_value,
                                                 byte_enable, &result)) {
+                handled = true;
                 if (reg_offset == HP_ZX1_IOC_IOMMU_PCOM) {
                     if (result.purged) {
                         unmap = result.purge;
@@ -261,6 +274,13 @@ static MemTxResult ia64_sba_csr_write(void *opaque, hwaddr addr, uint64_t value,
     }
     qemu_rec_mutex_unlock(&s->iommu_lock);
 
+    /* The identity registers are read-only; other writes are unmodeled. */
+    if (!handled && !ia64_sba_identity_reg(addr & ~UINT64_C(7), &ident) &&
+        !test_and_set_bit(addr, s->unimp_write)) {
+        qemu_log_mask(LOG_UNIMP, "ia64-sba: unimplemented write at 0x%"
+                      HWADDR_PRIx " (size %u) value 0x%" PRIx64 "\n",
+                      s->csr_base + addr, size, value);
+    }
     if (notify) {
         ia64_sba_notify_unmap(s, &unmap);
     }
@@ -334,6 +354,8 @@ static void ia64_sba_realize(PCIDevice *dev, Error **errp)
 
     qemu_rec_mutex_init(&s->iommu_lock);
     ia64_sba_frontend_reset(s);
+    s->unimp_read = bitmap_new(IA64_SBA_CSR_SIZE);
+    s->unimp_write = bitmap_new(IA64_SBA_CSR_SIZE);
 
     /* IOC CSR block, exposed to the CPU at the fixed chipset base. */
     memory_region_init_io(&s->csr, OBJECT(s), &ia64_sba_csr_ops, s,
@@ -346,6 +368,14 @@ static void ia64_sba_realize(PCIDevice *dev, Error **errp)
                              "ia64-sba-dma", IA64_SBA_IOMMU_SIZE);
     address_space_init(&s->dma_as, MEMORY_REGION(&s->iommu), "ia64-sba-dma");
     pci_setup_iommu(pci_get_bus(dev), &ia64_sba_iommu_ops, s);
+}
+
+static void ia64_sba_exit(PCIDevice *dev)
+{
+    IA64SBAState *s = IA64_SBA(dev);
+
+    g_free(s->unimp_read);
+    g_free(s->unimp_write);
 }
 
 void ia64_sba_attach_bus(IA64SBAState *s, PCIBus *bus)
@@ -403,6 +433,7 @@ static void ia64_sba_class_init(ObjectClass *klass, const void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
     k->realize = ia64_sba_realize;
+    k->exit = ia64_sba_exit;
     k->vendor_id = 0x103c;              /* Hewlett-Packard */
     k->device_id = 0x122a;              /* zx1 mio IOC (function 1) */
     k->class_id = PCI_CLASS_BRIDGE_HOST;

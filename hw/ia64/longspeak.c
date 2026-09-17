@@ -22,6 +22,7 @@
 #include "hw/ia64/ia64_mercury.h"
 #include "hw/ia64/ia64_sba.h"
 #include "hw/ia64/ia64_iosapic.h"
+#include "longspeak_pdh.h"
 #include "system/address-spaces.h"
 #include "target/ia64/cpu.h"
 #include "ia64_vpc_internal.h"
@@ -75,6 +76,28 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
                                     MemoryRegion *pci_io, DeviceState *iosapic,
                                     Error **errp)
 {
+    DeviceState *pdh;
+    SysBusDevice *pdh_sbd;
+    int i;
+
+    /*
+     * The PDH devices Dillon decodes below the flash (NVM, SRAM, processor
+     * presence, POST byte, Dillon registers).  The HP firmware needs them
+     * from its first instructions; the project firmware does not use them.
+     */
+    pdh = qdev_new(TYPE_LONGSPEAK_PDH);
+    qdev_prop_set_uint32(pdh, "sockets", MACHINE(s)->smp.cpus);
+    pdh_sbd = SYS_BUS_DEVICE(pdh);
+    if (!sysbus_realize_and_unref(pdh_sbd, errp)) {
+        return false;
+    }
+    sysbus_mmio_map(pdh_sbd, LONGSPEAK_PDH_MMIO_NVM, IA64_PDH_NVM_BASE);
+    sysbus_mmio_map(pdh_sbd, LONGSPEAK_PDH_MMIO_SRAM, IA64_PDH_SRAM_BASE);
+    for (i = 0; i < LONGSPEAK_PDH_BLOCKS; i++) {
+        sysbus_mmio_map(pdh_sbd, LONGSPEAK_PDH_MMIO_BLOCK0 + i,
+                        LONGSPEAK_PDH(pdh)->block[i].base);
+    }
+
     s->sba_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_SBA);
     object_property_set_uint(OBJECT(s->sba_dev), "csr-base",
                              IA64_SBA_CSR_BASE, &error_abort);
