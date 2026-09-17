@@ -1186,7 +1186,13 @@ static void fw_shell_system_info(void)
     fw_shell_puts("\r\nFile systems:   ");
     fw_shell_put_uint64(mShellFileSystemCount);
     fw_shell_puts("\r\nNVRAM backing:  ");
-    fw_shell_puts("nonvolatile variable store");
+    if (fw_nvram_protection_reason() != NULL) {
+        fw_shell_puts("write-protected (the store ");
+        fw_shell_puts(fw_nvram_protection_reason());
+        fw_shell_puts("; not changed)");
+    } else {
+        fw_shell_puts("nonvolatile variable store");
+    }
     fw_shell_puts("\r\nDate and time:  ");
     fw_shell_show_date_time();
 }
@@ -1300,6 +1306,8 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
             if (status == EFI_SUCCESS) {
                 fw_shell_puts("BootOrder saved to NVRAM.\r\n");
                 fw_shell_show_boot_order();
+            } else if (status == EFI_WRITE_PROTECTED) {
+                fw_shell_puts("NVRAM is write-protected; not saved.\r\n");
             }
         }
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "bootnext")) {
@@ -1311,6 +1319,8 @@ static BOOLEAN fw_shell_dispatch(UINTN ArgumentCount, CHAR8 **Arguments)
                      EFI_INVALID_PARAMETER;
             if (status == EFI_SUCCESS) {
                 fw_shell_puts("BootNext saved to NVRAM.\r\n");
+            } else if (status == EFI_WRITE_PROTECTED) {
+                fw_shell_puts("NVRAM is write-protected; not saved.\r\n");
             }
         }
     } else if (fw_shell_ascii_equal_ci(Arguments[0], "boot")) {

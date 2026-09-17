@@ -197,6 +197,8 @@ UINT32 fw_graphics_height(VOID);
 void graphics_set_text_cursor(UINT16 Location, BOOLEAN Visible);
 const CHAR8 *fw_storage_description(BOOLEAN boot_device);
 UINT16 fw_handoff_boot_timeout(VOID);
+const CHAR8 *fw_nvram_protection_reason(VOID);
+void fw_nvram_confirm_reset(VOID);
 void fw_reset_cold(VOID);
 
 BOOLEAN fw_boot_shell_selftest(VOID);

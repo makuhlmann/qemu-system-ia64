@@ -8372,6 +8372,25 @@ FW_STATIC_ASSERT(sizeof(NVRAM_STORE) <= FW_NVRAM_RTC_OFFSET,
 static NVRAM_STORE *mNvramStore = (NVRAM_STORE *)mNvramImage;
 static BOOLEAN mNvramSelftestActive;
 
+/*
+ * What nvram_init found in the sector.  A store that is neither valid nor
+ * blank belongs to someone: another firmware, a newer build of this one, or
+ * a commit that stopped half way.  It is not reformatted behind the user's
+ * back: nothing is written to the sector (mNvramWriteProtected) until the
+ * user agrees to a reset at the prompt before the boot menu
+ * (fw_nvram_confirm_reset).
+ */
+#define FW_NVRAM_STORE_VALID        0U
+#define FW_NVRAM_STORE_BLANK        1U
+#define FW_NVRAM_STORE_NEWER        2U
+#define FW_NVRAM_STORE_DAMAGED      3U
+#define FW_NVRAM_STORE_UNRECOGNIZED 4U
+
+static UINT8 mNvramStoreState;
+static BOOLEAN mNvramWriteProtected;
+/* The sector's first bytes as found, for the prompt. */
+static UINT8 mNvramFoundHeader[8];
+
 #define mNvramVars (mNvramStore->vars)
 #define mNvramVarCount (mNvramStore->count)
 
@@ -8571,7 +8590,7 @@ static void fw_flash_program_sector(volatile UINT8 *flash, const UINT8 *data,
 
 static void nvram_commit(void)
 {
-    if (mNvramSelftestActive) {
+    if (mNvramSelftestActive || mNvramWriteProtected) {
         return;
     }
     fw_flash_program_sector((volatile UINT8 *)mRuntimeNvramFlash,
@@ -8585,6 +8604,24 @@ const UINT8 *fw_nvram_image(void)
                              : (const UINT8 *)(UINTN)FW_NVRAM_BASE;
 }
 
+static BOOLEAN nvram_slot_valid(const NVRAM_VARIABLE *var)
+{
+    if (var->valid > 1U || var->deleted > 1U) {
+        return 0;
+    }
+    if (!var->valid) {
+        return 1;
+    }
+    return var->name_len >= 2 * sizeof(CHAR16) &&
+           var->name_len <= sizeof(var->name) &&
+           (var->name_len & (sizeof(CHAR16) - 1U)) == 0 &&
+           var->name[var->name_len - 2U] == 0 &&
+           var->name[var->name_len - 1U] == 0 &&
+           var->data_size <= sizeof(var->data) &&
+           !(var->deleted && var->data_size != 0) &&
+           (var->attributes & ~EFI_VARIABLE_SUPPORTED_ATTRIBUTES) == 0;
+}
+
 static BOOLEAN nvram_store_valid(void)
 {
     UINTN i;
@@ -8595,44 +8632,39 @@ static BOOLEAN nvram_store_valid(void)
         return 0;
     }
     for (i = 0; i < mNvramVarCount; i++) {
-        NVRAM_VARIABLE *var = &mNvramVars[i];
-
-        if (var->valid > 1U || var->deleted > 1U) {
-            return 0;
-        }
-        if (!var->valid) {
-            continue;
-        }
-        if (var->name_len < 2 * sizeof(CHAR16) ||
-            var->name_len > sizeof(var->name) ||
-            (var->name_len & (sizeof(CHAR16) - 1U)) != 0 ||
-            var->name[var->name_len - 2U] != 0 ||
-            var->name[var->name_len - 1U] != 0 ||
-            var->data_size > sizeof(var->data) ||
-            (var->deleted && var->data_size != 0) ||
-            (var->attributes & ~EFI_VARIABLE_SUPPORTED_ATTRIBUTES) != 0) {
+        if (!nvram_slot_valid(&mNvramVars[i])) {
             return 0;
         }
     }
     return 1;
 }
 
-static void nvram_init(void)
+/* Erased flash (0xFF), or a store imported from a zero-filled file. */
+static BOOLEAN nvram_store_blank(void)
+{
+    const UINT8 *bytes = (const UINT8 *)mNvramStore;
+    UINTN i;
+
+    for (i = 1; i < sizeof(*mNvramStore); i++) {
+        if (bytes[i] != bytes[0]) {
+            return 0;
+        }
+    }
+    return bytes[0] == 0x00U || bytes[0] == 0xffU;
+}
+
+static void nvram_store_format(void)
+{
+    fw_set_mem(mNvramStore, sizeof(*mNvramStore), 0);
+    mNvramStore->magic = NVRAM_STORE_MAGIC;
+    mNvramStore->version = NVRAM_STORE_VERSION;
+}
+
+/* Variables without NON_VOLATILE do not survive a platform reset. */
+static void nvram_drop_volatile(void)
 {
     UINTN i;
 
-    mNvramSelftestActive = 0;
-    fw_copy_mem(mNvramImage, (const VOID *)(UINTN)FW_NVRAM_BASE,
-                sizeof(mNvramImage));
-    mNvramImageLoaded = 1;
-    if (!nvram_store_valid()) {
-        fw_set_mem(mNvramStore, sizeof(*mNvramStore), 0);
-        mNvramStore->magic = NVRAM_STORE_MAGIC;
-        mNvramStore->version = NVRAM_STORE_VERSION;
-        return;
-    }
-
-    /* Variables without NON_VOLATILE do not survive a platform reset. */
     for (i = 0; i < mNvramVarCount; i++) {
         if (mNvramVars[i].valid &&
             (mNvramVars[i].attributes & EFI_VARIABLE_NON_VOLATILE) == 0) {
@@ -8640,6 +8672,164 @@ static void nvram_init(void)
             mNvramVars[i].deleted = 0;
         }
     }
+}
+
+static void nvram_init(void)
+{
+    UINTN i;
+
+    mNvramSelftestActive = 0;
+    mNvramWriteProtected = 0;
+    fw_copy_mem(mNvramImage, (const VOID *)(UINTN)FW_NVRAM_BASE,
+                sizeof(mNvramImage));
+    mNvramImageLoaded = 1;
+    fw_copy_mem(mNvramFoundHeader, mNvramImage, sizeof(mNvramFoundHeader));
+
+    if (nvram_store_valid()) {
+        mNvramStoreState = FW_NVRAM_STORE_VALID;
+        nvram_drop_volatile();
+        return;
+    }
+    if (nvram_store_blank()) {
+        mNvramStoreState = FW_NVRAM_STORE_BLANK;
+        nvram_store_format();
+        return;
+    }
+
+    mNvramWriteProtected = 1;
+    if (mNvramStore->magic == NVRAM_STORE_MAGIC &&
+        mNvramStore->version == NVRAM_STORE_VERSION) {
+        /* Keep reading the slots that pass the checks. */
+        mNvramStoreState = FW_NVRAM_STORE_DAMAGED;
+        if (mNvramVarCount > NVRAM_VAR_MAX) {
+            mNvramVarCount = NVRAM_VAR_MAX;
+        }
+        for (i = 0; i < mNvramVarCount; i++) {
+            if (!nvram_slot_valid(&mNvramVars[i])) {
+                mNvramVars[i].valid = 0;
+                mNvramVars[i].deleted = 0;
+            }
+        }
+        nvram_drop_volatile();
+        return;
+    }
+    mNvramStoreState = mNvramStore->magic == NVRAM_STORE_MAGIC &&
+                       mNvramStore->version > NVRAM_STORE_VERSION ?
+                       FW_NVRAM_STORE_NEWER : FW_NVRAM_STORE_UNRECOGNIZED;
+    /* The sector keeps the store; this boot works from an empty copy. */
+    nvram_store_format();
+}
+
+/* Why the store is write-protected, or NULL when it is not. */
+const CHAR8 *fw_nvram_protection_reason(VOID)
+{
+    if (!mNvramWriteProtected) {
+        return NULL;
+    }
+    switch (mNvramStoreState) {
+    case FW_NVRAM_STORE_NEWER:
+        return "is from a newer firmware";
+    case FW_NVRAM_STORE_DAMAGED:
+        return "is damaged";
+    default:
+        return "is not recognized";
+    }
+}
+
+static void fw_nvram_put_hex_byte(UINT8 Value)
+{
+    static const CHAR8 hex[] = "0123456789ABCDEF";
+    CHAR8 text[4];
+
+    text[0] = hex[Value >> 4];
+    text[1] = hex[Value & 0x0fU];
+    text[2] = ' ';
+    text[3] = 0;
+    efi_conout_ascii(text);
+}
+
+/*
+ * Before the boot menu: when nvram_init could not read the store, show what
+ * the sector holds and ask whether to reset it.  y resets the store (the
+ * whole sector below the machine's defaults record) and ends the write
+ * protection; n, Enter or Esc keep the sector untouched for this boot.  The
+ * wait follows the boot menu's fallback timeout (firmware-boot-timeout; the
+ * store's own Timeout cannot be read): 0xFFFF waits for a key, and any other
+ * value answers N when it runs out.
+ */
+void fw_nvram_confirm_reset(VOID)
+{
+    CHAR8 ascii[sizeof(mNvramFoundHeader) + 1U];
+    const CHAR8 *reason = fw_nvram_protection_reason();
+    UINT16 timeout;
+    INTN seconds_left;
+    BOOLEAN reset = 0;
+    BOOLEAN answered = 0;
+    UINTN i;
+
+    if (reason == NULL) {
+        return;
+    }
+
+    efi_conout_ascii("\r\nNVRAM: the variable store at 0xFFF90000 ");
+    efi_conout_ascii(reason);
+    efi_conout_ascii(".\r\n       First bytes: ");
+    for (i = 0; i < sizeof(mNvramFoundHeader); i++) {
+        UINT8 byte = mNvramFoundHeader[i];
+
+        fw_nvram_put_hex_byte(byte);
+        ascii[i] = byte >= 0x20U && byte < 0x7fU ? (CHAR8)byte : '.';
+    }
+    ascii[i] = 0;
+    efi_conout_ascii("\"");
+    efi_conout_ascii(ascii);
+    efi_conout_ascii("\"\r\n"
+                     "       Nothing was written. Variables are read-only "
+                     "for this boot.\r\n"
+                     "       To keep the old contents, answer N and copy "
+                     "the nvram file.\r\n"
+                     "Reset the NVRAM variable store? All old contents are "
+                     "lost. [y/N] ");
+
+    timeout = fw_handoff_boot_timeout();
+    seconds_left = timeout == 0xffffU ? -1 : (INTN)timeout;
+    while (!answered && seconds_left != 0) {
+        UINTN sub;
+
+        /* Poll ~1 second (100 x 10 ms), as the boot menu does. */
+        for (sub = 0; sub < 100U && !answered; sub++) {
+            EFI_INPUT_KEY key;
+
+            if (fw_console_read_key(&key) != EFI_SUCCESS) {
+                (void)bs_stall(10000U);
+                continue;
+            }
+            if (key.UnicodeChar == 'y' || key.UnicodeChar == 'Y') {
+                reset = 1;
+                answered = 1;
+            } else if (key.UnicodeChar == 'n' || key.UnicodeChar == 'N' ||
+                       key.UnicodeChar == '\r' || key.ScanCode == EFI_SCAN_ESC) {
+                answered = 1;
+            }
+        }
+        if (seconds_left > 0) {
+            seconds_left--;
+        }
+    }
+
+    if (!reset) {
+        efi_conout_ascii(answered ? "N\r\n" : "N (timed out)\r\n");
+        efi_conout_ascii("NVRAM: the variable store stays write-protected "
+                         "for this boot.\r\n");
+        return;
+    }
+    efi_conout_ascii("y\r\n");
+    fw_set_mem(mNvramImage, FW_NVRAM_DEFAULTS_OFFSET, 0xff);
+    nvram_store_format();
+    mNvramWriteProtected = 0;
+    mNvramStoreState = FW_NVRAM_STORE_VALID;
+    nvram_commit();
+    efi_conout_ascii("NVRAM: the variable store was reset.\r\n");
 }
 
 static BOOLEAN fw_char16_eq_ascii_z(const CHAR16 *s, const char *ascii)
@@ -13419,6 +13609,10 @@ EFI_STATUS rs_set_variable(CHAR16 *VariableName, void *VendorGuid,
             !rs_variable_writable_after_exit(existing_attributes)) {
             return EFI_INVALID_PARAMETER;
         }
+        if (mNvramWriteProtected && !mNvramSelftestActive &&
+            (existing_attributes & EFI_VARIABLE_NON_VOLATILE) != 0) {
+            return EFI_WRITE_PROTECTED;
+        }
         if (have_firmware) {
             if (!have_nvram) {
                 for (i = 0; i < mNvramVarCount; i++) {
@@ -13461,6 +13655,10 @@ EFI_STATUS rs_set_variable(CHAR16 *VariableName, void *VendorGuid,
     }
     if (existing && Attributes != existing_attributes) {
         return EFI_INVALID_PARAMETER;
+    }
+    if (mNvramWriteProtected && !mNvramSelftestActive &&
+        (Attributes & EFI_VARIABLE_NON_VOLATILE) != 0) {
+        return EFI_WRITE_PROTECTED;
     }
 
     if (!have_nvram) {
@@ -15104,6 +15302,7 @@ static void fw_phase_boot(void)
      * BootOrder/removable-media path below.
      */
     fw_phase_post_summary();
+    fw_nvram_confirm_reset();
     fw_boot_menu_run();
     if (mBootServicesExited) {
         while (1) {
