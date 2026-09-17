@@ -421,8 +421,8 @@ UINTN                         mRuntimePciConfigEcam;
 /* MC146818 CMOS RTC index port; the data port is index + 1 (rework D8). */
 static UINTN                  mRuntimeRtc = LEGACY_IO_BASE + 0x70U;
 /*
- * The NVRAM sector's contents, kept in RAM: the variable store, the RTC
- * state and the machine's defaults record.  Read from the flash at init and
+ * The NVRAM sector's contents, kept in RAM: the variable store, the time
+ * zone record and the machine's defaults record.  Read from the flash at init and
  * programmed back through the flash's command interface on every commit
  * (mRuntimeNvramFlash is the sector itself, converted with the rest of the
  * runtime pointers).
@@ -5612,12 +5612,20 @@ EFI_STATUS rs_convert_pointer(UINTN DebugDisposition, VOID **Address);
 #define FW_RTC_STATE_MAGIC 0x54464f3436545249ULL /* "IRT64OFT" */
 #define FW_RTC_STATE_VERSION 1U
 
+/*
+ * The time zone record in the NVRAM sector.  The time itself lives in the
+ * CMOS clock, as on the boards: SetTime writes the clock, and the clock has
+ * no place for TimeZone and Daylight, so they are kept here.  Firmware
+ * before 2026-09-17 kept the clock as an offset from the CMOS time in
+ * OffsetSeconds and Nanosecond; both are now written as 0 and ignored, so
+ * an older build reads offset 0 from a record this one wrote.
+ */
 typedef struct {
     UINT64 Magic;
     UINT32 Version;
     UINT32 Reserved;
-    INT64 OffsetSeconds;
-    UINT32 Nanosecond;
+    INT64 OffsetSeconds;        /* reserved, 0 */
+    UINT32 Nanosecond;          /* reserved, 0 */
     INT16 TimeZone;
     UINT8 Daylight;
     UINT8 Pad;
@@ -5783,10 +5791,26 @@ static UINT8 fw_cmos_read(UINT8 Reg)
     return *(volatile UINT8 *)(mRuntimeRtc + 1U);
 }
 
+static void fw_cmos_write(UINT8 Reg, UINT8 Value)
+{
+    *(volatile UINT8 *)mRuntimeRtc = Reg;
+    *(volatile UINT8 *)(mRuntimeRtc + 1U) = Value;
+}
+
 static UINT64 fw_rtc_field(UINT8 Value, BOOLEAN Binary)
 {
     return Binary ? Value : (UINT64)(Value >> 4) * 10U + (Value & 0x0FU);
 }
+
+/* The register encoding of a value below 100 (fw_rtc_field's inverse). */
+static UINT8 fw_rtc_encode(UINT64 Value, BOOLEAN Binary)
+{
+    return Binary ? (UINT8)Value : (UINT8)(((Value / 10U) << 4) | (Value % 10U));
+}
+
+/* The years fw_rtc_read_seconds reads back from the two-digit year. */
+#define FW_RTC_YEAR_MIN 1980U
+#define FW_RTC_YEAR_MAX 2079U
 
 /*
  * Read the MC146818 CMOS calendar (ports 0x70/0x71, as on the i2000/SDV
@@ -5873,13 +5897,51 @@ static BOOLEAN fw_rtc_read_seconds(INT64 *Seconds)
     return 0;
 }
 
+/*
+ * Write a calendar time to the MC146818 clock: halt updates with register B's
+ * SET bit, store the fields in the data mode register B selects (binary or
+ * BCD, 12 or 24 hours, as fw_rtc_read_seconds reads them), then release SET.
+ * The century goes to 32h, where the clock keeps it.
+ */
+static void fw_rtc_write_time(const EFI_TIME *Time, INT64 Seconds)
+{
+    UINT8 reg_b = fw_cmos_read(0x0BU);
+    BOOLEAN binary = (reg_b & 0x04U) != 0;
+    BOOLEAN hours24 = (reg_b & 0x02U) != 0;
+    INT64 days = Seconds / 86400;
+    UINT8 hour;
+
+    if (Seconds % 86400 < 0) {
+        days--;
+    }
+    if (hours24) {
+        hour = fw_rtc_encode(Time->Hour, binary);
+    } else {
+        hour = fw_rtc_encode(Time->Hour % 12U == 0U ? 12U : Time->Hour % 12U,
+                             binary);
+        if (Time->Hour >= 12U) {
+            hour |= 0x80U;
+        }
+    }
+
+    fw_cmos_write(0x0BU, (UINT8)(reg_b | 0x80U));
+    fw_cmos_write(0x00U, fw_rtc_encode(Time->Second, binary));
+    fw_cmos_write(0x02U, fw_rtc_encode(Time->Minute, binary));
+    fw_cmos_write(0x04U, hour);
+    /* 1970-01-01 was a Thursday; the register counts Sunday as 1. */
+    fw_cmos_write(0x06U, fw_rtc_encode((UINT64)(((days + 4) % 7 + 7) % 7) + 1U,
+                                       binary));
+    fw_cmos_write(0x07U, fw_rtc_encode(Time->Day, binary));
+    fw_cmos_write(0x08U, fw_rtc_encode(Time->Month, binary));
+    fw_cmos_write(0x09U, fw_rtc_encode(Time->Year % 100U, binary));
+    fw_cmos_write(0x32U, fw_rtc_encode(Time->Year / 100U, binary));
+    fw_cmos_write(0x0BU, (UINT8)(reg_b & ~0x80U));
+}
+
 EFI_STATUS rs_get_time(EFI_TIME *Time, EFI_TIME_CAPABILITIES *Capabilities)
 {
     FW_RTC_STATE *state = fw_rtc_state();
-    INT64 host_seconds;
-    INT64 offset_seconds = 0;
-    INT64 guest_seconds;
-    UINT32 nanosecond = 0;
+    INT64 seconds;
     INT16 timezone = 0;
     UINT8 daylight = 0;
 
@@ -5891,53 +5953,57 @@ EFI_STATUS rs_get_time(EFI_TIME *Time, EFI_TIME_CAPABILITIES *Capabilities)
         Capabilities->Accuracy = FW_TIME_ACCURACY_1E6_PPM;
         Capabilities->SetsToZero = 0;
     }
-    if (!fw_rtc_read_seconds(&host_seconds)) {
+    if (!fw_rtc_read_seconds(&seconds) ||
+        !efi_time_from_epoch(seconds, 0, Time)) {
         return EFI_DEVICE_ERROR;
     }
     if (fw_rtc_state_valid(state)) {
-        offset_seconds = state->OffsetSeconds;
-        nanosecond = state->Nanosecond;
         timezone = state->TimeZone;
         daylight = state->Daylight;
-    }
-    if ((offset_seconds > 0 &&
-         host_seconds > (INT64)0x7fffffffffffffffULL - offset_seconds) ||
-        (offset_seconds < 0 &&
-         host_seconds < (-0x7fffffffffffffffLL - 1) - offset_seconds)) {
-        return EFI_DEVICE_ERROR;
-    }
-    guest_seconds = host_seconds + offset_seconds;
-    if (!efi_time_from_epoch(guest_seconds, nanosecond, Time)) {
-        return EFI_DEVICE_ERROR;
     }
     Time->TimeZone = timezone;
     Time->Daylight = daylight;
     return EFI_SUCCESS;
 }
 
+/*
+ * SetTime writes the clock (the part keeps the time across a reset, and the
+ * machine starts it from -rtc) and commits the NVRAM only when TimeZone or
+ * Daylight change, or when a record from older firmware still carries a
+ * time offset.  The clock holds a two-digit year, which GetTime reads as
+ * 1980-2079; a year outside that range cannot be stored.
+ */
 EFI_STATUS rs_set_time(EFI_TIME *Time)
 {
     FW_RTC_STATE *state = fw_rtc_state();
     FW_RTC_STATE next;
-    INT64 host_seconds;
-    INT64 guest_seconds;
+    INT64 seconds;
+    BOOLEAN unchanged;
 
     if (Time == NULL || !efi_time_valid(Time)) {
         return EFI_INVALID_PARAMETER;
     }
-    if (!efi_time_to_epoch(Time, &guest_seconds) ||
-        !fw_rtc_read_seconds(&host_seconds)) {
+    if (Time->Year < FW_RTC_YEAR_MIN || Time->Year > FW_RTC_YEAR_MAX ||
+        !efi_time_to_epoch(Time, &seconds)) {
         return EFI_DEVICE_ERROR;
     }
-    if (guest_seconds < (-0x7fffffffffffffffLL - 1) + host_seconds) {
-        return EFI_DEVICE_ERROR;
-    }
+    fw_rtc_write_time(Time, seconds);
 
+    if (fw_rtc_state_valid(state)) {
+        unchanged = state->TimeZone == Time->TimeZone &&
+                    state->Daylight == Time->Daylight &&
+                    state->OffsetSeconds == 0 && state->Nanosecond == 0;
+    } else {
+        unchanged = Time->TimeZone == 0 && Time->Daylight == 0;
+    }
+    if (unchanged) {
+        return EFI_SUCCESS;
+    }
     next.Magic = FW_RTC_STATE_MAGIC;
     next.Version = FW_RTC_STATE_VERSION;
     next.Reserved = 0;
-    next.OffsetSeconds = guest_seconds - host_seconds;
-    next.Nanosecond = Time->Nanosecond;
+    next.OffsetSeconds = 0;
+    next.Nanosecond = 0;
     next.TimeZone = Time->TimeZone;
     next.Daylight = Time->Daylight;
     next.Pad = 0;
@@ -6040,6 +6106,10 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
     };
     EFI_TIME invalid = custom;
     EFI_TIME invalid_daylight = custom;
+    EFI_TIME out_of_range = custom;
+    EFI_TIME same;
+    INT64 set_seconds;
+    INT64 got_seconds;
     EFI_TIME alarm;
     EFI_TIME saved_alarm;
     BOOLEAN enabled;
@@ -6060,20 +6130,27 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
     mRtcSelftestActive = 1;
     invalid.Month = 13;
     invalid_daylight.Daylight = (UINT8)~EFI_TIME_DAYLIGHT_MASK;
+    out_of_range.Year = FW_RTC_YEAR_MAX + 1U;
+    /*
+     * SetTime writes the board's real clock, so write back the time just
+     * read (with another TimeZone and Daylight) rather than move it.
+     */
+    same = now;
+    same.TimeZone = 60;
+    same.Daylight = EFI_TIME_DAYLIGHT_MASK;
     if (rs_set_time(NULL) != EFI_INVALID_PARAMETER ||
         rs_set_time(&invalid) != EFI_INVALID_PARAMETER ||
         rs_set_time(&invalid_daylight) != EFI_INVALID_PARAMETER ||
+        rs_set_time(&out_of_range) != EFI_DEVICE_ERROR ||
         fw_rtc_state()->Daylight != saved_state.Daylight ||
-        rs_set_time(&custom) != EFI_SUCCESS ||
+        !efi_time_to_epoch(&same, &set_seconds) ||
+        rs_set_time(&same) != EFI_SUCCESS ||
         rs_get_time(&now, NULL) != EFI_SUCCESS ||
-        now.Year != custom.Year ||
-        now.Month != custom.Month ||
-        now.Day != custom.Day ||
-        now.Hour != custom.Hour ||
-        now.Minute != custom.Minute ||
-        now.Second < custom.Second ||
-        now.Nanosecond != custom.Nanosecond ||
-        now.Daylight != custom.Daylight) {
+        !efi_time_to_epoch(&now, &got_seconds) ||
+        got_seconds < set_seconds || got_seconds > set_seconds + 2 ||
+        now.Nanosecond != 0 ||
+        now.TimeZone != same.TimeZone ||
+        now.Daylight != same.Daylight) {
         *fw_rtc_state() = saved_state;
         mRtcSelftestActive = 0;
         return 0;

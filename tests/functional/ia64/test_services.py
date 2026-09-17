@@ -3,6 +3,7 @@
 
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+import struct
 from pathlib import Path
 
 from qemu_test import QemuSystemTest
@@ -45,6 +46,18 @@ class Ia64EfiServices(Ia64FirmwareTest):
         result = self.wait_ia64_suite(
             vm, "services", SERVICE_CASES, timeout=35.0)
         self.assertSetEqual(set(result.cases), SERVICE_CASES)
+        vm.shutdown()
+
+        # time-services set TimeZone 60 and Daylight 1: the NVRAM keeps them
+        # in the time zone record, with no clock offset (the clock is the RTC).
+        contents = nvram.read_bytes()
+        record = contents.find(b"IRT64OFT")
+        self.assertGreaterEqual(record, 0)
+        version, reserved, offset, nanosecond, zone, daylight, pad = \
+            struct.unpack_from("<IIqIhBB", contents, record + 8)
+        self.assertEqual((version, reserved, offset, nanosecond, pad),
+                         (1, 0, 0, 0, 0))
+        self.assertEqual((zone, daylight), (60, 1))
 
     def test_exit_boot_services(self):
         disk = Path(self.scratch_file("exitbs.img"))

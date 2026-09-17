@@ -1476,6 +1476,11 @@ static BOOLEAN test_time_services(EFI_SYSTEM_TABLE *SystemTable)
     EFI_TIME_CAPABILITIES capabilities;
     EFI_TIME now;
     EFI_TIME wake;
+    EFI_TIME set_time;
+    EFI_TIME out_of_range;
+    EFI_TIME readback;
+    UINT64 set_seconds;
+    UINT64 got_seconds;
     BOOLEAN enabled = 0;
     BOOLEAN pending = 0;
 
@@ -1505,7 +1510,32 @@ static BOOLEAN test_time_services(EFI_SYSTEM_TABLE *SystemTable)
         enabled || pending) {
         return 0;
     }
-    return 1;
+
+    /*
+     * SetTime writes the clock: write back the time just read, with a new
+     * TimeZone and Daylight, which GetTime then returns.  They stay in the
+     * NVRAM for test_services.py to find.  The clock holds a two-digit year,
+     * so a year it cannot hold is refused.
+     */
+    set_time = now;
+    set_time.Nanosecond = 0;
+    set_time.TimeZone = 60;
+    set_time.Daylight = 1;
+    out_of_range = set_time;
+    out_of_range.Year = 2080;
+    if (rs->SetTime(NULL) != EFI_INVALID_PARAMETER ||
+        rs->SetTime(&out_of_range) != EFI_DEVICE_ERROR ||
+        rs->SetTime(&set_time) != EFI_SUCCESS ||
+        rs->GetTime(&readback, NULL) != EFI_SUCCESS ||
+        readback.TimeZone != 60 || readback.Daylight != 1 ||
+        readback.Year != set_time.Year || readback.Month != set_time.Month) {
+        return 0;
+    }
+    set_seconds = ((set_time.Day * 24U + set_time.Hour) * 60U +
+                   set_time.Minute) * 60U + set_time.Second;
+    got_seconds = ((readback.Day * 24U + readback.Hour) * 60U +
+                   readback.Minute) * 60U + readback.Second;
+    return got_seconds >= set_seconds && got_seconds <= set_seconds + 2U;
 }
 
 static BOOLEAN variable_name_matches(const CHAR16 *Name, const CHAR16 *Want)

@@ -3,6 +3,7 @@
 
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from qemu_test import QemuSystemTest, wait_for_console_pattern
@@ -68,7 +69,9 @@ class Ia64BootShell(Ia64FirmwareTest):
 
         contents = nvram.read_bytes()
         self.assertIn("BootOrder".encode("utf-16le") + b"\0\0", contents)
-        self.assertIn(b"IRT64OFT", contents)
+        # The date and time live in the CMOS clock, not in the NVRAM: setting
+        # them with the time zone unchanged writes no time record.
+        self.assertNotIn(b"IRT64OFT", contents)
 
         # BootNext=Boot0000 boots before the menu, even with the default
         # Timeout (wait for the user), and is deleted first: the smoke app
@@ -79,16 +82,16 @@ class Ia64BootShell(Ia64FirmwareTest):
         self.wait_ia64_suite(vm, "smoke", SMOKE_CASES, timeout=60.0)
         vm.shutdown()
 
-        # Reopen the shell: the date/time/BootOrder settings persisted, and the
-        # one-shot BootNext was consumed by the boot above, so the menu shows.
+        # Reopen the shell: BootOrder persisted, and the one-shot BootNext was
+        # consumed by the boot above, so the menu shows.  The date set in the
+        # first run did not persist: QEMU starts the clock from the host clock
+        # (-rtc base=utc) at every start, and the firmware keeps no offset.
         vm = self.launch_ia64(
             name="shell-verify", media=disk, boot_timeout=None,
             machine_options=f"firmware-console=serial,nvram={nvram}")
         self._open_shell(vm)
-        self._command(vm, "date", "2024-02-29")
-        # The RTC keeps running from the value set above, so only the date and
-        # hour are stable across the intervening reboots.
-        self._command(vm, "time", "2024-02-29 12:")
+        self._command(vm, "date",
+                      datetime.now(timezone.utc).strftime("%Y-%m-%d"))
         self._command(vm, "bootorder", "BootOrder: Boot0000")
         self._command(vm, "bootnext", "BootNext is not set")
         vm.shutdown()
