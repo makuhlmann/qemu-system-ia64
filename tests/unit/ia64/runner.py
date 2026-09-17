@@ -47,7 +47,9 @@ class ExpectedExit:
 class MicroProgram:
     name: str
     bundles: tuple[EncodedBundle, ...]
-    entry: int
+    # None: no PC loader; the machine's own reset state enters the program
+    # (the loader resets the CPU before it sets the PC).
+    entry: int | None
     expected: StateExpectation
     completion: Completion
     data: tuple[MemoryInitializer, ...] = ()
@@ -100,7 +102,8 @@ def _loader_args(program: MicroProgram) -> list[str]:
             (f"loader,data=0x{data.value:x},data-len={data.size},"
              f"addr={data.address}"),
         ]
-    args += ["-device", f"loader,addr={program.entry},cpu-num=0"]
+    if program.entry is not None:
+        args += ["-device", f"loader,addr={program.entry},cpu-num=0"]
     return args
 
 

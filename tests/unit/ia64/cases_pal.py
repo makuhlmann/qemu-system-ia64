@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from .case import (CaseMetadata, CaseObservation, bind_cases)
+import os
+import struct
+import tempfile
+
+from . import encoding as _enc
+from .case import (CaseMetadata, CaseObservation, IA64Case, bind_cases)
 from .encoding import (
     IA64_CR_ITM,
     IA64_CR_ITV,
@@ -1146,6 +1151,111 @@ test_pal_fixed_addr_geographic_id = require_registers(
      "r9": 3, "r10": 0, "r11": 0}, entry=0x10,
     extra_args=("-global", "ia64-cpu.geographic-id=3"))
 
+# PALE_RESET calls SALE_ENTRY twice on every processor (SDM vol. 2 11.2.1,
+# 11.2.2): function RECOVERY_CHECK (3) with cr.iva = 0 and GR36 = PAL_RESET's
+# return address, then, after SAL returns there, function RESET (0) with the
+# PAL IVT in cr.iva and GR36 = the PAL authentication procedure.  A 64 KiB
+# flash image's SALE_ENTRY branches to RAM code that records the first call,
+# returns to GR36 through its uncacheable alias (bit 63 set, as the zx1 SAL_A
+# does), and on the second call loads both calls' values into registers.
+SALE_FLASH_BASE = 0xFFFF0000
+SALE_FLASH_SIZE = 0x10000
+SALE_ENTRY_ADDR = SALE_FLASH_BASE + 0x200
+SALE_CODE = 0x1000
+SALE_DATA = 0x2000
+SALE_PAL_PROC = 0xFF100000
+SALE_PAL_RESET_RETURN = 0xFF100020
+SALE_PAL_RESET_IVT = 0xFF300000
+
+
+def _sale_mii(address, slot0, slot1=None):
+    return (address, 0x01, slot0, _enc.nop_i() if slot1 is None else slot1,
+            _enc.nop_i())
+
+
+def _sale_two_call_bundles():
+    nop_m = _enc.nop_m()
+    bundles = [
+        # r2 = function; RECOVERY_CHECK goes to 0x1100, anything else 0x1200.
+        _sale_mii(0x1000, nop_m, _enc.extr_u(2, 20, 0, 8)),
+        _sale_mii(0x1010, nop_m, _enc.cmp_eq_imm(6, 7, 3, 2)),
+        (0x1020, 0x11, nop_m, _enc.nop_i(), _enc.br_cond(0x1020, 0x1100, qp=6)),
+        (0x1030, 0x11, nop_m, _enc.nop_i(), _enc.br_cond(0x1030, 0x1200)),
+        # First call: store GR20, GR36, cr.iva, GR33; return to GR36 | bit 63.
+        (0x1100, 0x05, *_enc.movl_mlx(3, SALE_DATA)[1:]),
+        _sale_mii(0x1110, _enc.st8(3, 20)),
+        _sale_mii(0x1120, nop_m, _enc.addl(3, 8, 3)),
+        _sale_mii(0x1130, _enc.st8(3, 36)),
+        _sale_mii(0x1140, nop_m, _enc.addl(3, 8, 3)),
+        _sale_mii(0x1150, _enc.mov_m_cr_gr(2, 2)),
+        _sale_mii(0x1160, _enc.st8(3, 2)),
+        _sale_mii(0x1170, nop_m, _enc.addl(3, 8, 3)),
+        _sale_mii(0x1180, _enc.st8(3, 33)),
+        (0x1190, 0x05, *_enc.movl_mlx(2, 1 << 63)[1:]),
+        _sale_mii(0x11a0, nop_m, _enc.or_reg(2, 2, 36)),
+        _sale_mii(0x11b0, nop_m, _enc.mov_br_gr(6, 2)),
+        (0x11c0, 0x11, nop_m, _enc.nop_i(), _enc.br_indirect(6)),
+        # Second call: r8-r10, r2 = first GR20, GR36, cr.iva, GR33;
+        # r11, r14, r15, r3 = the same now.
+        (0x1200, 0x05, *_enc.movl_mlx(3, SALE_DATA)[1:]),
+        _sale_mii(0x1210, _enc.ld8(8, 3)),
+        _sale_mii(0x1220, nop_m, _enc.addl(3, 8, 3)),
+        _sale_mii(0x1230, _enc.ld8(9, 3)),
+        _sale_mii(0x1240, nop_m, _enc.addl(3, 8, 3)),
+        _sale_mii(0x1250, _enc.ld8(10, 3)),
+        _sale_mii(0x1260, nop_m, _enc.addl(3, 8, 3)),
+        _sale_mii(0x1270, _enc.ld8(2, 3)),
+        _sale_mii(0x1280, nop_m, _enc.or_reg(11, 20, 0)),
+        _sale_mii(0x1290, nop_m, _enc.or_reg(14, 36, 0)),
+        _sale_mii(0x12a0, _enc.mov_m_cr_gr(15, 2)),
+        _sale_mii(0x12b0, nop_m, _enc.or_reg(3, 33, 0)),
+        (0x12c0, 0x11, nop_m, _enc.nop_i(), _enc.br_cond(0x12c0, 0x12c0)),
+    ]
+    return bundles
+
+
+def _sale_flash_image():
+    image = bytearray(b"\xff" * SALE_FLASH_SIZE)
+    fit = 0x100
+    image[fit:fit + 8] = b"_FIT_   "
+    struct.pack_into("<Q", image, fit + 8, 0x0100000000000001)
+    low, high = _enc.bundle_words(
+        *_enc.brl_cond_mlx(SALE_ENTRY_ADDR, SALE_CODE))
+    struct.pack_into("<QQ", image, SALE_ENTRY_ADDR - SALE_FLASH_BASE,
+                     low, high)
+    struct.pack_into("<Q", image, SALE_FLASH_SIZE - 32,
+                     (1 << 63) | (SALE_FLASH_BASE + fit))
+    struct.pack_into("<Q", image, SALE_FLASH_SIZE - 24,
+                     (1 << 63) | SALE_ENTRY_ADDR)
+    return bytes(image)
+
+
+SALE_TWO_CALL_EXPECTED = {
+    "ip": 0x12c0,
+    "r8": 3, "r9": SALE_PAL_RESET_RETURN, "r10": 0, "r2": 0,
+    "r11": 0, "r14": SALE_PAL_PROC, "r15": SALE_PAL_RESET_IVT, "r3": 0,
+}
+
+
+def _sale_entry_two_calls(qemu):
+    with tempfile.TemporaryDirectory(prefix="ia64-sale-") as tmpdir:
+        flash = os.path.join(tmpdir, "flash.bin")
+        with open(flash, "wb") as f:
+            f.write(_sale_flash_image())
+        _enc.run_program(qemu, _sale_two_call_bundles(),
+                         entry=None,
+                         expected=SALE_TWO_CALL_EXPECTED,
+                         name="sale_entry_two_calls",
+                         extra_args=("-bios", flash))
+
+
+test_sale_entry_two_calls = IA64Case(
+    name="sale_entry_two_calls", runner=_sale_entry_two_calls,
+    bundles=tuple(tuple(b) for b in _sale_two_call_bundles()),
+    expected=dict(SALE_TWO_CALL_EXPECTED),
+    metadata=CaseMetadata(required_features=frozenset({"alat:full"})),
+)
+
 test_pal_fixed_addr_reserved_arg = require_registers(
     "pal_fixed_addr_reserved_arg",
     pal_call_program(PAL_FIXED_ADDR, [(29, 1), (30, 0), (31, 0)]),
@@ -1771,6 +1881,7 @@ CASE_NAMES = (
     'pal_vm_tr_read_max_dtr',
     'pal_vm_tr_read_misaligned_buffer',
     'pal_vm_tr_read_rejects_first_non_tr',
+    'sale_entry_two_calls',
 )
 
 CASE_METADATA = {

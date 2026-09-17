@@ -746,11 +746,48 @@ void ia64_cpu_reset_to_boot_info(IA64CPU *cpu)
     cpu_reset(CPU(cpu));
 }
 
+static void ia64_cpu_sale_reset_call_work(CPUState *cs, run_on_cpu_data data)
+{
+    IA64CPU *cpu = IA64_CPU(cs);
+
+    (void)data;
+    cpu->sale_reset_call = true;
+    ia64_cpu_reset_to_boot_info(cpu);
+}
+
+/*
+ * SAL returned to PAL_RESET (GR36 of the RECOVERY_CHECK call): no recovery
+ * is needed.  PAL_RESET runs the first phase of the processor self-test,
+ * which leaves the processor state undefined, and calls SALE_ENTRY again
+ * with function RESET (SDM vol. 2 11.2.1, 11.2.2).  The emulation has no
+ * self-test to run, so the second call is a processor reset into that entry
+ * state.  The reset runs from the processor's work queue, outside the
+ * translation block that took the break.
+ */
+void ia64_cpu_pal_reset_return(CPUIA64State *env)
+{
+    CPUState *cs = env_cpu(env);
+
+    async_run_on_cpu(cs, ia64_cpu_sale_reset_call_work, RUN_ON_CPU_NULL);
+    cs->halted = 1;
+    cs->exception_index = EXCP_HLT;
+    cpu_loop_exit(cs);
+}
+
 static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
 {
     CPUIA64State *env = &cpu->env;
     const IA64BootInfo *info = &cpu->boot_info;
 
+    /*
+     * A board without a PAL_RESET return address makes the RESET call only
+     * (ia64_base.c: the vendor 460GX firmware's recovery-check pass does not
+     * run under emulation).
+     */
+    bool reset_call = cpu->sale_reset_call ||
+                      cpu->boot_info.raw_pal_reset_return == 0;
+
+    cpu->sale_reset_call = false;
     if (!cpu->boot_info_valid || !cpu->boot_info_pending) {
         return;
     }
@@ -765,17 +802,23 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
          * zeroed the whole env; only the non-zero pieces are set here.
          *
          * PSR.bn = 1 selects bank 1 for GR16-31.  Both banks are zero at
-         * this point, so setting the bit without a bank swap is consistent,
-         * and the bank-1 GR20 state parameter (function RESET) is 0 anyway.
+         * this point, so setting the bit without a bank swap is consistent;
+         * GR20 below is the bank-1 register.
+         *
+         * A reset makes the RECOVERY_CHECK call; SAL's return to
+         * raw_pal_reset_return makes the RESET call
+         * (ia64_cpu_pal_reset_return).
          */
         env->psr = IA64_PSR_BN;
         env->ip = info->firmware_entry;
+        env->gr[IA64_SALE_GR_STATE] = reset_call ?
+            IA64_SALE_FUNCTION_RESET : IA64_SALE_FUNCTION_RECOVERY_CHECK;
         /*
-         * IVA points at the capture IVT (SDM 11.2.2 has PAL provide an IVT
-         * before SALE_ENTRY; we synthesize one).  Zero keeps the historical
-         * no-IVT behavior for callers that leave it unset.
+         * On the RESET call IVA points at the capture IVT (SDM 11.2.2 has
+         * PAL provide an IVT before SALE_ENTRY; we synthesize one); on the
+         * RECOVERY_CHECK call it is 0.
          */
-        env->cr_iva = info->iva;
+        env->cr_iva = reset_call ? info->iva : 0;
         /* All 96 stacked registers accessible: CFM.sof = 96, rest 0. */
         env->cfm_sof = IA64_STACKED_GR_COUNT;
         env->rse.rse_invalid = 0;
@@ -787,7 +830,8 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
         env->cr_pta = 15ULL << 2;
         env->gr[IA64_SALE_GR_PROC_ID] = ia64_cpu_geographic_id(cpu);
         env->gr[IA64_SALE_GR_PAL_PROC] = info->raw_pal_proc;
-        env->gr[IA64_SALE_GR_PAL_RETURN] = info->raw_pal_auth;
+        env->gr[IA64_SALE_GR_PAL_RETURN] = reset_call ?
+            info->raw_pal_auth : info->raw_pal_reset_return;
         /* Keep the physical stacked file coherent with the virtual view
          * (rse_bol = 0, no rotation: GR32+n maps to rse_pgr[n]). */
         env->rse.rse_pgr[IA64_SALE_GR_PROC_ID - IA64_SALE_GR_FROM_PAL] =
@@ -795,7 +839,7 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
         env->rse.rse_pgr[IA64_SALE_GR_PAL_PROC - IA64_SALE_GR_FROM_PAL] =
             info->raw_pal_proc;
         env->rse.rse_pgr[IA64_SALE_GR_PAL_RETURN - IA64_SALE_GR_FROM_PAL] =
-            info->raw_pal_auth;
+            env->gr[IA64_SALE_GR_PAL_RETURN];
         env->interrupt.pal_halt_wake = info->powered_off;
         env->ar_fpsr = IA64_FPSR_DEFAULT;
         set_float_rounding_mode(float_round_nearest_even, &env->fp.fp_status);
@@ -916,6 +960,8 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
          * entry): its break instruction dispatches into the PAL emulation.
          */
         cpu->env.pal.pal_proc_reset_addr = cpu->boot_info.raw_pal_proc;
+        cpu->env.pal.pal_reset_return_addr =
+            cpu->boot_info.raw_pal_reset_return;
     }
     ia64_cpu_apply_boot_info(cpu);
     /*

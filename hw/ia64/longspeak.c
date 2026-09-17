@@ -255,6 +255,12 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
      */
     imc->pci_config_ecam = true;
     imc->i8042_default = false;
+    /*
+     * PALE_RESET calls SALE_ENTRY with function RECOVERY_CHECK first: the
+     * zx1 firmware rendezvouses its processors in that pass and SAL_B reads
+     * the record the pass leaves in the PDH SRAM (ref sec 5.3, sec 6).
+     */
+    imc->sale_recovery_check = true;
     imc->map_low_ram = longspeak_map_low_ram;
     imc->build_chipset = longspeak_build_chipset;
     imc->wire_intx = longspeak_wire_intx;

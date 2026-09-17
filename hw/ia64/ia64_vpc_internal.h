@@ -114,6 +114,14 @@ struct IA64VpcMachineClass {
      */
     const uint8_t *processor_ids;
     unsigned int nprocessor_ids;
+    /*
+     * PALE_RESET calls SALE_ENTRY twice on this board, the first time with
+     * function RECOVERY_CHECK (SDM vol. 2 11.2.2).  The zx1 firmware needs
+     * the call: it rendezvouses its processors there.  The vendor 460GX
+     * firmware's recovery-check pass does not complete under emulation, so
+     * that board makes the RESET call only -- see ia64_base.c's boot info.
+     */
+    bool sale_recovery_check;
 
     /* Board-specific configuration checks; NULL = none. */
     bool (*validate)(IA64VpcMachineState *s, Error **errp);

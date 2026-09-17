@@ -686,6 +686,7 @@ pal_debug_info
 pal_debug_info_reserved_arg
 pal_fixed_addr
 pal_fixed_addr_geographic_id
+sale_entry_two_calls
 pal_fixed_addr_reserved_arg
 pal_firmware_register_accepts_record
 pal_firmware_register_rejects_short_record

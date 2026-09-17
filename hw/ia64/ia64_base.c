@@ -109,6 +109,8 @@
  */
 #define IA64_PAL_ROM_BASE         IA64_U64(0x00000000ff100000)
 #define IA64_PAL_ROM_SIZE         0x1000
+/* PAL_RESET's return address for SAL's RECOVERY_CHECK call, in that ROM. */
+#define IA64_PAL_RESET_RETURN     (IA64_PAL_ROM_BASE + 0x20)
 /*
  * The reset IVT: a 32 KiB-aligned interruption vector table whose every
  * bundle is a branch-to-self, pointed to by cr.iva in the SALE_ENTRY entry
@@ -2290,10 +2292,11 @@ static void ia64_vpc_map_lsapic(IA64VpcMachineState *s)
  * FF00_0000-FFFF_FFFF).  The flash decodes at its top; below it, nothing on
  * the real boards answers.  The machine plants two things there, because it
  * plays PAL (PAL is emulated, so its entry and its reset IVT have to exist
- * somewhere): the PAL emulation ROM at FF10_0000, whose 32-byte stub is the
- * PAL procedure entry handed to SAL in GR34/GR36, and the reset IVT at
- * FF30_0000, cr.iva at SALE_ENTRY.  Both are read-only and present for every
- * firmware.
+ * somewhere): the PAL emulation ROM at FF10_0000, whose first 32-byte stub
+ * is the PAL procedure entry handed to SAL in GR34 (and in GR36 on the RESET
+ * call) and whose second is PAL_RESET's return address, GR36 on the
+ * RECOVERY_CHECK call; and the reset IVT at FF30_0000, cr.iva at the RESET
+ * call.  Both are read-only and present for every firmware.
  */
 static bool ia64_vpc_map_firmware_address_space(IA64VpcMachineState *s,
                                                 Error **errp)
@@ -3429,10 +3432,26 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                  * (GR34; GR36's authentication procedure lands on the same
                  * dispatcher and returns not-implemented for unknown
                  * indices).  SAL_B stashes this in bank-0 GR18 and uses it
-                 * for every static PAL call.
+                 * for every static PAL call.  The RECOVERY_CHECK call
+                 * offers the same full set, not the reduced one SDM vol. 2
+                 * 11.2.2 names (the SDV's SAL_A calls PAL_PLATFORM_ADDR
+                 * there, which is in it).
                  */
                 .raw_pal_proc = IA64_PAL_ROM_BASE,
                 .raw_pal_auth = IA64_PAL_ROM_BASE,
+                /*
+                 * PAL_RESET's return address for the RECOVERY_CHECK call,
+                 * on the boards that make it.  0 = this board calls
+                 * SALE_ENTRY once, with function RESET: the vendor 460GX
+                 * firmware's recovery-check pass initializes the DRAM,
+                 * resets the platform itself and then spins in a software
+                 * delay loop of its RAM-resident recovery module, so it
+                 * never reaches its boot manager
+                 * (plans/phase6-zx1-real-firmware-boot.md session 2).
+                 */
+                .raw_pal_reset_return =
+                    IA64_VPC_MACHINE_GET_CLASS(s)->sale_recovery_check ?
+                    IA64_PAL_RESET_RETURN : 0,
                 /*
                  * Every processor leaves reset together and runs SAL_A,
                  * which arbitrates the BSP through the SAC's write-once
@@ -3475,20 +3494,27 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
 
 
 /*
- * The PAL procedure entry stub, PAL_COPY_PAL's copy of it included
- * (target/ia64/arch/pal.c pal_copy_pal):
+ * The PAL emulation ROM's content.  At +0x00 the PAL procedure entry stub,
+ * PAL_COPY_PAL's copy of it included (target/ia64/arch/pal.c pal_copy_pal):
  *   break.m 0x100000 ;;  br.many b0 ;;
  * The translator services the break through ia64_pal_dispatch() when the
  * bundle sits at a recognized PAL entry address (env->pal.pal_proc_reset_addr,
- * seeded from IA64BootInfo.raw_pal_proc on every reset, or the copy).  It is
- * the PAL emulation ROM's content.
+ * seeded from IA64BootInfo.raw_pal_proc on every reset, or the copy).
+ * At +0x20 PAL_RESET's return address (IA64_PAL_RESET_RETURN):
+ *   break.m 0x100007 ;;  br.few . ;;
+ * The translator turns the break at that address into the second SALE_ENTRY
+ * call (ia64_cpu_pal_reset_return); the branch to itself is never reached.
  */
 
-static const uint8_t ia64_pal_stub[32] = {
+static const uint8_t ia64_pal_stub[64] = {
     0x0a, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
     0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x08, 0x00, 0x80, 0x00,
+    0x0a, 0x38, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+    0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
 };
 
 /*

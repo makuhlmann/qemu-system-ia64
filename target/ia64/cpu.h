@@ -563,7 +563,17 @@ typedef enum IA64SaleEntryRegisterIndex {
     IA64_SALE_GR_PAL_PROC = 34,   /* PAL procedure call address */
     IA64_SALE_GR_SELF_TEST = 35,  /* self-test state parameter */
     IA64_SALE_GR_PAL_RETURN = 36, /* PAL return / auth proc address */
+    IA64_SALE_GR_SELF_TEST_CONTROL = 37, /* self-test control word */
 } IA64SaleEntryRegisterIndex;
+
+/*
+ * SALE_ENTRY state parameter (bank-1 GR20, SDM vol. 2 11.2.2.1): function in
+ * bits 7:0, status in bits 15:8.  PALE_RESET calls SALE_ENTRY twice: first
+ * RECOVERY_CHECK, and after SAL returns to GR36, RESET.
+ */
+#define IA64_SALE_GR_STATE              20
+#define IA64_SALE_FUNCTION_RESET        0
+#define IA64_SALE_FUNCTION_RECOVERY_CHECK 3
 
 typedef enum IA64FirmwareDebugRegisterIndex {
     IA64_FW_DEBUG_GR_HANDLER = 16,
@@ -1678,16 +1688,24 @@ typedef struct IA64BootInfo {
      * Real-firmware entry (machine realfw mode): instead of the project
      * firmware's synthetic entry state, enter at firmware_entry with the
      * architected PALE_RESET exit state for a healthy normal cold boot
-     * (SDM Vol.2 rev 1.1 sec 11.2.2): GR20 = SALE_ENTRY state parameter
-     * (function RESET = 0), GR32 = 0 (entered from PALE_RESET),
-     * GR33 = geographic processor id, GR34 = PAL_PROC call address,
-     * GR35 = self-test state (0 = healthy), GR36 = PAL auth proc address,
-     * CFM.sof = 96, AR.RSC = 0, PSR = {bn=1}, DCR = 0.
+     * (SDM Vol.2 rev 1.1 sec 11.2.2), twice: GR20 = SALE_ENTRY state
+     * parameter (function RECOVERY_CHECK = 3, then RESET = 0), GR32 = 0
+     * (entered from PALE_RESET), GR33 = geographic processor id, GR34 =
+     * PAL_PROC call address, GR35 = self-test state (0 = healthy), GR36 =
+     * raw_pal_reset_return on the first call and the PAL authentication
+     * procedure on the second, GR37 = 0 (no self-test control), CFM.sof = 96,
+     * AR.RSC = 0, PSR = {bn=1}, DCR = 0, cr.iva = 0 on the first call and
+     * iva on the second.
      */
     bool raw_entry;
     /* GR33 is the processor's geographic id: ia64_cpu_geographic_id(). */
     uint64_t raw_pal_proc;  /* GR34 */
-    uint64_t raw_pal_auth;  /* GR36 */
+    uint64_t raw_pal_auth;  /* GR36, RESET call */
+    /*
+     * GR36 on the RECOVERY_CHECK call: PAL_RESET's return address.  Its
+     * break 0x100007 makes the second SALE_ENTRY call.
+     */
+    uint64_t raw_pal_reset_return;
 } IA64BootInfo;
 
 struct ArchCPU {
@@ -1698,6 +1716,11 @@ struct ArchCPU {
     IA64FirmwareDebugState firmware_debug;
     bool boot_info_valid;
     bool boot_info_pending;
+    /*
+     * Set only between SAL's return to PAL_RESET and the reset that makes
+     * the second SALE_ENTRY call (function RESET); never migrated.
+     */
+    bool sale_reset_call;
     bool alat_full;
     /*
      * The processor's geographic id on its bus ("geographic-id"): the board
@@ -1725,6 +1748,7 @@ static inline uint64_t ia64_cpu_geographic_id(const IA64CPU *cpu)
 
 void ia64_cpu_set_boot_info(IA64CPU *cpu, const IA64BootInfo *info);
 void ia64_cpu_reset_to_boot_info(IA64CPU *cpu);
+G_NORETURN void ia64_cpu_pal_reset_return(CPUIA64State *env);
 
 /*
  * Model-dependent PAL response data.  Rather than sprinkling is_montecito /

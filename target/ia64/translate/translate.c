@@ -126,7 +126,12 @@ static bool ia64_instruction_address_matches_physical_entry(CPUIA64State *env,
     uint32_t rid;
 
     if (!(env->psr & IA64_PSR_IT)) {
-        return address == entry_pa;
+        /*
+         * Bit 63 of a physical address selects the uncacheable alias of the
+         * same location (SDM vol. 2 4.4.6); SAL_A returns to PAL_RESET
+         * through it.
+         */
+        return (address & ~IA64_PHYS_UC_BIT) == entry_pa;
     }
 
     /*
@@ -184,6 +189,14 @@ bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address)
     return env->pal.pal_proc_copy_valid &&
            ia64_instruction_address_matches_physical_entry(
                env, address, env->pal.pal_proc_copy_addr);
+}
+
+/* SAL's return to PAL_RESET after the RECOVERY_CHECK call (break 0x100007). */
+bool ia64_is_pal_reset_return_break(CPUIA64State *env, uint64_t address)
+{
+    return env->pal.pal_reset_return_addr != 0 &&
+           ia64_instruction_address_matches_physical_entry(
+               env, address, env->pal.pal_reset_return_addr);
 }
 
 bool ia64_is_sal_runtime_break(CPUIA64State *env, uint64_t address,

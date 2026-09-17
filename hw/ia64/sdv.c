@@ -458,6 +458,15 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
      */
     imc->i8042_default = true;
     imc->legacy_com1_console = true;
+    /*
+     * imc->sale_recovery_check stays false: PALE_RESET makes the RESET call
+     * only on this board.  The vendor firmware's recovery-check pass sizes
+     * and initializes the DRAM, hands the result to the next pass through
+     * the SAC (see ia64_460gx_reset), resets the platform, and the pass
+     * after the reset stalls in a software delay loop of its RAM-resident
+     * recovery module -- 30 minutes with no further progress and no boot
+     * manager (plans/phase6-zx1-real-firmware-boot.md session 2).
+     */
     imc->processor_ids = sdv_processor_ids;
     imc->nprocessor_ids = ARRAY_SIZE(sdv_processor_ids);
     imc->validate = sdv_validate;

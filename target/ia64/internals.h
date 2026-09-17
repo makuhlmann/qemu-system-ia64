@@ -99,6 +99,8 @@ typedef struct IA64PalState {
      * PAL does.
      */
     uint64_t pal_proc_reset_addr;
+    /* PAL_RESET's return address SAL returns to after RECOVERY_CHECK. */
+    uint64_t pal_reset_return_addr;
     bool pal_proc_copy_valid;
     uint64_t pal_proc_copy_addr;
     uint64_t pal_interrupt_block_addr;

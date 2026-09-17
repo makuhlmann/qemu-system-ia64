@@ -101,6 +101,19 @@ fw_fit_pal:
     .proc fw_flash_entry
     .explicit
 fw_flash_entry:
+    /*
+     * PALE_RESET calls SALE_ENTRY twice (SDM vol. 2 11.2.1): first with
+     * function RECOVERY_CHECK (3) in bank-1 GR20, then with RESET (0).  This
+     * firmware has no recovery to make: return to PAL_RESET through GR36 at
+     * once, before anything is touched.
+     */
+    dep r2 = r20, r0, 0, 8
+    ;;
+    cmp.eq p6, p7 = 3, r2
+    mov b6 = r36
+    ;;
+(p6) br.cond.sptk.few b6
+    ;;
     bsw.0
     ;;
     /*

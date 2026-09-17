@@ -809,6 +809,10 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             ia64_gen_raise_exception(IA64_EXCP_BREAK, insn->address,
                                       op->immediate, insn->slot);
             return IA64_GEN_NORETURN;
+        } else if (op->auxiliary1 == 0 && op->immediate == 0x100007 &&
+                   ia64_is_pal_reset_return_break(ctx->env, insn->address)) {
+            gen_helper_pal_reset_return(tcg_env);
+            return IA64_GEN_NORETURN;
         } else if (op->immediate == 0x100001) {
             gen_helper_fpswa_dispatch(tcg_env);
         } else if ((op->immediate & 0x100000) &&
