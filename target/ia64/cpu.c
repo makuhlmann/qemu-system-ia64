@@ -948,7 +948,7 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.pal.pal_proc_copy_valid = false;
     cpu->env.pal.pal_proc_copy_addr = 0;
     cpu->env.pal.pal_interrupt_block_addr = IA64_LOCAL_SAPIC_PA;
-    cpu->env.pal.pal_io_block_addr = IA64_PAL_IO_BLOCK_PA;
+    cpu->env.pal.pal_io_block_addr = icc->pal->io_block_pa;
     /*
      * The no-firmware entry state stands in for a firmware that has
      * registered, on every reset; a firmware entry leaves this zero.
@@ -1088,6 +1088,7 @@ static const TCGCPUOps ia64_tcg_ops = {
 
 static const IA64PalProfile ia64_pal_profile_madison = {
     .freq_base_hz = 100000000ULL,
+    .io_block_pa = IA64_PAL_IO_BLOCK_ITANIUM2,
     .proc_ratio_num = 16, .proc_ratio_den = 1,   /* 1.6 GHz */
     .bus_ratio_num = 4,   .bus_ratio_den = 1,     /* 400 MHz */
     .itc_ratio_num = 16,  .itc_ratio_den = 1,     /* ITC at the core clock */
@@ -1129,6 +1130,7 @@ static const IA64PalProfile ia64_pal_profile_madison = {
 
 static const IA64PalProfile ia64_pal_profile_montecito = {
     .freq_base_hz = 100000000ULL,
+    .io_block_pa = IA64_PAL_IO_BLOCK_ITANIUM2,
     .proc_ratio_num = 16, .proc_ratio_den = 1,    /* 1.6 GHz */
     .bus_ratio_num = 16,  .bus_ratio_den = 3,      /* 533.33 MHz */
     .itc_ratio_num = 16,  .itc_ratio_den = 1,      /* ITC at the core clock */
@@ -1199,6 +1201,7 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
  */
 static const IA64PalProfile ia64_pal_profile_merced = {
     .freq_base_hz = 100000000ULL,
+    .io_block_pa = IA64_PAL_IO_BLOCK_MERCED,
     .proc_ratio_num = 8,  .proc_ratio_den = 1,     /* 800 MHz */
     .bus_ratio_num = 4,   .bus_ratio_den = 3,       /* 133.33 MHz */
     .itc_ratio_num = 8,   .itc_ratio_den = 1,       /* ITC at the core clock

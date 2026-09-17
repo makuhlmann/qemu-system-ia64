@@ -15,6 +15,7 @@
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "qom/object.h"
+#include "target/ia64/cpu.h"
 
 OBJECT_DECLARE_SIMPLE_TYPE(IA64PCIState, IA64_PCI_HOST_BRIDGE)
 
@@ -27,6 +28,9 @@ struct IA64PCIState {
     bool low_window_mapped;
     MemoryRegion pci_io;
     MemoryRegion pci_io_sparse;
+    /* The same window at the architected I/O block (see realize). */
+    MemoryRegion pci_io_block;
+    MemoryRegion pci_io_block_sparse;
     MemoryRegion pci_config;
     /* Map the segment-0 ECAM window; a chipset with CF8/CFC only has none. */
     bool ecam;
@@ -369,6 +373,33 @@ static void ia64_pci_realize(DeviceState *dev, Error **errp)
                                         IA64_PCI_IO_BASE +
                                         IA64_PCI_IO_SPARSE_SKIP,
                                         &s->pci_io_sparse, 1);
+    /*
+     * The I/O port window answers at the processor's architected I/O block as
+     * well -- the top 64 MB of its implemented physical address space, which
+     * is IA64_PCI_IO_BASE itself on a 44-bit Merced but 3_FFFF_FC00_0000 on a
+     * 50-bit Itanium 2.  PAL_PLATFORM_ADDR names that address (see
+     * ia64_pal_io_block_pa), and the HP zx1 firmware sets it and then talks to
+     * its console UART through it.  The project firmware keeps publishing
+     * IA64_PCI_IO_BASE, so no guest-visible address moves.
+     */
+    if (first_cpu != NULL) {
+        uint64_t block =
+            ia64_env_cpu_class(cpu_env(first_cpu))->pal->io_block_pa;
+
+        if (block != IA64_PCI_IO_BASE) {
+            memory_region_init_alias(&s->pci_io_block, OBJECT(dev),
+                                     "pci-io-block", &s->pci_io, 0,
+                                     IA64_PCI_IO_SIZE);
+            memory_region_init_alias(&s->pci_io_block_sparse, OBJECT(dev),
+                                     "pci-io-block-sparse", &s->pci_io_sparse,
+                                     0, IA64_PCI_IO_SPARSE_SIZE);
+            memory_region_add_subregion(get_system_memory(), block,
+                                        &s->pci_io_block);
+            memory_region_add_subregion_overlap(get_system_memory(),
+                                                block + IA64_PCI_IO_SPARSE_SKIP,
+                                                &s->pci_io_block_sparse, 1);
+        }
+    }
     if (s->ecam) {
         memory_region_add_subregion(get_system_memory(),
                                     IA64_PCI_CONFIG_BASE, &s->pci_config);

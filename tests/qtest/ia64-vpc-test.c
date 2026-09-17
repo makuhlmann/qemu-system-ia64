@@ -1879,6 +1879,50 @@ static uint32_t assert_geographic_id(QTestState *qts, int64_t cpu_index)
     }
 }
 
+/*
+ * PAL_PLATFORM_ADDR names the top 64 MB of the processor's architectural
+ * physical address space as the I/O port block -- FFF_FC00_0000 on Merced's
+ * 44 bits, 3_FFFF_FC00_0000 on Itanium 2's 50 -- and the vendor zx1 firmware
+ * sets the Itanium 2 one and then uses it.  The machine answers there as well
+ * as at IA64_PCI_IO_BASE, which is what the project firmware publishes.
+ */
+#define IA64_IO_BLOCK_ITANIUM2 0x0003fffffc000000ULL
+
+static void test_io_block_window(void)
+{
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    const uint64_t index = ia64_sparse_io_offset(0x70);
+    const uint64_t data = ia64_sparse_io_offset(0x71);
+
+    /* CMOS byte 0x0E is plain RAM in the RTC: write it through one window. */
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x0e);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + data, 0x5a);
+
+    /* The architected I/O block reaches the same ports. */
+    qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + index, 0x0e);
+    g_assert_cmphex(qtest_readb(qts, IA64_IO_BLOCK_ITANIUM2 + data), ==, 0x5a);
+
+    qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + index, 0x0e);
+    qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + data, 0xa5);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x0e);
+    g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE + data), ==, 0xa5);
+    qtest_quit(qts);
+
+    /*
+     * A Merced board's I/O block is IA64_PCI_IO_BASE itself, so there is no
+     * second window: the Itanium 2 address decodes nothing.
+     */
+    qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x0e);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + data, 0x5a);
+    /* Nothing decodes there, so a write through it reaches no port. */
+    qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + index, 0x0e);
+    qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + data, 0xa5);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x0e);
+    g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE + data), ==, 0x5a);
+    qtest_quit(qts);
+}
+
 static void test_cpu_geographic_ids(void)
 {
     QTestState *qts;
@@ -6747,6 +6791,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ahci/off-default", test_ahci_off_default);
     qtest_add_func("/ia64-vpc/ahci/on", test_ahci_on);
     qtest_add_func("/ia64-vpc/cpu/geographic-ids", test_cpu_geographic_ids);
+    qtest_add_func("/ia64-vpc/cpu/io-block-window", test_io_block_window);
     qtest_add_func("/ia64-vpc/cpu/merced", test_cpu_merced);
     qtest_add_func("/ia64-vpc/cpu/itanium-alias", test_cpu_itanium_alias);
     qtest_add_func("/ia64-vpc/nvram/defaults-options",

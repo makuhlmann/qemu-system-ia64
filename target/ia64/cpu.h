@@ -181,10 +181,21 @@
  */
 #define IA64_FW_REGION7_DIRECTMAP_SIZE 0x0000000020000000ULL
 #define IA64_LOCAL_SAPIC_PA   IA64_LOCAL_SAPIC_BASE
-/* The architected I/O block: top 64 MB of the 44-bit PA space.  Matches the
- * machine's IA64_PCI_IO_BASE so PAL_PLATFORM_ADDR agrees with the EFI
- * EfiMemoryMappedIOPortSpace descriptor (rework D6/D10). */
-#define IA64_PAL_IO_BLOCK_PA  0x00000ffffc000000ULL
+/*
+ * The architected I/O block: the top 64 MB of the processor's *implemented*
+ * physical address space, so it moves with the model -- FFF_FC00_0000 on
+ * Merced's 44 bits, 3_FFFF_FC00_0000 on Itanium 2's 50.  The HP zx1 firmware
+ * asks PAL_PLATFORM_ADDR for the Itanium 2 address (SAL_B, PAL call 0x10 with
+ * 0x8003_FFFF_FC00_0000), and the machine decodes its I/O port window there as
+ * well as at IA64_PCI_IO_BASE, which is the Merced address the project
+ * firmware publishes as the EFI EfiMemoryMappedIOPortSpace descriptor.
+ */
+#define IA64_PAL_IO_BLOCK_PA(pa_bits) ((1ULL << (pa_bits)) - (64ULL << 20))
+/* Merced implements 44 physical address bits, Itanium 2 implements 50. */
+#define IA64_PAL_IO_BLOCK_MERCED \
+    IA64_PAL_IO_BLOCK_PA(IA64_MERCED_IMPL_PA_BITS)
+#define IA64_PAL_IO_BLOCK_ITANIUM2 \
+    IA64_PAL_IO_BLOCK_PA(IA64_IMPL_PA_BITS)
 
 #define IA64_SAPIC_LID_ID_SHIFT   24
 #define IA64_SAPIC_LID_EID_SHIFT  16
@@ -1797,6 +1808,13 @@ typedef struct IA64PalTcLevel {
 typedef struct IA64PalProfile {
     /* PAL_FREQ_BASE base clock in Hz. */
     uint64_t freq_base_hz;
+    /*
+     * The address PAL_PLATFORM_ADDR takes for the I/O port block: the top
+     * 64 MB of the processor's architectural physical address space (see
+     * ia64_pal_io_block_pa).  It is not derived from impl_pa_bits, which
+     * every model in this fork keeps at 50 for the machine's own windows.
+     */
+    uint64_t io_block_pa;
     /* PAL_FREQ_RATIOS: each ratio is reported as (num << 32) | den. */
     uint32_t proc_ratio_num, proc_ratio_den;   /* processor / base */
     uint32_t bus_ratio_num, bus_ratio_den;      /* system bus / base */

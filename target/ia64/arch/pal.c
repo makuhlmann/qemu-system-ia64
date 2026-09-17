@@ -1361,7 +1361,7 @@ static void pal_platform_addr(CPUIA64State *env)
         supported = IA64_LOCAL_SAPIC_PA;
     } else {
         alignment = 64ULL << 20;
-        supported = IA64_PAL_IO_BLOCK_PA;
+        supported = ia64_env_cpu_class(env)->pal->io_block_pa;
     }
 
     if ((address & (alignment - 1)) != 0 ||

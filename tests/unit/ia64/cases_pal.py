@@ -60,6 +60,7 @@ from .encoding import (
     PAL_INSERTABLE_PAGE_SIZE_MASK,
     PAL_INTERRUPT_BLOCK_DEFAULT,
     PAL_IO_BLOCK_DEFAULT,
+    PAL_IO_BLOCK_MERCED,
     PAL_LOGICAL_TO_PHYSICAL,
     PAL_MC_CLEAR_LOG,
     PAL_MC_DRAIN,
@@ -1280,6 +1281,10 @@ test_pal_platform_addr_ignores_bit63 = require_registers(
     {"ip": 0x60, "r28": PAL_PLATFORM_ADDR, "r8": 0,
      "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
 
+# The I/O block is the top 64 MB of the processor's implemented physical
+# address space (SDM vol. 2 11.2.2 leaves the address to the implementation;
+# the HP zx1 firmware asks an Itanium 2 for 3_FFFF_FC00_0000).  Each model
+# takes its own address and refuses the other one.
 test_pal_platform_addr_io = require_registers(
     "pal_platform_addr_io",
     pal_call_program(PAL_PLATFORM_ADDR,
@@ -1287,6 +1292,32 @@ test_pal_platform_addr_io = require_registers(
                       (30, PAL_IO_BLOCK_DEFAULT), (31, 0)]),
     {"ip": 0x60, "r28": PAL_PLATFORM_ADDR, "r8": 0,
      "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+
+test_pal_platform_addr_io_merced_address = require_registers(
+    "pal_platform_addr_io_merced_address",
+    pal_call_program(PAL_PLATFORM_ADDR,
+                     [(29, PAL_PLATFORM_IO_BLOCK),
+                      (30, PAL_IO_BLOCK_MERCED), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PLATFORM_ADDR,
+     "r8": (-3 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_platform_addr_io_merced = require_registers(
+    "pal_platform_addr_io_merced",
+    pal_call_program(PAL_PLATFORM_ADDR,
+                     [(29, PAL_PLATFORM_IO_BLOCK),
+                      (30, PAL_IO_BLOCK_MERCED), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PLATFORM_ADDR, "r8": 0,
+     "r9": 0, "r10": 0, "r11": 0}, entry=0x10, cpu="merced")
+
+test_pal_platform_addr_io_merced_rejects_itanium2 = require_registers(
+    "pal_platform_addr_io_merced_rejects_itanium2",
+    pal_call_program(PAL_PLATFORM_ADDR,
+                     [(29, PAL_PLATFORM_IO_BLOCK),
+                      (30, PAL_IO_BLOCK_DEFAULT), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PLATFORM_ADDR,
+     "r8": (-3 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_platform_addr_bad_type = require_registers(
     "pal_platform_addr_bad_type",
@@ -1835,6 +1866,9 @@ CASE_NAMES = (
     'pal_platform_addr_ignores_bit63',
     'pal_platform_addr_interrupt',
     'pal_platform_addr_io',
+    'pal_platform_addr_io_merced',
+    'pal_platform_addr_io_merced_address',
+    'pal_platform_addr_io_merced_rejects_itanium2',
     'pal_platform_addr_unmapped',
     'pal_pmi_entrypoint',
     'pal_prefetch_vis',
