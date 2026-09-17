@@ -429,8 +429,8 @@ static UINTN                  mRuntimeRtc = LEGACY_IO_BASE + 0x70U;
  */
 static UINT8                  mNvramImage[FW_NVRAM_SIZE]
     __attribute__((aligned(16)));
-static UINTN                  mRuntimeRtcState =
-    (UINTN)mNvramImage + FW_NVRAM_RTC_OFFSET;
+static UINTN                  mRuntimeTimeZoneRecord =
+    (UINTN)mNvramImage + FW_NVRAM_TIME_ZONE_OFFSET;
 static UINTN                  mRuntimeNvramFlash = FW_NVRAM_BASE;
 static BOOLEAN                mNvramImageLoaded;
 
@@ -5609,8 +5609,8 @@ EFI_STATUS rs_convert_pointer(UINTN DebugDisposition, VOID **Address);
 #define EFI_TIME_DAYLIGHT_MASK   \
     (EFI_TIME_ADJUST_DAYLIGHT | EFI_TIME_IN_DAYLIGHT)
 
-#define FW_RTC_STATE_MAGIC 0x54464f3436545249ULL /* "IRT64OFT" */
-#define FW_RTC_STATE_VERSION 1U
+#define FW_TIME_ZONE_RECORD_MAGIC 0x54464f3436545249ULL /* "IRT64OFT" */
+#define FW_TIME_ZONE_RECORD_VERSION 1U
 
 /*
  * The time zone record in the NVRAM sector.  The time itself lives in the
@@ -5629,11 +5629,12 @@ typedef struct {
     INT16 TimeZone;
     UINT8 Daylight;
     UINT8 Pad;
-} FW_RTC_STATE;
+} FW_TIME_ZONE_RECORD;
 
-FW_STATIC_ASSERT(sizeof(FW_RTC_STATE) == 32U, rtc_state_format_size);
-FW_STATIC_ASSERT(FW_NVRAM_RTC_OFFSET + sizeof(FW_RTC_STATE) <=
-                 FW_NVRAM_DEFAULTS_OFFSET, rtc_state_fits_nvram);
+FW_STATIC_ASSERT(sizeof(FW_TIME_ZONE_RECORD) == 32U,
+                 time_zone_record_format_size);
+FW_STATIC_ASSERT(FW_NVRAM_TIME_ZONE_OFFSET + sizeof(FW_TIME_ZONE_RECORD) <=
+                 FW_NVRAM_DEFAULTS_OFFSET, time_zone_record_fits_nvram);
 
 static BOOLEAN mRtcSelftestActive;
 static EFI_TIME mWakeupTime;
@@ -5769,20 +5770,20 @@ static BOOLEAN efi_time_from_epoch(INT64 Seconds, UINT32 Nanosecond,
     return 1;
 }
 
-static FW_RTC_STATE *fw_rtc_state(void)
+static FW_TIME_ZONE_RECORD *fw_time_zone_record(void)
 {
-    return (FW_RTC_STATE *)mRuntimeRtcState;
+    return (FW_TIME_ZONE_RECORD *)mRuntimeTimeZoneRecord;
 }
 
-static BOOLEAN fw_rtc_state_valid(const FW_RTC_STATE *State)
+static BOOLEAN fw_time_zone_record_valid(const FW_TIME_ZONE_RECORD *Record)
 {
-    return State->Magic == FW_RTC_STATE_MAGIC &&
-           State->Version == FW_RTC_STATE_VERSION &&
-           State->Reserved == 0 && State->Pad == 0 &&
-           State->Nanosecond < FW_NANOSECONDS_PER_SECOND &&
-           (State->Daylight & ~EFI_TIME_DAYLIGHT_MASK) == 0 &&
-           (State->TimeZone == 2047 ||
-            (State->TimeZone >= -1440 && State->TimeZone <= 1440));
+    return Record->Magic == FW_TIME_ZONE_RECORD_MAGIC &&
+           Record->Version == FW_TIME_ZONE_RECORD_VERSION &&
+           Record->Reserved == 0 && Record->Pad == 0 &&
+           Record->Nanosecond < FW_NANOSECONDS_PER_SECOND &&
+           (Record->Daylight & ~EFI_TIME_DAYLIGHT_MASK) == 0 &&
+           (Record->TimeZone == 2047 ||
+            (Record->TimeZone >= -1440 && Record->TimeZone <= 1440));
 }
 
 static UINT8 fw_cmos_read(UINT8 Reg)
@@ -5940,7 +5941,7 @@ static void fw_rtc_write_time(const EFI_TIME *Time, INT64 Seconds)
 
 EFI_STATUS rs_get_time(EFI_TIME *Time, EFI_TIME_CAPABILITIES *Capabilities)
 {
-    FW_RTC_STATE *state = fw_rtc_state();
+    FW_TIME_ZONE_RECORD *record = fw_time_zone_record();
     INT64 seconds;
     INT16 timezone = 0;
     UINT8 daylight = 0;
@@ -5957,9 +5958,9 @@ EFI_STATUS rs_get_time(EFI_TIME *Time, EFI_TIME_CAPABILITIES *Capabilities)
         !efi_time_from_epoch(seconds, 0, Time)) {
         return EFI_DEVICE_ERROR;
     }
-    if (fw_rtc_state_valid(state)) {
-        timezone = state->TimeZone;
-        daylight = state->Daylight;
+    if (fw_time_zone_record_valid(record)) {
+        timezone = record->TimeZone;
+        daylight = record->Daylight;
     }
     Time->TimeZone = timezone;
     Time->Daylight = daylight;
@@ -5975,8 +5976,8 @@ EFI_STATUS rs_get_time(EFI_TIME *Time, EFI_TIME_CAPABILITIES *Capabilities)
  */
 EFI_STATUS rs_set_time(EFI_TIME *Time)
 {
-    FW_RTC_STATE *state = fw_rtc_state();
-    FW_RTC_STATE next;
+    FW_TIME_ZONE_RECORD *record = fw_time_zone_record();
+    FW_TIME_ZONE_RECORD next;
     INT64 seconds;
     BOOLEAN unchanged;
 
@@ -5989,25 +5990,25 @@ EFI_STATUS rs_set_time(EFI_TIME *Time)
     }
     fw_rtc_write_time(Time, seconds);
 
-    if (fw_rtc_state_valid(state)) {
-        unchanged = state->TimeZone == Time->TimeZone &&
-                    state->Daylight == Time->Daylight &&
-                    state->OffsetSeconds == 0 && state->Nanosecond == 0;
+    if (fw_time_zone_record_valid(record)) {
+        unchanged = record->TimeZone == Time->TimeZone &&
+                    record->Daylight == Time->Daylight &&
+                    record->OffsetSeconds == 0 && record->Nanosecond == 0;
     } else {
         unchanged = Time->TimeZone == 0 && Time->Daylight == 0;
     }
     if (unchanged) {
         return EFI_SUCCESS;
     }
-    next.Magic = FW_RTC_STATE_MAGIC;
-    next.Version = FW_RTC_STATE_VERSION;
+    next.Magic = FW_TIME_ZONE_RECORD_MAGIC;
+    next.Version = FW_TIME_ZONE_RECORD_VERSION;
     next.Reserved = 0;
     next.OffsetSeconds = 0;
     next.Nanosecond = 0;
     next.TimeZone = Time->TimeZone;
     next.Daylight = Time->Daylight;
     next.Pad = 0;
-    *state = next;
+    *record = next;
     if (!mRtcSelftestActive) {
         nvram_commit();
     }
@@ -6092,7 +6093,7 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
 {
     EFI_TIME now;
     EFI_TIME_CAPABILITIES caps;
-    FW_RTC_STATE saved_state;
+    FW_TIME_ZONE_RECORD saved_record;
     EFI_TIME custom = {
         .Year = 2031,
         .Month = 12,
@@ -6126,7 +6127,7 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
         caps.SetsToZero != 0) {
         return 0;
     }
-    saved_state = *fw_rtc_state();
+    saved_record = *fw_time_zone_record();
     mRtcSelftestActive = 1;
     invalid.Month = 13;
     invalid_daylight.Daylight = (UINT8)~EFI_TIME_DAYLIGHT_MASK;
@@ -6142,7 +6143,7 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
         rs_set_time(&invalid) != EFI_INVALID_PARAMETER ||
         rs_set_time(&invalid_daylight) != EFI_INVALID_PARAMETER ||
         rs_set_time(&out_of_range) != EFI_DEVICE_ERROR ||
-        fw_rtc_state()->Daylight != saved_state.Daylight ||
+        fw_time_zone_record()->Daylight != saved_record.Daylight ||
         !efi_time_to_epoch(&same, &set_seconds) ||
         rs_set_time(&same) != EFI_SUCCESS ||
         rs_get_time(&now, NULL) != EFI_SUCCESS ||
@@ -6151,11 +6152,11 @@ static BOOLEAN __attribute__((noinline)) uefi_time_services_selftest(void)
         now.Nanosecond != 0 ||
         now.TimeZone != same.TimeZone ||
         now.Daylight != same.Daylight) {
-        *fw_rtc_state() = saved_state;
+        *fw_time_zone_record() = saved_record;
         mRtcSelftestActive = 0;
         return 0;
     }
-    *fw_rtc_state() = saved_state;
+    *fw_time_zone_record() = saved_record;
     mRtcSelftestActive = 0;
     if (rs_get_wakeup_time(&enabled, &pending, &alarm) != EFI_SUCCESS ||
         enabled || pending || !efi_time_valid(&alarm)) {
@@ -8366,8 +8367,8 @@ FW_STATIC_ASSERT(__builtin_offsetof(NVRAM_STORE, vars) == 16U,
                  nvram_store_header_size);
 FW_STATIC_ASSERT(sizeof(NVRAM_STORE) == 38160U,
                  nvram_store_format_size);
-FW_STATIC_ASSERT(sizeof(NVRAM_STORE) <= FW_NVRAM_RTC_OFFSET,
-                 nvram_store_fits_mmio_window);
+FW_STATIC_ASSERT(sizeof(NVRAM_STORE) <= FW_NVRAM_TIME_ZONE_OFFSET,
+                 nvram_store_fits_below_time_zone_record);
 
 static NVRAM_STORE *mNvramStore = (NVRAM_STORE *)mNvramImage;
 static BOOLEAN mNvramSelftestActive;
@@ -12975,7 +12976,7 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     UINTN runtime_reset_control = mRuntimeResetControl;
     UINTN runtime_pci_config_ecam = mRuntimePciConfigEcam;
     UINTN runtime_rtc = mRuntimeRtc;
-    UINTN runtime_rtc_state = mRuntimeRtcState;
+    UINTN runtime_time_zone_record = mRuntimeTimeZoneRecord;
     UINTN nvram_store = (UINTN)mNvramStore;
     UINTN nvram_flash = mRuntimeNvramFlash;
     /* Physical-only virtual-memory services are deliberately excluded. */
@@ -13065,7 +13066,7 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     if (st != EFI_SUCCESS) {
         return st;
     }
-    st = rs_convert_required_uintn(&runtime_rtc_state);
+    st = rs_convert_required_uintn(&runtime_time_zone_record);
     if (st != EFI_SUCCESS) {
         return st;
     }
@@ -13114,7 +13115,7 @@ static EFI_STATUS rs_convert_runtime_tables(void)
     mRuntimeResetControl = runtime_reset_control;
     mRuntimePciConfigEcam = runtime_pci_config_ecam;
     mRuntimeRtc = runtime_rtc;
-    mRuntimeRtcState = runtime_rtc_state;
+    mRuntimeTimeZoneRecord = runtime_time_zone_record;
     mNvramStore = (NVRAM_STORE *)nvram_store;
     mRuntimeNvramFlash = nvram_flash;
     return EFI_SUCCESS;

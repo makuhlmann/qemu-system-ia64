@@ -178,7 +178,6 @@ struct IA64VpcMachineState {
     char *fw_image_name;
     /* A flash image: reset pointer block, FIT, mapped to end at 4 GiB. */
     bool fw_is_flash;
-    /* The flash image's FIT declares an NVRAM block (type 1Eh). */
     uint64_t fw_fit_ptr;
     uint64_t fw_sale_ptr;
     qemu_irq extint;

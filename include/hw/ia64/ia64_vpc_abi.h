@@ -480,11 +480,17 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 /*
  * The firmware defaults record: what a board's setup menu holds -- the
  * console policy, the IDE DMA policy, the boot-manager timeout and the
- * memory-map quirks.  It lives inside the NVRAM store, behind the variable
- * store and the RTC state and ahead of the commit word, and the machine
- * writes it from its options before the firmware runs, as a factory
- * programs a board's configuration.  A store without it means the
- * firmware's own defaults.
+ * memory-map quirks.  It lives in the flash's NVRAM sector, which the
+ * project firmware lays out as
+ *
+ *   0x0000-0x950F  the EFI variable store ("IVARSTOR")
+ *   0xF000-0xF01F  the time zone record ("IRT64OFT"; the clock itself is
+ *                  the CMOS RTC)
+ *   0xF800-0xF82F  this record ("IA64DFLT")
+ *
+ * and the machine writes it from its options before the firmware runs, as
+ * a factory programs a board's configuration.  A sector without it means
+ * the firmware's own defaults.
  */
 #define IA64_NVRAM_DEFAULTS_OFFSET    0xf800U
 #define IA64_NVRAM_DEFAULTS_MAGIC     IA64_U64(0x544c464434364149) /* "IA64DFLT" */

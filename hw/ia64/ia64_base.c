@@ -2426,11 +2426,6 @@ void ia64_vpc_set_low_ram_limit(IA64VpcMachineState *s, uint64_t limit)
 }
 
 /*
- * The firmware defaults record in the NVRAM store, written from the
- * machine's options as a factory programs a board's configuration.  It sits
- * behind the variable store and the RTC state, ahead of the commit word.
- */
-/*
  * The firmware defaults record: a factory-programmed setup block in the
  * flash's NVRAM sector that carries the machine's console, IDE DMA, boot
  * timeout and memory-map policies to the project firmware.  Only an image
