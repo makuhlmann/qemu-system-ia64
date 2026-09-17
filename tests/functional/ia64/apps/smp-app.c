@@ -103,6 +103,24 @@ static TEST_TRANSLATED_LOCK_PAGE translated_lock_pages[2]
     __attribute__((aligned(8192)));
 static volatile UINT32 fetchadd4_counter;
 static volatile UINT64 fetchadd8_counter;
+/*
+ * Bumped at every iteration of every batch.  wait_for_round() counts a
+ * change as progress: the lock
+ * batches hand their locks between vCPU threads, which a loaded host
+ * schedules in turn, so on an oversubscribed host one batch can outlast
+ * TEST_WAIT_TICKS with no round complete.
+ */
+static volatile UINT64 batch_heartbeat;
+
+static VOID batch_progress(VOID)
+{
+    UINT64 old;
+
+    __asm__ volatile ("fetchadd8.acq %0=[%1],1;;"
+                      : "=r"(old)
+                      : "r"(&batch_heartbeat)
+                      : "memory");
+}
 static volatile UINT32 cmpxchg4_acq_counter;
 static volatile UINT32 cmpxchg4_rel_counter;
 static volatile UINT64 cmpxchg8_acq_counter;
@@ -824,6 +842,7 @@ static VOID guarded_increment_batch(VOID)
     UINTN i;
 
     for (i = 0; i < TEST_GUARDED_INCREMENTS; i++) {
+        batch_progress();
         UINT64 value;
 
         spin_lock_acquire();
@@ -889,6 +908,7 @@ static VOID bit_lock_increment_batch(VOID)
     UINTN i;
 
     for (i = 0; i < TEST_BIT_LOCK_INCREMENTS; i++) {
+        batch_progress();
         UINT64 value;
 
         bit_lock_acquire();
@@ -951,6 +971,7 @@ static VOID slow_lock_increment_batch(UINTN Id)
     UINTN i;
 
     for (i = 0; i < TEST_SLOW_LOCK_INCREMENTS; i++) {
+        batch_progress();
         UINT64 value;
 
         if (xchg8(&slow_lock, 1) != 0) {
@@ -1077,6 +1098,7 @@ static VOID translated_lock_increment_batch(VOID)
     install_data_tc_at(TEST_TRANSLATED_LOCK_VA,
                        (const volatile UINT64 *)page);
     for (i = 0; i < TEST_TRANSLATED_LOCK_INCREMENTS; i++) {
+        batch_progress();
         translated_lock_increment_one();
         translated_lock8_increment_one();
     }
@@ -1141,6 +1163,7 @@ static VOID high_translated_lock_increment_batch(VOID)
                             TEST_HIGH_TRANSLATED_LOCK_PA,
                             TEST_HIGH_TRANSLATION_ITIR);
     for (i = 0; i < TEST_HIGH_TRANSLATED_LOCK_INCREMENTS; i++) {
+        batch_progress();
         high_translated_lock_increment_one();
     }
     purge_data_tc_mapping(TEST_HIGH_TRANSLATED_LOCK_VA,
@@ -1152,6 +1175,7 @@ static VOID fetchadd_increment_batch(VOID)
     UINTN i;
 
     for (i = 0; i < TEST_SEMAPHORE_INCREMENTS; i++) {
+        batch_progress();
         UINT64 old;
 
         __asm__ volatile ("fetchadd4.acq %0=[%1],1;;"
@@ -1222,6 +1246,7 @@ static VOID packed_pfn_update_batch(UINTN Id)
          * record.  A stale or non-atomic cmpxchg8 would erase count updates.
          */
         for (i = 0; i < TEST_PACKED_PFN_INCREMENTS; i++) {
+            batch_progress();
             UINT64 value;
 
             __asm__ volatile ("ld2.bias %0=[%1];;"
@@ -1239,6 +1264,7 @@ static VOID packed_pfn_update_batch(UINTN Id)
     }
 
     for (i = 0; i < TEST_PACKED_PFN_INCREMENTS; i++) {
+        batch_progress();
         UINT64 observed = packed_pfn_word.Whole;
 
         for (;;) {
@@ -1300,6 +1326,7 @@ static VOID queued_increment_batch(UINTN Id)
     UINTN i;
 
     for (i = 0; i < TEST_QUEUED_INCREMENTS; i++) {
+        batch_progress();
         UINT64 value;
 
         queued_lock_acquire(Id);
@@ -1320,6 +1347,7 @@ static VOID cmpxchg_increment_batch(VOID)
     UINTN i;
 
     for (i = 0; i < TEST_SEMAPHORE_INCREMENTS; i++) {
+        batch_progress();
         UINT32 compare4;
         UINT64 compare8;
 
@@ -1400,6 +1428,7 @@ static VOID atomic_increment_batch(VOID)
     UINTN i;
 
     for (i = 0; i < TEST_ATOMIC_INCREMENTS; i++) {
+        batch_progress();
         atomic_increment_pair();
     }
 }
@@ -1643,6 +1672,7 @@ static BOOLEAN wait_for_round(UINT64 Round)
         UINT64 progress = 0;
 
         __asm__ volatile ("mf;;" : : : "memory");
+        progress = batch_heartbeat;
         for (id = 1; id < TEST_PROCESSOR_COUNT; id++) {
             progress += ap_rendezvous_count[id];
             if (ap_rendezvous_count[id] < Round) {
@@ -1655,10 +1685,10 @@ static BOOLEAN wait_for_round(UINT64 Round)
         /*
          * The ITC tracks wall time even while a vCPU is starved by host
          * scheduling, so a fixed deadline flakes under parallel test load.
-         * Any AP advancing proves the system is live; only a total wedge
-         * may time out.
+         * Any AP advancing -- a finished round or one batch iteration --
+         * proves the system is live; only a total wedge may time out.
          */
-        if (progress > last_progress) {
+        if (progress != last_progress) {
             last_progress = progress;
             deadline = read_itc() + TEST_WAIT_TICKS;
         }
