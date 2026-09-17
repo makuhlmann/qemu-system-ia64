@@ -6186,9 +6186,13 @@ test_percpu_alt_dtlb_uses_updated_kr3_after_ptc_e = require_registers(
     }, entry=0x10)
 
 def test_srlz_i_without_pending_itlb_change_keeps_tb_cache(qemu):
+    # The srlz.i loop is not the entry bundle: the harness stops polling when
+    # it sees the loop's address, and at the entry address it could see that
+    # before the vCPU had translated anything ("TB count" 0).
     stats, output = run_program_jit(qemu, [
-        (0x10, 0x10, nop_m(), srlz_i(),
-         br_cond(0x10, 0x10)),
+        (0x10, 0x00, nop_m(), nop_i(), nop_i()),
+        (0x20, 0x10, nop_m(), srlz_i(),
+         br_cond(0x20, 0x20)),
     ], entry=0x10)
     if stats.get("TB count", 0) < 1:
         raise AssertionError(f"missing translated TB:\n{output}")
