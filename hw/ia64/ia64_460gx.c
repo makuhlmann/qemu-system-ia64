@@ -1005,20 +1005,37 @@ static void ia64_460gx_realize(DeviceState *dev, Error **errp)
 
 /*
  * The configuration store (CBN, the chipset functions' BARs and command
- * registers, and the CF8 config-address latch) and the SAC's scratch block
- * (the write-once BSP-select word included) model chipset state that a real
- * SYS_RST/RST_CPU (port 0xCF9) clears.  Without this a warm reset would
- * leave them holding the previous boot's programming (a non-zero CBN and
+ * registers, and the CF8 config-address latch) models chipset state that a
+ * real SYS_RST/RST_CPU (port 0xCF9) clears.  Without this a warm reset would
+ * leave it holding the previous boot's programming (a non-zero CBN and
  * assigned BARs); the firmware's re-enumeration then takes a different path
  * and the second boot's video-ROM POST diverges (it hangs in a vgabios
  * timed-delay whose INT8 tick never advances).
+ *
+ * The SAC's scratch block keeps its contents instead: SAL_A hands the result
+ * of one boot pass to the next one there, across a reset it asks for itself.
+ * Its recovery-check pass sizes and initializes the DRAM, sets bit 0 of the
+ * word at +0xCB0 (bios130.BIN @0xFFFF4F98) and resets the platform through
+ * port 0xCF9 (0x02 then 0x06); the pass after the reset reads that word
+ * (@0xFFFF4B80: "ld4.acq r35=[r34]; tbit.z p7,p6=r35,0"), finds bit 0 set and
+ * branches past the memory initialization.  The BSP-arbitration read-modify-
+ * write at @0xFFFF31F0 clears only bit 7 of the same word, so the hand-off
+ * survives arbitration too.  Clearing the block made the vendor firmware
+ * repeat the initialization and the reset without end: 21 resets in 45 s, no
+ * POST code.  The SSDM does not publish this register, and it does define
+ * registers whose data "remains valid and unchanged, during and following a
+ * hard reset" (sec 2.2.2) -- sticky is the attribute the firmware's own use
+ * asks for [inferred].
+ *
+ * Only the write-once BSP-select word is released, so the processors
+ * arbitrate for the boot role again on every reset.
  */
 static void ia64_460gx_reset(DeviceState *dev)
 {
     IA64460GXState *s = IA64_460GX(dev);
 
     ia64_460gx_reset_cfg(s);
-    memset(s->sac_data, 0, IA64_460GX_SAC_SIZE);
+    s->sac_data[IA64_460GX_SAC_BOOT_SEM] = 0;
     s->post_last = 0;
 }
 

@@ -3319,6 +3319,20 @@ static void test_460gx_sac_aperture(void)
     /* The diagnostic port latches the last code written to it. */
     qtest_writeb(qts, post, 0xc6);
     g_assert_cmphex(qtest_readb(qts, post), ==, 0xc6);
+
+    /*
+     * The block is sticky: SAL_A's recovery-check pass leaves its result in
+     * the word at +0xCB0 and then resets the platform itself, and the pass
+     * after the reset reads it to know the memory is initialized (see
+     * ia64_460gx_reset).  The configuration store is cleared instead -- CBN
+     * goes back to 0 -- and so is the diagnostic latch.
+     */
+    qtest_writel(qts, IA64_SAC_BASE + 0xcb0, 0x00000001);
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readl(qts, IA64_SAC_BASE + 0xcb0), ==, 0x00000001);
+    g_assert_cmphex(qtest_readl(qts, IA64_SAC_BASE + 0x100), ==, 0xa55aa55a);
+    g_assert_cmphex(qtest_readb(qts, post), ==, 0x00);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0xff, 0x10, 0, 0x40) & 0xff, ==, 0x00);
     qtest_quit(qts);
 
     qts = qtest_init("-machine zx1 -m 256M -S");
