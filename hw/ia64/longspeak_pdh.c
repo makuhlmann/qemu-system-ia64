@@ -332,14 +332,14 @@ static const MemoryRegionOps longspeak_pdh_ops = {
 };
 
 /*
- * The board has one BMC on two interfaces, but the IPMI core links a
- * simulated BMC to a single interface, so each one gets its own.
+ * The board has one BMC on two interfaces, but the IPMI core links a BMC to a
+ * single interface, so each one gets its own.
  */
 static DeviceState *longspeak_pdh_bmc_port(LongspeakPDHState *s,
                                            const char *type, const char *name,
                                            hwaddr offset, Error **errp)
 {
-    DeviceState *bmc = qdev_new(TYPE_IPMI_BMC_SIMULATOR);
+    DeviceState *bmc = qdev_new(TYPE_LONGSPEAK_BMC);
     DeviceState *port = qdev_new(type);
     g_autofree char *bmc_name = g_strdup_printf("%s-bmc", name);
 

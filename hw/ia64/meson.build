@@ -5,6 +5,7 @@ ia64_ss.add(when: 'CONFIG_IA64_VPC', if_true: files(
   'sdv.c',
   'longspeak.c',
   'longspeak_pdh.c',
+  'longspeak_bmc.c',
   'ia64_pci.c',
   'ia64_iosapic.c',
   'ia64_agp.c',

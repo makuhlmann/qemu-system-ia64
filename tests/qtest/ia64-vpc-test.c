@@ -1201,6 +1201,7 @@ static void test_pdh_unimp_logged_once(void)
 #define IPMI_BT_H_BUSY          0x40U
 #define IPMI_NETFN_APP_LUN0     0x18U
 #define IPMI_NETFN_STORAGE_LUN0 0x28U
+#define IPMI_NETFN_HP_TOKEN_LUN0 0xc8U
 #define IPMI_CMD_SELF_TEST      0x04U
 #define IPMI_CMD_GET_FRU_AREA_INFO 0x10U
 #define IPMI_CMD_READ_FRU_DATA     0x11U
@@ -1291,6 +1292,35 @@ static void test_pdh_bmc(void)
         sum += rsp[4 + i];
     }
     g_assert_cmphex(sum, ==, 0);
+
+    /*
+     * HP's own network function: command 0x01 on token 0 is the read the
+     * firmware halts on when it is refused, and 0x03 follows it per token.
+     * Both answer the requested number of bytes; a command the board does
+     * not carry is refused.
+     */
+    {
+        const uint8_t read[] = { IPMI_NETFN_HP_TOKEN_LUN0, 0x01, 0x00, 5 };
+        const uint8_t after[] = { IPMI_NETFN_HP_TOKEN_LUN0, 0x03, 0x0a, 5 };
+        const uint8_t unknown[] = { IPMI_NETFN_HP_TOKEN_LUN0, 0x42 };
+        const uint8_t *tokens[] = { read, after };
+        unsigned c;
+
+        for (c = 0; c < G_N_ELEMENTS(tokens); c++) {
+            g_assert_cmpuint(bmc_kcs_command(qts, kcs, tokens[c], 4,
+                                             rsp, sizeof(rsp)), ==, 3 + 5);
+            g_assert_cmphex(rsp[0], ==, IPMI_NETFN_HP_TOKEN_LUN0 | 0x04);
+            g_assert_cmphex(rsp[1], ==, tokens[c][1]);
+            g_assert_cmphex(rsp[2], ==, 0x00);
+            for (i = 0; i < 5; i++) {
+                g_assert_cmphex(rsp[3 + i], ==, 0x00);
+            }
+        }
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, unknown,
+                                         G_N_ELEMENTS(unknown),
+                                         rsp, sizeof(rsp)), ==, 3);
+        g_assert_cmphex(rsp[2], ==, 0xc1);
+    }
 
     /* The same self test over the BT, which carries a length and a sequence. */
     qtest_writeb(qts, bt, IPMI_BT_CLR_WR_PTR);

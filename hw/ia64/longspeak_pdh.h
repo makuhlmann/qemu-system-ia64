@@ -13,6 +13,7 @@
 #include "qom/object.h"
 
 #define TYPE_LONGSPEAK_PDH "longspeak-pdh"
+#define TYPE_LONGSPEAK_BMC "longspeak-bmc"
 OBJECT_DECLARE_SIMPLE_TYPE(LongspeakPDHState, LONGSPEAK_PDH)
 
 /* The register blocks, in sysbus MMIO order after the NVM and the SRAM. */
