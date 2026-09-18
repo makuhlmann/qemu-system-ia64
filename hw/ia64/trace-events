@@ -5,3 +5,4 @@
 longspeak_pdh_post(uint8_t code, int cpu) "POST 0x%02x (cpu %d)"
 longspeak_pdh_register(const char *name, uint64_t value, int cpu) "%s = 0x%" PRIx64 " (cpu %d)"
 longspeak_pdh_semaphore(const char *op, unsigned id, int cpu) "semaphore %s by id %u (cpu %d)"
+longspeak_pdh_status(unsigned slot, uint8_t value, int cpu) "status[%u] = %u (cpu %d)"

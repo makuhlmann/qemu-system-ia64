@@ -450,7 +450,10 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_PRESENCE             0x0000U   /* bits 3:0, active low */
 #define IA64_PDH_POST                 0x0018U
 #define IA64_PDH_DILLON_SCRATCH0      0x0020U   /* bits 7:6: boot mode */
+#define IA64_PDH_DILLON_STATUS        0x0028U   /* + 8 * processor index */
+#define IA64_PDH_DILLON_STATUSES      4U
 #define IA64_PDH_DILLON_CHECKIN       0x0068U   /* bits 19:16: check-in */
+#define IA64_PDH_DILLON_MONARCH       0x0070U   /* bits 15:0: ~(LID >> 16) */
 #define IA64_PDH_DILLON_SEMAPHORE     0x00b0U   /* + 8 * claimant id */
 #define IA64_PDH_DILLON_SEMAPHORES    8U
 #define IA64_PDH_DILLON_MODULE_LAYOUT 0x1010U   /* bit 0: mx2 modules */

@@ -7,6 +7,7 @@
 #ifndef HW_IA64_LONGSPEAK_PDH_H
 #define HW_IA64_LONGSPEAK_PDH_H
 
+#include "hw/ia64/ia64_vpc_abi.h"
 #include "hw/core/sysbus.h"
 #include "system/memory.h"
 #include "qom/object.h"
@@ -46,6 +47,8 @@ struct LongspeakPDHState {
     uint64_t scratch0;             /* FF5F_0020 */
     uint64_t checkin;              /* FF5F_0068 */
     uint8_t semaphore;             /* bit 0 held, bits 7:1 holder id */
+    uint8_t status[IA64_PDH_DILLON_STATUSES];  /* FF5F_0028 + 8n */
+    uint32_t monarch;              /* FF5F_0070 */
 };
 
 /* sysbus MMIO indexes */

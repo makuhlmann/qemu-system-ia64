@@ -123,6 +123,32 @@ static bool longspeak_pdh_semaphore_write(LongspeakPDHState *s, unsigned id,
     return true;
 }
 
+/*
+ * One signed status byte per processor at +0x28 + 8n, with n taken from the
+ * processor's own cr.lid: SAL_B's index routine (FFE79370) reads
+ * cr.lid{28:24}.  A processor publishes its own byte through FFF3DA20, and
+ * the monarch election at FFE65BA0 polls every present processor's byte
+ * until each one is greater than zero, then elects the highest.  A byte that
+ * always reads zero means "this processor has not checked in", so the
+ * election times out after 30 rounds and every processor parks.
+ *
+ * The election scans four slots (the loop at FFE65C96 stops after index 3),
+ * so four is what this models; the bytes above them keep falling through to
+ * the unimplemented log, where the next unknown register is easier to see.
+ */
+static bool longspeak_pdh_status_slot(hwaddr addr, unsigned size,
+                                      unsigned *slot)
+{
+    hwaddr off = addr - IA64_PDH_DILLON_STATUS;
+
+    if (size != 1 || addr < IA64_PDH_DILLON_STATUS || (off & 7) ||
+        off / 8 >= IA64_PDH_DILLON_STATUSES) {
+        return false;
+    }
+    *slot = off / 8;
+    return true;
+}
+
 static uint8_t longspeak_pdh_presence(LongspeakPDHState *s)
 {
     return (uint8_t)~MAKE_64BIT_MASK(0, MIN(s->sockets, 4));
@@ -154,6 +180,14 @@ static bool longspeak_pdh_do_read(LongspeakPDHBlock *b, hwaddr addr,
         if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_CHECKIN)) {
             *data = longspeak_pdh_reg_read(s->checkin, addr, size,
                                            IA64_PDH_DILLON_CHECKIN);
+            return true;
+        }
+        if (longspeak_pdh_status_slot(addr, size, &id)) {
+            *data = s->status[id];
+            return true;
+        }
+        if (addr == IA64_PDH_DILLON_MONARCH && size == 4) {
+            *data = s->monarch;
             return true;
         }
         if (longspeak_pdh_semaphore_slot(addr, size, &id)) {
@@ -206,6 +240,22 @@ static bool longspeak_pdh_do_write(LongspeakPDHBlock *b, hwaddr addr,
                                     IA64_PDH_DILLON_CHECKIN, data);
             if (s->checkin != old) {
                 trace_longspeak_pdh_register("checkin", s->checkin,
+                                             longspeak_pdh_cpu());
+            }
+            return true;
+        }
+        if (longspeak_pdh_status_slot(addr, size, &id)) {
+            if (s->status[id] != (uint8_t)data) {
+                s->status[id] = data;
+                trace_longspeak_pdh_status(id, s->status[id],
+                                           longspeak_pdh_cpu());
+            }
+            return true;
+        }
+        if (addr == IA64_PDH_DILLON_MONARCH && size == 4) {
+            if (s->monarch != (uint32_t)data) {
+                s->monarch = data;
+                trace_longspeak_pdh_register("monarch", s->monarch,
                                              longspeak_pdh_cpu());
             }
             return true;
@@ -310,6 +360,8 @@ static void longspeak_pdh_reset(DeviceState *dev)
     s->scratch0 = 0;
     s->checkin = 0;
     s->semaphore = 0;
+    s->monarch = 0;
+    memset(s->status, 0, sizeof(s->status));
 }
 
 static const VMStateDescription vmstate_longspeak_pdh = {
@@ -321,6 +373,9 @@ static const VMStateDescription vmstate_longspeak_pdh = {
         VMSTATE_UINT64(scratch0, LongspeakPDHState),
         VMSTATE_UINT64(checkin, LongspeakPDHState),
         VMSTATE_UINT8(semaphore, LongspeakPDHState),
+        VMSTATE_UINT8_ARRAY(status, LongspeakPDHState,
+                            IA64_PDH_DILLON_STATUSES),
+        VMSTATE_UINT32(monarch, LongspeakPDHState),
         VMSTATE_END_OF_LIST()
     },
 };

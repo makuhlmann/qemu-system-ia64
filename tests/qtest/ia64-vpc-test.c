@@ -924,6 +924,10 @@ static void test_sba_ioc_identity(void)
 
 #define IA64_PDH_SEMAPHORE_ADDR(id) \
     (IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_SEMAPHORE + 8 * (id))
+#define IA64_PDH_STATUS_ADDR(slot) \
+    (IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_STATUS + 8 * (slot))
+#define IA64_PDH_MONARCH_ADDR \
+    (IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_MONARCH)
 
 /*
  * Longs Peak PDH devices below the flash (plans/zx1-real-firmware-reference.md
@@ -992,6 +996,28 @@ static void test_pdh_longspeak_map(void)
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(0)), ==, 0);
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(1)), ==, 0x01);
 
+    /*
+     * One status byte per processor, and the monarch word.  SAL_B's boot
+     * rendezvous (FFE65BA0) polls every present processor's status byte and
+     * elects the one with the highest value, which then publishes its own
+     * cr.lid at the monarch word; both are plain storage.
+     */
+    qtest_writeb(qts, IA64_PDH_STATUS_ADDR(0), 3);
+    qtest_writeb(qts, IA64_PDH_STATUS_ADDR(1), 2);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(0)), ==, 3);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(1)), ==, 2);
+    qtest_writeb(qts, IA64_PDH_STATUS_ADDR(3), 1);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(3)), ==, 1);
+    /* Each slot is one byte, eight bytes apart; the gap is not the slot. */
+    qtest_writeb(qts, IA64_PDH_STATUS_ADDR(0) + 1, 0x5a);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(0) + 1), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(0)), ==, 3);
+    /* The election scans four slots, so nothing is stored beyond them. */
+    qtest_writeb(qts, IA64_PDH_STATUS_ADDR(4), 0x5a);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(4)), ==, 0);
+    qtest_writel(qts, IA64_PDH_MONARCH_ADDR, 0x0000ffff);
+    g_assert_cmphex(qtest_readl(qts, IA64_PDH_MONARCH_ADDR), ==, 0x0000ffff);
+
     /* Reset: no processor checked in, semaphore free, POST 0; NVM kept. */
     qtest_system_reset(qts);
     g_assert_cmphex(qtest_readl(qts, IA64_PDH_DILLON_BASE +
@@ -1001,6 +1027,8 @@ static void test_pdh_longspeak_map(void)
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST),
                     ==, 0);
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(1)), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(0)), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, IA64_PDH_MONARCH_ADDR), ==, 0);
     g_assert_cmphex(qtest_readq(qts, IA64_PDH_NVM_BASE), ==,
                     0x4e564d2054494e49ULL);
     qtest_quit(qts);
