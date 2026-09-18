@@ -1187,6 +1187,74 @@ static void test_pdh_unimp_logged_once(void)
 #define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x0c000000ULL)
 #define IA64_ISP_SLOT           IA64_460GX_WXB0_SCSI_SLOT
 #define IA64_ISP_BUS            IA64_460GX_WXB0_BUS
+/* IPMI KCS and BT, as the vendor firmware drives them. */
+#define IPMI_KCS_WRITE_START    0x61U
+#define IPMI_KCS_WRITE_END      0x62U
+#define IPMI_KCS_READ           0x68U
+#define IPMI_KCS_STATE_WRITE    0x80U
+#define IPMI_KCS_STATE_READ     0x40U
+#define IPMI_KCS_OBF            0x01U
+#define IPMI_BT_CLR_WR_PTR      0x01U
+#define IPMI_BT_CLR_RD_PTR      0x02U
+#define IPMI_BT_H2B_ATN         0x04U
+#define IPMI_BT_B2H_ATN         0x08U
+#define IPMI_BT_H_BUSY          0x40U
+#define IPMI_NETFN_APP_LUN0     0x18U
+#define IPMI_CMD_SELF_TEST      0x04U
+
+static void test_pdh_bmc(void)
+{
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    const uint64_t bt = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_BT;
+    /* Get Self Test Results: no error, and no device-specific error. */
+    const uint8_t expect[] = { 0x1c, IPMI_CMD_SELF_TEST, 0x00, 0x55, 0x00 };
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t rsp[G_N_ELEMENTS(expect) + 2];
+    unsigned i;
+
+    qtest_writeb(qts, kcs + 1, IPMI_KCS_WRITE_START);
+    g_assert_cmphex(qtest_readb(qts, kcs + 1), ==,
+                    IPMI_KCS_STATE_WRITE | IPMI_KCS_OBF);
+    qtest_readb(qts, kcs);
+    qtest_writeb(qts, kcs, IPMI_NETFN_APP_LUN0);
+    qtest_readb(qts, kcs);
+    qtest_writeb(qts, kcs + 1, IPMI_KCS_WRITE_END);
+    qtest_readb(qts, kcs);
+    qtest_writeb(qts, kcs, IPMI_CMD_SELF_TEST);
+    g_assert_cmphex(qtest_readb(qts, kcs + 1), ==,
+                    IPMI_KCS_STATE_READ | IPMI_KCS_OBF);
+    for (i = 0; i < G_N_ELEMENTS(expect); i++) {
+        rsp[i] = qtest_readb(qts, kcs);
+        qtest_writeb(qts, kcs, IPMI_KCS_READ);
+    }
+    g_assert_cmpmem(rsp, G_N_ELEMENTS(expect), expect, G_N_ELEMENTS(expect));
+    g_assert_cmphex(qtest_readb(qts, kcs + 1) & ~IPMI_KCS_OBF, ==, 0);
+
+    /* The same command over the BT, which carries a length and a sequence. */
+    qtest_writeb(qts, bt, IPMI_BT_CLR_WR_PTR);
+    qtest_writeb(qts, bt + 1, 3);
+    qtest_writeb(qts, bt + 1, IPMI_NETFN_APP_LUN0);
+    qtest_writeb(qts, bt + 1, 0x77);
+    qtest_writeb(qts, bt + 1, IPMI_CMD_SELF_TEST);
+    qtest_writeb(qts, bt, IPMI_BT_H2B_ATN);
+    g_assert_cmphex(qtest_readb(qts, bt), ==, IPMI_BT_B2H_ATN);
+    qtest_writeb(qts, bt, IPMI_BT_H_BUSY);
+    qtest_writeb(qts, bt, IPMI_BT_B2H_ATN);
+    qtest_writeb(qts, bt, IPMI_BT_CLR_RD_PTR);
+    for (i = 0; i < G_N_ELEMENTS(rsp); i++) {
+        rsp[i] = qtest_readb(qts, bt + 1);
+    }
+    qtest_writeb(qts, bt, IPMI_BT_H_BUSY);
+    g_assert_cmphex(rsp[0], ==, G_N_ELEMENTS(expect) + 1);
+    g_assert_cmphex(rsp[1], ==, expect[0]);
+    g_assert_cmphex(rsp[2], ==, 0x77);
+    g_assert_cmpmem(rsp + 3, G_N_ELEMENTS(expect) - 1,
+                    expect + 1, G_N_ELEMENTS(expect) - 1);
+    g_assert_cmphex(qtest_readb(qts, bt), ==, 0);
+
+    qtest_quit(qts);
+}
+
 #define IA64_ISP_REG_ISTATUS    0x0aU
 #define IA64_ISP_REG_SEMAPHORE  0x0cU
 #define IA64_ISP_REG_MAILBOX0   0x70U
@@ -6870,6 +6938,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pdh/longspeak-map", test_pdh_longspeak_map);
     qtest_add_func("/ia64-vpc/pdh/unimp-logged-once",
                    test_pdh_unimp_logged_once);
+    qtest_add_func("/ia64-vpc/pdh/bmc", test_pdh_bmc);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",
                    test_mercury_config_dispatch);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);

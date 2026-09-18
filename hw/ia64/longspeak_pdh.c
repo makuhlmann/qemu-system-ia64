@@ -14,8 +14,11 @@
  *              (plans/one-hardware-model-plan.md P6.7).
  *   FF44_0000  SRAM, 768 KiB.  SAL_A's rendezvous record, SAL_B's first
  *              memory stack and RSE backing store.
- *   FF5B_0000  an unidentified device; FF5B_8000 is the clock
- *              (plans/nvram-portability.md sec 2.2).  Not modelled yet.
+ *   FF5B_0000  the BMC.  The firmware probes an IPMI BT at FF5B_00E4 and
+ *              three IPMI KCS, which it calls KCS1 at FF5B_0CA2 (the
+ *              standard SMS base), KCS2 at FF5B_0000 and KCS3 at FF5B_0062.
+ *              Only BT and KCS1 are modelled; the firmware needs no more.
+ *   FF5B_8000  the clock (plans/nvram-portability.md sec 2.2).
  *   FF5C_0000  processor presence, bits 3:0 active low (SAL_A FFFE0E60).
  *   FF5C_0018  POST byte (SAL_A writes (id << 4) | step).
  *   FF5E_0000  two 16550 UARTs, FF5E_0000 and FF5E_2000 (EFI PDHUART,
@@ -44,6 +47,9 @@
 #include "chardev/char-fe.h"
 #include "system/system.h"
 #include "hw/ia64/ia64_vpc_abi.h"
+#include "hw/ipmi/ipmi.h"
+#include "hw/ipmi/ipmi_bt.h"
+#include "hw/ipmi/ipmi_kcs.h"
 #include "migration/vmstate.h"
 #include "system/runstate.h"
 #include "longspeak_pdh.h"
@@ -325,6 +331,33 @@ static const MemoryRegionOps longspeak_pdh_ops = {
     .impl = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
 };
 
+/*
+ * The board has one BMC on two interfaces, but the IPMI core links a
+ * simulated BMC to a single interface, so each one gets its own.
+ */
+static DeviceState *longspeak_pdh_bmc_port(LongspeakPDHState *s,
+                                           const char *type, const char *name,
+                                           hwaddr offset, Error **errp)
+{
+    DeviceState *bmc = qdev_new(TYPE_IPMI_BMC_SIMULATOR);
+    DeviceState *port = qdev_new(type);
+    g_autofree char *bmc_name = g_strdup_printf("%s-bmc", name);
+
+    object_property_add_child(OBJECT(s), bmc_name, OBJECT(bmc));
+    object_property_add_child(OBJECT(s), name, OBJECT(port));
+    if (!qdev_realize_and_unref(bmc, NULL, errp)) {
+        return NULL;
+    }
+    object_property_set_link(OBJECT(port), "bmc", OBJECT(bmc), &error_abort);
+    if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(port), errp)) {
+        return NULL;
+    }
+    memory_region_add_subregion_overlap(
+        &s->block[LONGSPEAK_PDH_DEV5B].container, offset,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(port), 0), 1);
+    return port;
+}
+
 static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
 {
     LongspeakPDHState *s = LONGSPEAK_PDH(dev);
@@ -362,8 +395,9 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * They overlay the log-only background, so an undecoded offset is still
-     * reported.  Their interrupt wiring is unknown; the firmware polls.
+     * The UARTs and the BT overlay the log-only background, so an undecoded
+     * offset is still reported.  Their interrupt wiring is unknown; the
+     * firmware polls both.
      */
     for (i = 0; i < IA64_PDH_UARTS; i++) {
         LongspeakPDHBlock *b = &s->block[LONGSPEAK_PDH_UART_BLOCK];
@@ -381,6 +415,14 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
             &b->container, i * IA64_PDH_UART_STRIDE,
             sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0), 1);
     }
+
+    s->bt = longspeak_pdh_bmc_port(s, TYPE_IPMI_BT_MM, "bt",
+                                   IA64_PDH_BMC_BT, errp);
+    if (s->bt == NULL) {
+        return;
+    }
+    s->kcs = longspeak_pdh_bmc_port(s, TYPE_IPMI_KCS_MM, "kcs",
+                                    IA64_PDH_BMC_KCS, errp);
 }
 
 static void longspeak_pdh_unrealize(DeviceState *dev)

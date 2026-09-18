@@ -53,6 +53,8 @@ struct LongspeakPDHState {
 
     /* The two PDH UARTs, FF5E_0000 and FF5E_2000. */
     DeviceState *uart[IA64_PDH_UARTS];
+    DeviceState *bt;               /* IPMI BT, FF5B_00E4 */
+    DeviceState *kcs;              /* IPMI KCS, FF5B_0000 */
 };
 
 /* sysbus MMIO indexes */

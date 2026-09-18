@@ -13,6 +13,8 @@ config IA64_VPC
     select I8259
     select I8254
     select SMBUS
+    select IPMI_BT_MM
+    select IPMI_KCS_MM
     select ACPI
     imply IA64_VPC_AUDIO
     imply IA64_VPC_GRAPHICS
