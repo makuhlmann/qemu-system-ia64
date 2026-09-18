@@ -1117,9 +1117,10 @@ static void test_pdh_unimp_logged_once(void)
     g_autofree char *contents = NULL;
     g_autoptr(GError) error = NULL;
     g_auto(GStrv) lines = NULL;
-    const uint64_t rtc = IA64_PDH_DEV5B_BASE + 0x8000;
+    /* An offset in the block that no device claims. */
+    const uint64_t pdh = IA64_PDH_DEV5B_BASE + 0x4000;
     const uint64_t sba = IA64_SBA_CSR_BASE + 0x0100;
-    unsigned rtc_reads = 0, rtc_writes = 0, sba_reads = 0, sba_writes = 0;
+    unsigned pdh_reads = 0, pdh_writes = 0, sba_reads = 0, sba_writes = 0;
     QTestState *qts;
     int i;
 
@@ -1130,8 +1131,8 @@ static void test_pdh_unimp_logged_once(void)
 
     qts = qtest_initf("-machine zx1 -m 256M -S -d unimp -D %s", quoted_log);
     for (i = 0; i < 1000; i++) {
-        g_assert_cmphex(qtest_readb(qts, rtc), ==, 0);
-        qtest_writeb(qts, rtc, i);
+        g_assert_cmphex(qtest_readb(qts, pdh), ==, 0);
+        qtest_writeb(qts, pdh, i);
         g_assert_cmphex(qtest_readq(qts, sba), ==, 0);
         qtest_writeq(qts, sba, i);
     }
@@ -1141,11 +1142,11 @@ static void test_pdh_unimp_logged_once(void)
     lines = g_strsplit(contents, "\n", -1);
     for (i = 0; lines[i] != NULL; i++) {
         if (strstr(lines[i],
-                   "longspeak-pdh: unimplemented read at 0xff5b8000")) {
-            rtc_reads++;
+                   "longspeak-pdh: unimplemented read at 0xff5b4000")) {
+            pdh_reads++;
         } else if (strstr(lines[i],
-                          "longspeak-pdh: unimplemented write at 0xff5b8000")) {
-            rtc_writes++;
+                          "longspeak-pdh: unimplemented write at 0xff5b4000")) {
+            pdh_writes++;
         } else if (strstr(lines[i],
                           "ia64-sba: unimplemented read at 0xfed00100")) {
             sba_reads++;
@@ -1154,8 +1155,8 @@ static void test_pdh_unimp_logged_once(void)
             sba_writes++;
         }
     }
-    g_assert_cmpuint(rtc_reads, ==, 1);
-    g_assert_cmpuint(rtc_writes, ==, 1);
+    g_assert_cmpuint(pdh_reads, ==, 1);
+    g_assert_cmpuint(pdh_writes, ==, 1);
     g_assert_cmpuint(sba_reads, ==, 1);
     g_assert_cmpuint(sba_writes, ==, 1);
 
@@ -1262,6 +1263,64 @@ static size_t bmc_bt_command(QTestState *qts, uint64_t bt, uint8_t netfn,
     qtest_writeb(qts, bt, IPMI_BT_H_BUSY);
     g_assert_cmphex(qtest_readb(qts, bt), ==, 0);
     return len;
+}
+
+static unsigned bcd(uint8_t v)
+{
+    return (v >> 4) * 10 + (v & 0x0f);
+}
+
+static void test_pdh_clock(void)
+{
+    const uint64_t rtc = IA64_PDH_DEV5B_BASE + IA64_PDH_RTC;
+    /* 1998-01-01 00:00:00, a Thursday, with the month register E32K bit. */
+    const uint8_t reset_time[] = { 0x00, 0x00, 0x00, 0x04,
+                                   0x01, 0x41, 0x98, 0x19 };
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t before, after;
+    unsigned i;
+
+    /* Register 0 is the seconds; the part has no hundredths register. */
+    g_assert_cmpuint(bcd(qtest_readb(qts, rtc)), <=, 59);
+    g_assert_cmpuint(bcd(qtest_readb(qts, rtc + 1)), <=, 59);
+    g_assert_cmpuint(bcd(qtest_readb(qts, rtc + 2)), <=, 23);
+    g_assert_cmpuint(bcd(qtest_readb(qts, rtc + 5) & 0x1f), >=, 1);
+    g_assert_cmpuint(bcd(qtest_readb(qts, rtc + 5) & 0x1f), <=, 12);
+    g_assert_cmpuint(bcd(qtest_readb(qts, rtc + 7)), >=, 20);
+    before = qtest_readb(qts, rtc);
+    qtest_clock_step(qts, 3 * 1000LL * 1000 * 1000);
+    after = qtest_readb(qts, rtc);
+    g_assert_cmpuint(bcd(after), ==, (bcd(before) + 3) % 60);
+
+    /* Control B bit 7 clear freezes the registers. */
+    qtest_writeb(qts, rtc + 0x0f, 0x00);
+    before = qtest_readb(qts, rtc);
+    qtest_clock_step(qts, 3 * 1000LL * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc), ==, before);
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+    g_assert_cmpuint(bcd(qtest_readb(qts, rtc)), ==, (bcd(before) + 3) % 60);
+
+    /* The time the vendor firmware writes when it rejects the clock. */
+    qtest_writeb(qts, rtc + 0x0f, 0x00);
+    for (i = 0; i < ARRAY_SIZE(reset_time); i++) {
+        qtest_writeb(qts, rtc + i, reset_time[i]);
+    }
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+    for (i = 0; i < ARRAY_SIZE(reset_time); i++) {
+        g_assert_cmphex(qtest_readb(qts, rtc + i), ==, reset_time[i]);
+    }
+
+    /* The window is 256 bytes behind an address and a data register. */
+    for (i = 0; i < 4; i++) {
+        qtest_writeb(qts, rtc + 0x10, i * 64);
+        qtest_writeb(qts, rtc + 0x13, 0xa0 + i);
+    }
+    for (i = 0; i < 4; i++) {
+        qtest_writeb(qts, rtc + 0x10, i * 64);
+        g_assert_cmphex(qtest_readb(qts, rtc + 0x13), ==, 0xa0 + i);
+    }
+
+    qtest_quit(qts);
 }
 
 static void test_pdh_bmc(void)
@@ -7058,6 +7117,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pdh/unimp-logged-once",
                    test_pdh_unimp_logged_once);
     qtest_add_func("/ia64-vpc/pdh/bmc", test_pdh_bmc);
+    qtest_add_func("/ia64-vpc/pdh/clock", test_pdh_clock);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",
                    test_mercury_config_dispatch);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);

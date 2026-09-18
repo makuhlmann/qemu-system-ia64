@@ -445,6 +445,9 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_BMC_BT               0x00e4U   /* BT_CTRL, then data */
 #define IA64_PDH_BMC_BT_BUFFER        64U
 #define IA64_PDH_BMC_BT_RETRIES       2U
+#define IA64_PDH_RTC                  0x8000U   /* the PDH clock */
+#define IA64_PDH_RTC_REGS             0x0014U
+#define IA64_PDH_RTC_RAM              256U
 #define IA64_PDH_BMC_KCS              0x0ca2U   /* data, then status */
 #define IA64_PDH_PRESENCE_BASE        IA64_U64(0x00000000ff5c0000)
 #define IA64_PDH_UART_BASE            IA64_U64(0x00000000ff5e0000)

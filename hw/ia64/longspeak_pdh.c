@@ -18,7 +18,7 @@
  *              three IPMI KCS, which it calls KCS1 at FF5B_0CA2 (the
  *              standard SMS base), KCS2 at FF5B_0000 and KCS3 at FF5B_0062.
  *              Only BT and KCS1 are modelled; the firmware needs no more.
- *   FF5B_8000  the clock (plans/nvram-portability.md sec 2.2).
+ *   FF5B_8000  the clock, a DS1501/1511-class part.
  *   FF5C_0000  processor presence, bits 3:0 active low (SAL_A FFFE0E60).
  *   FF5C_0018  POST byte (SAL_A writes (id << 4) | step).
  *   FF5E_0000  two 16550 UARTs, FF5E_0000 and FF5E_2000 (EFI PDHUART,
@@ -434,6 +434,18 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
     }
     s->kcs = longspeak_pdh_bmc_port(s, TYPE_IPMI_KCS_MM, "kcs",
                                     IA64_PDH_BMC_KCS, errp);
+    if (s->kcs == NULL) {
+        return;
+    }
+
+    s->rtc = qdev_new(TYPE_LONGSPEAK_RTC);
+    object_property_add_child(OBJECT(dev), "rtc", OBJECT(s->rtc));
+    if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(s->rtc), errp)) {
+        return;
+    }
+    memory_region_add_subregion_overlap(
+        &s->block[LONGSPEAK_PDH_DEV5B].container, IA64_PDH_RTC,
+        sysbus_mmio_get_region(SYS_BUS_DEVICE(s->rtc), 0), 1);
 }
 
 static void longspeak_pdh_unrealize(DeviceState *dev)

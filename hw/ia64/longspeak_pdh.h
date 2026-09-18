@@ -14,6 +14,7 @@
 
 #define TYPE_LONGSPEAK_PDH "longspeak-pdh"
 #define TYPE_LONGSPEAK_BMC "longspeak-bmc"
+#define TYPE_LONGSPEAK_RTC "longspeak-rtc"
 OBJECT_DECLARE_SIMPLE_TYPE(LongspeakPDHState, LONGSPEAK_PDH)
 
 /* The register blocks, in sysbus MMIO order after the NVM and the SRAM. */
@@ -55,7 +56,8 @@ struct LongspeakPDHState {
     /* The two PDH UARTs, FF5E_0000 and FF5E_2000. */
     DeviceState *uart[IA64_PDH_UARTS];
     DeviceState *bt;               /* IPMI BT, FF5B_00E4 */
-    DeviceState *kcs;              /* IPMI KCS, FF5B_0000 */
+    DeviceState *kcs;              /* IPMI KCS, FF5B_0CA2 */
+    DeviceState *rtc;              /* the clock, FF5B_8000 */
 };
 
 /* sysbus MMIO indexes */
