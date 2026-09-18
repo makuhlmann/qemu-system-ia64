@@ -2553,6 +2553,98 @@ static const VMStateDescription vmstate_ipmi_sim = {
     }
 };
 
+/*
+ * The default FRU, for when no file is given.  A reader that finds no common
+ * header, or an area the header points at and cannot parse, rejects the whole
+ * FRU: the HP zx1 firmware answers a zero-filled one with "fru version error"
+ * and then "fru read error".  Give it the smallest FRU that is complete --
+ * a common header and a board area (FRU Information Storage Definition v1.0
+ * sections 8 and 11).
+ */
+#define IPMI_FRU_DEFAULT_SIZE   64
+#define IPMI_FRU_TYPE_ASCII     0xc0
+#define IPMI_FRU_NO_MORE_FIELDS 0xc1
+
+static uint8_t *ipmi_fru_put_field(uint8_t *p, const char *s)
+{
+    size_t len = strlen(s);
+
+    *p++ = IPMI_FRU_TYPE_ASCII | len;
+    memcpy(p, s, len);
+    return p + len;
+}
+
+/* Pad the area to a multiple of 8 bytes and close it with a zero checksum. */
+static uint8_t *ipmi_fru_end_area(uint8_t *area, uint8_t *p)
+{
+    uint8_t sum = 0;
+    uint8_t *q;
+
+    *p++ = IPMI_FRU_NO_MORE_FIELDS;
+    while ((p - area + 1) % 8) {
+        *p++ = 0;
+    }
+    area[1] = (p - area + 1) / 8;
+    for (q = area; q < p; q++) {
+        sum += *q;
+    }
+    *p++ = -sum;
+    return p;
+}
+
+static void ipmi_fru_init_default(IPMIFru *fru)
+{
+    uint8_t *p = fru->data + 8;
+    uint8_t *area;
+    uint8_t sum = 0;
+    unsigned i;
+
+    if (fru->areasize < IPMI_FRU_DEFAULT_SIZE) {
+        return;
+    }
+    fru->data[0] = 0x01;
+
+    /* Chassis (sec 10): type "other", part number and serial number empty. */
+    area = p;
+    fru->data[2] = (area - fru->data) / 8;
+    area[0] = 0x01;
+    area[2] = 0x01;
+    p = area + 3;
+    p = ipmi_fru_put_field(p, "");
+    p = ipmi_fru_put_field(p, "");
+    p = ipmi_fru_end_area(area, p);
+
+    /* Board (sec 11): English, no manufacturing date. */
+    area = p;
+    fru->data[3] = (area - fru->data) / 8;
+    area[0] = 0x01;
+    p = area + 6;
+    p = ipmi_fru_put_field(p, "QEMU");
+    p = ipmi_fru_put_field(p, "IPMI BMC");
+    p = ipmi_fru_put_field(p, "");
+    p = ipmi_fru_put_field(p, "");
+    p = ipmi_fru_end_area(area, p);
+
+    /* Product (sec 12). */
+    area = p;
+    fru->data[4] = (area - fru->data) / 8;
+    area[0] = 0x01;
+    p = area + 3;
+    p = ipmi_fru_put_field(p, "QEMU");
+    p = ipmi_fru_put_field(p, "IPMI BMC");
+    p = ipmi_fru_put_field(p, "");
+    p = ipmi_fru_put_field(p, "");
+    p = ipmi_fru_put_field(p, "");
+    p = ipmi_fru_end_area(area, p);
+
+    assert(p - fru->data <= IPMI_FRU_DEFAULT_SIZE);
+
+    for (i = 0; i < 7; i++) {
+        sum += fru->data[i];
+    }
+    fru->data[7] = -sum;
+}
+
 static void ipmi_fru_init(IPMIFru *fru)
 {
     int fsize;
@@ -2577,9 +2669,9 @@ static void ipmi_fru_init(IPMIFru *fru)
 
 out:
     if (!fru->data) {
-        /* give one default FRU */
         size = fru->areasize;
         fru->data = g_malloc0(size);
+        ipmi_fru_init_default(fru);
     }
 
     fru->nentries = size / fru->areasize;

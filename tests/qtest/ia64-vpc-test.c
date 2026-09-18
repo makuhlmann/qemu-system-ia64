@@ -1200,37 +1200,99 @@ static void test_pdh_unimp_logged_once(void)
 #define IPMI_BT_B2H_ATN         0x08U
 #define IPMI_BT_H_BUSY          0x40U
 #define IPMI_NETFN_APP_LUN0     0x18U
+#define IPMI_NETFN_STORAGE_LUN0 0x28U
 #define IPMI_CMD_SELF_TEST      0x04U
+#define IPMI_CMD_GET_FRU_AREA_INFO 0x10U
+#define IPMI_CMD_READ_FRU_DATA     0x11U
+
+/*
+ * One KCS request, then the whole response.  The firmware writes WRITE_END
+ * before the last request byte and clears OBF after every step.
+ */
+static size_t bmc_kcs_command(QTestState *qts, uint64_t kcs,
+                              const uint8_t *req, size_t req_len,
+                              uint8_t *rsp, size_t rsp_max)
+{
+    size_t i, n = 0;
+
+    qtest_writeb(qts, kcs + 1, IPMI_KCS_WRITE_START);
+    for (i = 0; i < req_len; i++) {
+        g_assert_cmphex(qtest_readb(qts, kcs + 1), ==,
+                        IPMI_KCS_STATE_WRITE | IPMI_KCS_OBF);
+        qtest_readb(qts, kcs);
+        if (i == req_len - 1) {
+            qtest_writeb(qts, kcs + 1, IPMI_KCS_WRITE_END);
+            g_assert_cmphex(qtest_readb(qts, kcs + 1), ==,
+                            IPMI_KCS_STATE_WRITE | IPMI_KCS_OBF);
+            qtest_readb(qts, kcs);
+        }
+        qtest_writeb(qts, kcs, req[i]);
+    }
+    while (n < rsp_max &&
+           (qtest_readb(qts, kcs + 1) & 0xc0) == IPMI_KCS_STATE_READ) {
+        rsp[n++] = qtest_readb(qts, kcs);
+        qtest_writeb(qts, kcs, IPMI_KCS_READ);
+    }
+    return n;
+}
 
 static void test_pdh_bmc(void)
 {
     const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
     const uint64_t bt = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_BT;
+    const uint8_t self_test[] = { IPMI_NETFN_APP_LUN0, IPMI_CMD_SELF_TEST };
     /* Get Self Test Results: no error, and no device-specific error. */
     const uint8_t expect[] = { 0x1c, IPMI_CMD_SELF_TEST, 0x00, 0x55, 0x00 };
+    const uint8_t fru_info[] = { IPMI_NETFN_STORAGE_LUN0,
+                                 IPMI_CMD_GET_FRU_AREA_INFO, 0x00 };
+    const uint8_t fru_read[] = { IPMI_NETFN_STORAGE_LUN0,
+                                 IPMI_CMD_READ_FRU_DATA, 0x00, 0x00, 0x00, 8 };
+    uint8_t fru_area[] = { IPMI_NETFN_STORAGE_LUN0,
+                           IPMI_CMD_READ_FRU_DATA, 0x00, 0x00, 0x00, 0x00 };
     QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
-    uint8_t rsp[G_N_ELEMENTS(expect) + 2];
+    uint8_t rsp[64];
+    uint8_t sum = 0;
     unsigned i;
 
-    qtest_writeb(qts, kcs + 1, IPMI_KCS_WRITE_START);
-    g_assert_cmphex(qtest_readb(qts, kcs + 1), ==,
-                    IPMI_KCS_STATE_WRITE | IPMI_KCS_OBF);
-    qtest_readb(qts, kcs);
-    qtest_writeb(qts, kcs, IPMI_NETFN_APP_LUN0);
-    qtest_readb(qts, kcs);
-    qtest_writeb(qts, kcs + 1, IPMI_KCS_WRITE_END);
-    qtest_readb(qts, kcs);
-    qtest_writeb(qts, kcs, IPMI_CMD_SELF_TEST);
-    g_assert_cmphex(qtest_readb(qts, kcs + 1), ==,
-                    IPMI_KCS_STATE_READ | IPMI_KCS_OBF);
-    for (i = 0; i < G_N_ELEMENTS(expect); i++) {
-        rsp[i] = qtest_readb(qts, kcs);
-        qtest_writeb(qts, kcs, IPMI_KCS_READ);
-    }
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, self_test,
+                                     G_N_ELEMENTS(self_test),
+                                     rsp, sizeof(rsp)),
+                     ==, G_N_ELEMENTS(expect));
     g_assert_cmpmem(rsp, G_N_ELEMENTS(expect), expect, G_N_ELEMENTS(expect));
-    g_assert_cmphex(qtest_readb(qts, kcs + 1) & ~IPMI_KCS_OBF, ==, 0);
 
-    /* The same command over the BT, which carries a length and a sequence. */
+    /* The FRU has a common header: format version 1 and a zero checksum. */
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, fru_info,
+                                     G_N_ELEMENTS(fru_info),
+                                     rsp, sizeof(rsp)), ==, 6);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    g_assert_cmpuint(rsp[3] | rsp[4] << 8, >=, 8);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, fru_read,
+                                     G_N_ELEMENTS(fru_read),
+                                     rsp, sizeof(rsp)), ==, 12);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    g_assert_cmphex(rsp[3], ==, 8);
+    g_assert_cmphex(rsp[4], ==, 0x01);
+    for (i = 0; i < 8; i++) {
+        sum += rsp[4 + i];
+    }
+    g_assert_cmphex(sum, ==, 0);
+
+    /* The board area it points at is a whole area, checksum and all. */
+    fru_area[3] = rsp[4 + 3] * 8;
+    g_assert_cmpuint(fru_area[3], >, 0);
+    fru_area[5] = 2;
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, fru_area, G_N_ELEMENTS(fru_area),
+                                     rsp, sizeof(rsp)), ==, 6);
+    g_assert_cmphex(rsp[4], ==, 0x01);
+    fru_area[5] = rsp[5] * 8;
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, fru_area, G_N_ELEMENTS(fru_area),
+                                     rsp, sizeof(rsp)), ==, 4 + fru_area[5]);
+    for (i = 0, sum = 0; i < fru_area[5]; i++) {
+        sum += rsp[4 + i];
+    }
+    g_assert_cmphex(sum, ==, 0);
+
+    /* The same self test over the BT, which carries a length and a sequence. */
     qtest_writeb(qts, bt, IPMI_BT_CLR_WR_PTR);
     qtest_writeb(qts, bt + 1, 3);
     qtest_writeb(qts, bt + 1, IPMI_NETFN_APP_LUN0);
@@ -1241,7 +1303,7 @@ static void test_pdh_bmc(void)
     qtest_writeb(qts, bt, IPMI_BT_H_BUSY);
     qtest_writeb(qts, bt, IPMI_BT_B2H_ATN);
     qtest_writeb(qts, bt, IPMI_BT_CLR_RD_PTR);
-    for (i = 0; i < G_N_ELEMENTS(rsp); i++) {
+    for (i = 0; i < G_N_ELEMENTS(expect) + 2; i++) {
         rsp[i] = qtest_readb(qts, bt + 1);
     }
     qtest_writeb(qts, bt, IPMI_BT_H_BUSY);
