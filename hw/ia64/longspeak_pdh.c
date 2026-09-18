@@ -343,6 +343,17 @@ static DeviceState *longspeak_pdh_bmc_port(LongspeakPDHState *s,
     DeviceState *port = qdev_new(type);
     g_autofree char *bmc_name = g_strdup_printf("%s-bmc", name);
 
+    /*
+     * The firmware will not put a real command on a BT whose capabilities
+     * report no retries, and it sizes a request from the buffer size it is
+     * told: at 255 it asks for more than it can take back and reports
+     * "BT_RECEIVE_NEXT: data overflow!".
+     */
+    if (object_dynamic_cast(OBJECT(port), TYPE_IPMI_BT_MM)) {
+        qdev_prop_set_uint8(port, "input-size", IA64_PDH_BMC_BT_BUFFER);
+        qdev_prop_set_uint8(port, "output-size", IA64_PDH_BMC_BT_BUFFER);
+        qdev_prop_set_uint8(port, "retries", IA64_PDH_BMC_BT_RETRIES);
+    }
     object_property_add_child(OBJECT(s), bmc_name, OBJECT(bmc));
     object_property_add_child(OBJECT(s), name, OBJECT(port));
     if (!qdev_realize_and_unref(bmc, NULL, errp)) {

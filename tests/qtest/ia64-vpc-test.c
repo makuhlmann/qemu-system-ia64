@@ -1237,6 +1237,33 @@ static size_t bmc_kcs_command(QTestState *qts, uint64_t kcs,
     return n;
 }
 
+/* One BT request: the network function, the command, and a sequence byte. */
+static size_t bmc_bt_command(QTestState *qts, uint64_t bt, uint8_t netfn,
+                             uint8_t cmd, uint8_t seq, uint8_t *rsp,
+                             size_t rsp_max)
+{
+    size_t i, len;
+
+    qtest_writeb(qts, bt, IPMI_BT_CLR_WR_PTR);
+    qtest_writeb(qts, bt + 1, 3);
+    qtest_writeb(qts, bt + 1, netfn);
+    qtest_writeb(qts, bt + 1, seq);
+    qtest_writeb(qts, bt + 1, cmd);
+    qtest_writeb(qts, bt, IPMI_BT_H2B_ATN);
+    g_assert_cmphex(qtest_readb(qts, bt), ==, IPMI_BT_B2H_ATN);
+    qtest_writeb(qts, bt, IPMI_BT_H_BUSY);
+    qtest_writeb(qts, bt, IPMI_BT_B2H_ATN);
+    qtest_writeb(qts, bt, IPMI_BT_CLR_RD_PTR);
+    len = qtest_readb(qts, bt + 1);
+    g_assert_cmpuint(len, <=, rsp_max);
+    for (i = 0; i < len; i++) {
+        rsp[i] = qtest_readb(qts, bt + 1);
+    }
+    qtest_writeb(qts, bt, IPMI_BT_H_BUSY);
+    g_assert_cmphex(qtest_readb(qts, bt), ==, 0);
+    return len;
+}
+
 static void test_pdh_bmc(void)
 {
     const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
@@ -1323,26 +1350,26 @@ static void test_pdh_bmc(void)
     }
 
     /* The same self test over the BT, which carries a length and a sequence. */
-    qtest_writeb(qts, bt, IPMI_BT_CLR_WR_PTR);
-    qtest_writeb(qts, bt + 1, 3);
-    qtest_writeb(qts, bt + 1, IPMI_NETFN_APP_LUN0);
-    qtest_writeb(qts, bt + 1, 0x77);
-    qtest_writeb(qts, bt + 1, IPMI_CMD_SELF_TEST);
-    qtest_writeb(qts, bt, IPMI_BT_H2B_ATN);
-    g_assert_cmphex(qtest_readb(qts, bt), ==, IPMI_BT_B2H_ATN);
-    qtest_writeb(qts, bt, IPMI_BT_H_BUSY);
-    qtest_writeb(qts, bt, IPMI_BT_B2H_ATN);
-    qtest_writeb(qts, bt, IPMI_BT_CLR_RD_PTR);
-    for (i = 0; i < G_N_ELEMENTS(expect) + 2; i++) {
-        rsp[i] = qtest_readb(qts, bt + 1);
-    }
-    qtest_writeb(qts, bt, IPMI_BT_H_BUSY);
-    g_assert_cmphex(rsp[0], ==, G_N_ELEMENTS(expect) + 1);
-    g_assert_cmphex(rsp[1], ==, expect[0]);
-    g_assert_cmphex(rsp[2], ==, 0x77);
-    g_assert_cmpmem(rsp + 3, G_N_ELEMENTS(expect) - 1,
+    g_assert_cmpuint(bmc_bt_command(qts, bt, IPMI_NETFN_APP_LUN0,
+                                    IPMI_CMD_SELF_TEST, 0x77,
+                                    rsp, sizeof(rsp)),
+                     ==, G_N_ELEMENTS(expect) + 1);
+    g_assert_cmphex(rsp[0], ==, expect[0]);
+    g_assert_cmphex(rsp[1], ==, 0x77);
+    g_assert_cmpmem(rsp + 2, G_N_ELEMENTS(expect) - 1,
                     expect + 1, G_N_ELEMENTS(expect) - 1);
-    g_assert_cmphex(qtest_readb(qts, bt), ==, 0);
+
+    /*
+     * The BT reports what this board's BMC can take: the firmware sizes a
+     * request from the buffer size, and will not use a BT that recommends no
+     * retries at all.
+     */
+    g_assert_cmpuint(bmc_bt_command(qts, bt, IPMI_NETFN_APP_LUN0, 0x36, 0x78,
+                                    rsp, sizeof(rsp)), ==, 9);
+    g_assert_cmphex(rsp[3], ==, 0x00);
+    g_assert_cmphex(rsp[5], ==, IA64_PDH_BMC_BT_BUFFER);
+    g_assert_cmphex(rsp[6], ==, IA64_PDH_BMC_BT_BUFFER);
+    g_assert_cmphex(rsp[8], ==, IA64_PDH_BMC_BT_RETRIES);
 
     qtest_quit(qts);
 }
