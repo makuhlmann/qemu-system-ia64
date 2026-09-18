@@ -21,6 +21,14 @@ config ISA_IPMI_BT
     depends on ISA_BUS
     select IPMI
 
+config IPMI_BT_MM
+    bool
+    select IPMI
+
+config IPMI_KCS_MM
+    bool
+    select IPMI
+
 config PCI_IPMI_KCS
     bool
     depends on PCI

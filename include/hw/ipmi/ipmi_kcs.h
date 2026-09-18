@@ -27,6 +27,8 @@
 
 #include "hw/ipmi/ipmi.h"
 
+#define TYPE_IPMI_KCS_MM "ipmi-kcs-mm"
+
 typedef struct IPMIKCS {
     IPMIBmc *bmc;
 

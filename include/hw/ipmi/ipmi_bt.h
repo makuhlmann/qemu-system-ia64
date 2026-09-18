@@ -27,6 +27,8 @@
 
 #include "hw/ipmi/ipmi.h"
 
+#define TYPE_IPMI_BT_MM "ipmi-bt-mm"
+
 typedef struct IPMIBT {
     IPMIBmc *bmc;
 
