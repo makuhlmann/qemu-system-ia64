@@ -45,13 +45,11 @@ struct LongspeakPDHState {
     uint32_t sockets;              /* processors present, from -smp */
 
     uint8_t post;                  /* FF5C_0018 */
-    uint64_t scratch0;             /* FF5F_0020 */
-    uint64_t checkin;              /* FF5F_0068 */
     uint8_t semaphore;             /* bit 0 held, bits 7:1 holder id */
-    uint8_t status[IA64_PDH_DILLON_STATUSES];  /* FF5F_0028 + 8n */
-    uint32_t monarch;              /* FF5F_0070 */
+    uint64_t reg[IA64_PDH_DILLON_REGS];        /* FF5F_0000 - FF5F_0090 */
     uint64_t control;              /* FF5F_1000 */
     uint64_t scratch1;             /* FF5F_1038 */
+    uint64_t misc;                 /* FF5F_31C0 */
 
     /* The two PDH UARTs, FF5E_0000 and FF5E_2000. */
     DeviceState *uart[IA64_PDH_UARTS];

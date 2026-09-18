@@ -130,22 +130,34 @@ static bool longspeak_pdh_semaphore_write(LongspeakPDHState *s, unsigned id,
 }
 
 /*
- * One status byte per processor, indexed by cr.lid{28:24} (FFE79370), not by
- * the semaphore id.  The election at FFE65BA0 scans four slots and waits for
- * every present processor's byte to rise above zero, so the bytes above slot
- * 3 stay unmodelled and keep reaching the unimplemented log.
+ * FF5F_0000 to FF5F_0090 is a file of 8-byte registers: SAL_B walks it with a
+ * 0x55 pattern ("found bad miscellaneous register" ends the boot), so every
+ * offset stores what is written at any width.  Some carry meaning: 0x20 the
+ * boot mode, 0x68 the check-in bits, 0x70 the monarch's LID, and 0x28 + 8n one
+ * status byte per processor, indexed by cr.lid{28:24} (FFE79370), not by the
+ * semaphore id.
  */
-static bool longspeak_pdh_status_slot(hwaddr addr, unsigned size,
-                                      unsigned *slot)
+static bool longspeak_pdh_file_index(hwaddr addr, unsigned size, unsigned *idx)
 {
-    hwaddr off = addr - IA64_PDH_DILLON_STATUS;
-
-    if (size != 1 || addr < IA64_PDH_DILLON_STATUS || (off & 7) ||
-        off / 8 >= IA64_PDH_DILLON_STATUSES) {
+    if (addr + size > IA64_PDH_DILLON_REGS * 8 || (addr & 7) + size > 8) {
         return false;
     }
-    *slot = off / 8;
+    *idx = addr / 8;
     return true;
+}
+
+static const char *longspeak_pdh_reg_name(unsigned idx)
+{
+    switch (idx * 8) {
+    case IA64_PDH_DILLON_SCRATCH0:
+        return "scratch0";
+    case IA64_PDH_DILLON_CHECKIN:
+        return "checkin";
+    case IA64_PDH_DILLON_MONARCH:
+        return "monarch";
+    default:
+        return NULL;
+    }
 }
 
 static uint8_t longspeak_pdh_presence(LongspeakPDHState *s)
@@ -171,22 +183,8 @@ static bool longspeak_pdh_do_read(LongspeakPDHBlock *b, hwaddr addr,
         }
         return false;
     case LONGSPEAK_PDH_DILLON_BLOCK:
-        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_SCRATCH0)) {
-            *data = longspeak_pdh_reg_read(s->scratch0, addr, size,
-                                           IA64_PDH_DILLON_SCRATCH0);
-            return true;
-        }
-        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_CHECKIN)) {
-            *data = longspeak_pdh_reg_read(s->checkin, addr, size,
-                                           IA64_PDH_DILLON_CHECKIN);
-            return true;
-        }
-        if (longspeak_pdh_status_slot(addr, size, &id)) {
-            *data = s->status[id];
-            return true;
-        }
-        if (addr == IA64_PDH_DILLON_MONARCH && size == 4) {
-            *data = s->monarch;
+        if (longspeak_pdh_file_index(addr, size, &id)) {
+            *data = longspeak_pdh_reg_read(s->reg[id], addr, size, id * 8);
             return true;
         }
         if (longspeak_pdh_semaphore_slot(addr, size, &id)) {
@@ -201,6 +199,11 @@ static bool longspeak_pdh_do_read(LongspeakPDHBlock *b, hwaddr addr,
         if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_SCRATCH1)) {
             *data = longspeak_pdh_reg_read(s->scratch1, addr, size,
                                            IA64_PDH_DILLON_SCRATCH1);
+            return true;
+        }
+        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_MISC)) {
+            *data = longspeak_pdh_reg_read(s->misc, addr, size,
+                                           IA64_PDH_DILLON_MISC);
             return true;
         }
         if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_MODULE_LAYOUT)) {
@@ -231,41 +234,24 @@ static bool longspeak_pdh_do_write(LongspeakPDHBlock *b, hwaddr addr,
         }
         return false;
     case LONGSPEAK_PDH_DILLON_BLOCK:
-        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_SCRATCH0)) {
-            uint64_t old = s->scratch0;
+        if (longspeak_pdh_file_index(addr, size, &id)) {
+            uint64_t old = s->reg[id];
+            const char *name;
 
-            longspeak_pdh_reg_write(&s->scratch0, addr, size,
-                                    IA64_PDH_DILLON_SCRATCH0, data);
-            if (s->scratch0 != old) {
-                trace_longspeak_pdh_register("scratch0", s->scratch0,
-                                             longspeak_pdh_cpu());
+            longspeak_pdh_reg_write(&s->reg[id], addr, size, id * 8, data);
+            if (s->reg[id] == old) {
+                return true;
             }
-            return true;
-        }
-        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_CHECKIN)) {
-            uint64_t old = s->checkin;
-
-            longspeak_pdh_reg_write(&s->checkin, addr, size,
-                                    IA64_PDH_DILLON_CHECKIN, data);
-            if (s->checkin != old) {
-                trace_longspeak_pdh_register("checkin", s->checkin,
+            name = longspeak_pdh_reg_name(id);
+            if (name != NULL) {
+                trace_longspeak_pdh_register(name, s->reg[id],
                                              longspeak_pdh_cpu());
-            }
-            return true;
-        }
-        if (longspeak_pdh_status_slot(addr, size, &id)) {
-            if (s->status[id] != (uint8_t)data) {
-                s->status[id] = data;
-                trace_longspeak_pdh_status(id, s->status[id],
-                                           longspeak_pdh_cpu());
-            }
-            return true;
-        }
-        if (addr == IA64_PDH_DILLON_MONARCH && size == 4) {
-            if (s->monarch != (uint32_t)data) {
-                s->monarch = data;
-                trace_longspeak_pdh_register("monarch", s->monarch,
-                                             longspeak_pdh_cpu());
+            } else if (addr >= IA64_PDH_DILLON_STATUS &&
+                       addr < IA64_PDH_DILLON_STATUS +
+                              8 * IA64_PDH_DILLON_STATUSES) {
+                trace_longspeak_pdh_status(
+                    (id * 8 - IA64_PDH_DILLON_STATUS) / 8,
+                    s->reg[id] & 0xff, longspeak_pdh_cpu());
             }
             return true;
         }
@@ -289,6 +275,11 @@ static bool longspeak_pdh_do_write(LongspeakPDHBlock *b, hwaddr addr,
                 trace_longspeak_pdh_register("scratch1", s->scratch1,
                                              longspeak_pdh_cpu());
             }
+            return true;
+        }
+        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_MISC)) {
+            longspeak_pdh_reg_write(&s->misc, addr, size,
+                                    IA64_PDH_DILLON_MISC, data);
             return true;
         }
         if (longspeak_pdh_semaphore_slot(addr, size, &id)) {
@@ -414,26 +405,24 @@ static void longspeak_pdh_reset(DeviceState *dev)
     LongspeakPDHState *s = LONGSPEAK_PDH(dev);
 
     s->post = 0;
-    s->checkin = 0;
     s->semaphore = 0;
-    s->monarch = 0;
-    memset(s->status, 0, sizeof(s->status));
+    s->reg[IA64_PDH_DILLON_CHECKIN / 8] = 0;
+    s->reg[IA64_PDH_DILLON_MONARCH / 8] = 0;
+    memset(&s->reg[IA64_PDH_DILLON_STATUS / 8], 0,
+           IA64_PDH_DILLON_STATUSES * sizeof(s->reg[0]));
 }
 
 static const VMStateDescription vmstate_longspeak_pdh = {
     .name = TYPE_LONGSPEAK_PDH,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8(post, LongspeakPDHState),
-        VMSTATE_UINT64(scratch0, LongspeakPDHState),
-        VMSTATE_UINT64(checkin, LongspeakPDHState),
         VMSTATE_UINT8(semaphore, LongspeakPDHState),
-        VMSTATE_UINT8_ARRAY(status, LongspeakPDHState,
-                            IA64_PDH_DILLON_STATUSES),
-        VMSTATE_UINT32(monarch, LongspeakPDHState),
+        VMSTATE_UINT64_ARRAY(reg, LongspeakPDHState, IA64_PDH_DILLON_REGS),
         VMSTATE_UINT64(control, LongspeakPDHState),
         VMSTATE_UINT64(scratch1, LongspeakPDHState),
+        VMSTATE_UINT64(misc, LongspeakPDHState),
         VMSTATE_END_OF_LIST()
     },
 };

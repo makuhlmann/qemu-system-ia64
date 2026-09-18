@@ -946,6 +946,7 @@ static void test_sba_ioc_identity(void)
 static void test_pdh_longspeak_map(void)
 {
     QTestState *qts = qtest_init("-machine zx1 -smp 2 -m 256M -S");
+    unsigned int i;
 
     qtest_writeq(qts, IA64_PDH_NVM_BASE, 0x4e564d2054494e49ULL);
     qtest_writeq(qts, IA64_PDH_NVM_BASE + IA64_PDH_NVM_SIZE - 8,
@@ -1022,13 +1023,27 @@ static void test_pdh_longspeak_map(void)
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(1)), ==, 2);
     qtest_writeb(qts, IA64_PDH_STATUS_ADDR(3), 1);
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(3)), ==, 1);
-    /* Each slot is one byte, eight bytes apart; the gap is not the slot. */
-    qtest_writeb(qts, IA64_PDH_STATUS_ADDR(0) + 1, 0x5a);
-    g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(0) + 1), ==, 0);
-    g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(0)), ==, 3);
-    /* The election scans four slots, so nothing is stored beyond them. */
-    qtest_writeb(qts, IA64_PDH_STATUS_ADDR(4), 0x5a);
-    g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(4)), ==, 0);
+    /* A status byte is the low byte of an 8-byte register of the file. */
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_STATUS_ADDR(0)), ==, 3);
+
+    /*
+     * SAL_B walks the register file with a 0x55 pattern and halts the cell
+     * when a register does not read back ("found bad miscellaneous
+     * register").  Every 8-byte register from FF5F_0000 to FF5F_0090 stores,
+     * and so does FF5F_31C0, the last one it tests.
+     */
+    for (i = 0; i < IA64_PDH_DILLON_REGS; i++) {
+        qtest_writeq(qts, IA64_PDH_DILLON_BASE + 8 * i, 0x5555555555555555ULL);
+    }
+    for (i = 0; i < IA64_PDH_DILLON_REGS; i++) {
+        g_assert_cmphex(qtest_readq(qts, IA64_PDH_DILLON_BASE + 8 * i), ==,
+                        0x5555555555555555ULL);
+    }
+    qtest_writeq(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_MISC,
+                 0x5555555555555555ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_MISC), ==,
+                    0x5555555555555555ULL);
     qtest_writel(qts, IA64_PDH_MONARCH_ADDR, 0x0000ffff);
     g_assert_cmphex(qtest_readl(qts, IA64_PDH_MONARCH_ADDR), ==, 0x0000ffff);
 
