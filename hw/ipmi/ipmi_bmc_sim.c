@@ -59,6 +59,7 @@
 #define IPMI_CMD_GET_DEVICE_ID            0x01
 #define IPMI_CMD_COLD_RESET               0x02
 #define IPMI_CMD_WARM_RESET               0x03
+#define IPMI_CMD_GET_SELF_TEST_RESULTS    0x04
 #define IPMI_CMD_SET_ACPI_POWER_STATE     0x06
 #define IPMI_CMD_GET_ACPI_POWER_STATE     0x07
 #define IPMI_CMD_GET_DEVICE_GUID          0x08
@@ -962,6 +963,14 @@ static void get_acpi_power_state(IPMIBmcSim *ibs,
 {
     rsp_buffer_push(rsp, ibs->acpi_power_state[0]);
     rsp_buffer_push(rsp, ibs->acpi_power_state[1]);
+}
+
+static void get_self_test_results(IPMIBmcSim *ibs,
+                                  uint8_t *cmd, unsigned int cmd_len,
+                                  RspBuffer *rsp)
+{
+    rsp_buffer_push(rsp, 0x55); /* No error. */
+    rsp_buffer_push(rsp, 0x00);
 }
 
 static void get_device_guid(IPMIBmcSim *ibs,
@@ -2388,6 +2397,7 @@ static const IPMICmdHandler app_cmds[] = {
     [IPMI_CMD_GET_DEVICE_ID] = { get_device_id },
     [IPMI_CMD_COLD_RESET] = { cold_reset },
     [IPMI_CMD_WARM_RESET] = { warm_reset },
+    [IPMI_CMD_GET_SELF_TEST_RESULTS] = { get_self_test_results },
     [IPMI_CMD_SET_ACPI_POWER_STATE] = { set_acpi_power_state, 4 },
     [IPMI_CMD_GET_ACPI_POWER_STATE] = { get_acpi_power_state },
     [IPMI_CMD_GET_DEVICE_GUID] = { get_device_guid },
