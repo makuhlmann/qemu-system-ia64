@@ -1015,12 +1015,7 @@ static void test_pdh_longspeak_map(void)
     qtest_writeb(qts, IA64_PDH_UART_BASE + 0x1000, 0x5a);
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_UART_BASE + 0x1000), ==, 0);
 
-    /*
-     * One status byte per processor, and the monarch word.  SAL_B's boot
-     * rendezvous (FFE65BA0) polls every present processor's status byte and
-     * elects the one with the highest value, which then publishes its own
-     * cr.lid at the monarch word; both are plain storage.
-     */
+    /* The rendezvous elects the highest status byte; both are storage. */
     qtest_writeb(qts, IA64_PDH_STATUS_ADDR(0), 3);
     qtest_writeb(qts, IA64_PDH_STATUS_ADDR(1), 2);
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(0)), ==, 3);

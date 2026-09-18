@@ -130,17 +130,10 @@ static bool longspeak_pdh_semaphore_write(LongspeakPDHState *s, unsigned id,
 }
 
 /*
- * One signed status byte per processor at +0x28 + 8n, with n taken from the
- * processor's own cr.lid: SAL_B's index routine (FFE79370) reads
- * cr.lid{28:24}.  A processor publishes its own byte through FFF3DA20, and
- * the monarch election at FFE65BA0 polls every present processor's byte
- * until each one is greater than zero, then elects the highest.  A byte that
- * always reads zero means "this processor has not checked in", so the
- * election times out after 30 rounds and every processor parks.
- *
- * The election scans four slots (the loop at FFE65C96 stops after index 3),
- * so four is what this models; the bytes above them keep falling through to
- * the unimplemented log, where the next unknown register is easier to see.
+ * One status byte per processor, indexed by cr.lid{28:24} (FFE79370), not by
+ * the semaphore id.  The election at FFE65BA0 scans four slots and waits for
+ * every present processor's byte to rise above zero, so the bytes above slot
+ * 3 stay unmodelled and keep reaching the unimplemented log.
  */
 static bool longspeak_pdh_status_slot(hwaddr addr, unsigned size,
                                       unsigned *slot)
