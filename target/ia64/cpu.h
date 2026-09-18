@@ -1815,6 +1815,12 @@ typedef struct IA64PalProfile {
      * every model in this fork keeps at 50 for the machine's own windows.
      */
     uint64_t io_block_pa;
+    /*
+     * PAL_PROC_GET/SET_FEATURES implementation-specific feature sets: bit n
+     * stands for set 16 + n.  The architected sets 1-15 answer -2 and set 0
+     * is always there (SDM Vol. 2, PAL_PROC_GET_FEATURES).
+     */
+    uint32_t impl_feature_sets;
     /* PAL_FREQ_RATIOS: each ratio is reported as (num << 32) | den. */
     uint32_t proc_ratio_num, proc_ratio_den;   /* processor / base */
     uint32_t bus_ratio_num, bus_ratio_den;      /* system bus / base */

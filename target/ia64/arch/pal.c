@@ -108,6 +108,12 @@ static uint64_t pal_stacked_arg(CPUIA64State *env, uint32_t arg)
 #define PAL_STATUS_ERROR           (-3)
 #define PAL_STATUS_NO_INFORMATION  (-6)
 #define PAL_STATUS_BEYOND_MAX      (-8)
+/*
+ * An implementation-specific index (SDM Vol. 2 table 11-12: 512-767).  The HP
+ * zx1 SAL_B sets a processor response timeout through it and ends the boot
+ * with "cell halt" when it fails.  Nothing here has a bus timeout to set.
+ */
+#define PAL_IMPL_PROC_RESPONSE_TIMEOUT 0x213
 #define PAL_STATUS_NEXT_HIGHER     1
 
 static void pal_get_version(CPUIA64State *env)
@@ -983,10 +989,29 @@ static void pal_mem_for_test(CPUIA64State *env)
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
+static uint64_t pal_feature_set_status(CPUIA64State *env, uint64_t feature_set)
+{
+    uint32_t sets = ia64_env_cpu_class(env)->pal->impl_feature_sets;
+
+    if (feature_set == 0) {
+        return PAL_STATUS_SUCCESS;
+    }
+    if (feature_set < 16) {
+        return PAL_STATUS_INVALID_ARGUMENT;
+    }
+    if (feature_set - 16 >= 32) {
+        return PAL_STATUS_BEYOND_MAX;
+    }
+    sets >>= feature_set - 16;
+    if (sets & 1) {
+        return PAL_STATUS_SUCCESS;
+    }
+    return sets != 0 ? PAL_STATUS_NEXT_HIGHER : PAL_STATUS_BEYOND_MAX;
+}
+
 static void pal_proc_get_features(CPUIA64State *env)
 {
     uint64_t feature_set = env->gr[IA64_PAL_GR_ARG2];
-    bool montecito = ia64_env_cpu_class(env)->is_montecito;
 
     env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;
@@ -997,17 +1022,10 @@ static void pal_proc_get_features(CPUIA64State *env)
         return;
     }
 
-    if (feature_set == 0) {
-        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-    } else if (feature_set < 16) {
-        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
-    } else if (!montecito || feature_set > 18) {
-        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_BEYOND_MAX;
-    } else if (feature_set < 18) {
-        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_NEXT_HIGHER;
-    } else {
+    env->gr[IA64_PAL_GR_STATUS] = pal_feature_set_status(env, feature_set);
+    if (env->gr[IA64_PAL_GR_STATUS] == PAL_STATUS_SUCCESS &&
+        feature_set == 18) {
         /* Feature set 18, bit 18: Hyper-Threading is implemented. */
-        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
         env->gr[IA64_PAL_GR_RESULT1] = 1ULL << 18;
         env->gr[IA64_PAL_GR_RESULT2] = 1ULL << 18;
     }
@@ -1241,10 +1259,12 @@ static void pal_bus_get_features(CPUIA64State *env)
 
 static void pal_set_features(CPUIA64State *env)
 {
-    if (env->gr[IA64_PAL_GR_ARG2] != 0 || env->gr[IA64_PAL_GR_ARG3] != 0) {
+    /* A feature that cannot be set is ignored (SDM Vol. 2). */
+    if (env->gr[IA64_PAL_GR_ARG3] != 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
     } else {
-        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
+        env->gr[IA64_PAL_GR_STATUS] =
+            pal_feature_set_status(env, env->gr[IA64_PAL_GR_ARG2]);
     }
     env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;
@@ -1583,6 +1603,16 @@ uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
             pal_return_not_implemented(env);
         } else {
             pal_logical_to_physical(env);
+        }
+        break;
+    case PAL_IMPL_PROC_RESPONSE_TIMEOUT:
+        if (!pal_post_merced_available(env)) {
+            pal_return_not_implemented(env);
+        } else {
+            env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
+            env->gr[IA64_PAL_GR_RESULT1] = 0;
+            env->gr[IA64_PAL_GR_RESULT2] = 0;
+            env->gr[IA64_PAL_GR_RESULT3] = 0;
         }
         break;
     case PAL_MC_CLEAR_LOG:

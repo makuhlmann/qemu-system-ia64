@@ -1089,6 +1089,8 @@ static const TCGCPUOps ia64_tcg_ops = {
 static const IA64PalProfile ia64_pal_profile_madison = {
     .freq_base_hz = 100000000ULL,
     .io_block_pa = IA64_PAL_IO_BLOCK_ITANIUM2,
+    /* Set 16 exists and holds no feature this model implements. */
+    .impl_feature_sets = 1U << 0,
     .proc_ratio_num = 16, .proc_ratio_den = 1,   /* 1.6 GHz */
     .bus_ratio_num = 4,   .bus_ratio_den = 1,     /* 400 MHz */
     .itc_ratio_num = 16,  .itc_ratio_den = 1,     /* ITC at the core clock */
@@ -1131,6 +1133,7 @@ static const IA64PalProfile ia64_pal_profile_madison = {
 static const IA64PalProfile ia64_pal_profile_montecito = {
     .freq_base_hz = 100000000ULL,
     .io_block_pa = IA64_PAL_IO_BLOCK_ITANIUM2,
+    .impl_feature_sets = 1U << 2,                  /* set 18 */
     .proc_ratio_num = 16, .proc_ratio_den = 1,    /* 1.6 GHz */
     .bus_ratio_num = 16,  .bus_ratio_den = 3,      /* 533.33 MHz */
     .itc_ratio_num = 16,  .itc_ratio_den = 1,      /* ITC at the core clock */

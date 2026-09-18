@@ -965,10 +965,53 @@ test_pal_proc_get_features_montecito_beyond_max = require_registers(
 
 test_pal_proc_get_features_madison_beyond_max = require_registers(
     "pal_proc_get_features_madison_beyond_max",
-    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 16), (31, 0)]),
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 17), (31, 0)]),
     {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
      "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="madison")
+
+# Itanium 2 implements set 16 and no feature in it; the HP zx1 firmware stops
+# its boot when the call fails.
+test_pal_proc_get_features_madison_set16 = require_registers(
+    "pal_proc_get_features_madison_set16",
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 16), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES, "r8": 0,
+     "r9": 0, "r10": 0, "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_proc_get_features_merced_beyond_max = require_registers(
+    "pal_proc_get_features_merced_beyond_max",
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 16), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
+     "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+# A feature that cannot be set is ignored, so the call still succeeds.
+test_pal_proc_set_features_madison_set16 = require_registers(
+    "pal_proc_set_features_madison_set16",
+    pal_call_program(PAL_PROC_SET_FEATURES, [(29, 0x48), (30, 16), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_SET_FEATURES, "r8": 0,
+     "r9": 0, "r10": 0, "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_proc_set_features_merced_beyond_max = require_registers(
+    "pal_proc_set_features_merced_beyond_max",
+    pal_call_program(PAL_PROC_SET_FEATURES, [(29, 0x48), (30, 16), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PROC_SET_FEATURES,
+     "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+# Implementation-specific index the HP zx1 SAL_B needs (SDM Vol. 2 table 11-12).
+test_pal_impl_proc_response_timeout = require_registers(
+    "pal_impl_proc_response_timeout",
+    pal_call_program(0x213, [(29, 0x1f), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": 0x213, "r8": 0,
+     "r9": 0, "r10": 0, "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_impl_proc_response_timeout_merced = require_registers(
+    "pal_impl_proc_response_timeout_merced",
+    pal_call_program(0x213, [(29, 0x1f), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": 0x213,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_logical_to_physical_current = require_registers(
     "pal_logical_to_physical_current",
@@ -1874,13 +1917,19 @@ CASE_NAMES = (
     'pal_prefetch_vis',
     'pal_prefetch_vis_reserved_arg',
     'pal_proc_entry_virtual_itr',
+    'pal_impl_proc_response_timeout',
+    'pal_impl_proc_response_timeout_merced',
     'pal_proc_get_features',
     'pal_proc_get_features_madison_beyond_max',
+    'pal_proc_get_features_madison_set16',
+    'pal_proc_get_features_merced_beyond_max',
     'pal_proc_get_features_montecito_beyond_max',
     'pal_proc_get_features_montecito_next_set',
     'pal_proc_get_features_montecito_set18',
     'pal_proc_get_features_reserved_arg',
     'pal_proc_set_features',
+    'pal_proc_set_features_madison_set16',
+    'pal_proc_set_features_merced_beyond_max',
     'pal_proc_set_features_invalid',
     'pal_ptce_info',
     'pal_ptce_info_reserved_arg',
