@@ -55,6 +55,14 @@ typedef struct IPMIBT {
     uint8_t waiting_rsp;
     uint8_t waiting_seq;
 
+    /*
+     * What Get BT Interface Capabilities reports.  Zero means the buffer the
+     * interface really has, and no retries.
+     */
+    uint8_t cap_inmsg;
+    uint8_t cap_outmsg;
+    uint8_t cap_retries;
+
     uint32_t io_base;
     unsigned long io_length;
     MemoryRegion io;

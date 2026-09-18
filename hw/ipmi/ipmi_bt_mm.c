@@ -11,6 +11,7 @@
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/core/sysbus.h"
 #include "hw/ipmi/ipmi_bt.h"
 #include "migration/vmstate.h"
@@ -72,6 +73,17 @@ static void *ipmi_bt_mm_get_backend_data(IPMIInterface *ii)
     return &ibm->bt;
 }
 
+/*
+ * Zero keeps what the interface itself can take, and no retries.  The sizes
+ * are what Get BT Interface Capabilities advertises; nothing enforces them,
+ * so a response larger than the size given is still delivered.
+ */
+static const Property ipmi_bt_mm_properties[] = {
+    DEFINE_PROP_UINT8("input-size", IPMIBTMMDevice, bt.cap_inmsg, 0),
+    DEFINE_PROP_UINT8("output-size", IPMIBTMMDevice, bt.cap_outmsg, 0),
+    DEFINE_PROP_UINT8("retries", IPMIBTMMDevice, bt.cap_retries, 0),
+};
+
 static void ipmi_bt_mm_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -79,6 +91,7 @@ static void ipmi_bt_mm_class_init(ObjectClass *oc, const void *data)
 
     dc->realize = ipmi_bt_mm_realize;
     dc->vmsd = &vmstate_IPMIBTMMDevice;
+    device_class_set_props(dc, ipmi_bt_mm_properties);
 
     iic->get_backend_data = ipmi_bt_mm_get_backend_data;
     ipmi_bt_class_init(iic);

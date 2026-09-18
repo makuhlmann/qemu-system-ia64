@@ -116,18 +116,10 @@ static void ipmi_bt_handle_event(IPMIInterface *ii)
         ib->outmsg[3] = ib->inmsg[3];
         ib->outmsg[4] = 0;
         ib->outmsg[5] = 1; /* Only support 1 outstanding request. */
-        if (sizeof(ib->inmsg) > 0xff) { /* Input buffer size */
-            ib->outmsg[6] = 0xff;
-        } else {
-            ib->outmsg[6] = (unsigned char) sizeof(ib->inmsg);
-        }
-        if (sizeof(ib->outmsg) > 0xff) { /* Output buffer size */
-            ib->outmsg[7] = 0xff;
-        } else {
-            ib->outmsg[7] = (unsigned char) sizeof(ib->outmsg);
-        }
+        ib->outmsg[6] = ib->cap_inmsg;   /* Input buffer size */
+        ib->outmsg[7] = ib->cap_outmsg;  /* Output buffer size */
         ib->outmsg[8] = 10; /* Max request to response time */
-        ib->outmsg[9] = 0; /* Don't recommend retries */
+        ib->outmsg[9] = ib->cap_retries;
         ib->outlen = 10;
         IPMI_BT_SET_BBUSY(ib->control_reg, 0);
         IPMI_BT_SET_B2H_ATN(ib->control_reg, 1);
@@ -360,6 +352,12 @@ static void ipmi_bt_init(IPMIInterface *ii, unsigned int min_size, Error **errp)
     }
     ib->size_mask = min_size - 1;
     ib->io_length = 3;
+    if (!ib->cap_inmsg) {
+        ib->cap_inmsg = MIN(sizeof(ib->inmsg), 0xff);
+    }
+    if (!ib->cap_outmsg) {
+        ib->cap_outmsg = MIN(sizeof(ib->outmsg), 0xff);
+    }
 
     memory_region_init_io(&ib->io, NULL, &ipmi_bt_io_ops, ii, "ipmi-bt",
                           min_size);
