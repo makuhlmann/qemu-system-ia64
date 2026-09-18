@@ -919,6 +919,14 @@ static void test_sba_ioc_identity(void)
     g_assert_cmphex(qtest_readw(qts, ioc + 0x000), ==, 0x103c);
     g_assert_cmphex(qtest_readw(qts, ioc + 0x002), ==, 0x122a);
     g_assert_cmphex(qtest_readb(qts, ioc + 0x008), ==, 0x23);
+
+    /* The "bus config register" has to survive the reboot it triggers. */
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x9410, 0x02000000002a0400ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x9410), ==,
+                    0x02000000002a0400ULL);
+    qtest_system_reset(qts);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x9410), ==,
+                    0x02000000002a0400ULL);
     qtest_quit(qts);
 }
 
@@ -1029,7 +1037,35 @@ static void test_pdh_longspeak_map(void)
     qtest_writel(qts, IA64_PDH_MONARCH_ADDR, 0x0000ffff);
     g_assert_cmphex(qtest_readl(qts, IA64_PDH_MONARCH_ADDR), ==, 0x0000ffff);
 
+    /* The control register reboots the box; the scratch byte outlives it. */
+    qtest_writeb(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_SCRATCH0, 0x40);
+    qtest_writeb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST, 0x13);
+    qtest_writeb(qts, IA64_PDH_STATUS_ADDR(0), 3);
+    qtest_writeq(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_CONTROL,
+                 IA64_PDH_DILLON_RESET);
+    qtest_qmp_eventwait(qts, "RESET");
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_SCRATCH0), ==, 0x40);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST),
+                    ==, 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(0)), ==, 0);
+    /* A value without both bits set is stored and reboots nothing. */
+    qtest_writeq(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_CONTROL, 0x10);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_CONTROL), ==, 0x10);
+    /* (old & 0x16) | 6 is 0x16 when bit 4 was set: that resets as well. */
+    qtest_writeb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST, 0x13);
+    qtest_writeq(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_CONTROL, 0x16);
+    qtest_qmp_eventwait(qts, "RESET");
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST),
+                    ==, 0);
+
+    qtest_writeq(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_SCRATCH1, 2);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_SCRATCH1), ==, 2);
+
     /* Reset: no processor checked in, semaphore free, POST 0; NVM kept. */
+    qtest_writeb(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_SCRATCH0, 0);
     qtest_system_reset(qts);
     g_assert_cmphex(qtest_readl(qts, IA64_PDH_DILLON_BASE +
                                 IA64_PDH_DILLON_CHECKIN), ==, 0);

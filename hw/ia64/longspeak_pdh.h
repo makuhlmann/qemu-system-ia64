@@ -48,11 +48,13 @@ struct LongspeakPDHState {
     uint64_t scratch0;             /* FF5F_0020 */
     uint64_t checkin;              /* FF5F_0068 */
     uint8_t semaphore;             /* bit 0 held, bits 7:1 holder id */
+    uint8_t status[IA64_PDH_DILLON_STATUSES];  /* FF5F_0028 + 8n */
+    uint32_t monarch;              /* FF5F_0070 */
+    uint64_t control;              /* FF5F_1000 */
+    uint64_t scratch1;             /* FF5F_1038 */
 
     /* The two PDH UARTs, FF5E_0000 and FF5E_2000. */
     DeviceState *uart[IA64_PDH_UARTS];
-    uint8_t status[IA64_PDH_DILLON_STATUSES];  /* FF5F_0028 + 8n */
-    uint32_t monarch;              /* FF5F_0070 */
 };
 
 /* sysbus MMIO indexes */

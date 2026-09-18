@@ -41,9 +41,11 @@
 #include "hw/core/cpu.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/char/serial-mm.h"
+#include "chardev/char-fe.h"
 #include "system/system.h"
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "migration/vmstate.h"
+#include "system/runstate.h"
 #include "longspeak_pdh.h"
 #include "trace.h"
 
@@ -198,6 +200,16 @@ static bool longspeak_pdh_do_read(LongspeakPDHBlock *b, hwaddr addr,
             *data = longspeak_pdh_semaphore_read(s, id);
             return true;
         }
+        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_CONTROL)) {
+            *data = longspeak_pdh_reg_read(s->control, addr, size,
+                                           IA64_PDH_DILLON_CONTROL);
+            return true;
+        }
+        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_SCRATCH1)) {
+            *data = longspeak_pdh_reg_read(s->scratch1, addr, size,
+                                           IA64_PDH_DILLON_SCRATCH1);
+            return true;
+        }
         if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_MODULE_LAYOUT)) {
             /* One processor module per socket, no mx2 (SAL_A forces 0). */
             *data = 0;
@@ -260,6 +272,28 @@ static bool longspeak_pdh_do_write(LongspeakPDHBlock *b, hwaddr addr,
             if (s->monarch != (uint32_t)data) {
                 s->monarch = data;
                 trace_longspeak_pdh_register("monarch", s->monarch,
+                                             longspeak_pdh_cpu());
+            }
+            return true;
+        }
+        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_CONTROL)) {
+            longspeak_pdh_reg_write(&s->control, addr, size,
+                                    IA64_PDH_DILLON_CONTROL, data);
+            trace_longspeak_pdh_register("control", s->control,
+                                         longspeak_pdh_cpu());
+            if ((s->control & IA64_PDH_DILLON_RESET) ==
+                IA64_PDH_DILLON_RESET) {
+                qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            }
+            return true;
+        }
+        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_SCRATCH1)) {
+            uint64_t old = s->scratch1;
+
+            longspeak_pdh_reg_write(&s->scratch1, addr, size,
+                                    IA64_PDH_DILLON_SCRATCH1, data);
+            if (s->scratch1 != old) {
+                trace_longspeak_pdh_register("scratch1", s->scratch1,
                                              longspeak_pdh_cpu());
             }
             return true;
@@ -377,16 +411,16 @@ static void longspeak_pdh_unrealize(DeviceState *dev)
 }
 
 /*
- * A system reset clears the POST byte, the latches and the semaphore, so each
- * boot's rendezvous starts with no processor checked in.  The NVM and the
- * SRAM keep their contents.
+ * The rendezvous state is cleared, the chipset registers are not: SAL_B
+ * leaves its boot mode in the scratch byte (FFE79060) before it resets the
+ * box, and SAL_A reads that byte in its first instructions (FFFE0346).  The
+ * NVM and the SRAM keep their contents.
  */
 static void longspeak_pdh_reset(DeviceState *dev)
 {
     LongspeakPDHState *s = LONGSPEAK_PDH(dev);
 
     s->post = 0;
-    s->scratch0 = 0;
     s->checkin = 0;
     s->semaphore = 0;
     s->monarch = 0;
@@ -405,6 +439,8 @@ static const VMStateDescription vmstate_longspeak_pdh = {
         VMSTATE_UINT8_ARRAY(status, LongspeakPDHState,
                             IA64_PDH_DILLON_STATUSES),
         VMSTATE_UINT32(monarch, LongspeakPDHState),
+        VMSTATE_UINT64(control, LongspeakPDHState),
+        VMSTATE_UINT64(scratch1, LongspeakPDHState),
         VMSTATE_END_OF_LIST()
     },
 };

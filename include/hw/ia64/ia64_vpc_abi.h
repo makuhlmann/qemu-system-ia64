@@ -458,7 +458,10 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_DILLON_MONARCH       0x0070U   /* bits 15:0: ~(LID >> 16) */
 #define IA64_PDH_DILLON_SEMAPHORE     0x00b0U   /* + 8 * claimant id */
 #define IA64_PDH_DILLON_SEMAPHORES    8U
+#define IA64_PDH_DILLON_CONTROL       0x1000U   /* bits 2:1: reset the box */
+#define IA64_PDH_DILLON_RESET         0x06U     /* the value that resets it */
 #define IA64_PDH_DILLON_MODULE_LAYOUT 0x1010U   /* bit 0: mx2 modules */
+#define IA64_PDH_DILLON_SCRATCH1      0x1038U   /* written 0 and 2 */
 /*
  * The flash's NVRAM sector, the EFI variable store.  The real i2000/SDV
  * flash keeps its NVRAM/variable scratch block at 0xFFF90000 (FIT type

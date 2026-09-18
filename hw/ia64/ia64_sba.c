@@ -46,6 +46,13 @@
 /* IOC identity registers at the function block base: FUNC_ID + FCLASS. */
 #define IA64_SBA_IOC_FUNC_ID_OFFSET    (IA64_SBA_IOC_FUNCTION_OFFSET + 0x000)
 #define IA64_SBA_IOC_FCLASS_OFFSET     (IA64_SBA_IOC_FUNCTION_OFFSET + 0x008)
+/*
+ * The vendor firmware's "bus config register" (its own console name): it
+ * writes the value it wants and resets the box for it to take effect, so the
+ * value has to survive the reset.  Not in the mio ERS, whose register chapter
+ * ends at FED0_1238.
+ */
+#define IA64_SBA_BUS_CONFIG_OFFSET     UINT64_C(0x9410)
 #define IA64_SBA_IOMMU_FIRST           UINT64_C(0x1300)
 #define IA64_SBA_IOMMU_LAST            UINT64_C(0x1320)
 #define IA64_SBA_IOMMU_END             UINT64_C(0x1328)
@@ -213,6 +220,11 @@ static MemTxResult ia64_sba_csr_read(void *opaque, hwaddr addr, uint64_t *data,
     }
     qemu_rec_mutex_unlock(&s->iommu_lock);
 
+    if (!ok && addr == IA64_SBA_BUS_CONFIG_OFFSET && size == 8) {
+        *data = s->bus_config;
+        ok = true;
+    }
+
     if (!ok && size >= 1 && size <= 8 && (addr & 7) + size <= 8 &&
         ia64_sba_identity_reg(addr & ~UINT64_C(7), &reg)) {
         /* Right-justify the addressed byte lane, like the IOMMU/LBA reads. */
@@ -273,6 +285,11 @@ static MemTxResult ia64_sba_csr_write(void *opaque, hwaddr addr, uint64_t value,
         }
     }
     qemu_rec_mutex_unlock(&s->iommu_lock);
+
+    if (!handled && addr == IA64_SBA_BUS_CONFIG_OFFSET && size == 8) {
+        s->bus_config = value;
+        handled = true;
+    }
 
     /* The identity registers are read-only; other writes are unmodeled. */
     if (!handled && !ia64_sba_identity_reg(addr & ~UINT64_C(7), &ident) &&
@@ -419,6 +436,7 @@ static const VMStateDescription vmstate_ia64_sba = {
         VMSTATE_UINT64(fe.pcom, IA64SBAState),
         VMSTATE_UINT64(fe.tcnfg, IA64SBAState),
         VMSTATE_UINT64(fe.pdir_base, IA64SBAState),
+        VMSTATE_UINT64(bus_config, IA64SBAState),
         VMSTATE_END_OF_LIST()
     },
 };

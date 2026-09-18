@@ -29,6 +29,7 @@ struct IA64SBAState {
 
     uint64_t csr_base;             /* fixed chipset MMIO base (IA64_SBA_CSR_BASE) */
     /* CSR offsets already reported as unimplemented, one bit per offset. */
+    uint64_t bus_config;           /* FED0_9410, kept across a platform reset */
     unsigned long *unimp_read;
     unsigned long *unimp_write;
 };
