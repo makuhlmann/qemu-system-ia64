@@ -945,6 +945,7 @@ static void test_pdh_longspeak_map(void)
     qtest_writeq(qts, IA64_PDH_SRAM_BASE, 0x5555555555555555ULL);
     qtest_writeq(qts, IA64_PDH_SRAM_BASE + IA64_PDH_SRAM_SIZE - 8,
                  0xaaaaaaaaaaaaaaaaULL);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_UART_BASE + 7), ==, 0);
     g_assert_cmphex(qtest_readq(qts, IA64_PDH_NVM_BASE), ==,
                     0x4e564d2054494e49ULL);
     g_assert_cmphex(qtest_readq(qts, IA64_PDH_NVM_BASE + IA64_PDH_NVM_SIZE - 8),
@@ -995,6 +996,16 @@ static void test_pdh_longspeak_map(void)
     qtest_writeb(qts, IA64_PDH_SEMAPHORE_ADDR(1), 0);
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(0)), ==, 0);
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(1)), ==, 0x01);
+
+    /* A 16550's scratch register tells a UART from the block background. */
+    qtest_writeb(qts, IA64_PDH_UART_BASE + 7, 0x5a);
+    qtest_writeb(qts, IA64_PDH_UART_BASE + IA64_PDH_UART_STRIDE + 7, 0xa5);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_UART_BASE + 7), ==, 0x5a);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_UART_BASE +
+                                IA64_PDH_UART_STRIDE + 7), ==, 0xa5);
+    /* The rest of the block is still the log-only background. */
+    qtest_writeb(qts, IA64_PDH_UART_BASE + 0x1000, 0x5a);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_UART_BASE + 0x1000), ==, 0);
 
     /*
      * One status byte per processor, and the monarch word.  SAL_B's boot

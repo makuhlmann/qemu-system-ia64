@@ -18,7 +18,9 @@
  *              (plans/nvram-portability.md sec 2.2).  Not modelled yet.
  *   FF5C_0000  processor presence, bits 3:0 active low (SAL_A FFFE0E60).
  *   FF5C_0018  POST byte (SAL_A writes (id << 4) | step).
- *   FF5E_0000  two 16550 UARTs, FF5E_0000 and FF5E_2000.  Not modelled yet.
+ *   FF5E_0000  two 16550 UARTs, FF5E_0000 and FF5E_2000 (EFI PDHUART,
+ *              PNP0501 in the firmware's device table at FFF8E918).  They
+ *              take the second and third -serial chardev.
  *   FF5F_0000  Dillon registers.  0x20 and 0x68 are scratch latches the
  *              processors share (0x68 bits 19:16: check-in, SAL_A sec 5.3;
  *              0x20 bits 7:6: boot mode, FFFE0346); 0xB0 + 8 * id is one
@@ -38,6 +40,8 @@
 #include "qapi/error.h"
 #include "hw/core/cpu.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/char/serial-mm.h"
+#include "system/system.h"
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "migration/vmstate.h"
 #include "longspeak_pdh.h"
@@ -329,10 +333,35 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
         b->base = longspeak_pdh_blocks[i].base;
         b->unimp_read = bitmap_new(IA64_PDH_BLOCK_SIZE);
         b->unimp_write = bitmap_new(IA64_PDH_BLOCK_SIZE);
+        memory_region_init(&b->container, OBJECT(dev),
+                           longspeak_pdh_blocks[i].name,
+                           IA64_PDH_BLOCK_SIZE);
         memory_region_init_io(&b->mr, OBJECT(dev), &longspeak_pdh_ops, b,
                               longspeak_pdh_blocks[i].name,
                               IA64_PDH_BLOCK_SIZE);
-        sysbus_init_mmio(sbd, &b->mr);
+        memory_region_add_subregion(&b->container, 0, &b->mr);
+        sysbus_init_mmio(sbd, &b->container);
+    }
+
+    /*
+     * They overlay the log-only background, so an undecoded offset is still
+     * reported.  Their interrupt wiring is unknown; the firmware polls.
+     */
+    for (i = 0; i < IA64_PDH_UARTS; i++) {
+        LongspeakPDHBlock *b = &s->block[LONGSPEAK_PDH_UART_BLOCK];
+        DeviceState *uart = qdev_new(TYPE_SERIAL_MM);
+
+        qdev_prop_set_uint8(uart, "regshift", 0);
+        qdev_prop_set_uint32(uart, "baudbase", 115200);
+        qdev_prop_set_chr(uart, "chardev", serial_hd(i + 1));
+        qdev_prop_set_uint8(uart, "endianness", DEVICE_LITTLE_ENDIAN);
+        if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(uart), errp)) {
+            return;
+        }
+        s->uart[i] = uart;
+        memory_region_add_subregion_overlap(
+            &b->container, i * IA64_PDH_UART_STRIDE,
+            sysbus_mmio_get_region(SYS_BUS_DEVICE(uart), 0), 1);
     }
 }
 

@@ -444,6 +444,8 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_DEV5B_BASE           IA64_U64(0x00000000ff5b0000)
 #define IA64_PDH_PRESENCE_BASE        IA64_U64(0x00000000ff5c0000)
 #define IA64_PDH_UART_BASE            IA64_U64(0x00000000ff5e0000)
+#define IA64_PDH_UARTS                2U
+#define IA64_PDH_UART_STRIDE          0x2000U
 #define IA64_PDH_DILLON_BASE          IA64_U64(0x00000000ff5f0000)
 #define IA64_PDH_BLOCK_SIZE           IA64_U64(0x0000000000010000)
 /* Offsets in the presence block and in the Dillon register block. */
