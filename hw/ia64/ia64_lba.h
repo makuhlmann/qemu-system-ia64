@@ -20,7 +20,7 @@ struct IA64LBAState {
 
     MemoryRegion csr;              /* CSR block, mapped at csr_base */
     uint64_t csr_base;             /* fixed chipset MMIO base (IA64_LBA_CSR_BASE) */
-    PCIBus *mercury_bus;           /* Mercury root bus (for CONFIG_ADDRESS/DATA) */
+    PCIBus *config_bus;            /* bus CONFIG_ADDRESS/DATA cycles on */
 
     /* Writable Mercury CSR registers (reset values in ia64_lba_reset). */
     uint32_t config_address;       /* CONFIG_ADDRESS (0x40) selector */
@@ -38,7 +38,7 @@ struct IA64LBAState {
     uint64_t rope_config;               /* rope width    (0x610) */
 };
 
-/* Wire the Mercury root bus so CONFIG_ADDRESS/DATA reach downstream config. */
-void ia64_lba_set_mercury_bus(IA64LBAState *s, PCIBus *bus);
+/* Wire the root bus whose configuration space CONFIG_ADDRESS/DATA reaches. */
+void ia64_lba_set_config_bus(IA64LBAState *s, PCIBus *bus);
 
 #endif /* HW_IA64_LBA_H */

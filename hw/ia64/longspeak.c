@@ -121,10 +121,21 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     }
     /*
      * The vendor firmware looks for an I/O host bridge in the rope guest
-     * configuration space, not at the fixed base our own firmware publishes
-     * through ACPI, so the same block answers in rope 0's slot as well.
+     * configuration space, one per rope, and does its PCI configuration
+     * cycles through the bridge it finds there.  The primary root gets an ioa
+     * of its own for that -- it answers only in the window, which our own
+     * firmware never opens -- and the AGP bridge above keeps the fixed base
+     * ACPI publishes for it.
      */
-    ia64_sba_add_rope(IA64_SBA(s->sba_dev), 0, &IA64_LBA(s->lba_dev)->csr);
+    s->rope0_lba_dev = qdev_new(TYPE_IA64_LBA);
+    object_property_set_uint(OBJECT(s->rope0_lba_dev), "csr-base", 0,
+                             &error_abort);
+    if (!qdev_realize_and_unref(s->rope0_lba_dev, NULL, errp)) {
+        return false;
+    }
+    ia64_sba_add_rope(IA64_SBA(s->sba_dev), 0,
+                      &IA64_LBA(s->rope0_lba_dev)->csr);
+    ia64_sba_add_rope(IA64_SBA(s->sba_dev), 1, &IA64_LBA(s->lba_dev)->csr);
     /*
      * The Mercury (LBA/ioa) PCI host bridge: a second PCI root bus sharing
      * the primary host bridge's identity-mapped MMIO/I/O windows, which will
@@ -146,7 +157,8 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     ia64_pci_host_set_mercury_bus(pci_host, s->mercury_bus);
     ia64_sba_attach_bus(IA64_SBA(s->sba_dev), s->mercury_bus);
     /* The Mercury CSR CONFIG_ADDRESS/DATA pair does config on this bus. */
-    ia64_lba_set_mercury_bus(IA64_LBA(s->lba_dev), s->mercury_bus);
+    ia64_lba_set_config_bus(IA64_LBA(s->lba_dev), s->mercury_bus);
+    ia64_lba_set_config_bus(IA64_LBA(s->rope0_lba_dev), pci_bus);
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     /*

@@ -198,6 +198,7 @@ struct IA64VpcMachineState {
     PCIDevice *agp_dev;
     PCIDevice *sba_dev;
     DeviceState *lba_dev;
+    DeviceState *rope0_lba_dev;     /* zx1: the primary root's ioa   */
     DeviceState *mercury_host;      /* zx1: the Mercury (LBA) PCI host bridge */
     /* 460gx: the WXB0, WXB1 and GXB expander roots (buses 1, 2 and 3). */
     DeviceState *expander_host[IA64_460GX_EXPANDER_ROOTS];

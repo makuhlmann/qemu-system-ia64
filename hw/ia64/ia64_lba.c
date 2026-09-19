@@ -201,15 +201,16 @@ static PCIDevice *ia64_lba_config_target(IA64LBAState *s, unsigned int lane,
     uint8_t func = (addr >> 8) & 0x7;
 
     *reg = (addr & 0xfc) | lane;
-    if (s->mercury_bus == NULL) {
+    if (s->config_bus == NULL) {
         return NULL;
     }
-    return pci_find_device(s->mercury_bus, bus, PCI_DEVFN(dev, func));
+    return pci_find_device(s->config_bus, bus, PCI_DEVFN(dev, func));
 }
 
 static uint64_t ia64_lba_config_read(IA64LBAState *s, unsigned int lane,
                                      unsigned int size)
 {
+
     unsigned int cycle = size == 8 ? 4 : size;
     uint32_t reg;
     PCIDevice *d;
@@ -371,9 +372,9 @@ static const MemoryRegionOps ia64_lba_ops = {
     .impl = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
 };
 
-void ia64_lba_set_mercury_bus(IA64LBAState *s, PCIBus *bus)
+void ia64_lba_set_config_bus(IA64LBAState *s, PCIBus *bus)
 {
-    s->mercury_bus = bus;
+    s->config_bus = bus;
 }
 
 static void ia64_lba_reset(DeviceState *dev);
@@ -385,7 +386,14 @@ static void ia64_lba_realize(DeviceState *dev, Error **errp)
     (void)errp;
     memory_region_init_io(&s->csr, OBJECT(s), &ia64_lba_ops, s,
                           "ia64-zx1-lba", IA64_LBA_CSR_SIZE);
-    memory_region_add_subregion(get_system_memory(), s->csr_base, &s->csr);
+    /*
+     * A base of zero is an ioa that answers only in the rope guest window the
+     * mio opens, which is where the vendor firmware looks; the one our own
+     * firmware publishes through ACPI keeps its fixed base as well.
+     */
+    if (s->csr_base != 0) {
+        memory_region_add_subregion(get_system_memory(), s->csr_base, &s->csr);
+    }
     /*
      * Seed the register reset values here too: this device sits on no qbus
      * (it is mapped straight into system memory), so it is outside the machine

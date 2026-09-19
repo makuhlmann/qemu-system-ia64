@@ -1363,6 +1363,19 @@ static void test_lba_rope_window(void)
     g_assert_cmphex(qtest_readw(qts, IA64_LBA_CSR_BASE), ==,
                     IA64_LBA_VENDOR_ID);
 
+    /* Rope 1 carries the AGP bridge, so both roots have an ioa. */
+    g_assert_cmphex(qtest_readw(qts, rope + 0x2000), ==, IA64_LBA_VENDOR_ID);
+    g_assert_cmphex(qtest_readw(qts, rope + 0x2002), ==, IA64_LBA_DEVICE_ID);
+
+    /*
+     * Rope 0's block does configuration cycles on the primary root bus: the
+     * SBA answers at 00:1f.0 there, the AGP bridge's block does not see it.
+     */
+    qtest_writel(qts, rope + 0x40, 0x80000000 | (31 << 11));
+    g_assert_cmphex(qtest_readw(qts, rope + 0x48), ==, IA64_LBA_VENDOR_ID);
+    qtest_writel(qts, rope + 0x2000 + 0x40, 0x80000000 | (31 << 11));
+    g_assert_cmphex(qtest_readw(qts, rope + 0x2000 + 0x48), ==, 0xffff);
+
     /* Clearing the enable takes the window away again. */
     qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, 0);
     g_assert_cmphex(qtest_readw(qts, rope), !=, IA64_LBA_VENDOR_ID);
