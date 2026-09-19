@@ -29,6 +29,7 @@
  * offsets stay local. */
 #define IA64_LEGACY_IO_BASE          IA64_PCI_IO_BASE
 #define IA64_ACPI_PM1_EVT_EN_OFFSET  0x02ULL
+#define IA64_ACPI_PM1_EVT_TMR_EN      0x0001U
 #define IA64_IOSAPIC_IOREGSEL        0x00ULL
 #define IA64_IOSAPIC_IOWIN           0x10ULL
 #define IA64_IOSAPIC_EOI             0x40ULL
@@ -210,6 +211,13 @@ static QTestState *ia64_vpc_start_lsi(const char *extra_args)
 static uint64_t ia64_sparse_io_offset(uint32_t port)
 {
     return ((uint64_t)(port >> 2) << 12) | (port & 0xfff);
+}
+
+/* A register of the platform PM block, at the sparse address the HAL builds. */
+static uint64_t ia64_sparse_pm_io(uint32_t offset)
+{
+    return IA64_LEGACY_IO_BASE +
+           ia64_sparse_io_offset(IA64_ACPI_PM_IO_BASE + offset);
 }
 
 /*
@@ -700,6 +708,52 @@ static void test_acpi_reset_register(void)
                  IA64_ACPI_PM_RESET_OFFSET,
                  IA64_ACPI_PM_RESET_VALUE);
     qtest_qmp_eventwait(qts, "RESET");
+    qtest_quit(qts);
+}
+
+/*
+ * The vendor FADT reaches the same PM block through its extended
+ * (SystemMemory) fields, in the PDH's address range and in a different order
+ * from the I/O block.  ACPI.sys writes SCI_EN there and then spins on the
+ * readback (WSRV03/base/busdrv/acpi/driver/shared/acpienbl.c:99), so each
+ * alias must outrank the PDH block that decodes the same addresses.  The I/O
+ * block is read back through its sparse addresses, the form the IA-64 HAL
+ * uses (WSRV03/base/hals/halia64/ia64/i64ioacc.c:57).
+ */
+static void test_acpi_pm_mmio(void)
+{
+    const uint64_t cnt = IA64_PDH_ACPI_PM_BASE + IA64_PDH_ACPI_PM1_CNT;
+    const uint64_t evt = IA64_PDH_ACPI_PM_BASE + IA64_PDH_ACPI_PM1_EVT;
+    const uint64_t tmr = IA64_PDH_ACPI_PM_BASE + IA64_PDH_ACPI_PM_TMR;
+    const uint64_t io_cnt = ia64_sparse_pm_io(IA64_ACPI_PM1_CNT_OFFSET);
+    const uint64_t io_en = ia64_sparse_pm_io(IA64_ACPI_PM1_EVT_OFFSET +
+                                             IA64_ACPI_PM1_EVT_EN_OFFSET);
+    const uint64_t io_tmr = ia64_sparse_pm_io(IA64_ACPI_PM_TMR_OFFSET);
+    QTestState *qts = ia64_vpc_start_zx1(NULL);
+    uint32_t ticks;
+
+    qtest_writew(qts, io_cnt, 0);
+    g_assert_cmphex(qtest_readw(qts, cnt) & 1, ==, 0);
+
+    qtest_writew(qts, cnt, 1);
+    g_assert_cmphex(qtest_readw(qts, cnt) & 1, ==, 1);
+    g_assert_cmphex(qtest_readw(qts, io_cnt) & 1, ==, 1);
+
+    /* The event alias spans the status/enable pair; write the enable half. */
+    qtest_writew(qts, evt + IA64_ACPI_PM1_EVT_EN_OFFSET,
+                 IA64_ACPI_PM1_EVT_TMR_EN);
+    g_assert_cmphex(qtest_readw(qts, io_en), ==, IA64_ACPI_PM1_EVT_TMR_EN);
+
+    /*
+     * The timer alias must reach the PM timer itself, which runs at
+     * 3.579545 MHz: one millisecond of virtual time is about 3580 ticks.
+     */
+    g_assert_cmphex(qtest_readl(qts, tmr), ==, qtest_readl(qts, io_tmr));
+    ticks = qtest_readl(qts, tmr);
+    qtest_clock_step(qts, 1000 * 1000);
+    ticks = qtest_readl(qts, tmr) - ticks;
+    g_assert_cmpuint(ticks, >, 3400);
+    g_assert_cmpuint(ticks, <, 3800);
     qtest_quit(qts);
 }
 
@@ -7360,6 +7414,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/ia64-vpc/acpi-reset-register",
                    test_acpi_reset_register);
+    qtest_add_func("/ia64-vpc/acpi-pm-mmio", test_acpi_pm_mmio);
     qtest_add_func("/ia64-vpc/vga/int10-rom", test_int10_rom);
     qtest_add_func("/ia64-vpc/vga/int10-vbe", test_int10_vbe);
     qtest_add_func("/ia64-vpc/vga/int10-vbe-std", test_int10_vbe_std);
