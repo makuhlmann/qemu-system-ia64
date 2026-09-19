@@ -1408,6 +1408,42 @@ static void test_pdh_bmc(void)
         g_assert_cmphex(rsp[2], ==, 0xc1);
     }
 
+    /*
+     * Each processor has an information area of its own in FRU device
+     * 0x20 + n, with a second device at 0x24 + n.  They are present but not
+     * programmed, so the byte the firmware tests first reads zero.
+     */
+    {
+        const uint8_t info[] = { IPMI_NETFN_STORAGE_LUN0,
+                                 IPMI_CMD_GET_FRU_AREA_INFO, 0x20 };
+        const uint8_t present[] = { IPMI_NETFN_STORAGE_LUN0,
+                                    IPMI_CMD_READ_FRU_DATA, 0x27, 0x16, 0, 1 };
+        const uint8_t beyond[] = { IPMI_NETFN_STORAGE_LUN0,
+                                   IPMI_CMD_READ_FRU_DATA, 0x20, 0x80, 0, 1 };
+        const uint8_t absent[] = { IPMI_NETFN_STORAGE_LUN0,
+                                   IPMI_CMD_READ_FRU_DATA, 0x28, 0x16, 0, 1 };
+
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, G_N_ELEMENTS(info),
+                                         rsp, sizeof(rsp)), ==, 6);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        g_assert_cmpuint(rsp[3] | rsp[4] << 8, ==, 128);
+
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, present,
+                                         G_N_ELEMENTS(present),
+                                         rsp, sizeof(rsp)), ==, 5);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        g_assert_cmphex(rsp[3], ==, 1);
+        g_assert_cmphex(rsp[4], ==, 0x00);
+
+        /* Past the area, and a device the board does not have. */
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, beyond, G_N_ELEMENTS(beyond),
+                                         rsp, sizeof(rsp)), ==, 3);
+        g_assert_cmphex(rsp[2], ==, 0xc9);
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, absent, G_N_ELEMENTS(absent),
+                                         rsp, sizeof(rsp)), ==, 3);
+        g_assert_cmphex(rsp[2], ==, 0xcc);
+    }
+
     /* The same self test over the BT, which carries a length and a sequence. */
     g_assert_cmpuint(bmc_bt_command(qts, bt, IPMI_NETFN_APP_LUN0,
                                     IPMI_CMD_SELF_TEST, 0x77,
