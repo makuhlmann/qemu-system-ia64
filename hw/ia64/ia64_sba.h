@@ -33,6 +33,9 @@ struct IA64SBAState {
     uint64_t lba_port[8];          /* LBA_Port(N)_CNTRL, FED0_1200 + 8 * N    */
     uint64_t range[28];            /* address range registers, FED0_0300 on   */
     uint64_t error_control;        /* the IOC's own error log control, 0x0108 */
+    void (*window_notify)(void *opaque, uint64_t base);
+    void *window_opaque;
+    uint64_t window_base;          /* the lowest LMMIO base announced so far  */
     MemoryRegion rope_config;      /* the 16 rope guests, per FED0_03A8       */
     uint64_t rope_base;            /* where it is mapped while enabled        */
     bool rope_mapped;
@@ -55,5 +58,15 @@ void ia64_sba_attach_bus(IA64SBAState *s, PCIBus *bus);
  * bridge below that rope; the window itself follows ROPE_CONFIG_BASE.
  */
 void ia64_sba_add_rope(IA64SBAState *s, unsigned int rope, MemoryRegion *mr);
+
+/*
+ * Hear where the firmware puts the LMMIO ranges.  The machine opens its PCI
+ * MMIO window there: PCI addresses are CPU physical addresses on this
+ * platform, so a device whose BAR the firmware sets from a range the machine
+ * does not decode is unreachable.
+ */
+void ia64_sba_set_window_notify(IA64SBAState *s,
+                                void (*notify)(void *opaque, uint64_t base),
+                                void *opaque);
 
 #endif /* HW_IA64_SBA_H */

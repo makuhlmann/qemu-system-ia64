@@ -87,6 +87,18 @@
  * register blocks in one 128 KiB window: bit 31 of the base is implied, bits
  * 30:17 come from the register, and RE enables the decode.
  */
+/*
+ * The LMMIO ranges (mio ERS sec 3.2.3): one distributed range shared out
+ * among the ropes and two directed ones.  Each base register enables its
+ * range in bit 0 and carries bits 30:20 of the address, with bit 31 implied.
+ */
+#define IA64_SBA_LMMIO_DIR0_OFFSET     UINT64_C(0x0300)
+#define IA64_SBA_LMMIO_DIR1_OFFSET     UINT64_C(0x0318)
+#define IA64_SBA_LMMIO_DIST_OFFSET     UINT64_C(0x0360)
+#define IA64_SBA_LMMIO_ENABLE          UINT64_C(1)
+#define IA64_SBA_LMMIO_ADDR            UINT64_C(0x7ff00000)
+#define IA64_SBA_LMMIO_FIXED           UINT64_C(0x80000000)
+
 #define IA64_SBA_ROPE_CONFIG_OFFSET    UINT64_C(0x03a8)
 #define IA64_SBA_ROPE_CONFIG_RE        UINT64_C(1)
 #define IA64_SBA_ROPE_CONFIG_ADDR      UINT64_C(0x7ffe0000)
@@ -261,6 +273,38 @@ static bool ia64_sba_identity_reg(hwaddr base, uint64_t *reg)
     default:
         return false;
     }
+}
+
+void ia64_sba_set_window_notify(IA64SBAState *s,
+                                void (*notify)(void *opaque, uint64_t base),
+                                void *opaque)
+{
+    s->window_notify = notify;
+    s->window_opaque = opaque;
+}
+
+static void ia64_sba_lmmio_update(IA64SBAState *s)
+{
+    static const uint64_t bases[] = {
+        IA64_SBA_LMMIO_DIR0_OFFSET, IA64_SBA_LMMIO_DIR1_OFFSET,
+        IA64_SBA_LMMIO_DIST_OFFSET
+    };
+    uint64_t base = UINT64_MAX;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(bases); i++) {
+        uint64_t reg = s->range[(bases[i] - IA64_SBA_RANGE_FIRST) / 8];
+
+        if (reg & IA64_SBA_LMMIO_ENABLE) {
+            base = MIN(base, IA64_SBA_LMMIO_FIXED |
+                             (reg & IA64_SBA_LMMIO_ADDR));
+        }
+    }
+    if (base == UINT64_MAX || base == s->window_base || !s->window_notify) {
+        return;
+    }
+    s->window_base = base;
+    s->window_notify(s->window_opaque, base);
 }
 
 static void ia64_sba_rope_config_update(IA64SBAState *s)
@@ -441,6 +485,10 @@ static MemTxResult ia64_sba_csr_write(void *opaque, hwaddr addr, uint64_t value,
             handled = true;
             if (addr == IA64_SBA_ROPE_CONFIG_OFFSET) {
                 ia64_sba_rope_config_update(s);
+            } else if (addr == IA64_SBA_LMMIO_DIR0_OFFSET ||
+                       addr == IA64_SBA_LMMIO_DIR1_OFFSET ||
+                       addr == IA64_SBA_LMMIO_DIST_OFFSET) {
+                ia64_sba_lmmio_update(s);
             }
         }
     }

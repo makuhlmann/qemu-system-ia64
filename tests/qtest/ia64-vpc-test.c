@@ -963,6 +963,16 @@ static void test_sba_mio_registers(void)
     qtest_writeq(qts, rope_config_base, 0xfed20001);
     g_assert_cmphex(qtest_readq(qts, rope_config_base), ==, 0xfed20001);
 
+    /*
+     * An enabled LMMIO range opens the machine's PCI MMIO window there, so a
+     * BAR the firmware sets from that range answers.  The SBA's own BAR is
+     * the one this test can move.
+     */
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x360, 0x80000001);
+    qtest_writel(qts, IA64_PCI_CONFIG_BASE + (31 << 15) + 0x10, 0x90000000);
+    qtest_writel(qts, IA64_PCI_CONFIG_BASE + (31 << 15) + 0x04, 0x02);
+    g_assert_cmphex(qtest_readl(qts, 0x90000000), !=, 0xffffffff);
+
     /* RF resets at once, so RC never reads back set. */
     qtest_writeq(qts, port0, 0x1);
     g_assert_cmphex(qtest_readq(qts, port0), ==, 0);

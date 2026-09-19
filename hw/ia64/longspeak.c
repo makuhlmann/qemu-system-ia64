@@ -71,6 +71,20 @@ static uint64_t longspeak_map_low_ram(IA64VpcMachineState *s, uint64_t offset,
     return mapped + size;
 }
 
+/*
+ * The firmware's LMMIO ranges say where PCI memory lives; PCI addresses are
+ * CPU physical addresses here, so open the machine's PCI MMIO window there and
+ * keep low RAM below it.  Our own firmware never writes those registers, so
+ * this fires only under the vendor one.
+ */
+static void longspeak_lmmio_window_moved(void *opaque, uint64_t base)
+{
+    IA64VpcMachineState *s = opaque;
+
+    ia64_pci_host_set_low_mmio_window(s->pci_host_dev, base);
+    ia64_vpc_set_low_ram_limit(s, MIN(base, IA64_LOW_RAM_LIMIT));
+}
+
 static bool longspeak_build_chipset(IA64VpcMachineState *s,
                                     DeviceState *pci_host, PCIBus *pci_bus,
                                     MemoryRegion *pci_io, DeviceState *iosapic,
@@ -136,6 +150,8 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     ia64_sba_add_rope(IA64_SBA(s->sba_dev), 0,
                       &IA64_LBA(s->rope0_lba_dev)->csr);
     ia64_sba_add_rope(IA64_SBA(s->sba_dev), 1, &IA64_LBA(s->lba_dev)->csr);
+    ia64_sba_set_window_notify(IA64_SBA(s->sba_dev),
+                               longspeak_lmmio_window_moved, s);
     /*
      * The Mercury (LBA/ioa) PCI host bridge: a second PCI root bus sharing
      * the primary host bridge's identity-mapped MMIO/I/O windows, which will
