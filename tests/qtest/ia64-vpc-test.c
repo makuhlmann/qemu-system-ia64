@@ -1283,6 +1283,87 @@ static unsigned bcd(uint8_t v)
     return (v >> 4) * 10 + (v & 0x0f);
 }
 
+/*
+ * The DIMM slots are FRU devices behind the BMC: the firmware picks its slot
+ * table from the product id in the board's own FRU and then reads a JEDEC SPD
+ * from the device of each slot.
+ */
+static void test_pdh_dimm_spd(void)
+{
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    const uint8_t product[] = { IPMI_NETFN_STORAGE_LUN0,
+                                IPMI_CMD_READ_FRU_DATA, 0x00, 0x00, 0x00, 4 };
+    const uint8_t info[] = { IPMI_NETFN_STORAGE_LUN0,
+                             IPMI_CMD_GET_FRU_AREA_INFO, 0x80 };
+    const uint8_t spd[] = { IPMI_NETFN_STORAGE_LUN0,
+                            IPMI_CMD_READ_FRU_DATA, 0x80, 0x00, 0x00, 32 };
+    const uint8_t status[] = { IPMI_NETFN_STORAGE_LUN0, 0xd0, 0x81 };
+    const uint8_t empty[] = { IPMI_NETFN_STORAGE_LUN0,
+                              IPMI_CMD_GET_FRU_AREA_INFO, 0x88 };
+    /* 1 GB fills the first pair with 512 MB modules and leaves the rest. */
+    QTestState *qts = qtest_init("-machine zx1 -m 1G -S");
+    uint8_t request[6];
+    uint8_t rsp[80];
+    unsigned int area;
+    uint8_t sum;
+    unsigned i;
+
+    /*
+     * The product area carries the id the firmware selects the table with;
+     * the common header says where the area is.
+     */
+    memcpy(request, product, sizeof(request));
+    request[5] = 8;
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, request, sizeof(request),
+                                     rsp, sizeof(rsp)), ==, 12);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    area = rsp[4 + 4] * 8 + IA64_PDH_BMC_PRODUCT_ID_OFFSET;
+    g_assert_cmpuint(area, >, IA64_PDH_BMC_PRODUCT_ID_OFFSET);
+    memcpy(request, product, sizeof(request));
+    request[3] = area & 0xff;
+    request[4] = area >> 8;
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, request, sizeof(request),
+                                     rsp, sizeof(rsp)), ==, 8);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    g_assert_cmphex(ldl_le_p(rsp + 4), ==, IA64_PDH_BMC_PRODUCT_ID);
+
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, G_N_ELEMENTS(info),
+                                     rsp, sizeof(rsp)), ==, 6);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    g_assert_cmpuint(rsp[3] | rsp[4] << 8, ==, 256);
+
+    /* DDR SDRAM, 13 row and 11 column addresses, one rank, four banks. */
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, spd, G_N_ELEMENTS(spd),
+                                     rsp, sizeof(rsp)), ==, 4 + 32);
+    g_assert_cmphex(rsp[4 + 2], ==, 0x07);
+    g_assert_cmphex(rsp[4 + 3], ==, 13);
+    g_assert_cmphex(rsp[4 + 4], ==, 11);
+    g_assert_cmphex(rsp[4 + 5], ==, 1);
+    g_assert_cmphex(rsp[4 + 17], ==, 4);
+
+    /* The firmware checks the image against its own checksum byte. */
+    memcpy(request, spd, sizeof(request));
+    request[5] = 64;
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, request, sizeof(request),
+                                     rsp, sizeof(rsp)), ==, 4 + 64);
+    for (i = 0, sum = 0; i < 63; i++) {
+        sum += rsp[4 + i];
+    }
+    g_assert_cmphex(rsp[4 + 63], ==, sum);
+
+    /* HP's own status command answers for a populated slot. */
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, status, G_N_ELEMENTS(status),
+                                     rsp, sizeof(rsp)), ==, 4);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+
+    /* The second pair is empty at this size, so its device is not there. */
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, empty, G_N_ELEMENTS(empty),
+                                     rsp, sizeof(rsp)), ==, 3);
+    g_assert_cmphex(rsp[2], !=, 0x00);
+
+    qtest_quit(qts);
+}
+
 static void test_pdh_clock(void)
 {
     const uint64_t rtc = IA64_PDH_DEV5B_BASE + IA64_PDH_RTC;
@@ -7167,6 +7248,7 @@ int main(int argc, char **argv)
                    test_pdh_unimp_logged_once);
     qtest_add_func("/ia64-vpc/pdh/bmc", test_pdh_bmc);
     qtest_add_func("/ia64-vpc/pdh/clock", test_pdh_clock);
+    qtest_add_func("/ia64-vpc/pdh/dimm-spd", test_pdh_dimm_spd);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",
                    test_mercury_config_dispatch);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);

@@ -449,6 +449,9 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_RTC_REGS             0x0014U
 #define IA64_PDH_RTC_RAM              256U
 #define IA64_PDH_BMC_KCS              0x0ca2U   /* data, then status */
+/* The board id the firmware picks its DIMM slot table with (FFF62880). */
+#define IA64_PDH_BMC_PRODUCT_ID       257U
+#define IA64_PDH_BMC_PRODUCT_ID_OFFSET 115U  /* in the FRU product area */
 #define IA64_PDH_PRESENCE_BASE        IA64_U64(0x00000000ff5c0000)
 #define IA64_PDH_UART_BASE            IA64_U64(0x00000000ff5e0000)
 #define IA64_PDH_UARTS                2U
