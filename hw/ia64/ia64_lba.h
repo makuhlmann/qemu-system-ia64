@@ -35,6 +35,7 @@ struct IA64LBAState {
     uint64_t msi_base, msi_mask;        /* MSI window    (0x280/0x288) */
     uint64_t slave_control;             /* SLAVE_CONTROL (0x278) */
     uint64_t bus_mode;                  /* BUS_MODE      (0x620) */
+    uint64_t rope_config;               /* rope width    (0x610) */
 };
 
 /* Wire the Mercury root bus so CONFIG_ADDRESS/DATA reach downstream config. */

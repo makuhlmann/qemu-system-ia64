@@ -69,6 +69,16 @@
 #define LBA_SLAVE_CONTROL        0x278
 #define LBA_MSI_BASE             0x280
 #define LBA_MSI_MASK             0x288
+/*
+ * Not in the ioa ERS, which has 0x0610 to 0x0618 reserved: the firmware reads
+ * bit 3 of 0x0618 for the I/O bus clock's DLL and reports POST 0x82 "PCI clock
+ * DLL error" without it (FFEBA480), then deconfigures the bridge.
+ */
+#define LBA_ROPE_CONFIG          0x610
+#define LBA_ROPE_SINGLE_WIDE     (UINT64_C(1) << 8)
+#define LBA_CLOCK_STATUS         0x618
+#define LBA_CLOCK_DLL_LOCKED     (UINT64_C(1) << 3)
+
 #define LBA_BUS_MODE             0x620
 
 /* Reset values and writable masks (upstream hp-zx1-ioa-regs.h, AGP mode). */
@@ -173,6 +183,8 @@ static uint64_t ia64_lba_reg(IA64LBAState *s, uint64_t base)
     case LBA_SLAVE_CONTROL: return s->slave_control;
     case LBA_MSI_BASE:     return s->msi_base;
     case LBA_MSI_MASK:     return s->msi_mask;
+    case LBA_ROPE_CONFIG:  return s->rope_config | LBA_ROPE_SINGLE_WIDE;
+    case LBA_CLOCK_STATUS: return LBA_CLOCK_DLL_LOCKED;
     case LBA_BUS_MODE:     return s->bus_mode;
     default:
         return 0;
@@ -339,6 +351,9 @@ static MemTxResult ia64_lba_write(void *opaque, hwaddr addr, uint64_t value,
     case LBA_MSI_MASK:
         ia64_lba_latch(&s->msi_mask, LBA_MSI_MASK_WRITE, mask, data);
         break;
+    case LBA_ROPE_CONFIG:
+        ia64_lba_latch(&s->rope_config, ~LBA_ROPE_SINGLE_WIDE, mask, data);
+        break;
     case LBA_BUS_MODE:
         ia64_lba_latch(&s->bus_mode, LBA_BUS_MODE_SAFE_WRITE, mask, data);
         break;
@@ -401,6 +416,7 @@ static void ia64_lba_reset(DeviceState *dev)
     s->msi_mask = LBA_MSI_MASK_RESET;
     s->slave_control = LBA_SLAVE_CONTROL_RESET;
     s->bus_mode = LBA_BUS_MODE_AGP;
+    s->rope_config = 0;
 }
 
 static const VMStateDescription vmstate_ia64_lba = {

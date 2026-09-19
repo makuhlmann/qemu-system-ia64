@@ -73,6 +73,26 @@
 #define IA64_SBA_RANGE_FIRST           UINT64_C(0x0300)
 #define IA64_SBA_RANGE_REGS            28
 
+/*
+ * ROPE_CONFIG_BASE (mio ERS register 19) puts the 16 rope guests' 8 KiB
+ * register blocks in one 128 KiB window: bit 31 of the base is implied, bits
+ * 30:17 come from the register, and RE enables the decode.
+ */
+#define IA64_SBA_ROPE_CONFIG_OFFSET    UINT64_C(0x03a8)
+#define IA64_SBA_ROPE_CONFIG_RE        UINT64_C(1)
+#define IA64_SBA_ROPE_CONFIG_ADDR      UINT64_C(0x7ffe0000)
+#define IA64_SBA_ROPE_CONFIG_FIXED     UINT64_C(0x80000000)
+#define IA64_SBA_ROPE_SIZE             UINT64_C(0x2000)
+#define IA64_SBA_ROPES                 16
+
+/*
+ * One register per rope in function 1, not in the ERS: the firmware reads the
+ * rope's request queue depth from bits 55:48 (FFECA050 reads FED0_1400 + 8 per
+ * rope) and asserts "queueDepth >= MERCURY_ROPE_REQ_DEPTH_MIN" below two.
+ */
+#define IA64_SBA_ROPE_QUEUE_FIRST      UINT64_C(0x1400)
+#define IA64_SBA_ROPE_QUEUE_DEPTH      16
+
 #define IA64_SBA_LBA_PORT_FIRST        UINT64_C(0x1200)
 #define IA64_SBA_LBA_PORTS             8
 #define IA64_SBA_LBA_PORT_CL           (UINT64_C(1) << 10)
@@ -234,6 +254,38 @@ static bool ia64_sba_identity_reg(hwaddr base, uint64_t *reg)
     }
 }
 
+static void ia64_sba_rope_config_update(IA64SBAState *s)
+{
+    uint64_t reg = s->range[(IA64_SBA_ROPE_CONFIG_OFFSET -
+                             IA64_SBA_RANGE_FIRST) / 8];
+    uint64_t base = IA64_SBA_ROPE_CONFIG_FIXED |
+                    (reg & IA64_SBA_ROPE_CONFIG_ADDR);
+    bool enable = reg & IA64_SBA_ROPE_CONFIG_RE;
+
+    if (s->rope_mapped && (!enable || base != s->rope_base)) {
+        memory_region_del_subregion(get_system_memory(), &s->rope_config);
+        s->rope_mapped = false;
+    }
+    if (enable && !s->rope_mapped) {
+        s->rope_base = base;
+        memory_region_add_subregion(get_system_memory(), base,
+                                    &s->rope_config);
+        s->rope_mapped = true;
+    }
+}
+
+void ia64_sba_add_rope(IA64SBAState *s, unsigned int rope, MemoryRegion *mr)
+{
+    MemoryRegion *alias = g_new0(MemoryRegion, 1);
+    g_autofree char *name = g_strdup_printf("ia64-sba-rope%u", rope);
+
+    assert(rope < IA64_SBA_ROPES);
+    memory_region_init_alias(alias, OBJECT(s), name, mr, 0,
+                             MIN(memory_region_size(mr), IA64_SBA_ROPE_SIZE));
+    memory_region_add_subregion(&s->rope_config, rope * IA64_SBA_ROPE_SIZE,
+                                alias);
+}
+
 static bool ia64_sba_range_reg(hwaddr addr, unsigned int size, unsigned int *n)
 {
     if (size != 8 || addr < IA64_SBA_RANGE_FIRST ||
@@ -285,6 +337,11 @@ static MemTxResult ia64_sba_csr_read(void *opaque, hwaddr addr, uint64_t *data,
             ok = true;
         } else if (ia64_sba_range_reg(addr, size, &reg_index)) {
             *data = s->range[reg_index];
+            ok = true;
+        } else if (size == 8 && !(addr & 7) &&
+                   addr >= IA64_SBA_ROPE_QUEUE_FIRST &&
+                   addr < IA64_SBA_ROPE_QUEUE_FIRST + 8 * IA64_SBA_ROPES) {
+            *data = (uint64_t)IA64_SBA_ROPE_QUEUE_DEPTH << 48;
             ok = true;
         }
     }
@@ -361,6 +418,9 @@ static MemTxResult ia64_sba_csr_write(void *opaque, hwaddr addr, uint64_t value,
         if (ia64_sba_range_reg(addr, size, &reg_index)) {
             s->range[reg_index] = value;
             handled = true;
+            if (addr == IA64_SBA_ROPE_CONFIG_OFFSET) {
+                ia64_sba_rope_config_update(s);
+            }
         }
     }
 
@@ -465,6 +525,8 @@ static void ia64_sba_realize(PCIDevice *dev, Error **errp)
     memory_region_init_io(&s->csr, OBJECT(s), &ia64_sba_csr_ops, s,
                           "ia64-sba-csr", IA64_SBA_CSR_SIZE);
     memory_region_add_subregion(get_system_memory(), s->csr_base, &s->csr);
+    memory_region_init(&s->rope_config, OBJECT(s), "ia64-sba-rope-config",
+                       IA64_SBA_ROPES * IA64_SBA_ROPE_SIZE);
 
     /* Per-bus DMA translation: IOPDIR walk, else bypass to system memory. */
     memory_region_init_iommu(&s->iommu, sizeof(s->iommu),

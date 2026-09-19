@@ -120,6 +120,12 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
         return false;
     }
     /*
+     * The vendor firmware looks for an I/O host bridge in the rope guest
+     * configuration space, not at the fixed base our own firmware publishes
+     * through ACPI, so the same block answers in rope 0's slot as well.
+     */
+    ia64_sba_add_rope(IA64_SBA(s->sba_dev), 0, &IA64_LBA(s->lba_dev)->csr);
+    /*
      * The Mercury (LBA/ioa) PCI host bridge: a second PCI root bus sharing
      * the primary host bridge's identity-mapped MMIO/I/O windows, which will
      * carry the AGP graphics adapter -- exactly as real zx1 puts the AGP

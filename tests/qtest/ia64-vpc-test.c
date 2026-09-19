@@ -1336,6 +1336,40 @@ static unsigned bcd(uint8_t v)
 }
 
 /*
+ * What the vendor firmware needs of a rope guest before it will configure the
+ * I/O host bridge below it: its identity in the rope configuration window
+ * where ROPE_CONFIG_BASE puts it, the I/O bus clock's DLL locked (0x618 bit 3,
+ * or POST 0x82 "PCI clock DLL error"), a single-wide rope (0x610 bit 8, or
+ * POST 0x7D "I/O rope width does not match expected value") and a rope request
+ * queue depth of at least two in the mio (FED0_1400 + 8 per rope).
+ */
+static void test_lba_rope_window(void)
+{
+    const uint64_t rope = 0xfed20000;
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x1400) >> 48, >=, 2);
+
+    /* The window answers only once ROPE_CONFIG_BASE enables it. */
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, rope);
+    g_assert_cmphex(qtest_readw(qts, rope), !=, IA64_LBA_VENDOR_ID);
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, rope | 1);
+    g_assert_cmphex(qtest_readw(qts, rope), ==, IA64_LBA_VENDOR_ID);
+    g_assert_cmphex(qtest_readw(qts, rope + 2), ==, IA64_LBA_DEVICE_ID);
+
+    g_assert_cmphex(qtest_readq(qts, rope + 0x618) & 0x8, ==, 0x8);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x610) & 0x100, ==, 0x100);
+    /* The same block answers at the base our own firmware publishes. */
+    g_assert_cmphex(qtest_readw(qts, IA64_LBA_CSR_BASE), ==,
+                    IA64_LBA_VENDOR_ID);
+
+    /* Clearing the enable takes the window away again. */
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, 0);
+    g_assert_cmphex(qtest_readw(qts, rope), !=, IA64_LBA_VENDOR_ID);
+    qtest_quit(qts);
+}
+
+/*
  * The DIMM slots are FRU devices behind the BMC: the firmware picks its slot
  * table from the product id in the board's own FRU and then reads a JEDEC SPD
  * from the device of each slot.
@@ -7294,6 +7328,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ram/hole-zx1", test_ram_hole_zx1);
     qtest_add_func("/ia64-vpc/nvram/defaults", test_nvram_defaults);
     qtest_add_func("/ia64-vpc/lba/agp-capability", test_lba_agp_capability);
+    qtest_add_func("/ia64-vpc/lba/rope-window", test_lba_rope_window);
     qtest_add_func("/ia64-vpc/sba/ioc-identity", test_sba_ioc_identity);
     qtest_add_func("/ia64-vpc/sba/mio-registers", test_sba_mio_registers);
     qtest_add_func("/ia64-vpc/pdh/longspeak-map", test_pdh_longspeak_map);
