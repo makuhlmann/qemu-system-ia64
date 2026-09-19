@@ -266,7 +266,14 @@ static bool longspeak_pdh_do_write(LongspeakPDHBlock *b, hwaddr addr,
                                     IA64_PDH_DILLON_CONTROL, data);
             trace_longspeak_pdh_register("control", s->control,
                                          longspeak_pdh_cpu());
-            if ((s->control & IA64_PDH_DILLON_RESET) ==
+            /*
+             * The whole command field decides, not the two bits in it: the
+             * firmware asks for the reset with (old & 0x16) | 6 (FFE7AEC0),
+             * which leaves bit 3 clear, and SAL_B tests this register with
+             * the rest of the file (POST 0x10B) by writing 0x0e, which has
+             * both of those bits and must reboot nothing.
+             */
+            if ((s->control & IA64_PDH_DILLON_COMMAND) ==
                 IA64_PDH_DILLON_RESET) {
                 qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             }

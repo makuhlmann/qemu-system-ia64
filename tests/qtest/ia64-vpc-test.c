@@ -1063,6 +1063,19 @@ static void test_pdh_longspeak_map(void)
     qtest_writeq(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_CONTROL, 0x10);
     g_assert_cmphex(qtest_readq(qts, IA64_PDH_DILLON_BASE +
                                 IA64_PDH_DILLON_CONTROL), ==, 0x10);
+    /*
+     * SAL_B tests this register with the rest of the file (POST 0x10B) and
+     * writes 0x0e: both reset bits, but command 7, so it stores and reboots
+     * nothing.  Taking it for a reset restarted the cell configuration for
+     * ever.
+     */
+    qtest_writeb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST, 0x13);
+    qtest_writeq(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_CONTROL, 0x0e);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_CONTROL), ==, 0x0e);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST),
+                    ==, 0x13);
+
     /* (old & 0x16) | 6 is 0x16 when bit 4 was set: that resets as well. */
     qtest_writeb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST, 0x13);
     qtest_writeq(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_CONTROL, 0x16);
