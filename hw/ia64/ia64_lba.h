@@ -19,6 +19,9 @@ struct IA64LBAState {
     DeviceState parent_obj;
 
     MemoryRegion csr;              /* CSR block, mapped at csr_base */
+    MemoryRegion regs;             /* the registers below, inside it */
+    MemoryRegion iosapic_mr;       /* the ioa's own I/O SAPIC, at 0x800 */
+    DeviceState *iosapic;
     uint64_t csr_base;             /* fixed chipset MMIO base (IA64_LBA_CSR_BASE) */
     PCIBus *config_bus;            /* bus CONFIG_ADDRESS/DATA cycles on */
 
@@ -40,5 +43,12 @@ struct IA64LBAState {
 
 /* Wire the root bus whose configuration space CONFIG_ADDRESS/DATA reaches. */
 void ia64_lba_set_config_bus(IA64LBAState *s, PCIBus *bus);
+
+/*
+ * An interrupt input of this ioa's own I/O SAPIC.  The zx1 ioa ERS sec 11.2
+ * gives every ioa one, and the vendor firmware finds it there and publishes it
+ * in the MADT, so PCI interrupts on this rope reach the processor through it.
+ */
+qemu_irq ia64_lba_iosapic_input(IA64LBAState *s, unsigned int pin);
 
 #endif /* HW_IA64_LBA_H */

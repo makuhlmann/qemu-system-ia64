@@ -37,6 +37,9 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "hw/ia64/ia64_lba.h"
+#include "hw/ia64/ia64_iosapic.h"
+#include "hw/core/sysbus.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/pci/pci.h"
@@ -74,6 +77,15 @@
  * bit 3 of 0x0618 for the I/O bus clock's DLL and reports POST 0x82 "PCI clock
  * DLL error" without it (FFEBA480), then deconfigures the bridge.
  */
+/*
+ * ERS sec 11.2: the ioa's I/O SAPIC has a register-select/window pair here,
+ * a version hardwired to 0x20 with 0x0A as its highest redirection-table
+ * entry, and ten interrupt pins plus a software interrupt.
+ */
+#define LBA_IOSAPIC              0x800
+#define LBA_IOSAPIC_PINS         11
+#define LBA_IOSAPIC_VERSION      0x20
+
 #define LBA_ROPE_CONFIG          0x610
 #define LBA_ROPE_SINGLE_WIDE     (UINT64_C(1) << 8)
 #define LBA_CLOCK_STATUS         0x618
@@ -377,15 +389,36 @@ void ia64_lba_set_config_bus(IA64LBAState *s, PCIBus *bus)
     s->config_bus = bus;
 }
 
+qemu_irq ia64_lba_iosapic_input(IA64LBAState *s, unsigned int pin)
+{
+    assert(pin < LBA_IOSAPIC_PINS);
+    return qdev_get_gpio_in(s->iosapic, pin);
+}
+
 static void ia64_lba_reset(DeviceState *dev);
 
 static void ia64_lba_realize(DeviceState *dev, Error **errp)
 {
     IA64LBAState *s = IA64_LBA(dev);
 
-    (void)errp;
-    memory_region_init_io(&s->csr, OBJECT(s), &ia64_lba_ops, s,
-                          "ia64-zx1-lba", IA64_LBA_CSR_SIZE);
+    memory_region_init(&s->csr, OBJECT(s), "ia64-zx1-lba",
+                       IA64_LBA_CSR_SIZE);
+    memory_region_init_io(&s->regs, OBJECT(s), &ia64_lba_ops, s,
+                          "ia64-zx1-lba-regs", IA64_LBA_CSR_SIZE);
+    memory_region_add_subregion(&s->csr, 0, &s->regs);
+
+    s->iosapic = qdev_new(TYPE_IA64_IOSAPIC);
+    qdev_prop_set_uint32(s->iosapic, "num-pins", LBA_IOSAPIC_PINS);
+    qdev_prop_set_uint32(s->iosapic, "version", LBA_IOSAPIC_VERSION);
+    if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(s->iosapic), errp)) {
+        return;
+    }
+    memory_region_init_alias(&s->iosapic_mr, OBJECT(s), "ia64-zx1-lba-iosapic",
+                             sysbus_mmio_get_region(SYS_BUS_DEVICE(s->iosapic),
+                                                    0),
+                             0, IA64_LBA_CSR_SIZE - LBA_IOSAPIC);
+    memory_region_add_subregion_overlap(&s->csr, LBA_IOSAPIC,
+                                        &s->iosapic_mr, 1);
     /*
      * A base of zero is an ioa that answers only in the rope guest window the
      * mio opens, which is where the vendor firmware looks; the one our own

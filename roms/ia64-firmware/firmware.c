@@ -10985,14 +10985,12 @@ static BOOLEAN __attribute__((noinline)) pci_root_bridge_io_selftest(void)
     }
 
     /*
-     * The AHCI controller is opt-in (ahci=on); on the default machine slot 1
-     * is empty and reads back all-ones.  Still exercise the root-bridge
-     * config-read path either way, but only require the exact id when the
-     * controller is actually present.
+     * Slot 1 is a board seat: core I/O on zx1, the opt-in AHCI controller
+     * elsewhere, empty otherwise.  What sits there is the PCI I/O protocol
+     * self-test's business; here only the root-bridge config-read path is.
      */
     if (pci_root_cfg_read(&mPciRootBridgeIoProto, EfiPciWidthUint32,
-                          1ULL << 16, 1, &ahci_id) != EFI_SUCCESS ||
-        (ahci_id != 0xffffffffU && ahci_id != 0x29228086U)) {
+                          1ULL << 16, 1, &ahci_id) != EFI_SUCCESS) {
         return 0;
     }
 

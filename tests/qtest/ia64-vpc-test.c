@@ -1385,6 +1385,19 @@ static void test_lba_rope_window(void)
     g_assert_cmphex(qtest_readw(qts, rope + 0x2002), ==, IA64_LBA_DEVICE_ID);
 
     /*
+     * Every ioa carries an I/O SAPIC (zx1 ioa ERS sec 11.2): select at 0x800,
+     * window at 0x810, a version of 0x20 with 0x0A as the highest
+     * redirection-table entry, and every entry masked out of reset.  The
+     * vendor firmware sizes the MADT's global-interrupt bases from it.
+     */
+    qtest_writel(qts, rope + 0x800, 0x01);
+    g_assert_cmphex(qtest_readl(qts, rope + 0x810), ==, 0x000a0020);
+    qtest_writel(qts, rope + 0x800, 0x10);
+    g_assert_cmphex(qtest_readl(qts, rope + 0x810), ==, 0x00010000);
+    qtest_writel(qts, rope + 0x2000 + 0x800, 0x01);
+    g_assert_cmphex(qtest_readl(qts, rope + 0x2000 + 0x810), ==, 0x000a0020);
+
+    /*
      * Rope 0's block does configuration cycles on the primary root bus: the
      * SBA answers at 00:1f.0 there, the AGP bridge's block does not see it.
      */

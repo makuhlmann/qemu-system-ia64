@@ -1709,16 +1709,16 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
     UINT32 device_id = 0;
 
     /*
-     * Read the always-present boot HBA at device 4, which on this machine is
-     * the QLogic ISP12160 (0x1077:0x1216).  The AHCI controller at device 1
-     * is opt-in (ahci=off by default), so it must not be assumed present
-     * here.
+     * Read the always-present boot HBA, which on this board is the QLogic
+     * ISP12160 (0x1077:0x1216) on the Longs Peak core I/O seat, device 1.
+     * The AHCI controller is opt-in (ahci=off by default), so it must not be
+     * assumed present here.
      */
     return SystemTable->BootServices->LocateProtocol(
                pci_root_guid, NULL, (VOID **)&root) == EFI_SUCCESS &&
            root != NULL && root->Pci.Read != NULL &&
            root->SegmentNumber == 0 &&
-           root->Pci.Read(root, EfiPciWidthUint32, 4ULL << 16, 1,
+           root->Pci.Read(root, EfiPciWidthUint32, 1ULL << 16, 1,
                           &device_id) == EFI_SUCCESS &&
            device_id == 0x12161077U;
 }
@@ -2298,8 +2298,27 @@ static BOOLEAN test_dsdt_prt(const TEST_TABLE_CONTEXT *Context)
             (address & 0xffffU) != 0xffffU || pin > 3U || source != 0) {
             return 0;
         }
+        /*
+         * The zx1 board wires its core I/O seats the way the vendor firmware
+         * describes the Longs Peak board: device 1 (SCSI) to the rope's first
+         * three interrupts, device 2 (LAN) to the sixth and device 3 (USB) to
+         * the fifth.  Every other slot keeps the (slot + pin) % 4 swizzle.
+         */
+        static const UINT8 core_io_gsi[3][4] = {
+            { 16U, 17U, 18U, 19U },
+            { 21U, 21U, 21U, 21U },
+            { 20U, 20U, 20U, 20U },
+        };
+        UINT8 expected;
+
         device = (UINTN)(address >> 16);
-        if (device > 6U || gsi != 16U + ((device + pin) & 3U)) {
+        if (device > 6U) {
+            return 0;
+        }
+        expected = (device >= 1U && device <= 3U)
+                       ? core_io_gsi[device - 1U][pin]
+                       : (UINT8)(16U + ((device + pin) & 3U));
+        if (gsi != expected) {
             return 0;
         }
         seen |= 1U << (device * 4U + (UINTN)pin);

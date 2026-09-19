@@ -3026,6 +3026,13 @@ static void ia64_vpc_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
                           PCIBus **bus, int *devfn)
 {
     IA64_VPC_MACHINE_GET_CLASS(s)->seat(s, seat, bus, devfn);
+    if (*devfn >= 0) {
+        /*
+         * A slot the board names outranks a reservation, which only keeps
+         * automatic placement stable across ahci=on/off.
+         */
+        pci_bus_clear_slot_reserved_mask(*bus, 1U << PCI_SLOT(*devfn));
+    }
 }
 
 static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
@@ -4094,7 +4101,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (imc->pci0_intx != NULL) {
         ia64_pci_host_set_intx_routes(pci_host, imc->pci0_intx,
                                       imc->pci0_nintx,
-                                      IA64_460GX_INTX_FALLBACK_GSI);
+                                      imc->pci0_intx_fallback);
     }
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(pci_host), errp)) {
         return false;
@@ -4117,6 +4124,20 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * stable, then release it for an explicitly requested PCI controller.
      */
     pci_bus_set_slot_reserved_mask(pci_bus, 1U << 0);
+    /*
+     * A seat the board names on this bus must still be free when its device
+     * arrives, so keep it out of automatic placement until then.
+     */
+    {
+        PCIBus *seat_bus = pci_bus;
+        int seat_devfn = -1;
+
+        imc->seat(s, IA64_VPC_SEAT_SCSI, &seat_bus, &seat_devfn);
+        if (seat_devfn >= 0 && seat_bus == pci_bus) {
+            pci_bus_set_slot_reserved_mask(pci_bus,
+                                           1U << PCI_SLOT(seat_devfn));
+        }
+    }
     pci_io = pci_bus->address_space_io;
     /*
      * A board with a south bridge carries its ACPI block there (the 460GX's
@@ -4175,7 +4196,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      */
 #ifdef CONFIG_IA64_VPC_STORAGE
     if (s->ahci_enabled) {
-        s->ahci_dev = pci_create_simple(pci_bus, -1, TYPE_ICH9_AHCI);
+        s->ahci_dev = pci_create_simple(pci_bus,
+                                        PCI_DEVFN(imc->ahci_slot, 0),
+                                        TYPE_ICH9_AHCI);
         ia64_vpc_configure_ahci(s->ahci_dev);
         ahci = ICH9_AHCI(s->ahci_dev);
         g_assert(ahci->ahci.ports <= ARRAY_SIZE(sata_drives));
@@ -4191,7 +4214,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
             ahci_ide_create_devs(&ahci->ahci, sata_drives);
         }
     } else {
-        pci_bus_set_slot_reserved_mask(pci_bus, 1U << 1);
+        pci_bus_set_slot_reserved_mask(pci_bus, 1U << imc->ahci_slot);
     }
 #endif
 
@@ -4382,7 +4405,8 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         ia64_vpc_configure_audio(s->audio_dev);
     }
 #endif
-    pci_bus_clear_slot_reserved_mask(pci_bus, (1U << 0) | (1U << 1));
+    pci_bus_clear_slot_reserved_mask(pci_bus,
+                                     (1U << 0) | (1U << imc->ahci_slot));
 
     /*
      * The Programmable Interrupt Device's face in configuration space.  Its
@@ -4527,9 +4551,11 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
 static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_CLASS(oc);
 
     (void)data;
 
+    imc->ahci_slot = 1;
     mc->desc = "IA-64 virtual PC platform (abstract base)";
     mc->init = ia64_vpc_init;
     mc->max_cpus = IA64_VPC_MAX_CPUS;

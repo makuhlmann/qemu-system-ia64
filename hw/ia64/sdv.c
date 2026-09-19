@@ -449,6 +449,7 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
     imc->iosapic_version = IA64_IOSAPIC_460GX_VERSION;
     imc->pci0_intx = ia64_i2000_pci0_intx;
     imc->pci0_nintx = ARRAY_SIZE(ia64_i2000_pci0_intx);
+    imc->pci0_intx_fallback = IA64_460GX_INTX_FALLBACK_GSI;
     imc->has_south_bridge = true;
     imc->pci_config_ecam = false;
     /*

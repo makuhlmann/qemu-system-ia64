@@ -95,6 +95,10 @@ struct IA64VpcMachineClass {
     /* Per-slot INTx routing of PCI bus 0; NULL = the (slot+pin)%4 swizzle. */
     const IA64IntxRoute *pci0_intx;
     unsigned int pci0_nintx;
+    /* Where a PCI0 slot the table omits swizzles into. */
+    unsigned int pci0_intx_fallback;
+    /* The slot the opt-in AHCI controller takes, and which stays free. */
+    unsigned int ahci_slot;
     /* The board carries the 82468GX south bridge (and its IDE function). */
     bool has_south_bridge;
     /*

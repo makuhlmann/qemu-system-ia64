@@ -6,6 +6,7 @@ config IA64_VPC
     select PCI
     select HP_SBA_IOMMU
     select OR_IRQ
+    select SPLIT_IRQ
     select ISA_BUS
     select INTEL_82468GX_IFB
     select PFLASH_CFI01

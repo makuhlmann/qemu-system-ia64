@@ -22,6 +22,7 @@
 #include "hw/ia64/ia64_mercury.h"
 #include "hw/ia64/ia64_sba.h"
 #include "hw/ia64/ia64_iosapic.h"
+#include "hw/core/split-irq.h"
 #include "longspeak_pdh.h"
 #include "system/address-spaces.h"
 #include "target/ia64/cpu.h"
@@ -29,6 +30,25 @@
 
 /* The first network adapter's slot on the single PCI0 root. */
 #define IA64_VPC_NIC_SLOT           6
+/* Longs Peak core I/O: the SCSI adapter is device 1 of the root. */
+#define LONGSPEAK_SCSI_SLOT         1
+/* How many of the ioa I/O SAPIC's pins the board wires. */
+#define LONGSPEAK_INTX_PINS         6
+
+/*
+ * The board's INTx wiring, as the vendor firmware's own SCRAM interrupt
+ * records give it: device 1 INTA/INTB/INTC on pins 0/1/2, device 2 INTA on
+ * pin 5 and device 3 INTA on pin 4 of the rope's I/O SAPIC (read out of the
+ * record array, decoded by \LBA.PRTE; the firmware publishes that I/O SAPIC
+ * with global-interrupt base 16, so its _PRT names them 16..21).  A slot the
+ * table does not name keeps the (slot + pin) % 4 swizzle.  Keep in lockstep
+ * with the _PRT packages in roms/ia64-firmware/dsdt-pci-root-zx1.asl.
+ */
+static const IA64IntxRoute longspeak_pci0_intx[] = {
+    { LONGSPEAK_SCSI_SLOT, { 0, 1, 2, 3 } },   /* core I/O SCSI */
+    { 0x02, { 5, 5, 5, 5 } },                  /* core I/O LAN  */
+    { 0x03, { 4, 4, 4, 4 } },                  /* core I/O USB  */
+};
 
 /*
  * The zx1 machine carves a DRAM hole for the SBA "safe IOVA space"
@@ -196,21 +216,39 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     return true;
 }
 
+/*
+ * Both roots wire-OR into one block of interrupt lines, and each line reaches
+ * two controllers: the rope 0 ioa's own I/O SAPIC, which is the one the vendor
+ * firmware finds and publishes (ERS sec 11.2), and the platform IOSAPIC our
+ * own firmware publishes.  A line an OS has not programmed stays masked, so
+ * only the controller its firmware described ever delivers.
+ */
 static void longspeak_wire_intx(IA64VpcMachineState *s, DeviceState *pci_host,
                                 DeviceState *iosapic)
 {
+    IA64LBAState *rope0 = IA64_LBA(s->rope0_lba_dev);
     unsigned int i;
 
-    for (i = 0; i < IA64_PCI_INTX_LINES; i++) {
-        qemu_irq gsi = qdev_get_gpio_in(iosapic,
-                                        IA64_PCI_INTX_GSI_BASE + i);
+    for (i = 0; i < LONGSPEAK_INTX_PINS; i++) {
         DeviceState *org = qdev_new(TYPE_OR_IRQ);
+        DeviceState *split = qdev_new(TYPE_SPLIT_IRQ);
+
+        object_property_set_int(OBJECT(split), "num-lines", 2, &error_abort);
+        qdev_realize_and_unref(split, NULL, &error_abort);
+        qdev_connect_gpio_out(split, 0, ia64_lba_iosapic_input(rope0, i));
+        qdev_connect_gpio_out(split, 1,
+                              qdev_get_gpio_in(iosapic,
+                                               IA64_PCI_INTX_GSI_BASE + i));
 
         object_property_set_int(OBJECT(org), "num-lines", 2, &error_abort);
         qdev_realize_and_unref(org, NULL, &error_abort);
-        qdev_connect_gpio_out(org, 0, gsi);
+        qdev_connect_gpio_out(org, 0, qdev_get_gpio_in(split, 0));
         qdev_connect_gpio_out(pci_host, i, qdev_get_gpio_in(org, 0));
-        qdev_connect_gpio_out(s->mercury_host, i, qdev_get_gpio_in(org, 1));
+        /* The second root swizzles into the first four lines only. */
+        if (i < IA64_PCI_INTX_LINES) {
+            qdev_connect_gpio_out(s->mercury_host, i,
+                                  qdev_get_gpio_in(org, 1));
+        }
     }
 }
 
@@ -243,8 +281,7 @@ static void longspeak_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
 {
     switch (seat) {
     case IA64_VPC_SEAT_SCSI:
-        /* zx1 keeps device 4 of the single root for the seat. */
-        *devfn = PCI_DEVFN(4, 0);
+        *devfn = PCI_DEVFN(LONGSPEAK_SCSI_SLOT, 0);
         break;
     case IA64_VPC_SEAT_SCSI_PARK:
         /* The second adapter takes the next free slot of the single root. */
@@ -317,6 +354,11 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->nprocessor_ids = ARRAY_SIZE(longspeak_processor_ids);
     imc->map_low_ram = longspeak_map_low_ram;
     imc->build_chipset = longspeak_build_chipset;
+    imc->pci0_intx = longspeak_pci0_intx;
+    imc->pci0_nintx = ARRAY_SIZE(longspeak_pci0_intx);
+    imc->pci0_intx_fallback = 0;
+    /* Device 1 is core I/O on this board; the opt-in AHCI takes device 4. */
+    imc->ahci_slot = 4;
     imc->wire_intx = longspeak_wire_intx;
     imc->build_isa = longspeak_build_isa;
     imc->seat = longspeak_seat;
