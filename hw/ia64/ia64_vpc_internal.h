@@ -97,6 +97,8 @@ struct IA64VpcMachineClass {
     unsigned int pci0_nintx;
     /* Where a PCI0 slot the table omits swizzles into. */
     unsigned int pci0_intx_fallback;
+    /* Where the board also answers the PM block in memory space, or zero. */
+    uint64_t acpi_pm_mmio_base;
     /* The slot the opt-in AHCI controller takes, and which stays free. */
     unsigned int ahci_slot;
     /* The board carries the 82468GX south bridge (and its IDE function). */
@@ -231,6 +233,7 @@ struct IA64VpcMachineState {
     MemoryRegion pal_rom;
     MemoryRegion pal_reset_ivt;
     MemoryRegion acpi_pm;
+    MemoryRegion acpi_pm_mmio[3];
     MemoryRegion acpi_reset;
     SerialMM *debug_uart;
     SerialMM *console_uart;

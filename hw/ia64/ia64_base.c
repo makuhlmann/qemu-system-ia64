@@ -2083,6 +2083,26 @@ static void ia64_vpc_init_acpi_pm(IA64VpcMachineState *s,
      * backing storage for that internal zero-valued contribution.
      */
     acpi_gpe_init(&s->acpi_regs, 2);
+
+    if (IA64_VPC_MACHINE_GET_CLASS(s)->acpi_pm_mmio_base != 0) {
+        static const struct { unsigned int from, to, size; } mmio[] = {
+            { IA64_ACPI_PM_TMR_OFFSET,  IA64_PDH_ACPI_PM_TMR,  4 },
+            { IA64_ACPI_PM1_EVT_OFFSET, IA64_PDH_ACPI_PM1_EVT, 4 },
+            { IA64_ACPI_PM1_CNT_OFFSET, IA64_PDH_ACPI_PM1_CNT, 2 },
+        };
+        uint64_t base = IA64_VPC_MACHINE_GET_CLASS(s)->acpi_pm_mmio_base;
+        unsigned int i;
+
+        QEMU_BUILD_BUG_ON(ARRAY_SIZE(mmio) != ARRAY_SIZE(s->acpi_pm_mmio));
+        for (i = 0; i < ARRAY_SIZE(mmio); i++) {
+            memory_region_init_alias(&s->acpi_pm_mmio[i], OBJECT(s),
+                                     "ia64-acpi-pm-mmio", &s->acpi_pm,
+                                     mmio[i].from, mmio[i].size);
+            memory_region_add_subregion_overlap(get_system_memory(),
+                                                base + mmio[i].to,
+                                                &s->acpi_pm_mmio[i], 1);
+        }
+    }
 }
 
 static void ia64_vpc_powerdown_req(Notifier *n, void *opaque)

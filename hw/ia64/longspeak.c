@@ -357,6 +357,7 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->pci0_intx = longspeak_pci0_intx;
     imc->pci0_nintx = ARRAY_SIZE(longspeak_pci0_intx);
     imc->pci0_intx_fallback = 0;
+    imc->acpi_pm_mmio_base = IA64_PDH_ACPI_PM_BASE;
     /* Device 1 is core I/O on this board; the opt-in AHCI takes device 4. */
     imc->ahci_slot = 4;
     imc->wire_intx = longspeak_wire_intx;

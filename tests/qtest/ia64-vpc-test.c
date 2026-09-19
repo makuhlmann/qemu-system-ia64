@@ -29,7 +29,6 @@
  * offsets stay local. */
 #define IA64_LEGACY_IO_BASE          IA64_PCI_IO_BASE
 #define IA64_ACPI_PM1_EVT_EN_OFFSET  0x02ULL
-#define IA64_ACPI_PM1_CNT_OFFSET     0x04ULL
 #define IA64_IOSAPIC_IOREGSEL        0x00ULL
 #define IA64_IOSAPIC_IOWIN           0x10ULL
 #define IA64_IOSAPIC_EOI             0x40ULL

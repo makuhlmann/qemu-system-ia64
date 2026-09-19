@@ -455,6 +455,15 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_BMC_PRODUCT_ID       257U
 #define IA64_PDH_BMC_PRODUCT_ID_OFFSET 115U  /* in the FRU product area */
 #define IA64_PDH_PRESENCE_BASE        IA64_U64(0x00000000ff5c0000)
+/*
+ * The vendor FADT reaches the ACPI PM block here, through its extended
+ * (SystemMemory) fields and in a different order from the I/O block: the
+ * timer first, then the PM1a event pair, then PM1a control.
+ */
+#define IA64_PDH_ACPI_PM_BASE         IA64_U64(0x00000000ff5c1000)
+#define IA64_PDH_ACPI_PM_TMR          0x0004U
+#define IA64_PDH_ACPI_PM1_EVT         0x0008U
+#define IA64_PDH_ACPI_PM1_CNT         0x000cU
 #define IA64_PDH_UART_BASE            IA64_U64(0x00000000ff5e0000)
 #define IA64_PDH_UARTS                2U
 #define IA64_PDH_UART_STRIDE          0x2000U
@@ -490,6 +499,10 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * The zx1 machine's ACPI PM block in PCI I/O port space, and the SCI it
  * raises.  A stand-in until the zx1 firmware work shows the real block.
  */
+/* Offsets inside the PM block, as the shared ACPI core lays it out. */
+#define IA64_ACPI_PM1_EVT_OFFSET      0x0000U
+#define IA64_ACPI_PM1_CNT_OFFSET      0x0004U
+#define IA64_ACPI_PM_TMR_OFFSET       0x0008U
 #define IA64_ACPI_PM_IO_BASE          0x00002000U
 #define IA64_ACPI_PM_IO_SIZE          0x00000010U
 #define IA64_ACPI_PM_RESET_OFFSET     0x0000000cU
