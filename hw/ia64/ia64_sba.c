@@ -56,10 +56,9 @@
 /*
  * LBA_Port(N)_CNTRL (mio ERS register 24, FED0_1200 to FED0_1238).  RF resets
  * the rope and RC reads 1 only while that reset runs, so both are done here as
- * soon as they are asked for.  The error log is cleared by writing CL with CE
- * already set (ERS table 11); a clear that does not take is
- * "I/O SBA clear error failed", and the firmware then deconfigures the host
- * bridge it has just found.
+ * soon as they are asked for.  The error log clears like the IOC's own, and
+ * FFEC6A50 shows where the bits are: CL and CE are 4 and 5, as they are in the
+ * ioa's status register, not the 10 and 11 the ERS diagram reads like.
  */
 /*
  * Function 0: its class register, the module info register, and the address
@@ -70,6 +69,16 @@
  */
 #define IA64_SBA_FUNC0_FCLASS_OFFSET   UINT64_C(0x0008)
 #define IA64_SBA_MODULE_INFO_OFFSET    UINT64_C(0x0100)
+/*
+ * The IOC has an error log of its own and clears it the way a rope port does:
+ * FFEC68A0 sets CE, then CL, and reads CL back -- POST 0x90 "I/O SBA clear
+ * error failed" when it does not stay set.  Not in the ERS, whose function 0
+ * chapter ends at 0x0100.
+ */
+#define IA64_SBA_ERROR_CONTROL_OFFSET  UINT64_C(0x0108)
+#define IA64_SBA_ERROR_CL              (UINT64_C(1) << 4)
+#define IA64_SBA_ERROR_CE              (UINT64_C(1) << 5)
+
 #define IA64_SBA_RANGE_FIRST           UINT64_C(0x0300)
 #define IA64_SBA_RANGE_REGS            28
 
@@ -95,9 +104,9 @@
 
 #define IA64_SBA_LBA_PORT_FIRST        UINT64_C(0x1200)
 #define IA64_SBA_LBA_PORTS             8
-#define IA64_SBA_LBA_PORT_CL           (UINT64_C(1) << 10)
-#define IA64_SBA_LBA_PORT_CE           (UINT64_C(1) << 11)
-#define IA64_SBA_LBA_PORT_HF           (UINT64_C(1) << 12)
+#define IA64_SBA_LBA_PORT_CL           IA64_SBA_ERROR_CL
+#define IA64_SBA_LBA_PORT_CE           IA64_SBA_ERROR_CE
+#define IA64_SBA_LBA_PORT_HF           (UINT64_C(1) << 6)
 
 #define IA64_SBA_IOMMU_FIRST           UINT64_C(0x1300)
 #define IA64_SBA_IOMMU_LAST            UINT64_C(0x1320)
@@ -338,6 +347,9 @@ static MemTxResult ia64_sba_csr_read(void *opaque, hwaddr addr, uint64_t *data,
         } else if (ia64_sba_range_reg(addr, size, &reg_index)) {
             *data = s->range[reg_index];
             ok = true;
+        } else if (size == 8 && addr == IA64_SBA_ERROR_CONTROL_OFFSET) {
+            *data = s->error_control;
+            ok = true;
         } else if (size == 8 && !(addr & 7) &&
                    addr >= IA64_SBA_ROPE_QUEUE_FIRST &&
                    addr < IA64_SBA_ROPE_QUEUE_FIRST + 8 * IA64_SBA_ROPES) {
@@ -409,6 +421,15 @@ static MemTxResult ia64_sba_csr_write(void *opaque, hwaddr addr, uint64_t value,
 
     if (!handled && addr == IA64_SBA_BUS_CONFIG_OFFSET && size == 8) {
         s->bus_config = value;
+        handled = true;
+    }
+
+    if (!handled && size == 8 && addr == IA64_SBA_ERROR_CONTROL_OFFSET) {
+        bool cleared = (value & IA64_SBA_ERROR_CL) &&
+                       (s->error_control & IA64_SBA_ERROR_CE);
+
+        s->error_control = (value & ~IA64_SBA_ERROR_CL) |
+                           (cleared ? IA64_SBA_ERROR_CL : 0);
         handled = true;
     }
 
@@ -588,6 +609,7 @@ static const VMStateDescription vmstate_ia64_sba = {
         VMSTATE_UINT64(bus_config, IA64SBAState),
         VMSTATE_UINT64_ARRAY(lba_port, IA64SBAState, IA64_SBA_LBA_PORTS),
         VMSTATE_UINT64_ARRAY(range, IA64SBAState, IA64_SBA_RANGE_REGS),
+        VMSTATE_UINT64(error_control, IA64SBAState),
         VMSTATE_END_OF_LIST()
     },
 };

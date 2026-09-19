@@ -32,6 +32,7 @@ struct IA64SBAState {
     uint64_t bus_config;           /* FED0_9410, kept across a platform reset */
     uint64_t lba_port[8];          /* LBA_Port(N)_CNTRL, FED0_1200 + 8 * N    */
     uint64_t range[28];            /* address range registers, FED0_0300 on   */
+    uint64_t error_control;        /* the IOC's own error log control, 0x0108 */
     MemoryRegion rope_config;      /* the 16 rope guests, per FED0_03A8       */
     uint64_t rope_base;            /* where it is mapped while enabled        */
     bool rope_mapped;

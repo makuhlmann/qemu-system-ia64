@@ -968,17 +968,24 @@ static void test_sba_mio_registers(void)
     g_assert_cmphex(qtest_readq(qts, port0), ==, 0);
 
     /* CL alone does not clear; CL after CE does, and reads back. */
-    qtest_writeq(qts, port0, 1 << 10);
+    qtest_writeq(qts, port0, 1 << 4);
     g_assert_cmphex(qtest_readq(qts, port0), ==, 0);
-    qtest_writeq(qts, port0, 1 << 11);
-    g_assert_cmphex(qtest_readq(qts, port0), ==, 1 << 11);
-    qtest_writeq(qts, port0, 1 << 10);
-    g_assert_cmphex(qtest_readq(qts, port0), ==, 1 << 10);
+    qtest_writeq(qts, port0, 1 << 5);
+    g_assert_cmphex(qtest_readq(qts, port0), ==, 1 << 5);
+    qtest_writeq(qts, port0, 1 << 4);
+    g_assert_cmphex(qtest_readq(qts, port0), ==, 1 << 4);
 
     /* The eight ports are separate. */
-    qtest_writeq(qts, port0 + 8 * 7, (1 << 12));
-    g_assert_cmphex(qtest_readq(qts, port0 + 8 * 7), ==, 1 << 12);
+    qtest_writeq(qts, port0 + 8 * 7, (1 << 6));
+    g_assert_cmphex(qtest_readq(qts, port0 + 8 * 7), ==, 1 << 6);
     g_assert_cmphex(qtest_readq(qts, port0 + 8), ==, 0);
+
+    /* The IOC's own error log clears the same way, at 0x0108. */
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x108, 1 << 4);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x108), ==, 0);
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x108, 1 << 5);
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x108, 1 << 4);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x108), ==, 1 << 4);
     qtest_quit(qts);
 }
 
