@@ -930,6 +930,58 @@ static void test_sba_ioc_identity(void)
     qtest_quit(qts);
 }
 
+/*
+ * The mio's function 0 registers (mio ERS sec 3.2): its class and module info
+ * are read-only, and the address range registers are storage the firmware
+ * reads back -- ROPE_CONFIG_BASE tells it where it put the rope guests, so a
+ * register that reads zero sends it to address zero for every host bridge.
+ * LBA_Port(N)_CNTRL clears the error log when CL is written with CE already
+ * set (ERS table 11); a clear that does not take is "I/O SBA clear error
+ * failed" and the firmware deconfigures the bridge.
+ */
+static void test_sba_mio_registers(void)
+{
+    const uint64_t rope_config_base = IA64_SBA_CSR_BASE + 0x03a8;
+    const uint64_t port0 = IA64_SBA_CSR_BASE + 0x1200;
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    unsigned int i;
+
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x008), ==,
+                    IA64_SBA_IOC_FCLASS);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x100), ==,
+                    IA64_SBA_MODULE_INFO);
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x100, 0);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x100), ==,
+                    IA64_SBA_MODULE_INFO);
+
+    /* Every range register is storage, LMMIO_DIR_BASE[0] through IOS_DIR. */
+    for (i = 0x300; i <= 0x3d8; i += 8) {
+        qtest_writeq(qts, IA64_SBA_CSR_BASE + i, 0x1122334455660000ULL + i);
+        g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + i), ==,
+                        0x1122334455660000ULL + i);
+    }
+    qtest_writeq(qts, rope_config_base, 0xfed20001);
+    g_assert_cmphex(qtest_readq(qts, rope_config_base), ==, 0xfed20001);
+
+    /* RF resets at once, so RC never reads back set. */
+    qtest_writeq(qts, port0, 0x1);
+    g_assert_cmphex(qtest_readq(qts, port0), ==, 0);
+
+    /* CL alone does not clear; CL after CE does, and reads back. */
+    qtest_writeq(qts, port0, 1 << 10);
+    g_assert_cmphex(qtest_readq(qts, port0), ==, 0);
+    qtest_writeq(qts, port0, 1 << 11);
+    g_assert_cmphex(qtest_readq(qts, port0), ==, 1 << 11);
+    qtest_writeq(qts, port0, 1 << 10);
+    g_assert_cmphex(qtest_readq(qts, port0), ==, 1 << 10);
+
+    /* The eight ports are separate. */
+    qtest_writeq(qts, port0 + 8 * 7, (1 << 12));
+    g_assert_cmphex(qtest_readq(qts, port0 + 8 * 7), ==, 1 << 12);
+    g_assert_cmphex(qtest_readq(qts, port0 + 8), ==, 0);
+    qtest_quit(qts);
+}
+
 #define IA64_PDH_SEMAPHORE_ADDR(id) \
     (IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_SEMAPHORE + 8 * (id))
 #define IA64_PDH_STATUS_ADDR(slot) \
@@ -1132,7 +1184,7 @@ static void test_pdh_unimp_logged_once(void)
     g_auto(GStrv) lines = NULL;
     /* An offset in the block that no device claims. */
     const uint64_t pdh = IA64_PDH_DEV5B_BASE + 0x4000;
-    const uint64_t sba = IA64_SBA_CSR_BASE + 0x0100;
+    const uint64_t sba = IA64_SBA_CSR_BASE + 0x0200;
     unsigned pdh_reads = 0, pdh_writes = 0, sba_reads = 0, sba_writes = 0;
     QTestState *qts;
     int i;
@@ -1161,10 +1213,10 @@ static void test_pdh_unimp_logged_once(void)
                           "longspeak-pdh: unimplemented write at 0xff5b4000")) {
             pdh_writes++;
         } else if (strstr(lines[i],
-                          "ia64-sba: unimplemented read at 0xfed00100")) {
+                          "ia64-sba: unimplemented read at 0xfed00200")) {
             sba_reads++;
         } else if (strstr(lines[i],
-                          "ia64-sba: unimplemented write at 0xfed00100")) {
+                          "ia64-sba: unimplemented write at 0xfed00200")) {
             sba_writes++;
         }
     }
@@ -7243,6 +7295,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/nvram/defaults", test_nvram_defaults);
     qtest_add_func("/ia64-vpc/lba/agp-capability", test_lba_agp_capability);
     qtest_add_func("/ia64-vpc/sba/ioc-identity", test_sba_ioc_identity);
+    qtest_add_func("/ia64-vpc/sba/mio-registers", test_sba_mio_registers);
     qtest_add_func("/ia64-vpc/pdh/longspeak-map", test_pdh_longspeak_map);
     qtest_add_func("/ia64-vpc/pdh/unimp-logged-once",
                    test_pdh_unimp_logged_once);

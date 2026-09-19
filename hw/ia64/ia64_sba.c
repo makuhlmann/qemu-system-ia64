@@ -53,6 +53,32 @@
  * ends at FED0_1238.
  */
 #define IA64_SBA_BUS_CONFIG_OFFSET     UINT64_C(0x9410)
+/*
+ * LBA_Port(N)_CNTRL (mio ERS register 24, FED0_1200 to FED0_1238).  RF resets
+ * the rope and RC reads 1 only while that reset runs, so both are done here as
+ * soon as they are asked for.  The error log is cleared by writing CL with CE
+ * already set (ERS table 11); a clear that does not take is
+ * "I/O SBA clear error failed", and the firmware then deconfigures the host
+ * bridge it has just found.
+ */
+/*
+ * Function 0: its class register, the module info register, and the address
+ * range registers (mio ERS 3.2).  The ranges are plain read/write storage on
+ * the real part too; the firmware reads ROPE_CONFIG_BASE back to find where it
+ * put the rope guests, so a range register that reads zero sends it to address
+ * zero for every host bridge.
+ */
+#define IA64_SBA_FUNC0_FCLASS_OFFSET   UINT64_C(0x0008)
+#define IA64_SBA_MODULE_INFO_OFFSET    UINT64_C(0x0100)
+#define IA64_SBA_RANGE_FIRST           UINT64_C(0x0300)
+#define IA64_SBA_RANGE_REGS            28
+
+#define IA64_SBA_LBA_PORT_FIRST        UINT64_C(0x1200)
+#define IA64_SBA_LBA_PORTS             8
+#define IA64_SBA_LBA_PORT_CL           (UINT64_C(1) << 10)
+#define IA64_SBA_LBA_PORT_CE           (UINT64_C(1) << 11)
+#define IA64_SBA_LBA_PORT_HF           (UINT64_C(1) << 12)
+
 #define IA64_SBA_IOMMU_FIRST           UINT64_C(0x1300)
 #define IA64_SBA_IOMMU_LAST            UINT64_C(0x1320)
 #define IA64_SBA_IOMMU_END             UINT64_C(0x1328)
@@ -197,11 +223,37 @@ static bool ia64_sba_identity_reg(hwaddr base, uint64_t *reg)
         *reg = IA64_SBA_IOC_FUNC_ID;
         return true;
     case IA64_SBA_IOC_FCLASS_OFFSET:
+    case IA64_SBA_FUNC0_FCLASS_OFFSET:
         *reg = IA64_SBA_IOC_FCLASS;
+        return true;
+    case IA64_SBA_MODULE_INFO_OFFSET:
+        *reg = IA64_SBA_MODULE_INFO;
         return true;
     default:
         return false;
     }
+}
+
+static bool ia64_sba_range_reg(hwaddr addr, unsigned int size, unsigned int *n)
+{
+    if (size != 8 || addr < IA64_SBA_RANGE_FIRST ||
+        addr >= IA64_SBA_RANGE_FIRST + 8 * IA64_SBA_RANGE_REGS ||
+        (addr & 7)) {
+        return false;
+    }
+    *n = (addr - IA64_SBA_RANGE_FIRST) / 8;
+    return true;
+}
+
+static bool ia64_sba_lba_port(hwaddr addr, unsigned int size, unsigned int *n)
+{
+    if (size != 8 || addr < IA64_SBA_LBA_PORT_FIRST ||
+        addr >= IA64_SBA_LBA_PORT_FIRST + 8 * IA64_SBA_LBA_PORTS ||
+        (addr & 7)) {
+        return false;
+    }
+    *n = (addr - IA64_SBA_LBA_PORT_FIRST) / 8;
+    return true;
 }
 
 static MemTxResult ia64_sba_csr_read(void *opaque, hwaddr addr, uint64_t *data,
@@ -223,6 +275,18 @@ static MemTxResult ia64_sba_csr_read(void *opaque, hwaddr addr, uint64_t *data,
     if (!ok && addr == IA64_SBA_BUS_CONFIG_OFFSET && size == 8) {
         *data = s->bus_config;
         ok = true;
+    }
+
+    if (!ok) {
+        unsigned int reg_index;
+
+        if (ia64_sba_lba_port(addr, size, &reg_index)) {
+            *data = s->lba_port[reg_index];
+            ok = true;
+        } else if (ia64_sba_range_reg(addr, size, &reg_index)) {
+            *data = s->range[reg_index];
+            ok = true;
+        }
     }
 
     if (!ok && size >= 1 && size <= 8 && (addr & 7) + size <= 8 &&
@@ -289,6 +353,29 @@ static MemTxResult ia64_sba_csr_write(void *opaque, hwaddr addr, uint64_t value,
     if (!handled && addr == IA64_SBA_BUS_CONFIG_OFFSET && size == 8) {
         s->bus_config = value;
         handled = true;
+    }
+
+    if (!handled) {
+        unsigned int reg_index;
+
+        if (ia64_sba_range_reg(addr, size, &reg_index)) {
+            s->range[reg_index] = value;
+            handled = true;
+        }
+    }
+
+    if (!handled) {
+        unsigned int port;
+
+        if (ia64_sba_lba_port(addr, size, &port)) {
+            bool cleared = (value & IA64_SBA_LBA_PORT_CL) &&
+                           (s->lba_port[port] & IA64_SBA_LBA_PORT_CE);
+
+            s->lba_port[port] = (value & (IA64_SBA_LBA_PORT_CE |
+                                          IA64_SBA_LBA_PORT_HF)) |
+                                (cleared ? IA64_SBA_LBA_PORT_CL : 0);
+            handled = true;
+        }
     }
 
     /* The identity registers are read-only; other writes are unmodeled. */
@@ -437,6 +524,8 @@ static const VMStateDescription vmstate_ia64_sba = {
         VMSTATE_UINT64(fe.tcnfg, IA64SBAState),
         VMSTATE_UINT64(fe.pdir_base, IA64SBAState),
         VMSTATE_UINT64(bus_config, IA64SBAState),
+        VMSTATE_UINT64_ARRAY(lba_port, IA64SBAState, IA64_SBA_LBA_PORTS),
+        VMSTATE_UINT64_ARRAY(range, IA64SBAState, IA64_SBA_RANGE_REGS),
         VMSTATE_END_OF_LIST()
     },
 };

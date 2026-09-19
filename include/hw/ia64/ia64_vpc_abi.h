@@ -304,6 +304,8 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  */
 #define IA64_SBA_IOC_FUNC_ID          IA64_U64(0x00000000122a103c)
 #define IA64_SBA_IOC_FCLASS           IA64_U64(0x0000002006800023)
+/* Module Info (mio ERS register 3): module 0x000a, functions 0, 1, 8, 9, 10. */
+#define IA64_SBA_MODULE_INFO          IA64_U64(0x000000000703000a)
 /*
  * The zx1 SBA "safe IOVA space": the 1 GiB window at 1 GiB the IOC advertises
  * through IBASE/IMASK and that the OS's sba_iommu allocates IOVAs from.  On the
