@@ -893,6 +893,9 @@ static void test_nvram_defaults(void)
  * These are the config reads hp_zx1_lba_init()/hp_zx1_lba_find_capability()
  * perform against the ioremapped LBA CSR block.
  */
+/* SIC (0x108) bit 32: reset complete, read-only (ioa ERS 8.2.1). */
+#define IA64_LBA_SIC_RC                 (UINT64_C(1) << 32)
+
 static void test_lba_agp_capability(void)
 {
     const uint64_t lba = IA64_LBA_CSR_BASE;
@@ -941,6 +944,25 @@ static void test_lba_agp_capability(void)
     g_assert_cmphex(qtest_readl(qts, lba + 0x80), ==, 0x3f);
     /* STATUS_CONTROL/SIC (0x108): reset-complete (bit 32) reads set. */
     g_assert_cmphex(qtest_readl(qts, lba + 0x10c) & 1u, ==, 1u);
+    /*
+     * The error log clears as ERS 8.2.1 describes: CL takes only where CE was
+     * already set, a read of CL says whether the clear worked, and the clear
+     * consumes the enable.  The vendor firmware sets CE, writes CL back on
+     * top of the CE it reads, and waits for CL set with CE clear.
+     */
+    qtest_writeq(qts, lba + 0x108, (1 << 6) | (1 << 4));
+    g_assert_cmphex(qtest_readq(qts, lba + 0x108), ==,
+                    IA64_LBA_SIC_RC | (1 << 6));
+    qtest_writeq(qts, lba + 0x108, (1 << 6) | (1 << 5));
+    g_assert_cmphex(qtest_readq(qts, lba + 0x108), ==,
+                    IA64_LBA_SIC_RC | (1 << 6) | (1 << 5));
+    qtest_writeq(qts, lba + 0x108, (1 << 6) | (1 << 5) | (1 << 4));
+    g_assert_cmphex(qtest_readq(qts, lba + 0x108), ==,
+                    IA64_LBA_SIC_RC | (1 << 6) | (1 << 4));
+    /* A second clear finds no enable left and says so. */
+    qtest_writeq(qts, lba + 0x108, (1 << 6) | (1 << 4));
+    g_assert_cmphex(qtest_readq(qts, lba + 0x108), ==,
+                    IA64_LBA_SIC_RC | (1 << 6));
     /* LMMIO_BASE (0x200) reset 0x80000000; SLAVE_CONTROL (0x278) reset 0x6. */
     g_assert_cmphex(qtest_readl(qts, lba + 0x200), ==, 0x80000000u);
     g_assert_cmphex(qtest_readl(qts, lba + 0x278), ==, 0x6);

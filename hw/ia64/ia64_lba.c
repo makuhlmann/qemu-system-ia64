@@ -267,6 +267,7 @@ static void ia64_lba_config_write(IA64LBAState *s, unsigned int lane,
     }
 }
 
+
 static MemTxResult ia64_lba_read(void *opaque, hwaddr addr, uint64_t *data,
                                  unsigned int size, MemTxAttrs attrs)
 {
@@ -341,6 +342,22 @@ static MemTxResult ia64_lba_write(void *opaque, hwaddr addr, uint64_t value,
     case LBA_STATUS_CONTROL:
         latch = s->status_control;
         ia64_lba_latch(&latch, LBA_SIC_LATCH_MASK, mask, data);
+        /*
+         * Writing CL clears the error log only where CE was already set, and
+         * a read of CL then says whether the clear succeeded (ERS 8.2.1).
+         * The clear consumes the enable, so the pair reads back CE = 0 and
+         * CL = 1: the vendor firmware sets CE, writes CL back on top of it
+         * and polls for exactly that (SAL_B FFF3C050), 256 times before it
+         * gives up with "Unable to clear the error logs".
+         */
+        if (mask & (LBA_SIC_CLEAR_LOG | LBA_SIC_CLEAR_ENABLE)) {
+            bool cleared = (latch & LBA_SIC_CLEAR_LOG) &&
+                           (s->status_control & LBA_SIC_CLEAR_ENABLE);
+
+            latch &= ~(LBA_SIC_CLEAR_LOG | LBA_SIC_CLEAR_ENABLE);
+            latch |= cleared ? LBA_SIC_CLEAR_LOG
+                             : (data & mask & LBA_SIC_CLEAR_ENABLE);
+        }
         s->status_control = (uint32_t)latch;
         break;
     case LBA_LMMIO_BASE:
