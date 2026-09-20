@@ -55,6 +55,8 @@
 #define LBA_CONFIG_ADDRESS       0x040
 #define LBA_CONFIG_DATA          0x048
 #define LBA_BUS_NUMBER           0x058
+/* ERS 8.10: secondary in byte 0x58, subordinate in 0x59, R/W, reset 0. */
+#define LBA_BUS_NUMBER_WRITE     0xffffU
 #define LBA_AGP_CAPABILITY       0x060
 #define LBA_AGP_COMMAND          0x068
 #define LBA_ARBITRATION_MASK     0x080
@@ -168,9 +170,7 @@ static uint64_t ia64_lba_reg(IA64LBAState *s, uint64_t base)
     case LBA_CONFIG_ADDRESS:
         return s->config_address;
     case LBA_BUS_NUMBER:
-        /* secondary (byte 0x58) and subordinate (byte 0x59): the Mercury bus.
-         * Fixed by the machine, so read-only in this model. */
-        return IA64_MERCURY_BUS | (IA64_MERCURY_BUS << 8);
+        return s->bus_number;
     case LBA_AGP_CAPABILITY:
         /* AGP capability: id 0x02 at byte 0x60, AGP status at byte 0x64. */
         return IA64_LBA_AGP_CAPABILITY;
@@ -215,6 +215,19 @@ static PCIDevice *ia64_lba_config_target(IA64LBAState *s, unsigned int lane,
     *reg = (addr & 0xfc) | lane;
     if (s->config_bus == NULL) {
         return NULL;
+    }
+    /*
+     * The bus field is rope-local: bus 0 is the bus behind this ioa, whatever
+     * number the rest of the machine gives it.  The vendor firmware programs
+     * BUS_NUMBER with this rope's place in the machine-wide numbering (rope 1
+     * gets secondary 32, subordinate 63) and still addresses that bus as 0,
+     * which is what ERS 8.10 means by "no effect on chip operation".  Windows
+     * reaches this path through the vendor SAL, which serves the PCI config
+     * calls it makes for the root its ACPI tables number 32
+     * (WSRV03/base/hals/halia64/ia64/i64pcibus.c:1090).
+     */
+    if (bus == 0) {
+        bus = pci_bus_num(s->config_bus);
     }
     return pci_find_device(s->config_bus, bus, PCI_DEVFN(dev, func));
 }
@@ -300,6 +313,11 @@ static MemTxResult ia64_lba_write(void *opaque, hwaddr addr, uint64_t value,
     data = (value << (lane * 8)) & mask;
 
     switch (base) {
+    case LBA_BUS_NUMBER:
+        latch = s->bus_number;
+        ia64_lba_latch(&latch, LBA_BUS_NUMBER_WRITE, mask, data);
+        s->bus_number = (uint32_t)latch;
+        break;
     case LBA_CONFIG_ADDRESS:
         latch = s->config_address;
         ia64_lba_latch(&latch, LBA_CONFIG_ADDRESS_MASK, mask, data);
@@ -439,6 +457,7 @@ static void ia64_lba_reset(DeviceState *dev)
 {
     IA64LBAState *s = IA64_LBA(dev);
 
+    s->bus_number = 0;
     s->config_address = 0;
     s->agp_command = 0;
     s->arbitration_mask = LBA_ARBITRATION_RESET;
@@ -462,9 +481,10 @@ static void ia64_lba_reset(DeviceState *dev)
 
 static const VMStateDescription vmstate_ia64_lba = {
     .name = "ia64-zx1-lba",
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(bus_number, IA64LBAState),
         VMSTATE_UINT32(config_address, IA64LBAState),
         VMSTATE_UINT32(agp_command, IA64LBAState),
         VMSTATE_UINT32(arbitration_mask, IA64LBAState),

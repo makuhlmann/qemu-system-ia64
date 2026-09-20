@@ -925,9 +925,13 @@ static void test_lba_agp_capability(void)
     /* FUNCTION_CLASS (0x08): host-bridge class 0x060000, revision 0x32. */
     g_assert_cmphex(qtest_readl(qts, lba + 0x08), ==,
                     (uint32_t)(IA64_LBA_REVISION | (IA64_LBA_CLASS_CODE << 8)));
-    /* BUS_NUMBER (0x58): secondary/subordinate = the Mercury root bus. */
-    g_assert_cmphex(qtest_readw(qts, lba + 0x58), ==,
-                    IA64_MERCURY_BUS | (IA64_MERCURY_BUS << 8));
+    /*
+     * BUS_NUMBER (0x58): secondary and subordinate, R/W, reset 0 (ioa ERS
+     * 8.10).  The vendor firmware writes 0x3f20 here.
+     */
+    g_assert_cmphex(qtest_readw(qts, lba + 0x58), ==, 0);
+    qtest_writew(qts, lba + 0x58, 0x3f20);
+    g_assert_cmphex(qtest_readw(qts, lba + 0x58), ==, 0x3f20);
 
     /* Control/decode registers: real Mercury reset values (AGP mode). */
     /* ARBITRATION_MASK (0x80): reset 0x01; writable 0x7f, but the F bit (0x40)
@@ -945,11 +949,22 @@ static void test_lba_agp_capability(void)
     /* CONFIG_ADDRESS (0x40) is a writable selector, masked to 0x00fffffc. */
     qtest_writel(qts, lba + 0x40, 0xffffffffu);
     g_assert_cmphex(qtest_readl(qts, lba + 0x40), ==, 0x00fffffcu);
-    /* CONFIG_ADDRESS/DATA reach the Mercury bus: select the graphics adapter
-     * (bus IA64_MERCURY_BUS, dev 0, func 0, reg 0) and read its PCI vendor id
-     * (ATI 0x1002) through CONFIG_DATA (0x48). */
+    /*
+     * CONFIG_ADDRESS/DATA reach the Mercury bus.  The bus field is rope-local,
+     * so the graphics adapter answers at bus 0, device 0 -- the form the
+     * vendor firmware uses even after it has written its own bus numbers into
+     * BUS_NUMBER above, since that register steers nothing (ERS 8.10).  A
+     * cycle that names the bus number this machine gives the bus reaches it
+     * as well, which is how our own firmware and ACPI tables address it.
+     */
+    qtest_writel(qts, lba + 0x40, 0);
+    g_assert_cmphex(qtest_readw(qts, lba + 0x48), ==, 0x1002);
     qtest_writel(qts, lba + 0x40, (uint32_t)IA64_MERCURY_BUS << 16);
     g_assert_cmphex(qtest_readw(qts, lba + 0x48), ==, 0x1002);
+
+    /* A bus this ioa does not lead to stays unclaimed. */
+    qtest_writel(qts, lba + 0x40, (uint32_t)(IA64_MERCURY_BUS + 1) << 16);
+    g_assert_cmphex(qtest_readw(qts, lba + 0x48), ==, 0xffff);
     qtest_quit(qts);
 }
 

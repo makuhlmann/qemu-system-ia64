@@ -27,6 +27,7 @@ struct IA64LBAState {
 
     /* Writable Mercury CSR registers (reset values in ia64_lba_reset). */
     uint32_t config_address;       /* CONFIG_ADDRESS (0x40) selector */
+    uint32_t bus_number;           /* BUS_NUMBER (0x58) secondary|subordinate */
     uint32_t agp_command;          /* AGP_COMMAND (0x68) */
     uint32_t arbitration_mask;     /* ARBITRATION_MASK (0x80) */
     uint32_t status_control;       /* STATUS_CONTROL / SIC (0x108) */
