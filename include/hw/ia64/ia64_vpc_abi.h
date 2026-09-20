@@ -439,10 +439,17 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * block bounds are the ones the firmware's code shows, and only these blocks
  * decode.  The project firmware uses none of them.
  */
-#define IA64_PDH_NVM_BASE             IA64_U64(0x00000000ff400000)
-#define IA64_PDH_NVM_SIZE             IA64_U64(0x0000000000040000)
-#define IA64_PDH_SRAM_BASE            IA64_U64(0x00000000ff440000)
-#define IA64_PDH_SRAM_SIZE            IA64_U64(0x00000000000c0000)
+/*
+ * One battery-backed 512 KB SRAM (zx2000 O&M 02 p.16), of which the vendor
+ * firmware formats the first 256 KiB as its NVM: the SAL control block and
+ * token store at the bottom, the EFI variable banks at FF43_8000 and
+ * FF43_C000.  It puts its own stack and working tables in the rest.  What
+ * decodes above the part is volatile.
+ */
+#define IA64_PDH_BBSRAM_BASE          IA64_U64(0x00000000ff400000)
+#define IA64_PDH_BBSRAM_SIZE          IA64_U64(0x0000000000080000)
+#define IA64_PDH_SRAM_BASE            IA64_U64(0x00000000ff480000)
+#define IA64_PDH_SRAM_SIZE            IA64_U64(0x0000000000080000)
 #define IA64_PDH_DEV5B_BASE           IA64_U64(0x00000000ff5b0000)
 #define IA64_PDH_BMC_BT               0x00e4U   /* BT_CTRL, then data */
 #define IA64_PDH_BMC_BT_BUFFER        64U

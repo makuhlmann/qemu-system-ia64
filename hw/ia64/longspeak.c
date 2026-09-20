@@ -125,7 +125,7 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     if (!sysbus_realize_and_unref(pdh_sbd, errp)) {
         return false;
     }
-    sysbus_mmio_map(pdh_sbd, LONGSPEAK_PDH_MMIO_NVM, IA64_PDH_NVM_BASE);
+    sysbus_mmio_map(pdh_sbd, LONGSPEAK_PDH_MMIO_BBSRAM, IA64_PDH_BBSRAM_BASE);
     sysbus_mmio_map(pdh_sbd, LONGSPEAK_PDH_MMIO_SRAM, IA64_PDH_SRAM_BASE);
     for (i = 0; i < LONGSPEAK_PDH_BLOCKS; i++) {
         sysbus_mmio_map(pdh_sbd, LONGSPEAK_PDH_MMIO_BLOCK0 + i,

@@ -1109,26 +1109,26 @@ static void test_sba_mio_registers(void)
 
 /*
  * Longs Peak PDH devices below the flash (plans/zx1-real-firmware-reference.md
- * sec 7.3): NVM and SRAM are memory, the presence byte is active low per
- * socket, the POST byte and the two scratch latches read back, and the
- * semaphore is claimed by a read and freed by writing 0 at the holder's slot.
+ * sec 7.3): the battery-backed part and the SRAM above it are memory, the
+ * presence byte is active low per socket, the POST byte and the two scratch
+ * latches read back, and the semaphore is claimed by a read and freed by
+ * writing 0 at the holder's slot.
  */
 static void test_pdh_longspeak_map(void)
 {
     QTestState *qts = qtest_init("-machine zx1 -smp 2 -m 256M -S");
+    const uint64_t bb_last = IA64_PDH_BBSRAM_BASE + IA64_PDH_BBSRAM_SIZE - 8;
     unsigned int i;
 
-    qtest_writeq(qts, IA64_PDH_NVM_BASE, 0x4e564d2054494e49ULL);
-    qtest_writeq(qts, IA64_PDH_NVM_BASE + IA64_PDH_NVM_SIZE - 8,
-                 0x1122334455667788ULL);
+    qtest_writeq(qts, IA64_PDH_BBSRAM_BASE, 0x4e564d2054494e49ULL);
+    qtest_writeq(qts, bb_last, 0x1122334455667788ULL);
     qtest_writeq(qts, IA64_PDH_SRAM_BASE, 0x5555555555555555ULL);
     qtest_writeq(qts, IA64_PDH_SRAM_BASE + IA64_PDH_SRAM_SIZE - 8,
                  0xaaaaaaaaaaaaaaaaULL);
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_UART_BASE + 7), ==, 0);
-    g_assert_cmphex(qtest_readq(qts, IA64_PDH_NVM_BASE), ==,
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_BBSRAM_BASE), ==,
                     0x4e564d2054494e49ULL);
-    g_assert_cmphex(qtest_readq(qts, IA64_PDH_NVM_BASE + IA64_PDH_NVM_SIZE - 8),
-                    ==, 0x1122334455667788ULL);
+    g_assert_cmphex(qtest_readq(qts, bb_last), ==, 0x1122334455667788ULL);
     g_assert_cmphex(qtest_readq(qts, IA64_PDH_SRAM_BASE), ==,
                     0x5555555555555555ULL);
     g_assert_cmphex(qtest_readq(qts,
@@ -1257,7 +1257,7 @@ static void test_pdh_longspeak_map(void)
     g_assert_cmphex(qtest_readq(qts, IA64_PDH_DILLON_BASE +
                                 IA64_PDH_DILLON_SCRATCH1), ==, 2);
 
-    /* Reset: no processor checked in, semaphore free, POST 0; NVM kept. */
+    /* Reset: no processor checked in, semaphore free, POST 0; the part kept. */
     qtest_writeb(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_SCRATCH0, 0);
     qtest_system_reset(qts);
     g_assert_cmphex(qtest_readl(qts, IA64_PDH_DILLON_BASE +
@@ -1269,7 +1269,7 @@ static void test_pdh_longspeak_map(void)
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(1)), ==, 0);
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_STATUS_ADDR(0)), ==, 0);
     g_assert_cmphex(qtest_readl(qts, IA64_PDH_MONARCH_ADDR), ==, 0);
-    g_assert_cmphex(qtest_readq(qts, IA64_PDH_NVM_BASE), ==,
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_BBSRAM_BASE), ==,
                     0x4e564d2054494e49ULL);
     qtest_quit(qts);
 
@@ -1280,8 +1280,8 @@ static void test_pdh_longspeak_map(void)
 
     /* The SDV board has none of these devices. */
     qts = qtest_init("-machine 460gx -m 256M -S");
-    qtest_writeq(qts, IA64_PDH_NVM_BASE, 0x4e564d2054494e49ULL);
-    g_assert_cmphex(qtest_readq(qts, IA64_PDH_NVM_BASE), ==, 0);
+    qtest_writeq(qts, IA64_PDH_BBSRAM_BASE, 0x4e564d2054494e49ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_BBSRAM_BASE), ==, 0);
     qtest_writeb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST, 0x13);
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_PRESENCE_BASE + IA64_PDH_POST),
                     ==, 0);

@@ -386,13 +386,13 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "longspeak-pdh: sockets must be at least 1");
         return;
     }
-    if (!memory_region_init_ram(&s->nvm, OBJECT(dev), "longspeak-pdh.nvm",
-                                IA64_PDH_NVM_SIZE, errp) ||
+    if (!memory_region_init_ram(&s->bbsram, OBJECT(dev), "longspeak-pdh.bbsram",
+                                IA64_PDH_BBSRAM_SIZE, errp) ||
         !memory_region_init_ram(&s->sram, OBJECT(dev), "longspeak-pdh.sram",
                                 IA64_PDH_SRAM_SIZE, errp)) {
         return;
     }
-    sysbus_init_mmio(sbd, &s->nvm);
+    sysbus_init_mmio(sbd, &s->bbsram);
     sysbus_init_mmio(sbd, &s->sram);
     for (i = 0; i < LONGSPEAK_PDH_BLOCKS; i++) {
         LongspeakPDHBlock *b = &s->block[i];

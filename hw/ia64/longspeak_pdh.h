@@ -17,7 +17,7 @@
 #define TYPE_LONGSPEAK_RTC "longspeak-rtc"
 OBJECT_DECLARE_SIMPLE_TYPE(LongspeakPDHState, LONGSPEAK_PDH)
 
-/* The register blocks, in sysbus MMIO order after the NVM and the SRAM. */
+/* The register blocks, in sysbus MMIO order after the two SRAMs. */
 typedef enum LongspeakPDHBlockId {
     LONGSPEAK_PDH_DEV5B,
     LONGSPEAK_PDH_PRESENCE_BLOCK,
@@ -40,8 +40,8 @@ typedef struct LongspeakPDHBlock {
 struct LongspeakPDHState {
     SysBusDevice parent_obj;
 
-    MemoryRegion nvm;
-    MemoryRegion sram;
+    MemoryRegion bbsram;           /* the battery-backed part, FF40_0000 */
+    MemoryRegion sram;             /* volatile, above the part            */
     LongspeakPDHBlock block[LONGSPEAK_PDH_BLOCKS];
 
     uint32_t sockets;              /* processors present, from -smp */
@@ -61,7 +61,7 @@ struct LongspeakPDHState {
 };
 
 /* sysbus MMIO indexes */
-#define LONGSPEAK_PDH_MMIO_NVM     0
+#define LONGSPEAK_PDH_MMIO_BBSRAM  0
 #define LONGSPEAK_PDH_MMIO_SRAM    1
 #define LONGSPEAK_PDH_MMIO_BLOCK0  2
 
