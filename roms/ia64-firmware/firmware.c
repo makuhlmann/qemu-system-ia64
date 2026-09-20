@@ -9829,7 +9829,8 @@ static UINT32 fw_pci_io_device_id(const FW_PCI_IO_DEVICE *Dev)
 
 static BOOLEAN fw_pci_vga_id_supported(UINT32 Id)
 {
-    return Id == PCI_VGA_ATI_ID || Id == PCI_VGA_STD_ID;
+    return Id == PCI_VGA_ATI_ID || Id == PCI_VGA_MACH64_ID ||
+           Id == PCI_VGA_STD_ID;
 }
 
 static UINT32 fw_pci_io_expected_id(const FW_PCI_IO_DEVICE *Dev)
@@ -9855,9 +9856,16 @@ static UINT32 fw_pci_io_expected_bar_value(const FW_PCI_IO_DEVICE *Dev)
 
 static UINT64 fw_pci_io_expected_bar_length(const FW_PCI_IO_DEVICE *Dev)
 {
-    if (Dev->Protocol == &mPciVgaIoProto &&
-        fw_pci_io_device_id(Dev) == PCI_VGA_STD_ID) {
-        return PCI_VGA_STD_FB_SIZE;
+    if (Dev->Protocol == &mPciVgaIoProto) {
+        /* Each adapter the board can carry has its own aperture. */
+        switch (fw_pci_io_device_id(Dev)) {
+        case PCI_VGA_STD_ID:
+            return PCI_VGA_STD_FB_SIZE;
+        case PCI_VGA_MACH64_ID:
+            return PCI_VGA_MACH64_FB_SIZE;
+        default:
+            break;
+        }
     }
     return Dev->ExpectedBarLength;
 }

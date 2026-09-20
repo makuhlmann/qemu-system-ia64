@@ -1709,9 +1709,10 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
     UINT32 device_id = 0;
 
     /*
-     * Read the always-present boot HBA, which on this board is the QLogic
-     * ISP12160 (0x1077:0x1216) on the Longs Peak core I/O seat, device 1.
-     * The AHCI controller is opt-in (ahci=off by default), so it must not be
+     * Read the always-present boot HBA on the core I/O seat, device 1: the
+     * LSI (0x1000:0x0012) this board carries, or the QLogic ISP12160
+     * (0x1077:0x1216) when isp=on,lsi=off puts that one there instead.  The
+     * AHCI controller is opt-in (ahci=off by default), so it must not be
      * assumed present here.
      */
     return SystemTable->BootServices->LocateProtocol(
@@ -1720,7 +1721,7 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
            root->SegmentNumber == 0 &&
            root->Pci.Read(root, EfiPciWidthUint32, 1ULL << 16, 1,
                           &device_id) == EFI_SUCCESS &&
-           device_id == 0x12161077U;
+           (device_id == 0x00121000U || device_id == 0x12161077U);
 }
 
 static BOOLEAN test_pci_root_resources(EFI_SYSTEM_TABLE *SystemTable)

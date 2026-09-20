@@ -1982,13 +1982,37 @@ static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
     if (g_strcmp0(value, "rage128") != 0 &&
         g_strcmp0(value, "mach64") != 0 &&
         g_strcmp0(value, "nv15gl") != 0 &&
+        g_strcmp0(value, "none") != 0 &&
         g_strcmp0(value, "std") != 0) {
         error_setg(errp,
-                   "vga must be 'rage128', 'mach64', 'nv15gl' or 'std'");
+                   "vga must be 'rage128', 'mach64', 'nv15gl', 'std' or "
+                   "'none'");
         return;
     }
     g_free(s->vga_model);
     s->vga_model = g_strdup(value);
+    s->vga_model_set = true;
+}
+
+/*
+ * Which adapter the board gets.  A board whose own graphics is one of the
+ * fork's adapters names it as the class default, which leaves -vga with
+ * nothing to say; -vga still selects when the user has not asked for an
+ * adapter by name, and -vga none always wins so that a run can be made with
+ * no display at all.  VGA_ATI is what mc->default_display asks for, so
+ * anything else means the user chose the display: with -vga, or with
+ * -device, which asks for VGA_DEVICE and leaves pci_vga_init() to create
+ * nothing.
+ */
+const char *ia64_vpc_vga_model(IA64VpcMachineState *s)
+{
+    if (vga_interface_type == VGA_NONE) {
+        return "none";
+    }
+    if (!s->vga_model_set && vga_interface_type != VGA_ATI) {
+        return "std";
+    }
+    return s->vga_model;
 }
 
 static char *ia64_vpc_get_alat(Object *obj, Error **errp)
@@ -3042,6 +3066,18 @@ static void ia64_vpc_init_isp(IA64VpcMachineState *s, PCIBus *bus, int devfn)
 #endif
 
 /* Where the board seats a built-in device: *bus and *devfn preset to defaults. */
+/*
+ * Which adapter holds the board's SCSI seat when both are present: the one
+ * the board itself carries.  The other parks.
+ */
+static bool ia64_vpc_lsi_at_seat(IA64VpcMachineState *s)
+{
+    if (!s->isp_enabled) {
+        return true;
+    }
+    return s->lsi_enabled && IA64_VPC_MACHINE_GET_CLASS(s)->lsi_default;
+}
+
 static void ia64_vpc_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
                           PCIBus **bus, int *devfn)
 {
@@ -4294,10 +4330,12 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         int scsi_devfn = -1;
 
         ia64_vpc_seat(s, IA64_VPC_SEAT_SCSI, &scsi_bus, &scsi_devfn);
-        if (s->isp_enabled) {
+        if (ia64_vpc_lsi_at_seat(s)) {
+            if (!ia64_vpc_init_lsi(s, scsi_bus, scsi_devfn, errp)) {
+                return false;
+            }
+        } else {
             ia64_vpc_init_isp(s, scsi_bus, scsi_devfn);
-        } else if (!ia64_vpc_init_lsi(s, scsi_bus, scsi_devfn, errp)) {
-            return false;
         }
     }
 #endif
@@ -4311,11 +4349,18 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     PCIBus *vga_bus = pci_bus;
     int vga_devfn = -1;
     unsigned int vga_slot;
+    const char *vga_model = ia64_vpc_vga_model(s);
 
     ia64_vpc_seat(s, IA64_VPC_SEAT_VGA, &vga_bus, &vga_devfn);
     vga_slot = PCI_SLOT(vga_devfn);
 
-    if (g_strcmp0(s->vga_model, "mach64") == 0) {
+    /*
+     * The two adapters the boards create themselves also have to report that
+     * a display was made, or -vga says none was (system/vl.c:2895).
+     */
+    if (g_strcmp0(vga_model, "none") == 0) {
+        s->vga_dev = NULL;
+    } else if (g_strcmp0(vga_model, "mach64") == 0) {
         /*
          * The Mach64 3D Rage (DEV_4754): a PCI 2D adapter with no AGP, chosen
          * with -machine ia64-vpc,vga=mach64.  Create it explicitly at the VGA
@@ -4325,7 +4370,8 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         if (!pci_realize_and_unref(s->vga_dev, vga_bus, errp)) {
             return false;
         }
-    } else if (g_strcmp0(s->vga_model, "nv15gl") == 0) {
+        vga_interface_created = true;
+    } else if (g_strcmp0(vga_model, "nv15gl") == 0) {
         /*
          * The NVIDIA Quadro2 Pro (NV15GL, 10de:0153): an AGP graphics master
          * with a 16 MB MMIO BAR0 and a 128 MB prefetchable framebuffer BAR1,
@@ -4336,6 +4382,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         if (!pci_realize_and_unref(s->vga_dev, vga_bus, errp)) {
             return false;
         }
+        vga_interface_created = true;
     } else {
         s->vga_dev = pci_vga_init(vga_bus);
     }
@@ -4398,7 +4445,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         int park_devfn = -1;
 
         ia64_vpc_seat(s, IA64_VPC_SEAT_SCSI_PARK, &park_bus, &park_devfn);
-        if (!ia64_vpc_init_lsi(s, park_bus, park_devfn, errp)) {
+        if (ia64_vpc_lsi_at_seat(s)) {
+            ia64_vpc_init_isp(s, park_bus, park_devfn);
+        } else if (!ia64_vpc_init_lsi(s, park_bus, park_devfn, errp)) {
             return false;
         }
     }
@@ -4518,15 +4567,14 @@ static void ia64_vpc_machine_instance_init(Object *obj)
      * Re-enable with ahci=on for SATA-aware guests.  IDE (cmd646) is likewise
      * opt-in via ide=on.
      *
-     * The SCSI HBA is the QLogic ISP12160, the adapter the i2000 carries and
-     * the one both XP and Server 2003 have an in-box driver for.  The LSI
-     * that used to hold that seat is opt-in via lsi=on, for images installed
-     * against it.
+     * The SCSI HBA is the one the board carries: the QLogic ISP12160 on the
+     * i2000, the LSI on rx2600/zx2000.  The other is opt-in (isp=on / lsi=on)
+     * for images installed against it, and then parks off the seat.
      */
     s->ahci_enabled = false;
     s->audio_enabled = false;
-    s->isp_enabled = true;
-    s->lsi_enabled = false;
+    s->isp_enabled = !IA64_VPC_MACHINE_GET_CLASS(s)->lsi_default;
+    s->lsi_enabled = IA64_VPC_MACHINE_GET_CLASS(s)->lsi_default;
     s->ide_enabled = false;
     s->firmware_ide_dma = true;
 #endif
@@ -4546,8 +4594,10 @@ static void ia64_vpc_machine_instance_init(Object *obj)
      * in PCI-GART mode, which renders the Rage 128 greeter pixel-perfect.
      */
     s->agp_enabled = true;
-    /* Default display adapter: the Rage 128 (honouring -vga); mach64 opt-in. */
-    s->vga_model = g_strdup("rage128");
+    /* The board's own display adapter; ia64_vpc_vga_model() lets -vga in. */
+    s->vga_model = g_strdup(IA64_VPC_MACHINE_GET_CLASS(s)->vga_default ?
+                            IA64_VPC_MACHINE_GET_CLASS(s)->vga_default :
+                            "rage128");
 }
 
 static void ia64_vpc_machine_instance_finalize(Object *obj)
@@ -4678,9 +4728,10 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                   ia64_vpc_get_vga,
                                   ia64_vpc_set_vga);
     object_class_property_set_description(oc, "vga",
-        "Display adapter: 'rage128' (default, ATI Rage 128, honours -vga), "
-        "'mach64' (ATI Mach64 3D Rage, a PCI 2D adapter with no AGP), or "
-        "'std'");
+        "Display adapter: 'rage128' (ATI Rage 128, honours -vga), 'mach64' "
+        "(ATI Mach64 3D Rage, a PCI 2D adapter with no AGP), 'nv15gl' "
+        "(NVIDIA Quadro2 Pro), 'std' or 'none'. Each board defaults to its "
+        "own adapter");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);

@@ -200,12 +200,14 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     /*
      * On zx1 with agp=on, give the Rage 128 a PCI AGP capability so Linux
      * sba_iommu reserves the SBA IOVA GART half (and writes the cookie hp-agp
-     * handshakes on) and hp-agp can negotiate AGP mode.  The default VGA is
+     * handshakes on) and hp-agp can negotiate AGP mode.  The Rage 128 is
      * created by pci_vga_init() below, which realizes it internally, so opt it
-     * in through a global property applied to the ati-vga it creates.  460gx
-     * uses the GXB GART instead and never needs this.
+     * in through a global property applied to the ati-vga it creates; register
+     * the global only when that adapter is the one this run gets, because an
+     * unused global is reported as a warning.  460gx uses the GXB GART
+     * instead and never needs this.
      */
-    if (s->agp_enabled) {
+    if (s->agp_enabled && g_strcmp0(ia64_vpc_vga_model(s), "rage128") == 0) {
         static GlobalProperty ati_agp = {
             .driver = "ati-vga", .property = "agp", .value = "on",
         };
@@ -358,6 +360,15 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->pci0_nintx = ARRAY_SIZE(longspeak_pci0_intx);
     imc->pci0_intx_fallback = 0;
     imc->acpi_pm_mmio_base = IA64_PDH_ACPI_PM_BASE;
+    /*
+     * What rx2600/zx2000 carry: an LSI SCSI in core I/O and an ATI Rage XL
+     * for video.  The Rage XL is also the adapter whose video BIOS the vendor
+     * firmware runs: its x86 emulator interprets that ROM and sets a mode,
+     * where it refuses the Rage 128's ("Unable to execute video bios")
+     * without touching a VGA port.
+     */
+    imc->lsi_default = true;
+    imc->vga_default = "mach64";
     /* Device 1 is core I/O on this board; the opt-in AHCI takes device 4. */
     imc->ahci_slot = 4;
     imc->wire_intx = longspeak_wire_intx;

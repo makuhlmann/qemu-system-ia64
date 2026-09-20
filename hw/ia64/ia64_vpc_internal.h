@@ -111,6 +111,14 @@ struct IA64VpcMachineClass {
     bool pci_config_ecam;
     /* Default of the i8042 option. */
     bool i8042_default;
+    /*
+     * The board's own core I/O SCSI adapter holds the seat and is on by
+     * default; the other one is the opt-in.  True selects the LSI, which is
+     * what rx2600/zx2000 carry; false the QLogic ISP12160 of the i2000.
+     */
+    bool lsi_default;
+    /* The board's own graphics adapter ("rage128", "mach64", "nv15gl"). */
+    const char *vga_default;
     /* The console is COM1 (3F8h, IRQ 4); a debug port is COM2 (2F8h, IRQ 3). */
     bool legacy_com1_console;
     /*
@@ -199,6 +207,8 @@ struct IA64VpcMachineState {
     IA64460GXState *chipset;
     PCIBus *host_pci_bus;
     char *vga_model;
+    /* The user named an adapter, so -vga does not choose one. */
+    bool vga_model_set;
     bool alat_full;
 
     PCIDevice *agp_dev;
@@ -263,6 +273,7 @@ struct IA64VpcMachineState {
 
 /* Base-machine helpers the boards use. */
 void ia64_vpc_add_compat_defaults(MachineClass *mc);
+const char *ia64_vpc_vga_model(IA64VpcMachineState *s);
 uint64_t ia64_vpc_map_ram_alias(IA64VpcMachineState *s, hwaddr guest_base,
                                 uint64_t backing_offset, uint64_t remaining,
                                 uint64_t capacity, const char *name);

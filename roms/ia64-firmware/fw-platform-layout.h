@@ -30,9 +30,11 @@ extern char __fw_image_start[];
 #define PCI_VGA_FB_BAR                (IA64_PCI_MMIO_BASE + 0x02000000ULL)
 #define PCI_VGA_MMIO_BAR              (IA64_PCI_MMIO_BASE + 0x07000000ULL)
 #define PCI_VGA_ATI_ID                0x50461002U
+#define PCI_VGA_MACH64_ID             0x47521002U
 #define PCI_VGA_STD_ID                0x11111234U
 #define PCI_VGA_ATI_FB_SIZE           0x04000000ULL
 #define PCI_VGA_STD_FB_SIZE           0x01000000ULL
+#define PCI_VGA_MACH64_FB_SIZE        0x00800000ULL
 #define VGA_FB_BASE                   ((UINT64)PCI_VGA_FB_BAR)
 #define VGA_MMIO_BASE                 ((UINT64)PCI_VGA_MMIO_BAR)
 /*

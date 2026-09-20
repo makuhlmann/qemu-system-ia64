@@ -6057,7 +6057,8 @@ static bool sapic_wait_irr_vector(QTestState *qts, uint8_t vector)
 
 static void test_savevm_restores_platform_state(void)
 {
-    const char *machine = "ia64-vpc";
+    /* The ATI scratch register below is this adapter's, so ask for it. */
+    const char *machine = "ia64-vpc,vga=rage128";
     const uint64_t ram_addr = 0x00300000;
     const uint64_t saved_ram = 0x0123456789abcdefULL;
     const uint64_t changed_ram = 0xfedcba9876543210ULL;

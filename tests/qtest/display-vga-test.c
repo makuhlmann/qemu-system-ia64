@@ -353,7 +353,7 @@ static void ati_blit_visible_intersection(void)
     g_autofree char *after = NULL;
     g_autoptr(GError) error = NULL;
 
-    qts = qtest_init("-machine ia64-vpc -m 256M -S");
+    qts = qtest_init("-machine ia64-vpc,vga=rage128 -m 256M -S");
     qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_CRTC_H_TOTAL_DISP,
                  ((width / 8) - 1) << 16);
     qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_CRTC_V_TOTAL_DISP,
@@ -426,7 +426,7 @@ static void ati_reverse_overlap_blit(void)
     memcpy(expected, initial, sizeof(expected));
     memmove(&expected[4], &expected[0], 16);
 
-    qts = qtest_init("-machine ia64-vpc -m 256M -S");
+    qts = qtest_init("-machine ia64-vpc,vga=rage128 -m 256M -S");
     qtest_memwrite(qts, IA64_ATI_FB_BASE, initial, sizeof(initial));
     qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_DST_OFFSET, 0);
     qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_DST_PITCH, pitch / 8);
@@ -462,7 +462,7 @@ static void ati_mm_aper(void)
 {
     QTestState *qts;
 
-    qts = qtest_init("-machine ia64-vpc -m 256M -S");
+    qts = qtest_init("-machine ia64-vpc,vga=rage128 -m 256M -S");
 
     qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_MM_INDEX, 0x80000004);
     qtest_writel(qts, IA64_ATI_MMIO_BASE + ATI_MM_DATA, 0x11223344);
@@ -512,7 +512,7 @@ static void ati_stride(void)
     g_autofree char *ppm = NULL;
     g_autoptr(GError) error = NULL;
 
-    qts = qtest_init("-machine ia64-vpc -m 256M -S");
+    qts = qtest_init("-machine ia64-vpc,vga=rage128 -m 256M -S");
     /*
      * Program the ATI CRTC, not the generic VBE ports.  ati_vga_switch_mode()
      * must translate the Rage128 pitch (eight-pixel units) into the VBE
