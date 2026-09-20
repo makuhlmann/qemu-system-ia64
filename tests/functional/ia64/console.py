@@ -13,13 +13,20 @@ from ia64.protocol import ProtocolError, wait_for_suite
 
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
 
+# The zx1 board's nvram= file images its battery-backed SRAM, and the
+# firmware's own variable store sits at a fixed offset in it.
+PDH_STORE_SIZE = 0x80000
+PDH_STORE_VARS_OFFSET = 0x20000
+PDH_STORE_VARS_BASE = 0xFF420000
+
 
 class Ia64FirmwareTest(QemuSystemTest):
     """Base class that boots the in-tree IA-64 firmware and test media."""
 
     def make_nvram(self, name: str = "nvram.bin") -> Path:
+        """A blank store for the default board, which keeps it in the PDH."""
         path = Path(self.scratch_file(name))
-        path.write_bytes(bytes(64 * 1024))
+        path.write_bytes(bytes(PDH_STORE_SIZE))
         return path
 
     def launch_ia64(self, *, name: str = "default", media: Path | None = None,

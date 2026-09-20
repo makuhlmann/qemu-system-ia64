@@ -883,6 +883,54 @@ static void test_nvram_defaults(void)
     ia64_vpc_drop_nvram_flash(tmpdir, flash);
 }
 
+/*
+ * The zx1 board keeps both firmwares' settings in the PDH battery-backed
+ * SRAM, so `nvram=` images that part: a new file is created blank, what the
+ * guest leaves in the part is in the file at the next start, and a file of
+ * any other size belongs to another part and is refused.
+ */
+static void test_pdh_store_persists(void)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = g_dir_make_tmp("ia64-vpc-store-XXXXXX", &error);
+    g_autofree char *path = NULL;
+    g_autofree char *quoted = NULL;
+    g_autofree char *contents = NULL;
+    const uint64_t last = IA64_PDH_BBSRAM_BASE + IA64_PDH_BBSRAM_SIZE - 8;
+    gsize length = 0;
+    QTestState *qts;
+
+    g_assert_no_error(error);
+    path = g_build_filename(tmpdir, "zx1.nvram", NULL);
+    quoted = g_shell_quote(path);
+
+    qts = qtest_initf("-machine zx1,nvram=%s -m 256M", quoted);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_BBSRAM_BASE), ==, 0);
+    qtest_writeq(qts, IA64_PDH_BBSRAM_BASE, 0x4e564d2054494e49ULL);
+    qtest_writeq(qts, last, 0x1122334455667788ULL);
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(path, &contents, &length, &error));
+    g_assert_cmpuint(length, ==, IA64_PDH_BBSRAM_SIZE);
+
+    qts = qtest_initf("-machine zx1,nvram=%s -m 256M", quoted);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_BBSRAM_BASE), ==,
+                    0x4e564d2054494e49ULL);
+    g_assert_cmphex(qtest_readq(qts, last), ==, 0x1122334455667788ULL);
+    qtest_quit(qts);
+
+    /* The volatile SRAM above the part is not in the file. */
+    qts = qtest_initf("-machine zx1,nvram=%s -m 256M", quoted);
+    qtest_writeq(qts, IA64_PDH_SRAM_BASE, 0x5555555555555555ULL);
+    qtest_quit(qts);
+    qts = qtest_initf("-machine zx1,nvram=%s -m 256M", quoted);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_SRAM_BASE), ==, 0);
+    qtest_quit(qts);
+
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
 /* The zx1 machine writes the zx1 firmware personality. */
 
 /*
@@ -7475,6 +7523,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/nvram/defaults", test_nvram_defaults);
     qtest_add_func("/ia64-vpc/lba/agp-capability", test_lba_agp_capability);
     qtest_add_func("/ia64-vpc/lba/rope-window", test_lba_rope_window);
+    qtest_add_func("/ia64-vpc/pdh/store-persists", test_pdh_store_persists);
     qtest_add_func("/ia64-vpc/sba/ioc-identity", test_sba_ioc_identity);
     qtest_add_func("/ia64-vpc/sba/mio-registers", test_sba_mio_registers);
     qtest_add_func("/ia64-vpc/pdh/longspeak-map", test_pdh_longspeak_map);

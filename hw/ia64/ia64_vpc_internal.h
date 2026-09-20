@@ -104,6 +104,12 @@ struct IA64VpcMachineClass {
     /* The board carries the 82468GX south bridge (and its IDE function). */
     bool has_south_bridge;
     /*
+     * What `nvram=` persists.  The 460GX board keeps its settings in the
+     * firmware flash; the zx1 board keeps them in the PDH battery-backed
+     * SRAM, and its flash holds no NVRAM block at all.
+     */
+    bool nvram_is_pdh_store;
+    /*
      * Configuration space is reached through a segment-0 ECAM window.  The
      * 460GX has only CF8/CFC (SSDM 2.3.1); zx1 keeps the window until its
      * firmware work settles the mechanism.
@@ -274,6 +280,19 @@ struct IA64VpcMachineState {
 /* Base-machine helpers the boards use. */
 void ia64_vpc_add_compat_defaults(MachineClass *mc);
 const char *ia64_vpc_vga_model(IA64VpcMachineState *s);
+
+/*
+ * Open the `nvram=` file of a board that keeps its settings in the PDH
+ * battery-backed SRAM.  Returns NULL and sets @errp when the file is not one.
+ */
+BlockBackend *ia64_vpc_open_pdh_store(const char *path, Error **errp);
+
+/*
+ * Put the machine's own options (console, boot timeout, ...) where the
+ * project firmware reads them, for a board that keeps its store outside the
+ * flash.  @store points at the start of the store.
+ */
+void ia64_vpc_seed_store_defaults(IA64VpcMachineState *s, uint8_t *store);
 uint64_t ia64_vpc_map_ram_alias(IA64VpcMachineState *s, hwaddr guest_base,
                                 uint64_t backing_offset, uint64_t remaining,
                                 uint64_t capacity, const char *name);

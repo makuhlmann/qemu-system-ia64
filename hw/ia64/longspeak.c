@@ -115,16 +115,34 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     int i;
 
     /*
-     * The PDH devices Dillon decodes below the flash (NVM, SRAM, processor
-     * presence, POST byte, Dillon registers).  The HP firmware needs them
-     * from its first instructions; the project firmware does not use them.
+     * The PDH devices Dillon decodes below the flash (the battery-backed
+     * SRAM, the volatile SRAM, processor presence, POST byte, Dillon
+     * registers).  The HP firmware needs them from its first instructions.
+     * Both firmwares keep their settings in the battery-backed part, so
+     * `nvram=` stands in for the battery here rather than for the flash.
      */
     pdh = qdev_new(TYPE_LONGSPEAK_PDH);
     qdev_prop_set_uint32(pdh, "sockets", MACHINE(s)->smp.cpus);
+    if (s->nvram_path != NULL) {
+        BlockBackend *blk = ia64_vpc_open_pdh_store(s->nvram_path, errp);
+
+        if (blk == NULL) {
+            return false;
+        }
+        qdev_prop_set_drive(pdh, "store", blk);
+    }
     pdh_sbd = SYS_BUS_DEVICE(pdh);
     if (!sysbus_realize_and_unref(pdh_sbd, errp)) {
         return false;
     }
+    /*
+     * The project firmware reads the machine's options from a record in its
+     * own store, which on this board is in the part rather than the flash.
+     */
+    ia64_vpc_seed_store_defaults(s,
+        (uint8_t *)memory_region_get_ram_ptr(&LONGSPEAK_PDH(pdh)->bbsram) +
+        IA64_PDH_STORE_VARS_OFFSET);
+    longspeak_pdh_store_seeded(pdh);
     sysbus_mmio_map(pdh_sbd, LONGSPEAK_PDH_MMIO_BBSRAM, IA64_PDH_BBSRAM_BASE);
     sysbus_mmio_map(pdh_sbd, LONGSPEAK_PDH_MMIO_SRAM, IA64_PDH_SRAM_BASE);
     for (i = 0; i < LONGSPEAK_PDH_BLOCKS; i++) {
@@ -367,6 +385,7 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
      * where it refuses the Rage 128's ("Unable to execute video bios")
      * without touching a VGA port.
      */
+    imc->nvram_is_pdh_store = true;
     imc->lsi_default = true;
     imc->vga_default = "mach64";
     /* Device 1 is core I/O on this board; the opt-in AHCI takes device 4. */

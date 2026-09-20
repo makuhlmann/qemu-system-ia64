@@ -448,6 +448,13 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  */
 #define IA64_PDH_BBSRAM_BASE          IA64_U64(0x00000000ff400000)
 #define IA64_PDH_BBSRAM_SIZE          IA64_U64(0x0000000000080000)
+/*
+ * Where the project firmware keeps its variable store inside the part: the
+ * gap between what the vendor firmware formats as its SAL NVM (which ends at
+ * FF41_93FF) and its EFI variable banks (which start at FF43_8000), so a
+ * store file can carry both.
+ */
+#define IA64_PDH_STORE_VARS_OFFSET    IA64_U64(0x0000000000020000)
 #define IA64_PDH_SRAM_BASE            IA64_U64(0x00000000ff480000)
 #define IA64_PDH_SRAM_SIZE            IA64_U64(0x0000000000080000)
 #define IA64_PDH_DEV5B_BASE           IA64_U64(0x00000000ff5b0000)

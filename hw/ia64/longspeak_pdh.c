@@ -10,10 +10,11 @@
  * the firmware's code (HP System Firmware 2.31, zx2000 flash dump), see
  * plans/zx1-real-firmware-reference.md sec 5.3, 6 and 7.3:
  *
- *   FF40_0000  NVM, 256 KiB.  Battery-backed on the board; volatile here
- *              (plans/one-hardware-model-plan.md P6.7).
- *   FF44_0000  SRAM, 768 KiB.  SAL_A's rendezvous record, SAL_B's first
- *              memory stack and RSE backing store.
+ *   FF40_0000  the battery-backed SRAM, 512 KB (zx2000 O&M 02 p.16).  The
+ *              vendor firmware formats the first 256 KiB as its NVM and puts
+ *              SAL_A's rendezvous record, SAL_B's first memory stack and RSE
+ *              backing store in the rest.  "nvram=" stands in for the battery.
+ *   FF48_0000  SRAM, 512 KiB, volatile.
  *   FF5B_0000  the BMC.  The firmware probes an IPMI BT at FF5B_00E4 and
  *              three IPMI KCS, which it calls KCS1 at FF5B_0CA2 (the
  *              standard SMS base), KCS2 at FF5B_0000 and KCS3 at FF5B_0062.
@@ -42,7 +43,9 @@
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "hw/core/cpu.h"
+#include "hw/block/block.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/char/serial-mm.h"
 #include "chardev/char-fe.h"
 #include "system/system.h"
@@ -376,6 +379,79 @@ static DeviceState *longspeak_pdh_bmc_port(LongspeakPDHState *s,
     return port;
 }
 
+/*
+ * The part is plain memory and SAL_B runs its stack in it, so the writes
+ * cannot be trapped the way a flash device traps them.  Compare it with what
+ * the file already holds instead, and write back only the blocks that differ:
+ * once a second while the machine runs, and again whenever it stops.  A
+ * machine that never runs therefore never writes the file, which is why the
+ * qtest for this starts one.
+ */
+#define LONGSPEAK_PDH_STORE_BLOCK   4096
+#define LONGSPEAK_PDH_STORE_PERIOD  1000
+
+static void longspeak_pdh_store_flush(LongspeakPDHState *s)
+{
+    const uint8_t *ram = memory_region_get_ram_ptr(&s->bbsram);
+    uint64_t offset;
+
+    for (offset = 0; offset < IA64_PDH_BBSRAM_SIZE;
+         offset += LONGSPEAK_PDH_STORE_BLOCK) {
+        uint8_t *kept = s->store_shadow + offset;
+
+        if (memcmp(ram + offset, kept, LONGSPEAK_PDH_STORE_BLOCK) == 0) {
+            continue;
+        }
+        memcpy(kept, ram + offset, LONGSPEAK_PDH_STORE_BLOCK);
+        if (blk_pwrite(s->store, offset, LONGSPEAK_PDH_STORE_BLOCK, kept,
+                       0) < 0) {
+            qemu_log_mask(LOG_GUEST_ERROR, "longspeak-pdh: cannot write the "
+                          "store at 0x%" PRIx64 "\n", offset);
+            return;
+        }
+    }
+}
+
+/*
+ * What the machine itself puts in the part before the firmware runs -- its
+ * options record -- is not a change the battery should keep, so take it as
+ * already written.  A firmware that commits its store writes the record back
+ * with it, exactly as it does on a board that keeps the store in flash.
+ */
+void longspeak_pdh_store_seeded(DeviceState *dev)
+{
+    LongspeakPDHState *s = LONGSPEAK_PDH(dev);
+
+    if (s->store_shadow != NULL) {
+        memcpy(s->store_shadow, memory_region_get_ram_ptr(&s->bbsram),
+               IA64_PDH_BBSRAM_SIZE);
+    }
+}
+
+static void longspeak_pdh_store_timer(void *opaque)
+{
+    LongspeakPDHState *s = opaque;
+
+    longspeak_pdh_store_flush(s);
+    timer_mod(s->store_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+              LONGSPEAK_PDH_STORE_PERIOD);
+}
+
+/* Run the timer only while the machine does, and flush whenever it stops. */
+static void longspeak_pdh_store_vm_state(void *opaque, bool running,
+                                         RunState state)
+{
+    LongspeakPDHState *s = opaque;
+
+    if (running) {
+        timer_mod(s->store_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                  LONGSPEAK_PDH_STORE_PERIOD);
+    } else {
+        timer_del(s->store_timer);
+        longspeak_pdh_store_flush(s);
+    }
+}
+
 static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
 {
     LongspeakPDHState *s = LONGSPEAK_PDH(dev);
@@ -394,6 +470,21 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
     }
     sysbus_init_mmio(sbd, &s->bbsram);
     sysbus_init_mmio(sbd, &s->sram);
+    if (s->store != NULL) {
+        uint8_t *ram = memory_region_get_ram_ptr(&s->bbsram);
+
+        if (blk_set_perm(s->store, BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE,
+                         BLK_PERM_ALL, errp) < 0 ||
+            !blk_check_size_and_read_all(s->store, dev, ram,
+                                         IA64_PDH_BBSRAM_SIZE, errp)) {
+            return;
+        }
+        s->store_shadow = g_memdup2(ram, IA64_PDH_BBSRAM_SIZE);
+        s->store_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                      longspeak_pdh_store_timer, s);
+        s->store_vmstate =
+            qemu_add_vm_change_state_handler(longspeak_pdh_store_vm_state, s);
+    }
     for (i = 0; i < LONGSPEAK_PDH_BLOCKS; i++) {
         LongspeakPDHBlock *b = &s->block[i];
 
@@ -460,6 +551,13 @@ static void longspeak_pdh_unrealize(DeviceState *dev)
     LongspeakPDHState *s = LONGSPEAK_PDH(dev);
     int i;
 
+    if (s->store_shadow != NULL) {
+        timer_free(s->store_timer);
+        qemu_del_vm_change_state_handler(s->store_vmstate);
+        longspeak_pdh_store_flush(s);
+        g_free(s->store_shadow);
+        s->store_shadow = NULL;
+    }
     for (i = 0; i < LONGSPEAK_PDH_BLOCKS; i++) {
         g_free(s->block[i].unimp_read);
         g_free(s->block[i].unimp_write);
@@ -501,6 +599,7 @@ static const VMStateDescription vmstate_longspeak_pdh = {
 
 static const Property longspeak_pdh_properties[] = {
     DEFINE_PROP_UINT32("sockets", LongspeakPDHState, sockets, 1),
+    DEFINE_PROP_DRIVE("store", LongspeakPDHState, store),
 };
 
 static void longspeak_pdh_class_init(ObjectClass *klass, const void *data)

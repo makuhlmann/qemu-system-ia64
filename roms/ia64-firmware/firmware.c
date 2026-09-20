@@ -432,6 +432,14 @@ static UINT8                  mNvramImage[FW_NVRAM_SIZE]
 static UINTN                  mRuntimeTimeZoneRecord =
     (UINTN)mNvramImage + FW_NVRAM_TIME_ZONE_OFFSET;
 static UINTN                  mRuntimeNvramFlash = FW_NVRAM_BASE;
+static BOOLEAN                mNvramIsSram;
+
+/* Where the board keeps the variable store (see FW_PDH_STORE_BASE). */
+UINTN fw_nvram_base(void)
+{
+    return fw_platform_is_zx1() ? (UINTN)FW_PDH_STORE_BASE
+                                : (UINTN)FW_NVRAM_BASE;
+}
 static BOOLEAN                mNvramImageLoaded;
 
 void fw_copy_mem(VOID *Destination, const VOID *Source, UINTN Length);
@@ -8594,15 +8602,21 @@ static void nvram_commit(void)
     if (mNvramSelftestActive || mNvramWriteProtected) {
         return;
     }
+    /* An SRAM store takes plain writes; only a flash part needs the cycles. */
+    if (mNvramIsSram) {
+        fw_copy_mem((VOID *)mRuntimeNvramFlash, mNvramImage,
+                    sizeof(mNvramImage));
+        return;
+    }
     fw_flash_program_sector((volatile UINT8 *)mRuntimeNvramFlash,
                             mNvramImage, sizeof(mNvramImage));
 }
 
-/* The sector's image once loaded, the flash itself before (early boot). */
+/* The sector's image once loaded, the store itself before (early boot). */
 const UINT8 *fw_nvram_image(void)
 {
     return mNvramImageLoaded ? mNvramImage
-                             : (const UINT8 *)(UINTN)FW_NVRAM_BASE;
+                             : (const UINT8 *)fw_nvram_base();
 }
 
 static BOOLEAN nvram_slot_valid(const NVRAM_VARIABLE *var)
@@ -8681,7 +8695,9 @@ static void nvram_init(void)
 
     mNvramSelftestActive = 0;
     mNvramWriteProtected = 0;
-    fw_copy_mem(mNvramImage, (const VOID *)(UINTN)FW_NVRAM_BASE,
+    mNvramIsSram = fw_platform_is_zx1();
+    mRuntimeNvramFlash = fw_nvram_base();
+    fw_copy_mem(mNvramImage, (const VOID *)mRuntimeNvramFlash,
                 sizeof(mNvramImage));
     mNvramImageLoaded = 1;
     fw_copy_mem(mNvramFoundHeader, mNvramImage, sizeof(mNvramFoundHeader));
@@ -8737,6 +8753,22 @@ const CHAR8 *fw_nvram_protection_reason(VOID)
     }
 }
 
+/* The store's address, the way the prompt has always named it. */
+static void fw_nvram_put_address(UINTN Value)
+{
+    static const CHAR8 hex[] = "0123456789ABCDEF";
+    CHAR8 text[11];
+    UINTN i;
+
+    text[0] = '0';
+    text[1] = 'x';
+    for (i = 0; i < 8; i++) {
+        text[2 + i] = hex[(Value >> (28 - 4 * i)) & 0x0fU];
+    }
+    text[10] = 0;
+    efi_conout_ascii(text);
+}
+
 static void fw_nvram_put_hex_byte(UINT8 Value)
 {
     static const CHAR8 hex[] = "0123456789ABCDEF";
@@ -8772,7 +8804,9 @@ void fw_nvram_confirm_reset(VOID)
         return;
     }
 
-    efi_conout_ascii("\r\nNVRAM: the variable store at 0xFFF90000 ");
+    efi_conout_ascii("\r\nNVRAM: the variable store at ");
+    fw_nvram_put_address(fw_nvram_base());
+    efi_conout_ascii(" ");
     efi_conout_ascii(reason);
     efi_conout_ascii(".\r\n       First bytes: ");
     for (i = 0; i < sizeof(mNvramFoundHeader); i++) {

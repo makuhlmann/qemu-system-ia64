@@ -9,6 +9,8 @@
 
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "hw/core/sysbus.h"
+#include "system/block-backend.h"
+#include "qemu/timer.h"
 #include "system/memory.h"
 #include "qom/object.h"
 
@@ -42,6 +44,12 @@ struct LongspeakPDHState {
 
     MemoryRegion bbsram;           /* the battery-backed part, FF40_0000 */
     MemoryRegion sram;             /* volatile, above the part            */
+
+    /* nvram=: the file that stands in for the battery (see the .c file). */
+    BlockBackend *store;
+    uint8_t *store_shadow;         /* what the file holds already         */
+    QEMUTimer *store_timer;
+    VMChangeStateEntry *store_vmstate;
     LongspeakPDHBlock block[LONGSPEAK_PDH_BLOCKS];
 
     uint32_t sockets;              /* processors present, from -smp */
@@ -59,6 +67,9 @@ struct LongspeakPDHState {
     DeviceState *kcs;              /* IPMI KCS, FF5B_0CA2 */
     DeviceState *rtc;              /* the clock, FF5B_8000 */
 };
+
+/* Re-sync the store's file copy after the machine seeded its own record. */
+void longspeak_pdh_store_seeded(DeviceState *dev);
 
 /* sysbus MMIO indexes */
 #define LONGSPEAK_PDH_MMIO_BBSRAM  0

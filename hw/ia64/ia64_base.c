@@ -2480,10 +2480,13 @@ void ia64_vpc_set_low_ram_limit(IA64VpcMachineState *s, uint64_t limit)
  * from the options, whatever the persisted sector holds; the vendor
  * image's own NVRAM sector is left alone.
  */
-static void ia64_vpc_seed_nvram_defaults(IA64VpcMachineState *s,
-                                         uint8_t *flash, uint64_t flash_base)
+static bool ia64_vpc_nvram_defaults_record(IA64VpcMachineState *s,
+                                           IA64NvramDefaults *defaults)
 {
-    IA64NvramDefaults defaults = {
+    uint64_t base = IA64_REALFW_WINDOW_END - s->fw_image_size;
+    uint64_t record = IA64_NVRAM_BASE + IA64_NVRAM_DEFAULTS_OFFSET;
+
+    *defaults = (IA64NvramDefaults) {
         .Magic = cpu_to_le64(IA64_NVRAM_DEFAULTS_MAGIC),
         .Version = cpu_to_le64(IA64_NVRAM_DEFAULTS_VERSION),
         .ConsolePolicy = cpu_to_le64(s->firmware_console),
@@ -2491,15 +2494,33 @@ static void ia64_vpc_seed_nvram_defaults(IA64VpcMachineState *s,
         .BootTimeout = cpu_to_le64(s->firmware_boot_timeout),
         .MapQuirkDisable = cpu_to_le64(s->fw_map_quirk_disable),
     };
+    return record >= base &&
+           record + sizeof(*defaults) <= IA64_REALFW_WINDOW_END &&
+           ldq_le_p(s->fw_image + (record - base)) ==
+               IA64_NVRAM_DEFAULTS_MAGIC;
+}
+
+static void ia64_vpc_seed_nvram_defaults(IA64VpcMachineState *s,
+                                         uint8_t *flash, uint64_t flash_base)
+{
+    IA64NvramDefaults defaults;
     uint64_t record = IA64_NVRAM_BASE + IA64_NVRAM_DEFAULTS_OFFSET;
 
-    if (record < flash_base ||
-        record + sizeof(defaults) > IA64_REALFW_WINDOW_END ||
-        ldq_le_p(s->fw_image + (record - flash_base)) !=
-            IA64_NVRAM_DEFAULTS_MAGIC) {
+    if (!ia64_vpc_nvram_defaults_record(s, &defaults) || record < flash_base) {
         return;
     }
     memcpy(flash + (record - flash_base), &defaults, sizeof(defaults));
+}
+
+/* The same record, where a board keeps the store outside the flash. */
+void ia64_vpc_seed_store_defaults(IA64VpcMachineState *s, uint8_t *store)
+{
+    IA64NvramDefaults defaults;
+
+    if (!ia64_vpc_nvram_defaults_record(s, &defaults)) {
+        return;
+    }
+    memcpy(store + IA64_NVRAM_DEFAULTS_OFFSET, &defaults, sizeof(defaults));
 }
 
 /*
@@ -3927,6 +3948,56 @@ static bool ia64_vpc_read_firmware(IA64VpcMachineState *s,
 }
 
 /*
+ * The zx1 board keeps its settings in the PDH battery-backed SRAM, so its
+ * `nvram=` file is a raw image of that part.  A file of another size belongs
+ * to another part -- a flash image, or the 64 KiB store this firmware used to
+ * keep in one -- and scripts/ia64-nvram.py converts it.  Only the size is
+ * checked: a store of the right size that this firmware cannot read is the
+ * firmware's own business, which asks before it resets one.
+ */
+BlockBackend *ia64_vpc_open_pdh_store(const char *path, Error **errp)
+{
+    const uint64_t size = IA64_PDH_BBSRAM_SIZE;
+    g_autofree char *existing = NULL;
+    gsize existing_size = 0;
+    GError *gerr = NULL;
+    QDict *options;
+    BlockBackend *blk;
+
+    if (g_file_test(path, G_FILE_TEST_EXISTS) &&
+        !g_file_get_contents(path, &existing, &existing_size, &gerr)) {
+        error_setg(errp, "nvram '%s': cannot read: %s", path, gerr->message);
+        g_error_free(gerr);
+        return NULL;
+    }
+    if (existing_size == 0) {
+        g_autofree char *blank = g_malloc0(size);
+
+        /* A new file is a new battery: the firmware formats it itself. */
+        if (!g_file_set_contents(path, blank, size, &gerr)) {
+            error_setg(errp, "nvram '%s': cannot write: %s", path,
+                       gerr->message);
+            g_error_free(gerr);
+            return NULL;
+        }
+    } else if (existing_size != size) {
+        error_setg(errp, "nvram '%s' is %" G_GSIZE_FORMAT " bytes, but this "
+                   "board keeps its settings in the %" PRIu64 "-byte PDH "
+                   "store; the file was not changed, convert it with "
+                   "scripts/ia64-nvram.py", path, existing_size, size);
+        return NULL;
+    }
+
+    options = qdict_new();
+    qdict_put_str(options, "driver", "raw");
+    blk = blk_new_open(path, NULL, options, BDRV_O_RDWR, errp);
+    if (blk == NULL) {
+        error_prepend(errp, "nvram '%s': ", path);
+    }
+    return blk;
+}
+
+/*
  * Map a flash image so that its end lands exactly at 4 GiB, and take the
  * boot entry from the architected SALE_ENTRY pointer at 4 GiB-24.  The
  * flash window lies inside the ia64-firmware-address-space RAM region.
@@ -3953,7 +4024,8 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
         MemoryRegion *flash_mr;
         BlockBackend *flash_blk = NULL;
 
-        if (s->nvram_path != NULL) {
+        if (s->nvram_path != NULL &&
+            !IA64_VPC_MACHINE_GET_CLASS(s)->nvram_is_pdh_store) {
             flash_blk = ia64_vpc_open_flash_backing(s, s->nvram_path, errp);
             if (flash_blk == NULL) {
                 return false;

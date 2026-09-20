@@ -8,13 +8,13 @@ from pathlib import Path
 
 from qemu_test import QemuSystemTest, wait_for_console_pattern
 
-from ia64.console import Ia64FirmwareTest
+from ia64.console import (Ia64FirmwareTest, PDH_STORE_SIZE,
+                          PDH_STORE_VARS_BASE, PDH_STORE_VARS_OFFSET)
 from ia64.protocol import open_menu_entry
 
 
 NVRAM_SIZE = 0x10000
-# The sector's distance from the end of the flash: 0xFFF90000 .. 4 GiB.
-NVRAM_FROM_END = 0x100000000 - 0xFFF90000
+STORE_AT = "0x%08X" % PDH_STORE_VARS_BASE
 STORE_MAGIC = int.from_bytes(b"IVARSTOR", "little")
 EFI_GLOBAL_VARIABLE = bytes((0x61, 0xdf, 0xe4, 0x8b, 0xca, 0x93, 0xd2, 0x11,
                              0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c))
@@ -49,13 +49,15 @@ class Ia64NvramProtection(Ia64FirmwareTest):
     SHELL_BANNER = "EFI Shell version 1.10"
 
     def _nvram_file(self, name: str, sector: bytes) -> Path:
+        store = bytearray(PDH_STORE_SIZE)
+        store[PDH_STORE_VARS_OFFSET:PDH_STORE_VARS_OFFSET + NVRAM_SIZE] = sector
         path = Path(self.scratch_file(name))
-        path.write_bytes(sector)
+        path.write_bytes(bytes(store))
         return path
 
     def _sector(self, path: Path) -> bytes:
         contents = path.read_bytes()
-        start = len(contents) - NVRAM_FROM_END
+        start = PDH_STORE_VARS_OFFSET
         return contents[start:start + NVRAM_SIZE]
 
     def _open_shell(self, vm):
@@ -75,8 +77,8 @@ class Ia64NvramProtection(Ia64FirmwareTest):
         vm = self.launch_ia64(
             name="damaged", boot_timeout=None,
             machine_options=f"firmware-console=serial,nvram={nvram}")
-        wait_for_console_pattern(self, "variable store at 0xFFF90000 is "
-                                 "damaged", vm=vm)
+        wait_for_console_pattern(self, "variable store at %s is damaged"
+                                 % STORE_AT, vm=vm)
         wait_for_console_pattern(self, PROMPT, vm=vm)
         vm.console_socket.sendall(b"n")
         wait_for_console_pattern(self, KEPT, vm=vm)
@@ -95,8 +97,8 @@ class Ia64NvramProtection(Ia64FirmwareTest):
         vm = self.launch_ia64(
             name="foreign-timeout",
             machine_options=f"firmware-console=serial,nvram={nvram}")
-        wait_for_console_pattern(self, "variable store at 0xFFF90000 is not "
-                                 "recognized", vm=vm)
+        wait_for_console_pattern(self, "variable store at %s is not "
+                                 "recognized" % STORE_AT, vm=vm)
         wait_for_console_pattern(self, "76 62 72 6C 01 00 00 FF", vm=vm)
         wait_for_console_pattern(self, PROMPT, vm=vm)
         wait_for_console_pattern(self, "(timed out)", vm=vm)

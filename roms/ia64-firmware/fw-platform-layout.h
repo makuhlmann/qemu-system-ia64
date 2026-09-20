@@ -192,6 +192,12 @@ extern UINT64 mAcpiRegionBase;
 #define FW_FIRMWARE_ADDRESS_SPACE_END IA64_FW_ADDRESS_SPACE_END
 #define FW_NVRAM_BASE IA64_NVRAM_BASE
 #define FW_NVRAM_SIZE IA64_NVRAM_SIZE
+/*
+ * The Longs Peak board has no NVRAM block in its flash: both firmwares keep
+ * their settings in the PDH battery-backed SRAM, which the machine persists.
+ */
+#define FW_PDH_STORE_BASE \
+    (IA64_PDH_BBSRAM_BASE + IA64_PDH_STORE_VARS_OFFSET)
 #define FW_NVRAM_TIME_ZONE_OFFSET 0x000000000000f000ULL
 #define FW_NVRAM_DEFAULTS_OFFSET IA64_NVRAM_DEFAULTS_OFFSET
 #define FW_HIGH_RAM_RANGE_MAX 3U
