@@ -2002,7 +2002,7 @@ static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
  * no display at all.  VGA_ATI is what mc->default_display asks for, so
  * anything else means the user chose the display: with -vga, or with
  * -device, which asks for VGA_DEVICE and leaves pci_vga_init() to create
- * nothing.
+ * nothing.  NULL is that case: whatever -vga asks for.
  */
 const char *ia64_vpc_vga_model(IA64VpcMachineState *s)
 {
@@ -2010,7 +2010,7 @@ const char *ia64_vpc_vga_model(IA64VpcMachineState *s)
         return "none";
     }
     if (!s->vga_model_set && vga_interface_type != VGA_ATI) {
-        return "std";
+        return NULL;
     }
     return s->vga_model;
 }
@@ -4355,36 +4355,35 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     vga_slot = PCI_SLOT(vga_devfn);
 
     /*
-     * The two adapters the boards create themselves also have to report that
-     * a display was made, or -vga says none was (system/vl.c:2895).
+     * vga= names the device, so the board creates it at its own seat and
+     * reports the display itself, or -vga says none was made
+     * (system/vl.c:2895).  Only the -vga case goes through pci_vga_init(),
+     * which knows the types this option does not name.
+     *
+     * The Mach64 3D Rage (DEV_4752/4754) is a PCI 2D adapter with no AGP.
+     * The NVIDIA Quadro2 Pro (NV15GL, 10de:0153) is an AGP graphics master
+     * with a 16 MB MMIO BAR0 and a 128 MB prefetchable framebuffer BAR1,
+     * which ia64_vpc_configure_vga() maps in the NVIDIA layout.
      */
-    if (g_strcmp0(vga_model, "none") == 0) {
-        s->vga_dev = NULL;
-    } else if (g_strcmp0(vga_model, "mach64") == 0) {
-        /*
-         * The Mach64 3D Rage (DEV_4754): a PCI 2D adapter with no AGP, chosen
-         * with -machine ia64-vpc,vga=mach64.  Create it explicitly at the VGA
-         * slot rather than through pci_vga_init()/-vga.
-         */
-        s->vga_dev = pci_new(PCI_DEVFN(vga_slot, 0), "mach64-vga");
-        if (!pci_realize_and_unref(s->vga_dev, vga_bus, errp)) {
-            return false;
-        }
-        vga_interface_created = true;
-    } else if (g_strcmp0(vga_model, "nv15gl") == 0) {
-        /*
-         * The NVIDIA Quadro2 Pro (NV15GL, 10de:0153): an AGP graphics master
-         * with a 16 MB MMIO BAR0 and a 128 MB prefetchable framebuffer BAR1,
-         * chosen with -machine ia64-vpc,vga=nv15gl.  Created explicitly at the
-         * AGP/VGA slot; ia64_vpc_configure_vga() maps its BARs (NVIDIA layout).
-         */
-        s->vga_dev = pci_new(PCI_DEVFN(vga_slot, 0), "nv15gl-vga");
-        if (!pci_realize_and_unref(s->vga_dev, vga_bus, errp)) {
-            return false;
-        }
-        vga_interface_created = true;
-    } else {
+    if (vga_model == NULL) {
         s->vga_dev = pci_vga_init(vga_bus);
+    } else if (g_strcmp0(vga_model, "none") == 0) {
+        s->vga_dev = NULL;
+    } else {
+        const char *type = "ati-vga";
+
+        if (g_strcmp0(vga_model, "mach64") == 0) {
+            type = "mach64-vga";
+        } else if (g_strcmp0(vga_model, "nv15gl") == 0) {
+            type = "nv15gl-vga";
+        } else if (g_strcmp0(vga_model, "std") == 0) {
+            type = "VGA";
+        }
+        s->vga_dev = pci_new(PCI_DEVFN(vga_slot, 0), type);
+        if (!pci_realize_and_unref(s->vga_dev, vga_bus, errp)) {
+            return false;
+        }
+        vga_interface_created = true;
     }
     /*
      * The GART scoping above assumes the graphics device is the AGP master at
