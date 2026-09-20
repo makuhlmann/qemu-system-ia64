@@ -3,6 +3,7 @@
 
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+import importlib.util
 from pathlib import Path
 import struct
 import tempfile
@@ -438,6 +439,64 @@ class Ia64HostInfrastructure(unittest.TestCase):
                 media_format.UDF_BOOT_LBA * media_format.ISO_SECTOR_SIZE,
                 app_bytes, expected_sectors=256, expected_hidden=0)
             self.assert_udf(udf.path, app_bytes)
+
+class Ia64NvramTool(unittest.TestCase):
+    """scripts/ia64-nvram.py, which converts a store for the zx1 board."""
+
+    def setUp(self):
+        path = Path(__file__).parents[3] / "scripts" / "ia64-nvram.py"
+        spec = importlib.util.spec_from_file_location("ia64_nvram", path)
+        self.tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.tool)
+
+    def make_own_store(self, count=3):
+        store = bytearray(self.tool.OWN_STORE_SIZE)
+        store[:8] = self.tool.OWN_STORE_MAGIC
+        struct.pack_into("<II", store, 8, 1, count)
+        return bytes(store)
+
+    def test_convert(self):
+        tool = self.tool
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "old.nvram"
+            dst = Path(directory) / "zx1.nvram"
+            src.write_bytes(self.make_own_store())
+            self.assertEqual(tool.main(["convert", str(src), str(dst)]), 0)
+            out = dst.read_bytes()
+            self.assertEqual(len(out), tool.PDH_STORE_SIZE)
+            self.assertEqual(tool.own_store(out), self.make_own_store())
+            # The vendor parts of the store stay blank for the firmware to form.
+            for offset, tag, _name in tool.VENDOR_TAGS:
+                self.assertNotEqual(out[offset:offset + len(tag)], tag)
+            # A store that is already converted is refused, not converted twice.
+            self.assertEqual(tool.main(["convert", str(dst), str(src)]), 1)
+
+    def test_convert_from_flash(self):
+        tool = self.tool
+        image = bytearray(0x400000)
+        start = len(image) - tool.FLASH_STORE_FROM_END
+        image[start:start + tool.OWN_STORE_SIZE] = self.make_own_store(5)
+        # The reset pointer block names a table inside the image.
+        struct.pack_into("<Q", image, len(image) - tool.FLASH_FIT_FROM_END,
+                         0x80000000FFFF6000)
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "flash.nvram"
+            dst = Path(directory) / "zx1.nvram"
+            src.write_bytes(bytes(image))
+            self.assertTrue(tool.is_flash_image(bytes(image)))
+            self.assertEqual(tool.main(["convert", str(src), str(dst)]), 0)
+            self.assertEqual(tool.own_store(dst.read_bytes()),
+                             self.make_own_store(5))
+
+    def test_convert_refuses_a_file_with_no_store(self):
+        tool = self.tool
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "blank.nvram"
+            dst = Path(directory) / "zx1.nvram"
+            src.write_bytes(bytes(tool.OWN_STORE_SIZE))
+            self.assertEqual(tool.main(["convert", str(src), str(dst)]), 1)
+            self.assertFalse(dst.exists())
+
 
 if __name__ == "__main__":
     QemuSystemTest.main()
