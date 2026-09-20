@@ -883,6 +883,104 @@ static void test_nvram_defaults(void)
     ia64_vpc_drop_nvram_flash(tmpdir, flash);
 }
 
+/* A minimal flash image: a FIT and the two reset pointers, nothing else. */
+static char *ia64_vpc_write_flash_image(const char *dir, uint64_t size)
+{
+    const uint64_t base = 0x100000000ULL - size;
+    const uint64_t fit = base + 0x10000;
+    g_autofree uint8_t *image = g_malloc(size);
+    g_autoptr(GError) error = NULL;
+    char *path = g_build_filename(dir, "flash.bin", NULL);
+
+    memset(image, 0xff, size);
+    memcpy(image + (fit - base), "_FIT_   ", 8);
+    stq_le_p(image + (fit - base) + 8, 0x0100000000000010ULL);
+    stq_le_p(image + size - 32, (1ULL << 63) | fit);
+    stq_le_p(image + size - 24, (1ULL << 63) | base);
+    g_assert_true(g_file_set_contents(path, (char *)image, size, &error));
+    g_assert_no_error(error);
+    return path;
+}
+
+/*
+ * The boot flash part each board carries, as a probe reads it: the SDV's
+ * Intel 82802AC Firmware Hubs (device 0xAC, 64 KiB blocks, every block
+ * write-locked out of reset) and Longs Peak's one 28F640J3 (device 0x17,
+ * 8 MiB in 128 KiB blocks, unlocked).  Read-identifier and query answers
+ * repeat every 256 bytes, so the window below 4 GiB serves both boards
+ * whatever the image size puts at the bottom of the part.
+ */
+static void test_flash_part(const char *machine, uint8_t device,
+                            uint8_t size_log2, uint8_t blocks,
+                            uint8_t block_hi, bool locked)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = g_dir_make_tmp("ia64-vpc-flash-XXXXXX", &error);
+    g_autofree char *path = NULL;
+    g_autofree char *quoted = NULL;
+    const uint64_t win = 0x100000000ULL - 0x100;
+    QTestState *qts;
+
+    g_assert_no_error(error);
+    path = ia64_vpc_write_flash_image(tmpdir, 0x400000);
+    quoted = g_shell_quote(path);
+    qts = qtest_initf("-machine %s -bios %s -m 256M -S", machine, quoted);
+
+    qtest_writeb(qts, win, 0x90);
+    g_assert_cmphex(qtest_readb(qts, win), ==, 0x89);          /* Intel */
+    g_assert_cmphex(qtest_readb(qts, win + 1), ==, device);
+    qtest_writeb(qts, win, 0x98);
+    g_assert_cmphex(qtest_readb(qts, win + 0x10), ==, 'Q');
+    g_assert_cmphex(qtest_readb(qts, win + 0x11), ==, 'R');
+    g_assert_cmphex(qtest_readb(qts, win + 0x12), ==, 'Y');
+    g_assert_cmphex(qtest_readb(qts, win + 0x27), ==, size_log2);
+    g_assert_cmphex(qtest_readb(qts, win + 0x2c), ==, 1);   /* one region */
+    g_assert_cmphex(qtest_readb(qts, win + 0x2d), ==, blocks - 1);
+    g_assert_cmphex(qtest_readb(qts, win + 0x2f), ==, 0x00);
+    g_assert_cmphex(qtest_readb(qts, win + 0x30), ==, block_hi);
+    qtest_writeb(qts, win, 0xff);
+
+    /* A part that locks out of reset takes no program until it is unlocked. */
+    qtest_writeb(qts, win + 0x80, 0x40);
+    qtest_writeb(qts, win + 0x80, 0x5a);
+    qtest_writeb(qts, win, 0xff);
+    g_assert_cmphex(qtest_readb(qts, win + 0x80), ==, locked ? 0xff : 0x5a);
+    qtest_quit(qts);
+
+    g_unlink(path);
+    g_rmdir(tmpdir);
+}
+
+static void test_flash_part_sdv(void)
+{
+    /* The board carries as many 1 MiB parts as the image needs. */
+    test_flash_part("460gx", 0xac, 22, 64, 0x01, true);
+}
+
+static void test_flash_part_longspeak(void)
+{
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = g_dir_make_tmp("ia64-vpc-flash-XXXXXX", &error);
+    g_autofree char *path = NULL;
+    g_autofree char *quoted = NULL;
+    QTestState *qts;
+
+    test_flash_part("zx1", 0x17, 23, 64, 0x02, false);
+
+    /* One soldered 8 MiB part: a shorter image sits at the top of it. */
+    g_assert_no_error(error);
+    path = ia64_vpc_write_flash_image(tmpdir, 0x400000);
+    quoted = g_shell_quote(path);
+    qts = qtest_initf("-machine zx1 -bios %s -m 256M -S", quoted);
+    g_assert_cmphex(qtest_readb(qts, 0xff800000), ==, 0xff);
+    g_assert_cmphex(qtest_readq(qts, 0x100000000ULL - 24), ==,
+                    (1ULL << 63) | 0xffc00000);
+    qtest_quit(qts);
+
+    g_unlink(path);
+    g_rmdir(tmpdir);
+}
+
 /*
  * The zx1 board keeps both firmwares' settings in the PDH battery-backed
  * SRAM, so `nvram=` images that part: a new file is created blank, what the
@@ -7524,6 +7622,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/lba/agp-capability", test_lba_agp_capability);
     qtest_add_func("/ia64-vpc/lba/rope-window", test_lba_rope_window);
     qtest_add_func("/ia64-vpc/pdh/store-persists", test_pdh_store_persists);
+    qtest_add_func("/ia64-vpc/flash/sdv-part", test_flash_part_sdv);
+    qtest_add_func("/ia64-vpc/flash/longspeak-part", test_flash_part_longspeak);
     qtest_add_func("/ia64-vpc/sba/ioc-identity", test_sba_ioc_identity);
     qtest_add_func("/ia64-vpc/sba/mio-registers", test_sba_mio_registers);
     qtest_add_func("/ia64-vpc/pdh/longspeak-map", test_pdh_longspeak_map);

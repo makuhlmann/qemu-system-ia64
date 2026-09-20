@@ -386,6 +386,17 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
      * without touching a VGA port.
      */
     imc->nvram_is_pdh_store = true;
+    /*
+     * One soldered Intel 28F640J3 StrataFlash, 8 MiB in 64 blocks of 128 KiB,
+     * named in the zx2000 dump (plans/zx1-real-firmware-reference.md sec 8).
+     * It has no FWH register interface: the J3 locks blocks by command.  The
+     * vendor firmware issues none over a POST to the EFI shell, so the lock
+     * commands stay unmodelled and the part answers unlocked.
+     */
+    imc->flash_part_size = 8 * MiB;
+    imc->flash_sector_len = 128 * KiB;
+    imc->flash_device_id = 0x0017;
+    imc->flash_block_locking = false;
     imc->lsi_default = true;
     imc->vga_default = "mach64";
     /* Device 1 is core I/O on this board; the opt-in AHCI takes device 4. */

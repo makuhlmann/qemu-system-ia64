@@ -4006,7 +4006,10 @@ BlockBackend *ia64_vpc_open_pdh_store(const char *path, Error **errp)
  */
 static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
 {
-    uint64_t base = IA64_REALFW_WINDOW_END - s->fw_image_size;
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
+    uint64_t part = imc->flash_part_size != 0 ? imc->flash_part_size
+                                              : s->fw_image_size;
+    uint64_t base = IA64_REALFW_WINDOW_END - part;
 
     /*
      * The flash is a real Intel-CFI (command-set 0x0001) part: SDV firmware
@@ -4016,8 +4019,8 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
      * NVRAM sector.  Model it with pflash_cfi01 (the Intel CFI flash device)
      * initialized from the vendor image, overlaying the firmware address
      * space (priority above the identity RAM region) so its command interface
-     * shadows plain RAM at the flash window.  64 KiB blocks match the block
-     * size the firmware's flash descriptor uses.
+     * shadows plain RAM at the flash window.  The board says which part it
+     * carries; see IA64VpcMachineClass::flash_part_size.
      */
     {
         DeviceState *dev = qdev_new(TYPE_PFLASH_CFI01);
@@ -4033,32 +4036,29 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
             qdev_prop_set_drive(dev, "drive", flash_blk);
         }
 
-        qdev_prop_set_uint32(dev, "num-blocks", s->fw_image_size / 0x10000);
-        qdev_prop_set_uint64(dev, "sector-length", 0x10000);
+        qdev_prop_set_uint32(dev, "num-blocks", part / imc->flash_sector_len);
+        qdev_prop_set_uint64(dev, "sector-length", imc->flash_sector_len);
+        /*
+         * Byte-wide commands.  The J3 is an x8/x16 part and how Dillon wires
+         * it is not known; the vendor firmware issues no flash command over a
+         * POST to the EFI shell, so keep the addressing the SDV needs.
+         */
         qdev_prop_set_uint8(dev, "width", 1);
         qdev_prop_set_bit(dev, "big-endian", 0);
         /*
-         * JEDEC ID the firmware checks: manufacturer 0x89 (Intel), device
-         * 0xAC (82802AC Firmware Hub, 8 Mbit -- the part the 460GX datasheet
-         * names, though the vendor image mapped here is larger than one).
-         * It byte-reads read-ID offset 0 for
-         * the manufacturer and offset 1 for the device, then combines them to
-         * 0xAC89.  pflash returns id0<<8|id1 at word offset 0 and id2<<8|id3
+         * JEDEC identity the firmware checks.  It byte-reads read-ID offset
+         * 0 for the manufacturer and offset 1 for the device, then combines
+         * them.  pflash returns id0<<8|id1 at word offset 0 and id2<<8|id3
          * at word offset 1, so a byte read of offset 0 yields id1 (hold the
          * manufacturer there) and a byte read of offset 1 yields id3 (hold
          * the device there).  id0 also carries the device so that a 16-bit
-         * read of offset 0 reads 0xAC89 too.
+         * read of offset 0 reads device<<8|manufacturer too.
          */
-        qdev_prop_set_uint16(dev, "id0", 0x00ac);
-        qdev_prop_set_uint16(dev, "id1", 0x0089);        /* Intel (offset 0) */
+        qdev_prop_set_uint16(dev, "id0", imc->flash_device_id);
+        qdev_prop_set_uint16(dev, "id1", imc->flash_manufacturer_id);
         qdev_prop_set_uint16(dev, "id2", 0x0000);
-        qdev_prop_set_uint16(dev, "id3", 0x00ac);        /* 82802AC (offset 1) */
-        /*
-         * The board's firmware storage is Intel 82802AC Firmware Hubs, which
-         * lock every block for writing out of reset and expect firmware to
-         * clear the lock register before programming (datasheet 290658).
-         */
-        qdev_prop_set_bit(dev, "block-locking", true);
+        qdev_prop_set_uint16(dev, "id3", imc->flash_device_id);
+        qdev_prop_set_bit(dev, "block-locking", imc->flash_block_locking);
         /*
          * Firmware programs the NVRAM sector a byte at a time; batch the
          * backing file's writes rather than paying one host write per byte.
@@ -4078,7 +4078,12 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
          * image copy would clobber them.
          */
         if (flash_blk == NULL) {
-            memcpy(memory_region_get_ram_ptr(flash_mr), s->fw_image, s->fw_image_size);
+            uint8_t *ram = memory_region_get_ram_ptr(flash_mr);
+
+            /* An erased block reads 0xFF; the image takes the top of it. */
+            memset(ram, 0xff, part - s->fw_image_size);
+            memcpy(ram + (part - s->fw_image_size), s->fw_image,
+                   s->fw_image_size);
         }
         ia64_vpc_seed_nvram_defaults(s, memory_region_get_ram_ptr(flash_mr),
                                      base);
@@ -4697,6 +4702,16 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
     (void)data;
 
     imc->ahci_slot = 1;
+    /*
+     * Intel 82802AC Firmware Hub, 8 Mbit, 64 KiB blocks, which locks every
+     * block out of reset through its register interface (datasheet 290658).
+     * The SDV board carries four of them; a board with another part says so.
+     */
+    imc->flash_part_size = 0;
+    imc->flash_sector_len = 64 * KiB;
+    imc->flash_manufacturer_id = 0x0089;
+    imc->flash_device_id = 0x00ac;
+    imc->flash_block_locking = true;
     mc->desc = "IA-64 virtual PC platform (abstract base)";
     mc->init = ia64_vpc_init;
     mc->max_cpus = IA64_VPC_MAX_CPUS;

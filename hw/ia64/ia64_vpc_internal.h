@@ -110,6 +110,20 @@ struct IA64VpcMachineClass {
      */
     bool nvram_is_pdh_store;
     /*
+     * The board's boot flash part.  A size of zero makes the part exactly
+     * the -bios image, which is what the SDV's Firmware Hubs look like: the
+     * board carries as many 1 MiB parts as the image needs.  A board with
+     * one soldered part states its size, and the image sits at the top of
+     * it, as a shorter image does on the real board.
+     */
+    uint64_t flash_part_size;
+    uint64_t flash_sector_len;
+    /* Read-identifier answers: manufacturer, then device (see id0..id3). */
+    uint16_t flash_manufacturer_id;
+    uint16_t flash_device_id;
+    /* The part locks its blocks through the register interface of the FWH. */
+    bool flash_block_locking;
+    /*
      * Configuration space is reached through a segment-0 ECAM window.  The
      * 460GX has only CF8/CFC (SSDM 2.3.1); zx1 keeps the window until its
      * firmware work settles the mechanism.
