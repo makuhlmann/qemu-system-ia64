@@ -1010,13 +1010,24 @@ static void test_sba_ioc_identity(void)
     g_assert_cmphex(qtest_readw(qts, ioc + 0x002), ==, 0x122a);
     g_assert_cmphex(qtest_readb(qts, ioc + 0x008), ==, 0x23);
 
-    /* The "bus config register" has to survive the reboot it triggers. */
+    /*
+     * The "bus config register" has to survive the reboot it triggers, and so
+     * does the register next to it, where SAL_B keeps its own "the box has a
+     * VGA device" flag in bit 25 (set at FFEED170, read back at FFEDC7B0 into
+     * the memory layout table as the compatibility hole it leaves out of
+     * conventional memory).
+     */
     qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x9410, 0x02000000002a0400ULL);
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x9418, 0x02000000ULL);
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x9410), ==,
                     0x02000000002a0400ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x9418), ==,
+                    0x02000000ULL);
     qtest_system_reset(qts);
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x9410), ==,
                     0x02000000002a0400ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x9418), ==,
+                    0x02000000ULL);
     qtest_quit(qts);
 }
 

@@ -30,6 +30,7 @@ struct IA64SBAState {
     uint64_t csr_base;             /* fixed chipset MMIO base (IA64_SBA_CSR_BASE) */
     /* CSR offsets already reported as unimplemented, one bit per offset. */
     uint64_t bus_config;           /* FED0_9410, kept across a platform reset */
+    uint64_t vga_config;           /* FED0_9418, bit 25 = the box has a VGA   */
     uint64_t lba_port[8];          /* LBA_Port(N)_CNTRL, FED0_1200 + 8 * N    */
     uint64_t range[28];            /* address range registers, FED0_0300 on   */
     uint64_t error_control;        /* the IOC's own error log control, 0x0108 */

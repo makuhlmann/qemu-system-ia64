@@ -54,6 +54,17 @@
  */
 #define IA64_SBA_BUS_CONFIG_OFFSET     UINT64_C(0x9410)
 /*
+ * The register next to it, as undocumented: SAL_B keeps its own "the platform
+ * has a VGA device" flag in bit 25.  FFEED170 sets or clears the bit after the
+ * bus walk and FFEDC7B0 reads it back into mem->mlt.vgaSize, which is what
+ * makes the memory layout table leave the compatibility hole out of the
+ * conventional memory run.  Read back as zero, SAL_B still describes 0xA0000
+ * and 0xC0000 on their own but keeps the memory that they overlap, and its own
+ * check (FFE6A530, which counts both against the DIMM total) then ends POST on
+ * "efi mdt table is bad".
+ */
+#define IA64_SBA_VGA_CONFIG_OFFSET     UINT64_C(0x9418)
+/*
  * LBA_Port(N)_CNTRL (mio ERS register 24, FED0_1200 to FED0_1238).  RF resets
  * the rope and RC reads 1 only while that reset runs, so both are done here as
  * soon as they are asked for.  The error log clears like the IOC's own, and
@@ -382,6 +393,11 @@ static MemTxResult ia64_sba_csr_read(void *opaque, hwaddr addr, uint64_t *data,
         ok = true;
     }
 
+    if (!ok && addr == IA64_SBA_VGA_CONFIG_OFFSET && size == 8) {
+        *data = s->vga_config;
+        ok = true;
+    }
+
     if (!ok) {
         unsigned int reg_index;
 
@@ -465,6 +481,11 @@ static MemTxResult ia64_sba_csr_write(void *opaque, hwaddr addr, uint64_t value,
 
     if (!handled && addr == IA64_SBA_BUS_CONFIG_OFFSET && size == 8) {
         s->bus_config = value;
+        handled = true;
+    }
+
+    if (!handled && addr == IA64_SBA_VGA_CONFIG_OFFSET && size == 8) {
+        s->vga_config = value;
         handled = true;
     }
 
@@ -644,8 +665,8 @@ static int ia64_sba_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ia64_sba = {
     .name = "ia64-sba-ioc",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .post_load = ia64_sba_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_PCI_DEVICE(parent_obj, IA64SBAState),
@@ -655,6 +676,7 @@ static const VMStateDescription vmstate_ia64_sba = {
         VMSTATE_UINT64(fe.tcnfg, IA64SBAState),
         VMSTATE_UINT64(fe.pdir_base, IA64SBAState),
         VMSTATE_UINT64(bus_config, IA64SBAState),
+        VMSTATE_UINT64(vga_config, IA64SBAState),
         VMSTATE_UINT64_ARRAY(lba_port, IA64SBAState, IA64_SBA_LBA_PORTS),
         VMSTATE_UINT64_ARRAY(range, IA64SBAState, IA64_SBA_RANGE_REGS),
         VMSTATE_UINT64(error_control, IA64SBAState),
