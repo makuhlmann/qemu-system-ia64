@@ -658,8 +658,11 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
         val = s->dev_id | ((uint32_t)s->chip_rev << 24);
         break;
     case GUI_STAT:
+        /* Engine idle, and the whole command FIFO free (see GUI_FIFO_SHIFT). */
+        val = (uint32_t)GUI_FIFO_PIO_DWORDS << GUI_FIFO_SHIFT;
+        break;
     case FIFO_STAT:
-        val = 0;           /* engine idle, FIFO empty: WaitForIdle/FIFO pass */
+        val = 0;           /* no entry filled: a wait for room passes */
         break;
     case CRTC_VLINE_CRNT_VLINE:
         val = (mach64_crtc_vline(s) << CRTC_CRNT_VLINE_SHIFT) & CRTC_CRNT_VLINE;

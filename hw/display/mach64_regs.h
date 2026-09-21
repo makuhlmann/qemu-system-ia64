@@ -246,6 +246,15 @@
 
 /* ---- GUI_STAT / FIFO_STAT ---- */
 #define GUI_ACTIVE              0x00000001ul
+/*
+ * GUI_STAT's GUI_FIFO field counts the DWORDs still FREE in the command FIFO
+ * (RAGE XL Register Reference sec 5.2.8), the opposite sense to FIFO_STAT,
+ * where a set bit marks a filled entry (sec 5.2.6).  A driver that waits for
+ * room spins for ever on a zero here.  The depth follows
+ * CMDFIFO_SIZE_MODE@GUI_CNTL, whose reset mode 00 gives 512 DWORDs of PIO.
+ */
+#define GUI_FIFO_SHIFT          16
+#define GUI_FIFO_PIO_DWORDS     512
 
 /* ---- pixel-width codes (CRTC_PIX_WIDTH and DP_*_PIX_WIDTH nibbles) ---- */
 #define PIX_WIDTH_1BPP          0x00
