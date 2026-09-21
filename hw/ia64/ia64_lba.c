@@ -123,7 +123,7 @@
 #define LBA_SIC_CLEAR_LOG        (UINT64_C(1) << 4)
 #define LBA_SIC_CLEAR_ENABLE     (UINT64_C(1) << 5)
 #define LBA_SIC_HARD_FAIL        (UINT64_C(1) << 6)
-#define LBA_SIC_RESET_COMPLETE   (UINT64_C(1) << 32)
+#define LBA_SIC_BUS_IN_RESET     (UINT64_C(1) << 32)
 #define LBA_SIC_LATCH_MASK       (LBA_SIC_FORWARD_VGA | LBA_SIC_CLEAR_LOG | \
                                   LBA_SIC_CLEAR_ENABLE | LBA_SIC_HARD_FAIL)
 #define LBA_LMMIO_BASE_RESET     UINT64_C(0x80000000)
@@ -199,9 +199,12 @@ static uint64_t ia64_lba_reg(IA64LBAState *s, uint64_t base, bool *modelled)
     case LBA_ARBITRATION_MASK:
         return s->arbitration_mask;
     case LBA_STATUS_CONTROL:
-        /* SIC latch; reset-complete reads set (this model never asserts the
-         * subordinate-bus reset the SIC RESET_FUNCTION bit would drive). */
-        return (s->status_control & LBA_SIC_LATCH_MASK) | LBA_SIC_RESET_COMPLETE;
+        /*
+         * SIC latch.  RC (bit 32) "returns 1 while the PCI bus is held in
+         * reset" (ioa ERS sec 8.2.1), and this model never asserts the
+         * subordinate-bus reset the RF bit would drive, so it reads 0.
+         */
+        return s->status_control & LBA_SIC_LATCH_MASK;
     case LBA_LMMIO_BASE:   return s->lmmio_base;
     case LBA_LMMIO_MASK:   return s->lmmio_mask;
     case LBA_GMMIO_BASE:   return s->gmmio_base;
