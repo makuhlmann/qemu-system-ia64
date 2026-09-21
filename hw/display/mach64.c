@@ -13,6 +13,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "mach64_int.h"
 #include "mach64_regs.h"
 #include "hw/core/qdev-properties.h"
@@ -43,6 +44,25 @@ static bool mach64_trace_on(void)
     }
     return on;
 }
+
+/* MACH64_TRACE=<n> raises the line cap; anything else keeps the default. */
+#define MACH64_TRACE_LINE_CAP 40000UL
+
+static unsigned long mach64_trace_cap(void)
+{
+    static unsigned long cap;
+
+    if (cap == 0) {
+        const char *v = getenv("MACH64_TRACE");
+        uint64_t n = 0;
+
+        if (v == NULL || qemu_strtou64(v, NULL, 0, &n) < 0 || n <= 1) {
+            n = MACH64_TRACE_LINE_CAP;
+        }
+        cap = n;
+    }
+    return cap;
+}
 #define M64_TRACE(fmt, ...) do {                                        \
     if (mach64_trace_on()) {                                            \
         fprintf(stderr, "mach64: " fmt "\n", ##__VA_ARGS__);           \
@@ -60,9 +80,8 @@ static void mach64_trace_access(char rw, unsigned reg, uint32_t val)
      * so it cannot fill the disk (CLAUDE.md tight-loop rule).
      */
     static unsigned long emitted;
-#define MACH64_TRACE_LINE_CAP 40000UL
 
-    if (!mach64_trace_on() || emitted >= MACH64_TRACE_LINE_CAP) {
+    if (!mach64_trace_on() || emitted >= mach64_trace_cap()) {
         return;
     }
     if (rw != last_rw || reg != last_reg) {
@@ -73,7 +92,7 @@ static void mach64_trace_access(char rw, unsigned reg, uint32_t val)
         fprintf(stderr, "mach64: %c reg[%03x] %s %08x\n", rw, reg,
                 rw == 'r' ? "->" : "<-", val);
         emitted++;
-        if (emitted == MACH64_TRACE_LINE_CAP) {
+        if (emitted == mach64_trace_cap()) {
             fprintf(stderr, "mach64: (trace line cap reached, silencing)\n");
         }
         last_rw = rw;
@@ -82,7 +101,6 @@ static void mach64_trace_access(char rw, unsigned reg, uint32_t val)
     } else {
         rep++;
     }
-#undef MACH64_TRACE_LINE_CAP
 }
 
 #ifdef CONFIG_PIXMAN
