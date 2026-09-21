@@ -746,6 +746,61 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
     return val;
 }
 
+/*
+ * DP_SET_GUI_ENGINE (0_BF, write only): one store programs the data path.
+ * RAGE XL Register Reference sec 5.2, Table 5-11 for the registers it resets
+ * and Table 5-12 for the DRAWING_COMBO presets.  Server 2003's ati2drad writes
+ * it before every batch of glyph rectangles, so ignoring it left the engine
+ * running on whatever the previous operation had left behind.
+ */
+static void mach64_dp_set_gui_engine(Mach64VGAState *s, uint32_t v)
+{
+    static const struct { uint32_t src, mix, traj; } combo[16] = {
+        [1] = { 0x0000100, 0x070003, 0x00000023 },
+        [2] = { 0x0000200, 0x070007, 0x00000003 },
+        [3] = { 0x0020100, 0x070007, 0x00000003 },
+        [4] = { 0x0000100, 0x070007, 0x00000023 },
+        [5] = { 0x0010100, 0x070007, 0x01000003 },
+        [6] = { 0x0000100, 0x070007, 0x00000003 },
+        [7] = { 0x0000300, 0x070007, 0x00030003 },
+        [8] = { 0x0000300, 0x070007, 0x00000000 },
+        [9] = { 0x0000300, 0x070007, 0x00000001 },
+    };
+    static const uint16_t pitch_tab[16] = {
+        0, 320, 352, 384, 640, 800, 896, 512,
+        1024, 1152, 1280, 400, 832, 1600, 448, 2048,
+    };
+    unsigned dstw = (v & DP_SGE_DST_PIX_WIDTH) >> DP_SGE_DST_PIX_WIDTH_SHIFT;
+    unsigned cmb = (v & DP_SGE_DRAWING_COMBO) >> DP_SGE_DRAWING_COMBO_SHIFT;
+    unsigned pidx = (v & DP_SGE_DST_PITCH) >> DP_SGE_DST_PITCH_SHIFT;
+    unsigned pitch = pitch_tab[pidx];
+    unsigned srcw = (v & DP_SGE_SRC_PIX_WIDTH) ? dstw : PIX_WIDTH_1BPP;
+
+    s->regs[DP_PIX_WIDTH] = dstw | (srcw << DP_SRC_PIX_WIDTH_SHIFT);
+    if (v & DP_SGE_DST_PITCH_BY_2) {
+        pitch *= 2;
+    }
+    if (pitch != 0) {
+        s->regs[DST_OFF_PITCH] = (s->regs[DST_OFF_PITCH] & 0x000fffff) |
+                                 ((uint32_t)(pitch / 8) << CRTC_PITCH_SHIFT);
+    }
+    s->regs[SRC_OFF_PITCH] = (v & DP_SGE_SRC_OFFPITCH_COPY) ?
+                             s->regs[DST_OFF_PITCH] : 0;
+    if (combo[cmb].src != 0) {
+        s->regs[DP_SRC] = combo[cmb].src;
+        s->regs[DP_MIX] = combo[cmb].mix;
+    }
+    /* Table 5-11: the registers the write leaves in a known state. */
+    s->regs[DST_Y_X] = 0;
+    s->regs[DST_HEIGHT_WIDTH] = 0;
+    s->regs[SRC_Y_X] = 0;
+    s->regs[SC_TOP_BOTTOM] = 0x3fff0000;
+    s->regs[SC_LEFT_RIGHT] = 0x1fff0000;
+    s->regs[DP_WRITE_MASK] = 0xffffffff;
+    s->regs[CLR_CMP_CNTL] = 0;
+    s->regs[SRC_CNTL] = 0;
+}
+
 static void mach64_reg_store(Mach64VGAState *s, unsigned reg, unsigned byte,
                              unsigned size, uint32_t data)
 {
@@ -808,6 +863,9 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
          */
         s->regs[reg] = data;
         mach64_update_irq(s);
+        return;
+    case DP_SET_GUI_ENGINE:
+        mach64_dp_set_gui_engine(s, data);
         return;
     case LCD_INDEX:
         s->lcd_index = data & 0xff;

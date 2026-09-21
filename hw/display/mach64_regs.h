@@ -179,6 +179,25 @@
 #define DP_PIX_WIDTH            0xb4
 #define DP_MIX                  0xb5
 #define DP_SRC                  0xb6
+#define DP_SET_GUI_ENGINE       0xbf
+
+/*
+ * DP_SET_GUI_ENGINE (RAGE XL Register Reference sec 5.2): one write programs
+ * the whole data path.  The field positions are anchored by SET_DST_PITCH,
+ * which a 640-wide mode leaves at 4 in both values Server 2003's ati2drad
+ * writes.  Only the fields the model can act on are decoded.
+ */
+#define DP_SGE_DST_PIX_WIDTH    0x00000038ul   /* 000 = mono, 010 = 8 bpp ... */
+#define DP_SGE_DST_PIX_WIDTH_SHIFT 3
+#define DP_SGE_SRC_PIX_WIDTH    0x00000040ul   /* 0 = mono, 1 = same as dst   */
+#define DP_SGE_DST_OFFSET       0x00000380ul
+#define DP_SGE_DST_OFFSET_SHIFT 7
+#define DP_SGE_DST_PITCH        0x00003c00ul
+#define DP_SGE_DST_PITCH_SHIFT  10
+#define DP_SGE_DST_PITCH_BY_2   0x00004000ul
+#define DP_SGE_SRC_OFFPITCH_COPY 0x00008000ul
+#define DP_SGE_DRAWING_COMBO    0x003c0000ul
+#define DP_SGE_DRAWING_COMBO_SHIFT 18
 #define DST_X_Y                 0xba
 #define DST_WIDTH_HEIGHT        0xbb
 #define CLR_CMP_CLR             0xc0
