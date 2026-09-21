@@ -194,6 +194,15 @@ static void mach64_switch_mode(Mach64VGAState *s)
     }
 
     s->mode = EXT_MODE;
+    /*
+     * CRTC_EXT_DISP_EN selects the extended display over the VGA one (RAGE XL
+     * RRG, CRTC_GEN_CNTL MM 0_07), so the attribute controller's PAS bit stops
+     * gating the output -- but the VGA core keeps blanking the console while
+     * that bit is clear (vga.c, GMODE_BLANK), and ati2drad programs the mode
+     * through the extended registers alone.  hw/display/ati.c drives the same
+     * bit from its own display enable.
+     */
+    vga->ar_index |= BIT(5);
 
     uint32_t htd = s->regs[CRTC_H_TOTAL_DISP];
     uint32_t vtd = s->regs[CRTC_V_TOTAL_DISP];
