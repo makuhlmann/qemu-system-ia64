@@ -36,6 +36,8 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
+#include "qemu/bitmap.h"
+#include "qemu/log.h"
 #include "hw/ia64/ia64_lba.h"
 #include "hw/ia64/ia64_iosapic.h"
 #include "hw/core/sysbus.h"
@@ -94,6 +96,23 @@
 #define LBA_CLOCK_DLL_LOCKED     (UINT64_C(1) << 3)
 
 #define LBA_BUS_MODE             0x620
+/*
+ * The ioa's error-log block (ERS sec 6).  POST programs ERROR_CONFIG and
+ * reads it back; a read that does not answer with what it wrote makes the
+ * vendor SAL log a PCI bus error record for this rope, which Windows then
+ * reports as a Machine Check Error.  The register at 0x6a0 is in the ERS's
+ * reserved range and the firmware writes and reads it the same way.
+ */
+#define LBA_ERROR_CONFIG         0x680
+#define LBA_ERROR_STATUS         0x688
+#define LBA_ERROR_MASTER_ID      0x690
+#define LBA_ERROR_CONTROL        0x6a0
+#define LBA_PCIX_CAP             0x0a0
+#define LBA_ROPE_ERROR           0x600
+#define LBA_INBOUND_ERR_ADDR     0x290
+#define LBA_INBOUND_ERR_ATTR     0x298
+#define LBA_COMPLETION_MSG       0x2a0
+#define LBA_OUTBOUND_ERR_ADDR    0x070
 
 /* Reset values and writable masks (upstream hp-zx1-ioa-regs.h, AGP mode). */
 #define LBA_CONFIG_ADDRESS_MASK  UINT32_C(0x00fffffc)
@@ -153,8 +172,9 @@ static void ia64_lba_latch(uint64_t *latch, uint64_t writable,
  * Every offset not modelled reads as zero.  CONFIG_DATA (0x48) is handled
  * separately by ia64_lba_config_read().
  */
-static uint64_t ia64_lba_reg(IA64LBAState *s, uint64_t base)
+static uint64_t ia64_lba_reg(IA64LBAState *s, uint64_t base, bool *modelled)
 {
+    *modelled = true;
     switch (base) {
     case LBA_FUNCTION_ID:
         /* vendor | device | command(0) | status(CAP_LIST set). */
@@ -198,7 +218,19 @@ static uint64_t ia64_lba_reg(IA64LBAState *s, uint64_t base)
     case LBA_ROPE_CONFIG:  return s->rope_config | LBA_ROPE_SINGLE_WIDE;
     case LBA_CLOCK_STATUS: return LBA_CLOCK_DLL_LOCKED;
     case LBA_BUS_MODE:     return s->bus_mode;
+    case LBA_ERROR_CONFIG: return s->error_config;
+    case LBA_ERROR_CONTROL: return s->error_control;
+    case LBA_PCIX_CAP:     return s->pcix_cap;
+    case LBA_ROPE_ERROR:   return s->rope_error;
+    /* The log registers: storage, because this model logs no error itself. */
+    case LBA_ERROR_STATUS:      return s->error_status;
+    case LBA_ERROR_MASTER_ID:   return s->error_master_id;
+    case LBA_INBOUND_ERR_ADDR:  return s->inbound_err_addr;
+    case LBA_INBOUND_ERR_ATTR:  return s->inbound_err_attr;
+    case LBA_COMPLETION_MSG:    return s->completion_msg;
+    case LBA_OUTBOUND_ERR_ADDR: return s->outbound_err_addr;
     default:
+        *modelled = false;
         return 0;
     }
 }
@@ -275,6 +307,7 @@ static MemTxResult ia64_lba_read(void *opaque, hwaddr addr, uint64_t *data,
     unsigned int lane = addr & 7;
     uint64_t base = addr & ~UINT64_C(7);
     uint64_t reg;
+    bool modelled;
 
     (void)attrs;
     if ((size != 1 && size != 2 && size != 4 && size != 8) || lane + size > 8) {
@@ -286,7 +319,11 @@ static MemTxResult ia64_lba_read(void *opaque, hwaddr addr, uint64_t *data,
                                      size);
         return MEMTX_OK;
     }
-    reg = ia64_lba_reg(s, base);
+    reg = ia64_lba_reg(s, base, &modelled);
+    if (!modelled && !test_and_set_bit(base, s->unimp_read)) {
+        qemu_log_mask(LOG_UNIMP, "ia64-lba: unimplemented read at 0x%"
+                      HWADDR_PRIx " (size %u)\n", s->csr_base + addr, size);
+    }
     *data = (reg >> (lane * 8)) & ia64_lba_size_mask(size);
     return MEMTX_OK;
 }
@@ -405,8 +442,44 @@ static MemTxResult ia64_lba_write(void *opaque, hwaddr addr, uint64_t value,
     case LBA_BUS_MODE:
         ia64_lba_latch(&s->bus_mode, LBA_BUS_MODE_SAFE_WRITE, mask, data);
         break;
+    case LBA_ERROR_CONFIG:
+        ia64_lba_latch(&s->error_config, UINT64_MAX, mask, data);
+        break;
+    case LBA_PCIX_CAP:
+        ia64_lba_latch(&s->pcix_cap, UINT64_MAX, mask, data);
+        break;
+    case LBA_ROPE_ERROR:
+        ia64_lba_latch(&s->rope_error, UINT64_MAX, mask, data);
+        break;
+    case LBA_ERROR_CONTROL:
+        ia64_lba_latch(&s->error_control, UINT64_MAX, mask, data);
+        break;
+    case LBA_ERROR_STATUS:
+        ia64_lba_latch(&s->error_status, UINT64_MAX, mask, data);
+        break;
+    case LBA_ERROR_MASTER_ID:
+        ia64_lba_latch(&s->error_master_id, UINT64_MAX, mask, data);
+        break;
+    case LBA_INBOUND_ERR_ADDR:
+        ia64_lba_latch(&s->inbound_err_addr, UINT64_MAX, mask, data);
+        break;
+    case LBA_INBOUND_ERR_ATTR:
+        ia64_lba_latch(&s->inbound_err_attr, UINT64_MAX, mask, data);
+        break;
+    case LBA_COMPLETION_MSG:
+        ia64_lba_latch(&s->completion_msg, UINT64_MAX, mask, data);
+        break;
+    case LBA_OUTBOUND_ERR_ADDR:
+        ia64_lba_latch(&s->outbound_err_addr, UINT64_MAX, mask, data);
+        break;
     default:
-        break;  /* read-only / unmodelled registers ignore writes */
+        /* Read-only and unmodelled registers ignore writes; name the latter. */
+        if (!test_and_set_bit(base, s->unimp_write)) {
+            qemu_log_mask(LOG_UNIMP, "ia64-lba: unimplemented write at 0x%"
+                          HWADDR_PRIx " (size %u) value 0x%" PRIx64 "\n",
+                          s->csr_base + addr, size, data);
+        }
+        break;
     }
     return MEMTX_OK;
 }
@@ -436,6 +509,8 @@ static void ia64_lba_realize(DeviceState *dev, Error **errp)
 {
     IA64LBAState *s = IA64_LBA(dev);
 
+    s->unimp_read = bitmap_new(IA64_LBA_CSR_SIZE);
+    s->unimp_write = bitmap_new(IA64_LBA_CSR_SIZE);
     memory_region_init(&s->csr, OBJECT(s), "ia64-zx1-lba",
                        IA64_LBA_CSR_SIZE);
     memory_region_init_io(&s->regs, OBJECT(s), &ia64_lba_ops, s,
@@ -494,12 +569,22 @@ static void ia64_lba_reset(DeviceState *dev)
     s->slave_control = LBA_SLAVE_CONTROL_RESET;
     s->bus_mode = LBA_BUS_MODE_AGP;
     s->rope_config = 0;
+    s->error_config = 0;
+    s->error_control = 0;
+    s->pcix_cap = 0;
+    s->rope_error = 0;
+    s->error_status = 0;
+    s->error_master_id = 0;
+    s->inbound_err_addr = 0;
+    s->inbound_err_attr = 0;
+    s->completion_msg = 0;
+    s->outbound_err_addr = 0;
 }
 
 static const VMStateDescription vmstate_ia64_lba = {
     .name = "ia64-zx1-lba",
-    .version_id = 3,
-    .minimum_version_id = 3,
+    .version_id = 4,
+    .minimum_version_id = 4,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(bus_number, IA64LBAState),
         VMSTATE_UINT32(config_address, IA64LBAState),
@@ -520,9 +605,27 @@ static const VMStateDescription vmstate_ia64_lba = {
         VMSTATE_UINT64(msi_mask, IA64LBAState),
         VMSTATE_UINT64(slave_control, IA64LBAState),
         VMSTATE_UINT64(bus_mode, IA64LBAState),
+        VMSTATE_UINT64(error_config, IA64LBAState),
+        VMSTATE_UINT64(error_control, IA64LBAState),
+        VMSTATE_UINT64(pcix_cap, IA64LBAState),
+        VMSTATE_UINT64(rope_error, IA64LBAState),
+        VMSTATE_UINT64(error_status, IA64LBAState),
+        VMSTATE_UINT64(error_master_id, IA64LBAState),
+        VMSTATE_UINT64(inbound_err_addr, IA64LBAState),
+        VMSTATE_UINT64(inbound_err_attr, IA64LBAState),
+        VMSTATE_UINT64(completion_msg, IA64LBAState),
+        VMSTATE_UINT64(outbound_err_addr, IA64LBAState),
         VMSTATE_END_OF_LIST()
     },
 };
+
+static void ia64_lba_unrealize(DeviceState *dev)
+{
+    IA64LBAState *s = IA64_LBA(dev);
+
+    g_free(s->unimp_read);
+    g_free(s->unimp_write);
+}
 
 static const Property ia64_lba_properties[] = {
     DEFINE_PROP_UINT64("csr-base", IA64LBAState, csr_base, IA64_LBA_CSR_BASE),
@@ -534,6 +637,7 @@ static void ia64_lba_class_init(ObjectClass *klass, const void *data)
 
     (void)data;
     dc->realize = ia64_lba_realize;
+    dc->unrealize = ia64_lba_unrealize;
     dc->desc = "HP zx1 LBA/Mercury CSR block";
     dc->vmsd = &vmstate_ia64_lba;
     device_class_set_legacy_reset(dc, ia64_lba_reset);

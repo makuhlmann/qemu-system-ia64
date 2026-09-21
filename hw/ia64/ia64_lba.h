@@ -40,6 +40,21 @@ struct IA64LBAState {
     uint64_t slave_control;             /* SLAVE_CONTROL (0x278) */
     uint64_t bus_mode;                  /* BUS_MODE      (0x620) */
     uint64_t rope_config;               /* rope width    (0x610) */
+    /* The error-log block of ioa ERS sec 6; storage, this model logs none. */
+    uint64_t error_config;              /* ERROR_CONFIG  (0x680) */
+    uint64_t error_control;             /* undocumented  (0x6a0) */
+    uint64_t pcix_cap;                  /* PCI-X cap/cmd (0x0a0) */
+    uint64_t rope_error;                /* undocumented  (0x600) */
+    uint64_t error_status;              /* ERROR_STATUS  (0x688) */
+    uint64_t error_master_id;           /* MASTER ID LOG (0x690) */
+    uint64_t inbound_err_addr;          /* IN ERR ADDR   (0x290) */
+    uint64_t inbound_err_attr;          /* IN ERR ATTR   (0x298) */
+    uint64_t completion_msg;            /* COMPL MSG LOG (0x2a0) */
+    uint64_t outbound_err_addr;         /* OUT ERR ADDR  (0x070) */
+
+    /* Offsets already named in the log; see the mio's own pair. */
+    unsigned long *unimp_read;
+    unsigned long *unimp_write;
 };
 
 /* Wire the root bus whose configuration space CONFIG_ADDRESS/DATA reaches. */
