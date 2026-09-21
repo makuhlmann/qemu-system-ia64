@@ -99,6 +99,12 @@ struct IA64VpcMachineClass {
     unsigned int pci0_intx_fallback;
     /* Where the board also answers the PM block in memory space, or zero. */
     uint64_t acpi_pm_mmio_base;
+    /*
+     * The SLP_TYP value this board's firmware puts in _S5, where that is
+     * not the architected 0 the ACPI core always takes.  It goes in the
+     * core's s4_val slot, the one other value that ends the machine.
+     */
+    uint8_t acpi_s5_slp_typ;
     /* The slot the opt-in AHCI controller takes, and which stays free. */
     unsigned int ahci_slot;
     /* The board carries the 82468GX south bridge (and its IDE function). */

@@ -387,6 +387,15 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
      */
     imc->nvram_is_pdh_store = true;
     /*
+     * The vendor firmware's DSDT declares _S5 as SLP_TYP 5 and the box
+     * has no other sleep state.  Windows stores that with SLP_EN to power
+     * off; a store the chipset ignores leaves the HAL to fall back on
+     * EFI ResetSystem(EfiResetCold), which reboots instead
+     * (WSRV03/base/hals/halia64/ia64/pmsleep.c).  Our own firmware's DSDT
+     * uses 0, which the ACPI core takes anyway.
+     */
+    imc->acpi_s5_slp_typ = 5;
+    /*
      * One soldered Intel 28F640J3 StrataFlash, 8 MiB in 64 blocks of 128 KiB,
      * named in the zx2000 dump (plans/zx1-real-firmware-reference.md sec 8).
      * It has no FWH register interface: the J3 locks blocks by command.  The

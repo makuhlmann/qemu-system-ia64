@@ -951,6 +951,25 @@ static void test_flash_part(const char *machine, uint8_t device,
     g_rmdir(tmpdir);
 }
 
+/*
+ * The vendor firmware's DSDT declares _S5 as SLP_TYP 5 and the box has no
+ * other sleep state, so that store with SLP_EN must end the machine: a store
+ * the chipset ignores leaves Windows' HAL to reboot through EFI ResetSystem
+ * instead.  The PM block answers in the PDH as well as in I/O space.
+ */
+static void test_longspeak_s5_power_off(void)
+{
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    const uint64_t cnt = IA64_PDH_ACPI_PM_BASE + IA64_PDH_ACPI_PM1_CNT;
+
+    /* A sleep type the board does not have leaves the machine running. */
+    qtest_writew(qts, cnt, (3 << 10) | (1 << 13));
+    g_assert_cmphex(qtest_readw(qts, cnt) & (1 << 13), ==, 0);
+    qtest_writew(qts, cnt, (5 << 10) | (1 << 13));
+    qtest_qmp_eventwait(qts, "SHUTDOWN");
+    qtest_quit(qts);
+}
+
 static void test_flash_part_sdv(void)
 {
     /* The board carries as many 1 MiB parts as the image needs. */
@@ -7620,6 +7639,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/lba/agp-capability", test_lba_agp_capability);
     qtest_add_func("/ia64-vpc/lba/rope-window", test_lba_rope_window);
     qtest_add_func("/ia64-vpc/pdh/store-persists", test_pdh_store_persists);
+    qtest_add_func("/ia64-vpc/acpi/longspeak-s5-power-off",
+                   test_longspeak_s5_power_off);
     qtest_add_func("/ia64-vpc/flash/sdv-part", test_flash_part_sdv);
     qtest_add_func("/ia64-vpc/flash/longspeak-part", test_flash_part_longspeak);
     qtest_add_func("/ia64-vpc/sba/ioc-identity", test_sba_ioc_identity);

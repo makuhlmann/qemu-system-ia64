@@ -2090,8 +2090,8 @@ static void ia64_vpc_init_acpi_pm(IA64VpcMachineState *s,
 
     acpi_pm1_evt_init(&s->acpi_regs, ia64_vpc_acpi_update_sci,
                       &s->acpi_pm);
-    acpi_pm1_cnt_init(&s->acpi_regs, &s->acpi_pm,
-                      false, false, 0, true);
+    acpi_pm1_cnt_init(&s->acpi_regs, &s->acpi_pm, false, false,
+                      IA64_VPC_MACHINE_GET_CLASS(s)->acpi_s5_slp_typ, true);
     acpi_pm_tmr_init(&s->acpi_regs, ia64_vpc_acpi_update_sci,
                      &s->acpi_pm);
     memory_region_init_io(&s->acpi_reset, OBJECT(s),
