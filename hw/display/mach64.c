@@ -667,6 +667,36 @@ static bool mach64_gfx_update(void *opaque)
 
 /* ---- MMIO register access ---- */
 
+/*
+ * GUI_TRAJ_CNTL is the composite view of DST_CNTL, SRC_CNTL, PAT_CNTL and
+ * HOST_CNTL (RAGE XL RRG sec 5.2.9).  The engine reads the four, so a write
+ * here has to reach them; native drivers set the trajectory through this
+ * register alone.
+ */
+static void mach64_gui_traj_split(Mach64VGAState *s, uint32_t v)
+{
+    s->regs[DST_CNTL] = (v & GUI_TRAJ_DST_CNTL_MASK) >>
+                        GUI_TRAJ_DST_CNTL_SHIFT;
+    s->regs[SRC_CNTL] = (v & GUI_TRAJ_SRC_CNTL_MASK) >>
+                        GUI_TRAJ_SRC_CNTL_SHIFT;
+    s->regs[PAT_CNTL] = (v & GUI_TRAJ_PAT_CNTL_MASK) >>
+                        GUI_TRAJ_PAT_CNTL_SHIFT;
+    s->regs[HOST_CNTL] = (v & GUI_TRAJ_HOST_CNTL_MASK) >>
+                         GUI_TRAJ_HOST_CNTL_SHIFT;
+}
+
+static uint32_t mach64_gui_traj_compose(const Mach64VGAState *s)
+{
+    return ((s->regs[DST_CNTL] << GUI_TRAJ_DST_CNTL_SHIFT) &
+            GUI_TRAJ_DST_CNTL_MASK) |
+           ((s->regs[SRC_CNTL] << GUI_TRAJ_SRC_CNTL_SHIFT) &
+            GUI_TRAJ_SRC_CNTL_MASK) |
+           ((s->regs[PAT_CNTL] << GUI_TRAJ_PAT_CNTL_SHIFT) &
+            GUI_TRAJ_PAT_CNTL_MASK) |
+           ((s->regs[HOST_CNTL] << GUI_TRAJ_HOST_CNTL_SHIFT) &
+            GUI_TRAJ_HOST_CNTL_MASK);
+}
+
 static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
 {
     Mach64VGAState *s = opaque;
@@ -690,6 +720,9 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
         break;
     case FIFO_STAT:
         val = 0;           /* no entry filled: a wait for room passes */
+        break;
+    case GUI_TRAJ_CNTL:
+        val = mach64_gui_traj_compose(s);
         break;
     case CRTC_VLINE_CRNT_VLINE:
         val = (mach64_crtc_vline(s) << CRTC_CRNT_VLINE_SHIFT) & CRTC_CRNT_VLINE;
@@ -862,6 +895,10 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
     case GUI_STAT:
     case FIFO_STAT:
         return; /* read-only */
+    case GUI_TRAJ_CNTL:
+        mach64_reg_store(s, reg, byte, size, data);
+        mach64_gui_traj_split(s, s->regs[reg]);
+        return;
     case CRTC_INT_CNTL:
         /*
          * Plain R/W: the hardware sets the _INT status bits on the event (the

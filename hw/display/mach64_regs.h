@@ -335,14 +335,38 @@
 /* ---- DST_CNTL ---- */
 #define DST_X_DIR               0x00000001ul   /* 1 = left-to-right */
 #define DST_Y_DIR               0x00000002ul   /* 1 = top-to-bottom */
+#define DST_X_TILE              0x00000008ul
+#define DST_Y_TILE              0x00000010ul
 #define DST_LAST_PEL            0x00000020ul
 
 /* ---- SRC_CNTL ---- */
 #define SRC_PATT_EN             0x00000001ul
+#define SRC_PATT_ROT_EN         0x00000002ul
 #define SRC_LINEAR_EN           0x00000004ul
+#define SRC_BYTE_ALIGN          0x00000008ul
 
 /* ---- PAT_CNTL ---- */
 #define PAT_MONO_EN             0x00000001ul
+
+/* ---- HOST_CNTL ---- */
+#define HOST_BYTE_ALIGN         0x00000001ul
+
+/*
+ * GUI_TRAJ_CNTL (MM 0_CC) "is a composite of registers DST_CNTL, SRC_CNTL,
+ * PAT_CNTL, and HOST_CNTL" (RAGE XL RRG sec 5.2.9), in that order from the
+ * low byte up: DST_CNTL takes two bytes, the other three one nibble or byte
+ * each.  Anchored by the DRAWING_COMBO values of RRG Table 5-12 --
+ * SrcLinearEnable is 0004_0000h (SRC_CNTL bit 2), PatMonoEnable 0100_0000h
+ * (PAT_CNTL bit 0) and HostByteAlign 1000_0000h (HOST_CNTL bit 0).
+ */
+#define GUI_TRAJ_DST_CNTL_SHIFT  0
+#define GUI_TRAJ_DST_CNTL_MASK   0x0000fffful
+#define GUI_TRAJ_SRC_CNTL_SHIFT  16
+#define GUI_TRAJ_SRC_CNTL_MASK   0x00ff0000ul
+#define GUI_TRAJ_PAT_CNTL_SHIFT  24
+#define GUI_TRAJ_PAT_CNTL_MASK   0x0f000000ul
+#define GUI_TRAJ_HOST_CNTL_SHIFT 28
+#define GUI_TRAJ_HOST_CNTL_MASK  0xf0000000ul
 
 /* ---- CLR_CMP_CNTL ---- */
 #define CLR_CMP_FN              0x00000007ul
