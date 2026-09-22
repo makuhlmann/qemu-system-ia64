@@ -31,6 +31,7 @@ typedef struct {
     uint32_t frgd_clr;
     uint32_t bkgd_clr;
     uint32_t write_mask;
+    uint32_t px_mask;       /* the bits one pixel occupies */
     /* scissor (inclusive) */
     int sc_left, sc_right, sc_top, sc_bottom;
     /* colour-compare */
@@ -101,23 +102,29 @@ static uint32_t apply_mix(unsigned mix, uint32_t src, uint32_t dst)
     }
 }
 
-/* Colour-compare: returns true if the pixel should be drawn. */
-static bool cmp_pass(const Mach64Ctx *c, uint32_t src)
+/*
+ * Colour compare (RAGE XL RRG CLR_CMP_CNTL MM 0_C2).  The comparison runs on
+ * the destination or on the 2D source as CLR_CMP_SRC selects, and "if the
+ * result of the comparison is false, the color source data is written to the
+ * destination; otherwise destination data is written" -- a true result keeps
+ * the pixel.  A source-keyed transparent blit is thus 2D source with the
+ * EQUAL function, as WXPSP1 drivers/video/ms/ati/disp/ddraw64.c:447 programs
+ * it, and a destination-keyed one is destination with NOT EQUAL (:454).
+ */
+static bool cmp_keeps_dst(const Mach64Ctx *c, uint32_t src, uint32_t dst)
 {
-    if (!c->cmp_on_src) {
-        return true;
-    }
+    uint32_t v = c->cmp_on_src ? src : dst;
+    uint32_t m = c->cmp_msk & c->px_mask;
+
     switch (c->cmp_fn) {
-    case CLR_CMP_FN_FALSE:
-        return true;                       /* comparison disabled: always draw */
     case CLR_CMP_FN_TRUE:
-        return false;
-    case CLR_CMP_FN_EQUAL:
-        return (src & c->cmp_msk) == (c->cmp_clr & c->cmp_msk);
-    case CLR_CMP_FN_NOT_EQUAL:
-        return (src & c->cmp_msk) != (c->cmp_clr & c->cmp_msk);
-    default:
         return true;
+    case CLR_CMP_FN_NOT_EQUAL:
+        return (v & m) != (c->cmp_clr & m);
+    case CLR_CMP_FN_EQUAL:
+        return (v & m) == (c->cmp_clr & m);
+    default:
+        return false;   /* FALSE and the reserved codes: always write */
     }
 }
 
@@ -125,7 +132,12 @@ static void blend_px(const Mach64Ctx *c, uint32_t off, unsigned mix,
                      uint32_t src)
 {
     uint32_t dst = px_read(c, off);
-    uint32_t res = apply_mix(mix, src, dst);
+    uint32_t res;
+
+    if (cmp_keeps_dst(c, src, dst)) {
+        return;
+    }
+    res = apply_mix(mix, src, dst);
 
     res = (res & c->write_mask) | (dst & ~c->write_mask);
     px_write(c, off, res);
@@ -147,6 +159,7 @@ static bool ctx_init(Mach64VGAState *s, Mach64Ctx *c)
     if (c->bypp == 0) {
         return false;
     }
+    c->px_mask = c->bypp >= 4 ? ~0u : (1u << (c->bypp * 8)) - 1;
     c->dst_pitch = mach64_dst_pitch_bytes(s);
     c->dst_base = mach64_dst_base(s);
 
@@ -176,8 +189,8 @@ static bool ctx_init(Mach64VGAState *s, Mach64Ctx *c)
     }
 
     c->cmp_fn = s->regs[CLR_CMP_CNTL] & CLR_CMP_FN;
-    c->cmp_on_src = ((s->regs[CLR_CMP_CNTL] & CLR_CMP_SRC) >> 24) ==
-                    CLR_CMP_SRC_2D;
+    c->cmp_on_src = ((s->regs[CLR_CMP_CNTL] & CLR_CMP_SRC) >> 24) !=
+                    CLR_CMP_SRC_DST;
     c->cmp_clr = s->regs[CLR_CMP_CLR];
     c->cmp_msk = s->regs[CLR_CMP_MSK] ? s->regs[CLR_CMP_MSK] : ~0u;
     return true;
@@ -263,9 +276,6 @@ static void copy_rect(Mach64Ctx *c, int dx0, int dy0, int sx0, int sy0,
                 continue;
             }
             src = px_read(c, soff);
-            if (!cmp_pass(c, src)) {
-                continue;
-            }
             blend_px(c, doff, c->frgd_mix, src);
         }
     }
@@ -407,7 +417,7 @@ void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
             int y = y0 + s->host_data.y;
             uint32_t off = dst_off(&c, x, y);
 
-            if (in_scissor(&c, x, y) && off_ok(&c, off) && cmp_pass(&c, src)) {
+            if (in_scissor(&c, x, y) && off_ok(&c, off)) {
                 blend_px(&c, off, c.frgd_mix, src);
             }
             if (++s->host_data.x >= (unsigned)w) {

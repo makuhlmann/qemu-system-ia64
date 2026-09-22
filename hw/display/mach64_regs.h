@@ -380,11 +380,11 @@
 #define GUI_TRAJ_HOST_CNTL_MASK  0xf0000000ul
 
 /* ---- CLR_CMP_CNTL ---- */
-#define CLR_CMP_FN              0x00000007ul
-#define CLR_CMP_FN_FALSE        0x0            /* always draw */
-#define CLR_CMP_FN_TRUE         0x1            /* never draw */
-#define CLR_CMP_FN_NOT_EQUAL    0x4            /* draw where src != key */
-#define CLR_CMP_FN_EQUAL        0x5            /* draw where src == key */
+#define CLR_CMP_FN              0x00000007ul   /* a true result keeps dst */
+#define CLR_CMP_FN_FALSE        0x0
+#define CLR_CMP_FN_TRUE         0x1
+#define CLR_CMP_FN_NOT_EQUAL    0x4
+#define CLR_CMP_FN_EQUAL        0x5
 #define CLR_CMP_SRC             0x03000000ul
 #define CLR_CMP_SRC_DST         0x0
 #define CLR_CMP_SRC_2D          0x1

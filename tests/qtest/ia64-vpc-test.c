@@ -7336,6 +7336,11 @@ static void test_agp_gart_dma(void)
 #define M64_REG(r)              (0x400u + (unsigned)(r) * 4u)
 #define M64_CONFIG_CHIP_ID      0x38
 #define M64_MEM_VGA_WP_SEL      0x2d
+#define M64_SRC_OFF_PITCH       0x60
+#define M64_SRC_Y_X             0x63
+#define M64_CLR_CMP_CLR         0xc0
+#define M64_CLR_CMP_MSK         0xc1
+#define M64_CLR_CMP_CNTL        0xc2
 #define M64_MEM_VGA_RP_SEL      0x2e
 #define M64_CONFIG_CNTL         0x37
 #define M64_CFG_MEM_VGA_AP_EN   0x00000004
@@ -7471,6 +7476,64 @@ static void mach64_do_fill(Mach64TestDev *a, unsigned pixw, unsigned bypp,
             }
         }
     }
+}
+
+/*
+ * Colour compare: a true comparison keeps the destination pixel (RAGE XL RRG
+ * CLR_CMP_CNTL MM 0_C2).  Source keying with EQUAL is a transparent blit;
+ * destination keying with NOT EQUAL paints only where the key already is.
+ */
+static void test_mach64_colour_compare(void)
+{
+    const uint32_t key = 0x00ff00ff, dst = 0x00123456, pitch = 32 * 4;
+    const uint32_t src[8] = {
+        key, 0x00010203, key, key, 0x00a0b0c0, 0x00d0e0f0, key, 0x00777777,
+    };
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    for (unsigned i = 0; i < 8; i++) {
+        qtest_writel(a.qts, a.fb + 10 * pitch + i * 4, src[i]);
+        qtest_writel(a.qts, a.fb + 20 * pitch + i * 4, dst);
+        /* every other destination pixel carries the key for the second case */
+        qtest_writel(a.qts, a.fb + 30 * pitch + i * 4, (i & 1) ? key : dst);
+    }
+    m64_wr(&a, M64_DP_PIX_WIDTH, M64_PIX_WIDTH_32BPP);
+    m64_wr(&a, M64_DST_OFF_PITCH, (32 / 8) << 22);
+    m64_wr(&a, M64_SRC_OFF_PITCH, (32 / 8) << 22);
+    m64_wr(&a, M64_DP_MIX, 0x7u << 16);
+    m64_wr(&a, M64_DP_WRITE_MASK, 0xffffffff);
+    m64_wr(&a, M64_SC_LEFT, 0);
+    m64_wr(&a, M64_SC_RIGHT, 0x3fff);
+    m64_wr(&a, M64_SC_TOP, 0);
+    m64_wr(&a, M64_SC_BOTTOM, 0x3fff);
+    m64_wr(&a, M64_DST_CNTL, M64_DST_DIR_DOWN_RIGHT);
+    m64_wr(&a, M64_CLR_CMP_CLR, key);
+    m64_wr(&a, M64_CLR_CMP_MSK, 0xffffffff);
+
+    /* source keyed: CLR_CMP_SRC = 2D source, FCN = EQUAL */
+    m64_wr(&a, M64_CLR_CMP_CNTL, (1u << 24) | 5);
+    m64_wr(&a, M64_DP_SRC, 0x3u << 8);                  /* FRGD_SRC = blit */
+    m64_wr(&a, M64_SRC_Y_X, 10);
+    m64_wr(&a, M64_DST_Y_X, 20);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (8u << 16) | 1);
+    for (unsigned i = 0; i < 8; i++) {
+        g_assert_cmphex(qtest_readl(a.qts, a.fb + 20 * pitch + i * 4), ==,
+                        src[i] == key ? dst : src[i]);
+    }
+
+    /* destination keyed: CLR_CMP_SRC = destination, FCN = NOT EQUAL */
+    m64_wr(&a, M64_CLR_CMP_CNTL, 4);
+    m64_wr(&a, M64_DP_SRC, 0x1u << 8);                  /* FRGD_SRC = colour */
+    m64_wr(&a, M64_DP_FRGD_CLR, 0x00abcdef);
+    m64_wr(&a, M64_DST_Y_X, 30);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (8u << 16) | 1);
+    for (unsigned i = 0; i < 8; i++) {
+        g_assert_cmphex(qtest_readl(a.qts, a.fb + 30 * pitch + i * 4), ==,
+                        (i & 1) ? 0x00abcdef : dst);
+    }
+
+    mach64_dev_close(&a);
 }
 
 static void test_mach64_2d_solid_fill(void)
@@ -7832,6 +7895,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ids", test_mach64_ids);
     qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
                    test_mach64_2d_solid_fill);
+    qtest_add_func("/ia64-vpc/mach64/colour-compare",
+                   test_mach64_colour_compare);
     qtest_add_func("/ia64-vpc/mach64/linear-aperture",
                    test_mach64_linear_aperture);
     qtest_add_func("/ia64-vpc/mach64/vga-paged-aperture",
