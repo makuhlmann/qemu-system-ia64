@@ -294,6 +294,7 @@
 #define DP_SRC_PIX_WIDTH_SHIFT  8
 #define DP_HOST_PIX_WIDTH       0x000f0000ul
 #define DP_HOST_PIX_WIDTH_SHIFT 16
+#define DP_BYTE_PIX_ORDER       0x01000000ul   /* 1 = LSB first in each byte */
 
 /* ---- DP_MIX ---- */
 #define DP_BKGD_MIX             0x0000001ful

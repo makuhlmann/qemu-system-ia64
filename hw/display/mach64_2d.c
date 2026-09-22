@@ -317,6 +317,23 @@ void mach64_2d_dst_trigger(Mach64VGAState *s)
 
 /* ---- host-data (CPU-to-screen) stream ---- */
 
+/*
+ * Monochrome host pixels are consumed a byte at a time -- byte 0 first for a
+ * left-to-right trajectory, byte 3 first for a right-to-left one -- and from
+ * the most significant bit down inside each byte, unless DP_BYTE_PIX_ORDER
+ * reverses that (RAGE PRO PRG sec 6.2.2.3, RAGE XL RRG DP_PIX_WIDTH MM 0_B4).
+ */
+static bool host_mono_bit(uint32_t data, unsigned n, bool lsb_first, bool l2r)
+{
+    unsigned byte = l2r ? n / 8 : 3 - n / 8;
+    unsigned bit = n % 8;
+
+    if (l2r != lsb_first) {
+        bit = 7 - bit;
+    }
+    return (data >> (byte * 8 + bit)) & 1;
+}
+
 void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
 {
     Mach64Ctx c;
@@ -333,14 +350,19 @@ void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
     }
 
     if (s->host_data.mono) {
-        /* 32 mono pixels per dword, MSB (bit 31) leftmost. */
-        for (int b = 31; b >= 0; b--) {
+        bool x_l2r = s->regs[DST_CNTL] & DST_X_DIR;
+        bool y_t2b = s->regs[DST_CNTL] & DST_Y_DIR;
+        bool lsb_first = s->regs[DP_PIX_WIDTH] & DP_BYTE_PIX_ORDER;
+
+        for (unsigned n = 0; n < 32; n++) {
             if (s->host_data.y >= (unsigned)h) {
                 break;
             }
-            bool bit = (data >> b) & 1;
-            int x = x0 + s->host_data.x;
-            int y = y0 + s->host_data.y;
+            bool bit = host_mono_bit(data, n, lsb_first, x_l2r);
+            int x = x0 + (x_l2r ? (int)s->host_data.x
+                                : w - 1 - (int)s->host_data.x);
+            int y = y0 + (y_t2b ? (int)s->host_data.y
+                                : h - 1 - (int)s->host_data.y);
             uint32_t off = dst_off(&c, x, y);
             unsigned mix = bit ? c.frgd_mix : c.bkgd_mix;
             uint32_t src = bit ? c.frgd_clr : c.bkgd_clr;
