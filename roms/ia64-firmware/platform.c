@@ -166,14 +166,16 @@ UINT8 fw_acpi_reset_value(void)
                                   : IA64_ACPI_PM_RESET_VALUE;
 }
 
+/*
+ * No board needs one: the IFB's SCIRC (45h) leaves the SCI on IRQ9 (SSDM
+ * 11.1.10), and every I/O SAPIC input is its ISA interrupt, so the FADT's
+ * SCI_INT already names the right global interrupt.
+ */
 BOOLEAN fw_acpi_sci_override(UINT32 *Gsi, UINT16 *Flags)
 {
-    if (!fw_platform_is_460gx()) {
-        return 0;
-    }
-    *Gsi = IA64_460GX_SCI_GSI;
-    *Flags = IA64_460GX_SCI_ISO_FLAGS;
-    return 1;
+    (void)Gsi;
+    (void)Flags;
+    return 0;
 }
 
 /*

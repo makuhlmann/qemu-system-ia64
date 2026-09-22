@@ -309,9 +309,11 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
         return NULL;
     }
     /*
-     * The bridge's SCI reaches the platform interrupt controller on the
-     * i2000's input 49: the vendor MADT's interrupt source override maps
-     * ISA IRQ 9 (the FADT's SCI_INT) to GSI 49, active low, level.
+     * The bridge leaves the SCI on IRQ9 (SCIRC 45h reset value, SSDM
+     * 11.1.10), so it arrives over the ISA interrupt wires above.  This
+     * output carries only the encodings that name no ISA interrupt, and the
+     * board takes those to input 49 -- the global interrupt the vendor MADT
+     * template's source override names for the part's own SCI pin.
      */
     qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_SCI,
                                 0, qdev_get_gpio_in(iosapic,

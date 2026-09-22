@@ -527,9 +527,10 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * programs to A00h (00:03.0 @44h = 0, @40h = 0A00h, @44h = 1): PM1a_EVT
  * A00h, PM1a_CNT A04h, PM_TMR A08h, GPE0 A0Ch.  The vendor FADT names SMI_CMD
  * B2h with ACPI_ENABLE A0h / ACPI_DISABLE A1h, the reset register at CF9h
- * (RST_CNT, value 06h), and SCI_INT 9; its MADT overrides ISA IRQ 9 to
- * GSI 49, active high, level (bios130.BIN FADT/MADT templates at 0x1001D0
- * and 0x100070).
+ * (RST_CNT, value 06h), and SCI_INT 9 (bios130.BIN FADT/MADT templates at
+ * 0x1001D0 and 0x100070).  The template's source override takes ISA IRQ 9 to
+ * GSI 49, active high, level -- the wiring of the part's own SCI pin, which
+ * the board reaches only when SCIRC (45h) selects it over IRQ9.
  */
 #define IA64_460GX_ACPI_PM_IO_BASE    0x00000a00U
 #define IA64_460GX_ACPI_GPE0_OFFSET   0x0000000cU
@@ -540,7 +541,6 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_460GX_RESET_CONTROL_PORT 0x00000cf9U
 #define IA64_460GX_RESET_CONTROL_VALUE 0x06U
 #define IA64_460GX_SCI_GSI            49
-#define IA64_460GX_SCI_ISO_FLAGS      0x000dU
 /*
  * The board's Super I/O UARTs (LPC47B27x LDN 4 and 5): COM1 at 3F8h on ISA
  * IRQ 4 is the console, COM2 at 2F8h on IRQ 3 the debug port when one is

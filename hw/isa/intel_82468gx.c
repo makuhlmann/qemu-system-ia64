@@ -73,6 +73,7 @@ struct Intel82468GXIFBState {
     qemu_irq legacy_irq;
     qemu_irq isa_irq[ISA_NUM_IRQS];
     qemu_irq sci;
+    qemu_irq sci_in;
     qemu_irq *pic_irqs;
     qemu_irq *isa_irqs;
     PICCommonState *master_pic;
@@ -156,15 +157,48 @@ struct Intel82468GXIFBState {
  */
 #define IFB_APM_IOPORT          0xb2
 
+/*
+ * SCIRC (45h) "specifies on which pin the SCI will appear on internally",
+ * reset value 000b = IRQ9 (SSDM 11.1.10).  "When this interrupt is chosen,
+ * the corresponding interrupt pin is blocked", so the SCI owns the line
+ * rather than sharing it with an ISA source.  The two encodings that name no
+ * ISA interrupt -- the part's own SCI pin and FEMPTY# -- leave through the
+ * separate "sci" output, which a board wires wherever it takes them.
+ */
+#define IFB_SCIRC           0x45
+#define IFB_SCIRC_MAP       0x07
+
+static const int ifb_scirc_isa_irq[8] = { 9, -1, -1, 8, 0, 10, 11, -1 };
+
+static int ifb_sci_isa_irq(Intel82468GXIFBState *s)
+{
+    PCIDevice *pci = PCI_DEVICE(s);
+
+    return ifb_scirc_isa_irq[pci->config[IFB_SCIRC] & IFB_SCIRC_MAP];
+}
+
+static void ifb_sci_set(void *opaque, int n, int level)
+{
+    Intel82468GXIFBState *s = opaque;
+    int irq = ifb_sci_isa_irq(s);
+
+    if (irq < 0) {
+        qemu_set_irq(s->sci, level);
+        return;
+    }
+    qemu_set_irq(s->pic_irqs[irq], level);
+    qemu_set_irq(s->isa_irq[irq], level);
+}
+
 static void ifb_acpi_update_sci(ACPIREGS *ar)
 {
     Intel82468GXIFBState *s = container_of(ar, Intel82468GXIFBState,
                                            acpi_regs);
 
     if (ar->pm1.cnt.cnt & ACPI_BITMASK_SCI_ENABLE) {
-        acpi_update_sci(ar, s->sci);
+        acpi_update_sci(ar, s->sci_in);
     } else {
-        qemu_set_irq(s->sci, 0);
+        qemu_set_irq(s->sci_in, 0);
     }
 }
 
@@ -286,6 +320,9 @@ static void ifb_isa_irq_handler(void *opaque, int irq, int level)
 {
     Intel82468GXIFBState *s = opaque;
 
+    if (irq == ifb_sci_isa_irq(s)) {
+        return;
+    }
     qemu_set_irq(s->pic_irqs[irq], level);
     qemu_set_irq(s->isa_irq[irq], level);
 }
@@ -500,6 +537,7 @@ static void ifb_lpc_write_config(PCIDevice *pci, uint32_t address,
     Intel82468GXIFBState *s = INTEL_82468GX_IFB(pci);
     uint16_t biosen = pci_get_word(pci->config + 0x4e);
     uint8_t rtccfg = pci->config[0xc8];
+    int old_sci_irq = ifb_sci_isa_irq(s);
     int i;
 
     for (i = 0; i < length; i++) {
@@ -514,6 +552,16 @@ static void ifb_lpc_write_config(PCIDevice *pci, uint32_t address,
     }
 
     pci_default_write_config(pci, address, value, length);
+    if (ranges_overlap(address, length, IFB_SCIRC, 1) &&
+        ifb_sci_isa_irq(s) != old_sci_irq) {
+        if (old_sci_irq < 0) {
+            qemu_set_irq(s->sci, 0);
+        } else {
+            qemu_set_irq(s->pic_irqs[old_sci_irq], 0);
+            qemu_set_irq(s->isa_irq[old_sci_irq], 0);
+        }
+        ifb_acpi_update_sci(&s->acpi_regs);
+    }
     if (biosen & BIT(15)) {
         pci_word_test_and_set_mask(pci->config + 0x4e, BIT(15));
     }
@@ -644,6 +692,7 @@ static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
     memory_region_add_subregion(pci_address_space_io(pci), 0,
                                 &s->acpi_pm);
     memory_region_set_enabled(&s->acpi_pm, false);
+    s->sci_in = qemu_allocate_irq(ifb_sci_set, s, 0);
     acpi_pm1_evt_init(&s->acpi_regs, ifb_acpi_update_sci, &s->acpi_pm);
     acpi_pm1_cnt_init(&s->acpi_regs, &s->acpi_pm,
                       false, false, 4, false);
