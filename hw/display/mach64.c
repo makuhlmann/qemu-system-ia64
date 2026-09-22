@@ -273,8 +273,16 @@ static void mach64_switch_mode(Mach64VGAState *s)
  * cursor colour 1, 10 transparent, 11 complement.  "Cursor pitch is always 64
  * pixels ... 16 bytes of data ... The pixel definition is specified in Intel
  * order.  The first pixel is defined in the low-order 2 bits of the low-order
- * byte in memory" (RAGE PRO PRG sec 6.4.3).  CUR_HORZ_VERT_OFF crops the
- * definition from its top left corner.
+ * byte in memory" (RAGE PRO PRG sec 6.4.3).
+ *
+ * The two halves of CUR_HORZ_VERT_OFF do not crop alike.  CUR_HORZ_OFF is a
+ * shift: the first column displayed is CUR_HORZ_OFF, so the cursor is
+ * 64 - CUR_HORZ_OFF wide.  Vertically there is no shift -- CUR_OFFSET already
+ * addresses the first line to display, and CUR_VERT_OFF only shortens the
+ * cursor to 64 - CUR_VERT_OFF lines.  The PRG's own SetHWCursorPos says so:
+ * when the cursor runs off the top of the screen it raises CUR_VERT_OFF *and*
+ * advances "CUR_OFFSET ... to point to the appropriate line in the cursor
+ * definition", where the horizontal case moves CUR_HORZ_OFF alone.
  */
 #define MACH64_CUR_CLR0         0
 #define MACH64_CUR_CLR1         1
@@ -328,7 +336,7 @@ static void mach64_cursor_define(Mach64VGAState *s)
                 *px = 0;
                 continue;
             }
-            switch (mach64_cursor_pixel(s, srcoff, y + voff, x + hoff)) {
+            switch (mach64_cursor_pixel(s, srcoff, y, x + hoff)) {
             case MACH64_CUR_CLR0:
                 *px = mach64_cursor_color(s, s->regs[CUR_CLR0]);
                 break;
@@ -383,10 +391,7 @@ static void mach64_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
     unsigned voff = (s->regs[CUR_HORZ_VERT_OFF] >> 16) & 0x3f;
     int row = scr_y - vga->hw_cursor_y;
 
-    if (!mach64_cursor_enabled(s) || row < 0 || row >= 64) {
-        return;
-    }
-    if ((unsigned)row + voff >= 64) {
+    if (!mach64_cursor_enabled(s) || row < 0 || row + (int)voff >= 64) {
         return;
     }
     srcoff = (s->regs[CUR_OFFSET] & 0x000fffff) * 8;
@@ -399,7 +404,7 @@ static void mach64_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
         if (vga->hw_cursor_x + i >= h) {
             return;
         }
-        switch (mach64_cursor_pixel(s, srcoff, row + voff, i + hoff)) {
+        switch (mach64_cursor_pixel(s, srcoff, row, i + hoff)) {
         case MACH64_CUR_CLR0:
             color = mach64_cursor_color(s, s->regs[CUR_CLR0]);
             break;
