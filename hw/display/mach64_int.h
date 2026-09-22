@@ -37,7 +37,7 @@
 #define MACH64_REV_RAGE_XL           0x27
 #define MACH64_REV_3DRAGE_II         0x9a
 
-#define MACH64_LINEAR_APER_SIZE      (8 * MiB)
+#define MACH64_LINEAR_APER_SIZE      (16 * MiB)
 
 #define TYPE_MACH64_VGA "mach64-vga"
 OBJECT_DECLARE_SIMPLE_TYPE(Mach64VGAState, MACH64_VGA)
@@ -74,6 +74,8 @@ struct Mach64VGAState {
     MemoryRegion linear_aper;
     MemoryRegion io;
     MemoryRegion mm;
+    MemoryRegion vga_aper;
+    MemoryRegion be_aper;
 
     /* Block-0 register file, indexed by Mach64 block index (see mach64_regs.h). */
     uint32_t regs[MACH64_NREGS];

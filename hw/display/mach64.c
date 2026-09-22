@@ -738,6 +738,120 @@ static uint32_t mach64_gui_traj_compose(const Mach64VGAState *s)
             GUI_TRAJ_HOST_CNTL_MASK);
 }
 
+/*
+ * Small dual paged apertures (RAGE PRO PRG sec 3.2.2.2): two 32 KiB windows at
+ * 0xA0000 and 0xA8000 whose pages into the frame buffer are selected
+ * independently for reads (MEM_VGA_RP_SEL) and writes (MEM_VGA_WP_SEL), the
+ * low half of each register paging the first window and the high half the
+ * second (RRG 0_2D/0_2E).  They reach the whole 8 MiB.
+ *
+ * The adapter BIOS sizes video memory through them: for each candidate size it
+ * writes a page-derived pattern to 32 bytes of every 32 KiB page and reads it
+ * back (vgabios-mach64.bin offsets 0x7B96 and 0x7CAA).  Without the paging
+ * every page aliases onto the same window, every candidate above one page
+ * fails, and the BIOS leaves MEM_CNTL's MEM_SIZE at 1 MiB.
+ *
+ * The PRG gates the apertures on accelerator or SVGA packed-pixel mode and
+ * names CFG_MEM_VGA_AP_EN only as the gate for the memory-mapped registers.
+ * We gate on CFG_MEM_VGA_AP_EN alone: guests that page these windows set it
+ * first, and it is zero in every VGA and VBE path, so the banked VBE window at
+ * 0xA0000 keeps the plain VGA behaviour.
+ */
+static hwaddr mach64_vga_aper_off(Mach64VGAState *s, hwaddr addr, bool write)
+{
+    uint32_t sel = s->regs[write ? MEM_VGA_WP_SEL : MEM_VGA_RP_SEL];
+    uint32_t page;
+
+    addr &= 0xffff;
+    page = (addr & MEM_VGA_PAGE_SIZE) ? (sel >> MEM_VGA_PS1_SHIFT) & 0xffff
+                                      : sel & MEM_VGA_PS0;
+    /* Unpopulated address bits alias, which is what makes the sizing work. */
+    return ((hwaddr)page * MEM_VGA_PAGE_SIZE + (addr & (MEM_VGA_PAGE_SIZE - 1)))
+           % s->vga.vram_size;
+}
+
+static uint64_t mach64_vga_aper_read(void *opaque, hwaddr addr, unsigned size)
+{
+    Mach64VGAState *s = opaque;
+    uint64_t val = 0;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        val |= (uint64_t)s->vga.vram_ptr[mach64_vga_aper_off(s, addr + i,
+                                                             false)] << (i * 8);
+    }
+    return val;
+}
+
+static void mach64_vga_aper_write(void *opaque, hwaddr addr, uint64_t data,
+                                  unsigned size)
+{
+    Mach64VGAState *s = opaque;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        hwaddr off = mach64_vga_aper_off(s, addr + i, true);
+
+        s->vga.vram_ptr[off] = (data >> (i * 8)) & 0xff;
+        memory_region_set_dirty(&s->vga.vram, off, 1);
+    }
+}
+
+static const MemoryRegionOps mach64_vga_aper_ops = {
+    .read = mach64_vga_aper_read,
+    .write = mach64_vga_aper_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
+};
+
+/*
+ * Second half of the linear aperture.  Enabling the big aperture also enables
+ * an 8 MiB big-endian view of the same frame buffer "at the standard linear
+ * aperture address plus 8MB", which is why the part needs a 16 MiB BAR and why
+ * CFG_MEM_AP_SIZE reads "2x8MB" (RAGE PRO PRG sec 3.2.2.3, RRG 0_37).  Windows'
+ * miniport sizes the frame buffer as half the aperture, so an 8 MiB BAR made it
+ * refuse every configuration above 4 MiB.
+ */
+static uint64_t mach64_be_aper_read(void *opaque, hwaddr addr, unsigned size)
+{
+    Mach64VGAState *s = opaque;
+    uint64_t val = 0;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        val |= (uint64_t)s->vga.vram_ptr[(addr + i) % s->vga.vram_size]
+               << (i * 8);
+    }
+    return val;
+}
+
+static void mach64_be_aper_write(void *opaque, hwaddr addr, uint64_t data,
+                                 unsigned size)
+{
+    Mach64VGAState *s = opaque;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        hwaddr off = (addr + i) % s->vga.vram_size;
+
+        s->vga.vram_ptr[off] = (data >> (i * 8)) & 0xff;
+        memory_region_set_dirty(&s->vga.vram, off, 1);
+    }
+}
+
+static const MemoryRegionOps mach64_be_aper_ops = {
+    .read = mach64_be_aper_read,
+    .write = mach64_be_aper_write,
+    .endianness = DEVICE_BIG_ENDIAN,
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
+};
+
+static void mach64_vga_aper_update(Mach64VGAState *s)
+{
+    memory_region_set_enabled(&s->vga_aper,
+                              (s->regs[CONFIG_CNTL] & CFG_MEM_VGA_AP_EN) != 0);
+}
+
 static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
 {
     Mach64VGAState *s = opaque;
@@ -943,6 +1057,13 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
     case GUI_STAT:
     case FIFO_STAT:
         return; /* read-only */
+    case CONFIG_CNTL:
+        mach64_reg_store(s, reg, byte, size, data);
+        /* CFG_MEM_AP_SIZE is read-only on PCI and always 2x8MB (RRG 0_37). */
+        s->regs[CONFIG_CNTL] = (s->regs[CONFIG_CNTL] & ~CFG_MEM_AP_SIZE) |
+                               CFG_MEM_AP_SIZE_2X8M;
+        mach64_vga_aper_update(s);
+        return;
     case GUI_TRAJ_CNTL:
         mach64_reg_store(s, reg, byte, size, data);
         mach64_gui_traj_split(s, s->regs[reg]);
@@ -1103,6 +1224,7 @@ static int mach64_post_load(void *opaque, int version_id)
         mach64_cursor_define(s);
     }
     mach64_update_irq(s);
+    mach64_vga_aper_update(s);
     graphic_hw_invalidate(s->vga.con);
     return 0;
 }
@@ -1195,6 +1317,18 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
         vga->cursor_draw_line = mach64_cursor_draw_line;
     }
 
+    /*
+     * Paged VGA aperture, disabled until CFG_MEM_VGA_AP_EN turns it on.  It
+     * needs a priority above 2: the guests that page it also put the VGA into
+     * chain-4 packed-pixel mode, for which vga_update_memory_access() maps the
+     * frame buffer straight onto 0xA0000 as a RAM alias at priority 2.
+     */
+    memory_region_init_io(&s->vga_aper, OBJECT(s), &mach64_vga_aper_ops, s,
+                          "mach64.vga-paged-aper", 0x10000);
+    memory_region_set_enabled(&s->vga_aper, false);
+    memory_region_add_subregion_overlap(pci_address_space(dev), 0x000a0000,
+                                        &s->vga_aper, 3);
+
     /* MMIO register block (BAR2). */
     memory_region_init_io(&s->mm, OBJECT(s), &mach64_mm_ops, s,
                           "mach64.mmregs", MACH64_MMIO_SIZE);
@@ -1207,10 +1341,14 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
     memory_region_init_alias(&s->io, OBJECT(s), "mach64.io", &s->mm,
                              MACH64_REG_BLOCK0_BASE, 0x100);
 
-    /* Linear framebuffer aperture (BAR0). */
+    /* Linear framebuffer aperture (BAR0): 8 MiB, then its big-endian view. */
     memory_region_init(&s->linear_aper, OBJECT(dev), "mach64.vram",
                        MACH64_LINEAR_APER_SIZE);
     memory_region_add_subregion(&s->linear_aper, 0, &vga->vram);
+    memory_region_init_io(&s->be_aper, OBJECT(s), &mach64_be_aper_ops, s,
+                          "mach64.vram-be", MACH64_LINEAR_APER_SIZE / 2);
+    memory_region_add_subregion(&s->linear_aper, MACH64_LINEAR_APER_SIZE / 2,
+                                &s->be_aper);
 
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->linear_aper);
     pci_register_bar(dev, 1, PCI_BASE_ADDRESS_SPACE_IO, &s->io);
@@ -1254,7 +1392,9 @@ static void mach64_vga_reset(DeviceState *dev)
     s->ddc_addr = -1;
     /* Engine out of reset on 264xT parts. */
     s->regs[GEN_TEST_CNTL] = GEN_GUI_RESETB;
+    s->regs[CONFIG_CNTL] = CFG_MEM_AP_SIZE_2X8M;   /* read-only, RRG 0_37 */
     mach64_update_irq(s);
+    mach64_vga_aper_update(s);
 
     /*
      * Seed the internal PLL with divider values a real video-BIOS POST would

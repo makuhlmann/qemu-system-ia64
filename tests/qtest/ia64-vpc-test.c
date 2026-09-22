@@ -7335,6 +7335,10 @@ static void test_agp_gart_dma(void)
  */
 #define M64_REG(r)              (0x400u + (unsigned)(r) * 4u)
 #define M64_CONFIG_CHIP_ID      0x38
+#define M64_MEM_VGA_WP_SEL      0x2d
+#define M64_MEM_VGA_RP_SEL      0x2e
+#define M64_CONFIG_CNTL         0x37
+#define M64_CFG_MEM_VGA_AP_EN   0x00000004
 #define M64_SCRATCH_REG0        0x20
 #define M64_DST_OFF_PITCH       0x40
 #define M64_DST_Y_X             0x43
@@ -7592,6 +7596,79 @@ static uint8_t i2c_rd_byte(Mach64TestDev *a, int ack)
     return v;
 }
 
+/*
+ * The linear aperture is 16 MiB: 8 MiB of frame buffer followed by its
+ * big-endian view ("the big endian aperture starts at the standard linear
+ * aperture address plus 8MB", RAGE PRO PRG sec 3.2.2.3).  CFG_MEM_AP_SIZE says
+ * so and is read-only on PCI (RRG 0_37).  Windows' miniport takes the frame
+ * buffer as half the aperture, so a short BAR halves the usable memory.
+ */
+static void test_mach64_linear_aperture(void)
+{
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+
+    /* CFG_MEM_AP_SIZE reads 2x8MB and does not take a write. */
+    g_assert_cmphex(m64_rd(&a, M64_CONFIG_CNTL) & 3, ==, 2);
+    m64_wr(&a, M64_CONFIG_CNTL, 1);
+    g_assert_cmphex(m64_rd(&a, M64_CONFIG_CNTL) & 3, ==, 2);
+
+    /* The same word, read back byte-swapped through the second half. */
+    qtest_writel(a.qts, a.fb + 0x1234, 0x11223344);
+    g_assert_cmphex(qtest_readl(a.qts, a.fb + 0x1234), ==, 0x11223344);
+    g_assert_cmphex(qtest_readl(a.qts, a.fb + 0x800000 + 0x1234), ==,
+                    0x44332211);
+
+    /* a write through the big-endian half lands swapped in the buffer */
+    qtest_writel(a.qts, a.fb + 0x800000 + 0x2000, 0xaabbccdd);
+    g_assert_cmphex(qtest_readl(a.qts, a.fb + 0x2000), ==, 0xddccbbaa);
+
+    mach64_dev_close(&a);
+}
+
+/*
+ * Small dual paged apertures: 0xA0000 and 0xA8000 page independently into the
+ * frame buffer, reads through MEM_VGA_RP_SEL and writes through
+ * MEM_VGA_WP_SEL (RAGE PRO PRG sec 3.2.2.2).  The adapter BIOS sizes video
+ * memory through them, so a regression here costs the guest 7 of its 8 MiB.
+ */
+static void test_mach64_vga_paged_aperture(void)
+{
+    Mach64TestDev a;
+    unsigned i;
+
+    mach64_dev_open(&a);
+
+    /* Mark four pages through the linear aperture. */
+    for (i = 0; i < 4; i++) {
+        qtest_writel(a.qts, a.fb + (0x7c + i) * 0x8000, 0xa5000000 + i);
+    }
+
+    m64_wr(&a, M64_MEM_VGA_RP_SEL, (0x7du << 16) | 0x7cu);
+    m64_wr(&a, M64_MEM_VGA_WP_SEL, (0x7fu << 16) | 0x7eu);
+    m64_wr(&a, M64_CONFIG_CNTL, M64_CFG_MEM_VGA_AP_EN);
+
+    /* Reads follow RP_SEL: low window page 0x7c, high window page 0x7d. */
+    g_assert_cmphex(qtest_readl(a.qts, 0xa0000), ==, 0xa5000000);
+    g_assert_cmphex(qtest_readl(a.qts, 0xa8000), ==, 0xa5000001);
+
+    /* Writes follow WP_SEL, which is independent of the read pages. */
+    qtest_writel(a.qts, 0xa0000, 0x1234abcd);
+    qtest_writel(a.qts, 0xa8000, 0x5678ef01);
+    g_assert_cmphex(qtest_readl(a.qts, a.fb + 0x7e * 0x8000), ==, 0x1234abcd);
+    g_assert_cmphex(qtest_readl(a.qts, a.fb + 0x7f * 0x8000), ==, 0x5678ef01);
+    /* the read pages are untouched */
+    g_assert_cmphex(qtest_readl(a.qts, a.fb + 0x7c * 0x8000), ==, 0xa5000000);
+
+    /* Clearing CFG_MEM_VGA_AP_EN takes the aperture away again. */
+    m64_wr(&a, M64_CONFIG_CNTL, 0);
+    qtest_writel(a.qts, 0xa0000, 0xffffffff);
+    g_assert_cmphex(qtest_readl(a.qts, a.fb + 0x7e * 0x8000), ==, 0x1234abcd);
+
+    mach64_dev_close(&a);
+}
+
 static void test_mach64_ddc_edid(void)
 {
     Mach64TestDev a;
@@ -7755,6 +7832,10 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ids", test_mach64_ids);
     qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
                    test_mach64_2d_solid_fill);
+    qtest_add_func("/ia64-vpc/mach64/linear-aperture",
+                   test_mach64_linear_aperture);
+    qtest_add_func("/ia64-vpc/mach64/vga-paged-aperture",
+                   test_mach64_vga_paged_aperture);
     qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
     qtest_add_func("/ia64-vpc/eepro100/csr-windows",
                    test_eepro100_csr_windows);

@@ -112,11 +112,17 @@
 #define I2C_CNTL_GO             0x00000400ul   /* byte 1: issue the transfer */
 #define MEM_VGA_WP_SEL          0x2d
 #define MEM_VGA_RP_SEL          0x2e
+#define MEM_VGA_PS0             0x0000fffful   /* page of the 0xA0000 window */
+#define MEM_VGA_PS1_SHIFT       16             /* page of the 0xA8000 window */
+#define MEM_VGA_PAGE_SIZE       0x8000
 #define DAC_REGS                0x30
 #define DAC_CNTL                0x31
 #define GEN_TEST_CNTL           0x34
 #define CUSTOM_MACRO_CNTL       0x35
 #define CONFIG_CNTL             0x37
+#define CFG_MEM_AP_SIZE         0x00000003ul   /* bits 1:0, read-only */
+#define CFG_MEM_AP_SIZE_2X8M    0x00000002ul
+#define CFG_MEM_VGA_AP_EN       0x00000004ul   /* bit 2 */
 #define CONFIG_CHIP_ID          0x38
 #define CONFIG_STAT0            0x39
 
