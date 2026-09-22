@@ -797,16 +797,22 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
  */
 static void mach64_dp_set_gui_engine(Mach64VGAState *s, uint32_t v)
 {
+    /* RRG Table 5-12; row 0 and row 14 are undefined and leave the path be. */
     static const struct { uint32_t src, mix, traj; } combo[16] = {
-        [1] = { 0x0000100, 0x070003, 0x00000023 },
-        [2] = { 0x0000200, 0x070007, 0x00000003 },
-        [3] = { 0x0020100, 0x070007, 0x00000003 },
-        [4] = { 0x0000100, 0x070007, 0x00000023 },
-        [5] = { 0x0010100, 0x070007, 0x01000003 },
-        [6] = { 0x0000100, 0x070007, 0x00000003 },
-        [7] = { 0x0000300, 0x070007, 0x00030003 },
-        [8] = { 0x0000300, 0x070007, 0x00000000 },
-        [9] = { 0x0000300, 0x070007, 0x00000001 },
+        [1]  = { 0x0000100, 0x0070003, 0x00000023 },
+        [2]  = { 0x0000200, 0x0070007, 0x00000003 },
+        [3]  = { 0x0020100, 0x0070007, 0x00000003 },
+        [4]  = { 0x0000100, 0x0070007, 0x00000023 },
+        [5]  = { 0x0010100, 0x0070007, 0x01000003 },
+        [6]  = { 0x0000100, 0x0070007, 0x00000003 },
+        [7]  = { 0x0000300, 0x0070007, 0x00030003 },
+        [8]  = { 0x0000300, 0x0070007, 0x00000000 },
+        [9]  = { 0x0000300, 0x0070007, 0x00000001 },
+        [10] = { 0x0000300, 0x0070007, 0x00000002 },
+        [11] = { 0x0000300, 0x0070007, 0x00000003 },
+        [12] = { 0x0020100, 0x0070003, 0x1004001b },
+        [13] = { 0x0020100, 0x0070003, 0x0004001b },
+        [15] = { 0x0000300, 0x0070007, 0x0004001b },
     };
     static const uint16_t pitch_tab[16] = {
         0, 320, 352, 384, 640, 800, 896, 512,
@@ -818,6 +824,7 @@ static void mach64_dp_set_gui_engine(Mach64VGAState *s, uint32_t v)
     unsigned pitch = pitch_tab[pidx];
     unsigned srcw = (v & DP_SGE_SRC_PIX_WIDTH) ? dstw : PIX_WIDTH_1BPP;
 
+    /* Table 5-11 leaves DP_HOST_PIX_WIDTH and DP_BYTE_PIX_ORDER at 0. */
     s->regs[DP_PIX_WIDTH] = dstw | (srcw << DP_SRC_PIX_WIDTH_SHIFT);
     if (v & DP_SGE_DST_PITCH_BY_2) {
         pitch *= 2;
@@ -831,6 +838,7 @@ static void mach64_dp_set_gui_engine(Mach64VGAState *s, uint32_t v)
     if (combo[cmb].src != 0) {
         s->regs[DP_SRC] = combo[cmb].src;
         s->regs[DP_MIX] = combo[cmb].mix;
+        mach64_gui_traj_split(s, combo[cmb].traj);
     }
     /* Table 5-11: the registers the write leaves in a known state. */
     s->regs[DST_Y_X] = 0;
@@ -840,7 +848,6 @@ static void mach64_dp_set_gui_engine(Mach64VGAState *s, uint32_t v)
     s->regs[SC_LEFT_RIGHT] = 0x1fff0000;
     s->regs[DP_WRITE_MASK] = 0xffffffff;
     s->regs[CLR_CMP_CNTL] = 0;
-    s->regs[SRC_CNTL] = 0;
 }
 
 static void mach64_reg_store(Mach64VGAState *s, unsigned reg, unsigned byte,
