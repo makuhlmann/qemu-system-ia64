@@ -266,11 +266,45 @@ static void mach64_switch_mode(Mach64VGAState *s)
               vga->vbe_start_addr, off_ok, vga->vbe_size);
 }
 
-/* ---- hardware cursor (64x64 2bpp AND/XOR, identical model to the Rage 128) ---- */
+/* ---- hardware cursor ---- */
+
+/*
+ * "Each cursor pixel is defined by a 2-bit field": 00 cursor colour 0, 01
+ * cursor colour 1, 10 transparent, 11 complement.  "Cursor pitch is always 64
+ * pixels ... 16 bytes of data ... The pixel definition is specified in Intel
+ * order.  The first pixel is defined in the low-order 2 bits of the low-order
+ * byte in memory" (RAGE PRO PRG sec 6.4.3).  CUR_HORZ_VERT_OFF crops the
+ * definition from its top left corner.
+ */
+#define MACH64_CUR_CLR0         0
+#define MACH64_CUR_CLR1         1
+#define MACH64_CUR_TRANSPARENT  2
+
+static unsigned mach64_cursor_pixel(const Mach64VGAState *s, uint32_t srcoff,
+                                    unsigned row, unsigned col)
+{
+    uint8_t byte = s->vga.vram_ptr[srcoff + row * 16 + col / 4];
+
+    return (byte >> ((col % 4) * 2)) & 3;
+}
+
+/*
+ * "for pseudo color modes, the colors are specified in color indices, and for
+ * direct color modes ... in 24-bit true color" (PRG sec 6.4.3).
+ */
+static uint32_t mach64_cursor_color(Mach64VGAState *s, uint32_t clr)
+{
+    unsigned pw = (s->regs[CRTC_GEN_CNTL] & CRTC_PIX_WIDTH) >>
+                  CRTC_PIX_WIDTH_SHIFT;
+
+    if (pw == PIX_WIDTH_8BPP) {
+        return s->vga.last_palette[clr & 0xff] | 0xff000000;
+    }
+    return (clr & 0x00ffffff) | 0xff000000;
+}
 
 static void mach64_cursor_define(Mach64VGAState *s)
 {
-    uint64_t data[128];
     uint32_t srcoff;
     unsigned hoff, voff;
 
@@ -283,27 +317,34 @@ static void mach64_cursor_define(Mach64VGAState *s)
     if (srcoff > s->vga.vram_size - 64 * 16) {
         return;
     }
-    for (unsigned i = 0; i < 64; i++) {
-        uint64_t and_row = ~0ULL, xor_row = 0;
-
-        if (i + voff < 64) {
-            const uint8_t *src = &s->vga.vram_ptr[srcoff + i * 16];
-
-            and_row = ldq_be_p(src);
-            xor_row = ldq_be_p(src + 8);
-            if (hoff) {
-                and_row = (and_row << hoff) | ((1ULL << hoff) - 1);
-                xor_row <<= hoff;
-            }
-        }
-        stq_be_p(&data[i], and_row);
-        stq_be_p(&data[i + 64], xor_row);
-    }
     if (!s->cursor) {
         s->cursor = cursor_alloc(64, 64);
     }
-    cursor_set_mono(s->cursor, s->regs[CUR_CLR1], s->regs[CUR_CLR0],
-                    (uint8_t *)&data[64], 1, (uint8_t *)&data[0]);
+    for (unsigned y = 0; y < 64; y++) {
+        for (unsigned x = 0; x < 64; x++) {
+            uint32_t *px = &s->cursor->data[y * 64 + x];
+
+            if (x + hoff >= 64 || y + voff >= 64) {
+                *px = 0;
+                continue;
+            }
+            switch (mach64_cursor_pixel(s, srcoff, y + voff, x + hoff)) {
+            case MACH64_CUR_CLR0:
+                *px = mach64_cursor_color(s, s->regs[CUR_CLR0]);
+                break;
+            case MACH64_CUR_CLR1:
+                *px = mach64_cursor_color(s, s->regs[CUR_CLR1]);
+                break;
+            case MACH64_CUR_TRANSPARENT:
+                *px = 0;
+                break;
+            default:
+                /* complement; ui/cursor.c marks such a pixel this way */
+                *px = 0x80000000;
+                break;
+            }
+        }
+    }
     dpy_cursor_define(s->vga.con, s->cursor);
 }
 
@@ -337,7 +378,6 @@ static void mach64_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
 {
     Mach64VGAState *s = container_of(vga, Mach64VGAState, vga);
     uint32_t srcoff, color, h;
-    uint64_t abits, xbits, mask;
     uint32_t *dp = (uint32_t *)d;
     unsigned hoff = s->regs[CUR_HORZ_VERT_OFF] & 0x3f;
     unsigned voff = (s->regs[CUR_HORZ_VERT_OFF] >> 16) & 0x3f;
@@ -349,32 +389,28 @@ static void mach64_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
     if ((unsigned)row + voff >= 64) {
         return;
     }
-    srcoff = (s->regs[CUR_OFFSET] & 0x000fffff) * 8 + row * 16;
-    if (srcoff > s->vga.vram_size - 16) {
+    srcoff = (s->regs[CUR_OFFSET] & 0x000fffff) * 8;
+    if (srcoff > s->vga.vram_size - 64 * 16) {
         return;
     }
     dp = &dp[vga->hw_cursor_x];
     h = (((s->regs[CRTC_H_TOTAL_DISP] & CRTC_H_DISP) >> 16) + 1) * 8;
-    abits = ldq_be_p(&vga->vram_ptr[srcoff]);
-    xbits = ldq_be_p(&vga->vram_ptr[srcoff + 8]);
-    if (hoff) {
-        abits = (abits << hoff) | ((1ULL << hoff) - 1);
-        xbits <<= hoff;
-    }
-    mask = BIT_ULL(63);
-    for (int i = 0; i < 64; i++, mask >>= 1) {
+    for (int i = 0; i < 64 - (int)hoff; i++) {
         if (vga->hw_cursor_x + i >= h) {
             return;
         }
-        if (abits & mask) {
-            if (xbits & mask) {
-                color = dp[i] ^ 0xffffffff;
-            } else {
-                continue;
-            }
-        } else {
-            color = (xbits & mask ? s->regs[CUR_CLR1] :
-                                    s->regs[CUR_CLR0]) | 0xff000000;
+        switch (mach64_cursor_pixel(s, srcoff, row + voff, i + hoff)) {
+        case MACH64_CUR_CLR0:
+            color = mach64_cursor_color(s, s->regs[CUR_CLR0]);
+            break;
+        case MACH64_CUR_CLR1:
+            color = mach64_cursor_color(s, s->regs[CUR_CLR1]);
+            break;
+        case MACH64_CUR_TRANSPARENT:
+            continue;
+        default:
+            color = dp[i] ^ 0x00ffffff;
+            break;
         }
         dp[i] = color;
     }
