@@ -7338,6 +7338,8 @@ static void test_agp_gart_dma(void)
 #define M64_SCRATCH_REG0        0x20
 #define M64_DST_OFF_PITCH       0x40
 #define M64_DST_Y_X             0x43
+#define M64_DST_CNTL            0x4c
+#define M64_DST_DIR_DOWN_RIGHT  0x00000003
 #define M64_DST_HEIGHT_WIDTH    0x46
 #define M64_SC_LEFT             0xa8
 #define M64_SC_RIGHT            0xa9
@@ -7445,6 +7447,12 @@ static void mach64_do_fill(Mach64TestDev *a, unsigned pixw, unsigned bypp,
     m64_wr(a, M64_SC_RIGHT, 0x3fff);
     m64_wr(a, M64_SC_TOP, 0);
     m64_wr(a, M64_SC_BOTTOM, 0x3fff);
+    /*
+     * DST_CNTL "must be set for all draw operations" (RAGE XL RRG): its
+     * direction bits say which way the rectangle runs from DST_Y_X, and the
+     * reset value takes it up and to the left.
+     */
+    m64_wr(a, M64_DST_CNTL, M64_DST_DIR_DOWN_RIGHT);
     m64_wr(a, M64_DST_Y_X, 0);                          /* x=0, y=0 */
     /* the DST_HEIGHT_WIDTH write (W high, H low) triggers the fill */
     m64_wr(a, M64_DST_HEIGHT_WIDTH, (width << 16) | height);

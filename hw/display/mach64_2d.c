@@ -244,12 +244,13 @@ static void fill_rect(Mach64Ctx *c, int x0, int y0, int w, int h,
 static void copy_rect(Mach64Ctx *c, int dx0, int dy0, int sx0, int sy0,
                       int w, int h, bool x_l2r, bool y_t2b)
 {
-    for (int jj = 0; jj < h; jj++) {
-        int j = y_t2b ? jj : h - 1 - jj;
-        int dy = dy0 + j, sy = sy0 + j;
-        for (int ii = 0; ii < w; ii++) {
-            int i = x_l2r ? ii : w - 1 - ii;
-            int dx = dx0 + i, sx = sx0 + i;
+    int xs = x_l2r ? 1 : -1;
+    int ys = y_t2b ? 1 : -1;
+
+    for (int j = 0; j < h; j++) {
+        int dy = dy0 + j * ys, sy = sy0 + j * ys;
+        for (int i = 0; i < w; i++) {
+            int dx = dx0 + i * xs, sx = sx0 + i * xs;
             uint32_t soff, doff, src;
 
             if (!in_scissor(c, dx, dy)) {
@@ -281,6 +282,14 @@ void mach64_2d_dst_trigger(Mach64VGAState *s)
     int h = s->regs[DST_HEIGHT_WIDTH] & 0x3fff;
     unsigned frgd_src = (s->regs[DP_SRC] >> DP_FRGD_SRC_SHIFT) & 7;
     unsigned mono_src = (s->regs[DP_SRC] & DP_MONO_SRC) >> DP_MONO_SRC_SHIFT;
+    /*
+     * DST_X_DIR and DST_Y_DIR "determine the trajectory quadrant that the
+     * destination area and the source area will take" (RAGE XL RRG,
+     * DST_CNTL): DST_Y_X is where the draw starts, and the rectangle extends
+     * from it the way the trajectory runs -- leftwards and upwards when the
+     * bits are clear, which is how the tiling side effect subtracts the width
+     * there.  It is not a walk order inside a fixed rectangle.
+     */
     bool x_l2r = s->regs[DST_CNTL] & DST_X_DIR;
     bool y_t2b = s->regs[DST_CNTL] & DST_Y_DIR;
 
@@ -308,11 +317,13 @@ void mach64_2d_dst_trigger(Mach64VGAState *s)
         copy_rect(&c, x, y, sx, sy, w, h, x_l2r, y_t2b);
     } else if (frgd_src == SRC_PATTERN ||
                (s->regs[SRC_CNTL] & SRC_PATT_EN)) {
-        fill_rect(&c, x, y, w, h, true);
+        fill_rect(&c, x_l2r ? x : x - w + 1, y_t2b ? y : y - h + 1, w, h, true);
     } else {
-        fill_rect(&c, x, y, w, h, false);
+        fill_rect(&c, x_l2r ? x : x - w + 1, y_t2b ? y : y - h + 1, w, h,
+                  false);
     }
-    mach64_2d_set_dirty(s, c.dst_base, x, y, w, h);
+    mach64_2d_set_dirty(s, c.dst_base, x_l2r ? x : x - w + 1,
+                        y_t2b ? y : y - h + 1, w, h);
 }
 
 /* ---- host-data (CPU-to-screen) stream ---- */
@@ -359,10 +370,8 @@ void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
                 break;
             }
             bool bit = host_mono_bit(data, n, lsb_first, x_l2r);
-            int x = x0 + (x_l2r ? (int)s->host_data.x
-                                : w - 1 - (int)s->host_data.x);
-            int y = y0 + (y_t2b ? (int)s->host_data.y
-                                : h - 1 - (int)s->host_data.y);
+            int x = x0 + (int)s->host_data.x * (x_l2r ? 1 : -1);
+            int y = y0 + (int)s->host_data.y * (y_t2b ? 1 : -1);
             uint32_t off = dst_off(&c, x, y);
             unsigned mix = bit ? c.frgd_mix : c.bkgd_mix;
             uint32_t src = bit ? c.frgd_clr : c.bkgd_clr;
