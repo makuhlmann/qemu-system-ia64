@@ -4,6 +4,16 @@
 - The VGA BIOS and the Cirrus VGA BIOS come from the LGPL VGA bios
   project (http://www.nongnu.org/vgabios/).
 
+- bios.bin, bios-256k.bin, bios-microvm.bin, vgabios.bin and
+  vgabios-{ati,bochs-display,cirrus,qxl,ramfb,stdvga,virtio,vmware}.bin are the
+  qemu.org prebuilt images of SeaBIOS rel-1.17.0 (commit b52ca86e,
+  https://gitlab.com/qemu-project/seabios.git).
+
+- vgabios-nv15gl.bin is SeaVGABIOS (LGPLv3) with an NVIDIA NV15 backend for the
+  nv15gl-vga device.  It is built from roms/seabios, a SeaBIOS fork at
+  https://github.com/makuhlmann/qemu-seabios, with roms/config.vga-nv15gl:
+  make -C roms seavgabios-nv15gl FIRMWARE_EXTRAVERSION=-qemu-ia64 PYTHON=python3
+
 - OpenBIOS (http://www.openbios.org/) is a free (GPL v2) portable
   firmware implementation. The goal is to implement a 100% IEEE
   1275-1994 (referred to as Open Firmware) compliant firmware.
