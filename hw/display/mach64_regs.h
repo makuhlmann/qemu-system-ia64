@@ -140,6 +140,7 @@
 #define DST_BRES_INC            0x4a
 #define DST_BRES_DEC            0x4b
 #define DST_CNTL                0x4c
+#define DST_Y_X_ALIAS           0x4d           /* RAGE XL RRG: DST_Y_X alias */
 #define SRC_OFF_PITCH           0x60
 #define SRC_X                   0x61
 #define SRC_Y                   0x62
@@ -353,6 +354,9 @@
 #define DST_24_ROT_EN           0x00000080ul
 #define DST_24_ROT              0x00000700ul
 #define DST_24_ROT_SHIFT        8
+
+/* ---- DST_WIDTH ---- */
+#define DST_WIDTH_FILL_DIS      0x80000000ul   /* write without launching */
 
 /* ---- SRC_CNTL ---- */
 #define SRC_PATT_EN             0x00000001ul

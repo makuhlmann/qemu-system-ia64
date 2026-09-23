@@ -7337,6 +7337,10 @@ static void test_agp_gart_dma(void)
 #define M64_CONFIG_CHIP_ID      0x38
 #define M64_MEM_VGA_WP_SEL      0x2d
 #define M64_SRC_OFF_PITCH       0x60
+#define M64_DST_X               0x41
+#define M64_DST_Y               0x42
+#define M64_DST_WIDTH           0x44
+#define M64_DST_HEIGHT          0x45
 #define M64_SRC_CNTL            0x6d
 #define M64_HOST_DATA0          0x80
 #define M64_HOST_CNTL           0x90
@@ -7750,6 +7754,54 @@ static void test_mach64_colour_reg_write(void)
     mach64_dev_close(&a);
 }
 
+/*
+ * Of the separate destination registers DST_WIDTH launches the rectangle,
+ * unless DST_WIDTH_FILL_DIS rides along, and DST_HEIGHT does not (RAGE XL RRG
+ * MM 0_44, 0_45).  A span fill sets the height once and steps down with
+ * DST_Y_TILE between DST_X / DST_WIDTH pairs.
+ */
+static void test_mach64_dst_width_launch(void)
+{
+    const uint32_t pitch = 32;
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    for (unsigned i = 0; i < 8 * pitch; i++) {
+        qtest_writeb(a.qts, a.fb + i, 0);
+    }
+    m64_wr(&a, M64_DP_PIX_WIDTH, M64_PIX_WIDTH_8BPP);
+    m64_wr(&a, M64_DST_OFF_PITCH, (32 / 8) << 22);
+    m64_wr(&a, M64_DP_FRGD_CLR, 0x77);
+    m64_wr(&a, M64_DP_MIX, 0x7u << 16);
+    m64_wr(&a, M64_DP_SRC, 0x1u << 8);
+    m64_wr(&a, M64_DP_WRITE_MASK, 0xffffffff);
+    m64_wr(&a, M64_SC_LEFT, 0);
+    m64_wr(&a, M64_SC_RIGHT, 0x3fff);
+    m64_wr(&a, M64_SC_TOP, 0);
+    m64_wr(&a, M64_SC_BOTTOM, 0x3fff);
+    m64_wr(&a, M64_DST_CNTL, M64_DST_DIR_DOWN_RIGHT | 0x10);   /* Y_TILE */
+
+    m64_wr(&a, M64_DST_Y, 2);
+    m64_wr(&a, M64_DST_HEIGHT, 1);                 /* holds, draws nothing */
+    m64_wr(&a, M64_DST_X, 1);
+    m64_wr(&a, M64_DST_WIDTH, 3);                  /* row 2, x 1..3 */
+    m64_wr(&a, M64_DST_X, 0);
+    m64_wr(&a, M64_DST_WIDTH, 5);                  /* row 3, x 0..4 */
+    m64_wr(&a, M64_DST_X, 6);
+    m64_wr(&a, M64_DST_WIDTH, 0x80000002);         /* FILL_DIS: no draw */
+
+    for (unsigned y = 0; y < 6; y++) {
+        for (unsigned x = 0; x < 10; x++) {
+            bool on = (y == 2 && x >= 1 && x <= 3) || (y == 3 && x <= 4);
+
+            g_assert_cmphex(qtest_readb(a.qts, a.fb + y * pitch + x), ==,
+                            on ? 0x77 : 0);
+        }
+    }
+
+    mach64_dev_close(&a);
+}
+
 static void test_mach64_2d_solid_fill(void)
 {
     Mach64TestDev a;
@@ -8118,6 +8170,8 @@ int main(int argc, char **argv)
                    test_mach64_packed_24bpp);
     qtest_add_func("/ia64-vpc/mach64/colour-reg-write",
                    test_mach64_colour_reg_write);
+    qtest_add_func("/ia64-vpc/mach64/dst-width-launch",
+                   test_mach64_dst_width_launch);
     qtest_add_func("/ia64-vpc/mach64/colour-compare",
                    test_mach64_colour_compare);
     qtest_add_func("/ia64-vpc/mach64/linear-aperture",

@@ -1175,9 +1175,8 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         s->regs[DST_Y_X] = ((s->regs[reg] & 0x3fff) << 16) |
                            ((s->regs[reg] >> 16) & 0x7fff);
         break;
-    case DST_WIDTH:
-        s->regs[DST_HEIGHT_WIDTH] = (s->regs[DST_HEIGHT_WIDTH] & 0x0000ffff) |
-                                    ((s->regs[reg] & 0x3fff) << 16);
+    case DST_Y_X_ALIAS:
+        s->regs[DST_Y_X] = s->regs[reg];
         break;
     case SC_LEFT_RIGHT:  /* LEFT low, RIGHT high */
         s->regs[SC_LEFT] = s->regs[reg] & 0x3fff;
@@ -1188,10 +1187,31 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         s->regs[SC_BOTTOM] = (s->regs[reg] >> 16) & 0x7fff;
         break;
 
-    /* Trajectory launches. */
-    case DST_HEIGHT:  /* separate-register rect: W already set, H triggers */
+    case DST_HEIGHT:
         s->regs[DST_HEIGHT_WIDTH] = (s->regs[DST_HEIGHT_WIDTH] & 0xffff0000) |
                                     (s->regs[reg] & 0x7fff);
+        break;
+
+    /*
+     * Trajectory launches.  Of the separate registers it is DST_WIDTH that
+     * "initiates a draw operation", unless DST_WIDTH_FILL_DIS is set in the
+     * same write; DST_HEIGHT only holds the height (RAGE XL RRG MM 0_44,
+     * 0_45).  A span fill writes DST_HEIGHT = 1 once and then DST_X and
+     * DST_WIDTH per span, stepping down with DST_Y_TILE (WXPSP1
+     * drivers/video/ms/ati/disp/fastfill.c:1037-1069).
+     */
+    case DST_WIDTH:
+        s->regs[DST_HEIGHT_WIDTH] = (s->regs[DST_HEIGHT_WIDTH] & 0x0000ffff) |
+                                    ((s->regs[reg] & 0x3fff) << 16);
+        if (!(data & DST_WIDTH_FILL_DIS)) {
+            mach64_2d_dst_trigger(s);
+        }
+        break;
+    case DST_X_WIDTH:  /* X low, W high */
+        s->regs[DST_Y_X] = (s->regs[DST_Y_X] & 0x0000ffff) |
+                           ((s->regs[reg] & 0x3fff) << 16);
+        s->regs[DST_HEIGHT_WIDTH] = (s->regs[DST_HEIGHT_WIDTH] & 0x0000ffff) |
+                                    (s->regs[reg] & 0x3fff0000);
         mach64_2d_dst_trigger(s);
         break;
     case DST_WIDTH_HEIGHT:  /* W low, H high */
