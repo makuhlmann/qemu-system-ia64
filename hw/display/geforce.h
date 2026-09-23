@@ -650,6 +650,7 @@ struct NV15State {
     /* redraw bookkeeping (mirrors bochs redraw_area into VGA dirty bitmap) */
     unsigned last_width, last_height, last_bpp;
     bool full_update_pending;
+    bool svga_scanout;       /* the last frame came from the NV scanout */
     MemoryRegionSection fbsection;
     bool fbsection_valid;
     uint32_t fbsection_base;

@@ -1954,11 +1954,23 @@ static void nv_draw_cursor(NV15State *s, DisplaySurface *surface)
     }
 }
 
+static void nv_gfx_invalidate(void *opaque);
+
 static bool nv_gfx_update(void *opaque)
 {
     NV15State *s = opaque;
     VGACommonState *vga = &s->vga;
     uint8_t crtc28 = s->crtc.reg[0x28] & 0x7F;
+
+    /*
+     * The VGA core and the NV scanout each cache the console geometry; after
+     * a switch the other side's frame is stale and the VGA core would not
+     * resize a console it did not size itself.
+     */
+    if ((crtc28 != 0x00) != s->svga_scanout) {
+        s->svga_scanout = crtc28 != 0x00;
+        nv_gfx_invalidate(s);
+    }
 
     if (crtc28 == 0x00) {
         return nv_vga_hw_ops.gfx_update ? nv_vga_hw_ops.gfx_update(vga) : true;
