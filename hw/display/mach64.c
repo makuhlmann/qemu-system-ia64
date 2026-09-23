@@ -1004,7 +1004,23 @@ static void mach64_dp_set_gui_engine(Mach64VGAState *s, uint32_t v)
         s->regs[DP_MIX] = combo[cmb].mix;
         mach64_gui_traj_split(s, combo[cmb].traj);
     }
+    /* SET_SRC_HGTWID1_2: both general-pattern extents, 8x8, 32x1 or 24x8. */
+    switch ((v & DP_SGE_SRC_HGTWID) >> DP_SGE_SRC_HGTWID_SHIFT) {
+    case 0:
+        s->regs[SRC_HEIGHT1_WIDTH1] = s->regs[SRC_HEIGHT2_WIDTH2] =
+            (8u << 16) | 8;
+        break;
+    case 1:
+        s->regs[SRC_HEIGHT1_WIDTH1] = s->regs[SRC_HEIGHT2_WIDTH2] =
+            (32u << 16) | 1;
+        break;
+    case 2:
+        s->regs[SRC_HEIGHT1_WIDTH1] = s->regs[SRC_HEIGHT2_WIDTH2] =
+            (24u << 16) | 8;
+        break;
+    }
     /* Table 5-11: the registers the write leaves in a known state. */
+    s->regs[SRC_Y_X_START] &= 0x0000ffff;           /* SRC_X_START = 0 */
     s->regs[DST_Y_X] = 0;
     s->regs[DST_HEIGHT_WIDTH] = 0;
     s->regs[SRC_Y_X] = 0;
@@ -1177,6 +1193,42 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         break;
     case DST_Y_X_ALIAS:
         s->regs[DST_Y_X] = s->regs[reg];
+        break;
+    case SRC_X:
+        s->regs[SRC_Y_X] = (s->regs[SRC_Y_X] & 0x0000ffff) |
+                           ((s->regs[reg] & 0x3fff) << 16);
+        break;
+    case SRC_Y:
+        s->regs[SRC_Y_X] = (s->regs[SRC_Y_X] & 0xffff0000) |
+                           (s->regs[reg] & 0x7fff);
+        break;
+    case SRC_WIDTH1:
+        s->regs[SRC_HEIGHT1_WIDTH1] = (s->regs[SRC_HEIGHT1_WIDTH1] &
+                                       0x0000ffff) |
+                                      ((s->regs[reg] & 0x3fff) << 16);
+        break;
+    case SRC_HEIGHT1:
+        s->regs[SRC_HEIGHT1_WIDTH1] = (s->regs[SRC_HEIGHT1_WIDTH1] &
+                                       0xffff0000) |
+                                      (s->regs[reg] & 0x7fff);
+        break;
+    case SRC_X_START:
+        s->regs[SRC_Y_X_START] = (s->regs[SRC_Y_X_START] & 0x0000ffff) |
+                                 ((s->regs[reg] & 0x3fff) << 16);
+        break;
+    case SRC_Y_START:
+        s->regs[SRC_Y_X_START] = (s->regs[SRC_Y_X_START] & 0xffff0000) |
+                                 (s->regs[reg] & 0x7fff);
+        break;
+    case SRC_WIDTH2:
+        s->regs[SRC_HEIGHT2_WIDTH2] = (s->regs[SRC_HEIGHT2_WIDTH2] &
+                                       0x0000ffff) |
+                                      ((s->regs[reg] & 0x3fff) << 16);
+        break;
+    case SRC_HEIGHT2:
+        s->regs[SRC_HEIGHT2_WIDTH2] = (s->regs[SRC_HEIGHT2_WIDTH2] &
+                                       0xffff0000) |
+                                      (s->regs[reg] & 0x7fff);
         break;
     case SC_LEFT_RIGHT:  /* LEFT low, RIGHT high */
         s->regs[SC_LEFT] = s->regs[reg] & 0x3fff;

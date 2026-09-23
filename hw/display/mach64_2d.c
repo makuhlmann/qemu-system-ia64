@@ -310,16 +310,49 @@ static void fill_rect(Mach64Ctx *c, int x0, int y0, int w, int h,
 
 /* ---- screen-to-screen copy ---- */
 
+/*
+ * The source position of the n-th pixel along one axis.  A general pattern
+ * source (SRC_PATT_EN) restarts at SRC_X after SRC_WIDTH1 pixels and at SRC_Y
+ * after SRC_HEIGHT1 lines; with SRC_PATT_ROT_EN only the first run is
+ * SRC_WIDTH1 / SRC_HEIGHT1 long, after which it restarts at SRC_X_START /
+ * SRC_Y_START every SRC_WIDTH2 / SRC_HEIGHT2 (RAGE PRO PRG sec 6.2.3.5-6,
+ * source trajectories 3 and 4).  That is a brush: WXPSP1
+ * drivers/video/ms/ati/disp/bltm64.c:492-506 sets SRC_X = brush phase,
+ * SRC_WIDTH1 = 8 - phase, SRC_X_START = 0 and SRC_WIDTH2 = 8.  Any other
+ * source runs with the destination.
+ */
+static int src_pos(uint32_t cntl, int start, int n, int dir, int len1,
+                   int start2, int len2)
+{
+    if (!(cntl & SRC_PATT_EN) || len1 <= 0) {
+        return start + n * dir;
+    }
+    if (!(cntl & SRC_PATT_ROT_EN) || len2 <= 0) {
+        return start + (n % len1) * dir;
+    }
+    return n < len1 ? start + n * dir : start2 + ((n - len1) % len2) * dir;
+}
+
 static void copy_rect(Mach64Ctx *c, int dx0, int dy0, int sx0, int sy0,
                       int w, int h, bool x_l2r, bool y_t2b)
 {
+    Mach64VGAState *s = c->s;
+    uint32_t cntl = s->regs[SRC_CNTL];
     int xs = x_l2r ? 1 : -1;
     int ys = y_t2b ? 1 : -1;
+    int w1 = (s->regs[SRC_HEIGHT1_WIDTH1] >> 16) & 0x3fff;
+    int h1 = s->regs[SRC_HEIGHT1_WIDTH1] & 0x7fff;
+    int w2 = (s->regs[SRC_HEIGHT2_WIDTH2] >> 16) & 0x3fff;
+    int h2 = s->regs[SRC_HEIGHT2_WIDTH2] & 0x7fff;
+    int xs2 = yx_x(s->regs[SRC_Y_X_START]);
+    int ys2 = yx_y(s->regs[SRC_Y_X_START]);
 
     for (int j = 0; j < h; j++) {
-        int dy = dy0 + j * ys, sy = sy0 + j * ys;
+        int dy = dy0 + j * ys;
+        int sy = src_pos(cntl, sy0, j, ys, h1, ys2, h2);
         for (int i = 0; i < w; i++) {
-            int dx = dx0 + i * xs, sx = sx0 + i * xs;
+            int dx = dx0 + i * xs;
+            int sx = src_pos(cntl, sx0, i, xs, w1, xs2, w2);
             uint32_t soff, doff, src;
 
             if (!in_scissor(c, dx, dy)) {

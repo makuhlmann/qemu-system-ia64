@@ -151,7 +151,9 @@
 #define SRC_X_START             0x67
 #define SRC_Y_START             0x68
 #define SRC_Y_X_START           0x69
-#define SRC_HEIGHT2_WIDTH2      0x6a
+#define SRC_WIDTH2              0x6a
+#define SRC_HEIGHT2             0x6b
+#define SRC_HEIGHT2_WIDTH2      0x6c
 #define SRC_CNTL                0x6d
 #define HOST_DATA0              0x80
 #define HOST_DATA1              0x81

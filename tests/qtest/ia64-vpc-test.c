@@ -7345,6 +7345,9 @@ static void test_agp_gart_dma(void)
 #define M64_HOST_DATA0          0x80
 #define M64_HOST_CNTL           0x90
 #define M64_SRC_Y_X             0x63
+#define M64_SRC_HEIGHT1_WIDTH1  0x66
+#define M64_SRC_Y_X_START       0x69
+#define M64_SRC_HEIGHT2_WIDTH2  0x6c
 #define M64_CLR_CMP_CLR         0xc0
 #define M64_CLR_CMP_MSK         0xc1
 #define M64_CLR_CMP_CNTL        0xc2
@@ -7802,6 +7805,65 @@ static void test_mach64_dst_width_launch(void)
     mach64_dev_close(&a);
 }
 
+/*
+ * A general-pattern blit source repeats SRC_WIDTH1 x SRC_HEIGHT1 from SRC_Y_X;
+ * with rotation the first run starts at the brush phase and later runs restart
+ * at SRC_Y_X_START every SRC_WIDTH2 x SRC_HEIGHT2 (RAGE PRO PRG sec 6.2.3.5-6).
+ * Windows fills an 8 bpp tooltip from an 8x8 dither brush this way.
+ */
+static void test_mach64_pattern_source(void)
+{
+    const uint32_t brush = 0x10000, pitch = 32;
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    for (unsigned i = 0; i < 64; i++) {
+        qtest_writeb(a.qts, a.fb + brush + i, 0x40 + i);
+    }
+    m64_wr(&a, M64_DP_PIX_WIDTH,
+           M64_PIX_WIDTH_8BPP | (M64_PIX_WIDTH_8BPP << 8));
+    m64_wr(&a, M64_DST_OFF_PITCH, (32 / 8) << 22);
+    m64_wr(&a, M64_SRC_OFF_PITCH, (1u << 22) | (brush / 8));   /* pitch 8 */
+    m64_wr(&a, M64_DP_MIX, 0x7u << 16);
+    m64_wr(&a, M64_DP_SRC, 0x3u << 8);                  /* FRGD_SRC = blit */
+    m64_wr(&a, M64_DP_WRITE_MASK, 0xffffffff);
+    m64_wr(&a, M64_SC_LEFT, 0);
+    m64_wr(&a, M64_SC_RIGHT, 0x3fff);
+    m64_wr(&a, M64_SC_TOP, 0);
+    m64_wr(&a, M64_SC_BOTTOM, 0x3fff);
+    m64_wr(&a, M64_DST_CNTL, M64_DST_DIR_DOWN_RIGHT);
+
+    /* general pattern: 8x8 from 0,0 */
+    m64_wr(&a, M64_SRC_CNTL, 1);
+    m64_wr(&a, M64_SRC_Y_X, 0);
+    m64_wr(&a, M64_SRC_HEIGHT1_WIDTH1, (8u << 16) | 8);
+    m64_wr(&a, M64_DST_Y_X, 0);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (20u << 16) | 10);
+    for (unsigned y = 0; y < 10; y++) {
+        for (unsigned x = 0; x < 20; x++) {
+            g_assert_cmphex(qtest_readb(a.qts, a.fb + y * pitch + x), ==,
+                            0x40 + (x % 8) + (y % 8) * 8);
+        }
+    }
+
+    /* with rotation: brush phase 3,2 */
+    m64_wr(&a, M64_SRC_CNTL, 3);
+    m64_wr(&a, M64_SRC_Y_X, (3u << 16) | 2);
+    m64_wr(&a, M64_SRC_HEIGHT1_WIDTH1, (5u << 16) | 6);
+    m64_wr(&a, M64_SRC_Y_X_START, 0);
+    m64_wr(&a, M64_SRC_HEIGHT2_WIDTH2, (8u << 16) | 8);
+    m64_wr(&a, M64_DST_Y_X, 12);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (20u << 16) | 10);
+    for (unsigned y = 0; y < 10; y++) {
+        for (unsigned x = 0; x < 20; x++) {
+            g_assert_cmphex(qtest_readb(a.qts, a.fb + (12 + y) * pitch + x), ==,
+                            0x40 + (3 + x) % 8 + ((2 + y) % 8) * 8);
+        }
+    }
+
+    mach64_dev_close(&a);
+}
+
 static void test_mach64_2d_solid_fill(void)
 {
     Mach64TestDev a;
@@ -8172,6 +8234,8 @@ int main(int argc, char **argv)
                    test_mach64_colour_reg_write);
     qtest_add_func("/ia64-vpc/mach64/dst-width-launch",
                    test_mach64_dst_width_launch);
+    qtest_add_func("/ia64-vpc/mach64/pattern-source",
+                   test_mach64_pattern_source);
     qtest_add_func("/ia64-vpc/mach64/colour-compare",
                    test_mach64_colour_compare);
     qtest_add_func("/ia64-vpc/mach64/linear-aperture",
