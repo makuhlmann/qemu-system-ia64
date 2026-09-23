@@ -5,7 +5,7 @@
   project (http://www.nongnu.org/vgabios/).
 
 - bios.bin, bios-256k.bin, bios-microvm.bin, vgabios.bin and
-  vgabios-{ati,bochs-display,cirrus,qxl,ramfb,stdvga,virtio,vmware}.bin are the
+  vgabios-{bochs-display,cirrus,qxl,ramfb,stdvga,virtio,vmware}.bin are the
   qemu.org prebuilt images of SeaBIOS rel-1.17.0 (commit b52ca86e,
   https://gitlab.com/qemu-project/seabios.git).
 
@@ -16,6 +16,13 @@
   The config selects VGA_X86COMPAT, which rewrites the code for the option ROM
   interpreter of the HP zx1 firmware, and debug level 0, so the image carries
   no version string: the roms/seabios gitlink records its source commit.
+
+- vgabios-ati.bin is SeaVGABIOS (LGPLv3) for the ati-vga device, built the
+  same way from roms/seabios, with roms/config.vga-ati:
+  make -C roms seavgabios-ati FIRMWARE_EXTRAVERSION=-qemu-ia64 PYTHON=python3
+  The config clears VGA_ATI_TABLES: the IA-64 machines write the Rage 128 Pro
+  BIOS tables into the image at load time, and the image leaves the pointer
+  at 48h to them.
 
 - OpenBIOS (http://www.openbios.org/) is a free (GPL v2) portable
   firmware implementation. The goal is to implement a 100% IEEE

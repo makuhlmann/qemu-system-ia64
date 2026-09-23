@@ -2777,7 +2777,8 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
      * placement at the declared end, 9A00h for the shipped image) read as
      * whatever the neighbouring system PTEs map: XCLK 0, every mode-set
      * refused, VgaSave at 640x480x4.  The shipped SeaVGABIOS keeps a zero
-     * run at 144h-200h; take the first zero run below 2000h that holds the
+     * run at 50h-150h (VGA_ATI_TABLES off, roms/config.vga-ati) and leaves
+     * 48h to us; take the first zero run below 2000h that holds the
      * 40h-byte header plus the 32h-byte PLL block (72h), and
      * only if none exists fall back to appending.
      */
