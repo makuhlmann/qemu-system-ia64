@@ -7618,6 +7618,51 @@ static void test_mach64_host_byte_align(void)
     mach64_dev_close(&a);
 }
 
+/*
+ * DST_X_TILE / DST_Y_TILE move DST_X / DST_Y past the rectangle once it is
+ * drawn (RAGE XL RRG DST_CNTL MM 0_4C), so a second launch without a new
+ * DST_Y_X lands next to the first.
+ */
+static void test_mach64_tile_side_effect(void)
+{
+    const uint32_t pitch = 32;
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    m64_wr(&a, M64_DP_PIX_WIDTH, M64_PIX_WIDTH_8BPP);
+    m64_wr(&a, M64_DST_OFF_PITCH, (32 / 8) << 22);
+    m64_wr(&a, M64_DP_MIX, 0x7u << 16);
+    m64_wr(&a, M64_DP_SRC, 0x1u << 8);
+    m64_wr(&a, M64_DP_WRITE_MASK, 0xffffffff);
+    m64_wr(&a, M64_SC_LEFT, 0);
+    m64_wr(&a, M64_SC_RIGHT, 0x3fff);
+    m64_wr(&a, M64_SC_TOP, 0);
+    m64_wr(&a, M64_SC_BOTTOM, 0x3fff);
+
+    m64_wr(&a, M64_DST_CNTL, M64_DST_DIR_DOWN_RIGHT | 0x08);   /* X_TILE */
+    m64_wr(&a, M64_DST_Y_X, 0);
+    m64_wr(&a, M64_DP_FRGD_CLR, 0x21);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (4u << 16) | 1);
+    m64_wr(&a, M64_DP_FRGD_CLR, 0x42);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (4u << 16) | 1);
+    for (unsigned x = 0; x < 8; x++) {
+        g_assert_cmphex(qtest_readb(a.qts, a.fb + x), ==, x < 4 ? 0x21 : 0x42);
+    }
+
+    m64_wr(&a, M64_DST_CNTL, M64_DST_DIR_DOWN_RIGHT | 0x10);   /* Y_TILE */
+    m64_wr(&a, M64_DST_Y_X, 4);
+    m64_wr(&a, M64_DP_FRGD_CLR, 0x63);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (2u << 16) | 2);
+    m64_wr(&a, M64_DP_FRGD_CLR, 0x84);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (2u << 16) | 2);
+    for (unsigned y = 4; y < 8; y++) {
+        g_assert_cmphex(qtest_readb(a.qts, a.fb + y * pitch), ==,
+                        y < 6 ? 0x63 : 0x84);
+    }
+
+    mach64_dev_close(&a);
+}
+
 static void test_mach64_2d_solid_fill(void)
 {
     Mach64TestDev a;
@@ -7980,6 +8025,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/negative-x", test_mach64_negative_x);
     qtest_add_func("/ia64-vpc/mach64/host-byte-align",
                    test_mach64_host_byte_align);
+    qtest_add_func("/ia64-vpc/mach64/tile-side-effect",
+                   test_mach64_tile_side_effect);
     qtest_add_func("/ia64-vpc/mach64/colour-compare",
                    test_mach64_colour_compare);
     qtest_add_func("/ia64-vpc/mach64/linear-aperture",

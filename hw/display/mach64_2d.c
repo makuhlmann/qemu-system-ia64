@@ -298,6 +298,32 @@ static void copy_rect(Mach64Ctx *c, int dx0, int dy0, int sx0, int sy0,
     }
 }
 
+/*
+ * DST_X_TILE and DST_Y_TILE "determine the side effect of the DST_X and DST_Y
+ * registers after the draw operation is completed": DST_X becomes
+ * DST_X+DST_WIDTH for a left-to-right draw (DST_X-DST_WIDTH for right to
+ * left), DST_Y likewise with DST_HEIGHT (RAGE XL RRG DST_CNTL MM 0_4C).  A
+ * driver that tiles a strip issues the next rectangle without writing DST_Y_X.
+ */
+static void tile_advance(Mach64VGAState *s)
+{
+    uint32_t cntl = s->regs[DST_CNTL];
+    uint32_t yx = s->regs[DST_Y_X];
+    int x = yx_x(yx), y = yx_y(yx);
+    int w = (s->regs[DST_HEIGHT_WIDTH] >> 16) & 0x3fff;
+    int h = s->regs[DST_HEIGHT_WIDTH] & 0x7fff;
+
+    if (cntl & DST_X_TILE) {
+        x += (cntl & DST_X_DIR) ? w : -w;
+    }
+    if (cntl & DST_Y_TILE) {
+        y += (cntl & DST_Y_DIR) ? h : -h;
+    }
+    s->regs[DST_Y_X] = ((uint32_t)(x & 0x3fff) << 16) | (y & 0x7fff);
+    s->regs[DST_X] = x & 0x3fff;
+    s->regs[DST_Y] = y & 0x7fff;
+}
+
 /* ---- launch a rectangle trajectory ---- */
 
 void mach64_2d_dst_trigger(Mach64VGAState *s)
@@ -351,6 +377,7 @@ void mach64_2d_dst_trigger(Mach64VGAState *s)
     }
     mach64_2d_set_dirty(s, c.dst_base, x_l2r ? x : x - w + 1,
                         y_t2b ? y : y - h + 1, w, h);
+    tile_advance(s);
 }
 
 /* ---- host-data (CPU-to-screen) stream ---- */
@@ -457,6 +484,7 @@ void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
     if (s->host_data.y >= (unsigned)h) {
         s->host_data.active = false;
         mach64_2d_set_dirty(s, c.dst_base, x0, y0, w, h);
+        tile_advance(s);
     }
 }
 
