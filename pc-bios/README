@@ -13,6 +13,9 @@
   nv15gl-vga device.  It is built from roms/seabios, a SeaBIOS fork at
   https://github.com/makuhlmann/qemu-seabios, with roms/config.vga-nv15gl:
   make -C roms seavgabios-nv15gl FIRMWARE_EXTRAVERSION=-qemu-ia64 PYTHON=python3
+  The config selects VGA_X86COMPAT, which rewrites the code for the option ROM
+  interpreter of the HP zx1 firmware, and debug level 0, so the image carries
+  no version string: the roms/seabios gitlink records its source commit.
 
 - OpenBIOS (http://www.openbios.org/) is a free (GPL v2) portable
   firmware implementation. The goal is to implement a 100% IEEE
