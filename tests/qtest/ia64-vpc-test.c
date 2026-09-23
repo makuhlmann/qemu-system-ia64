@@ -7337,6 +7337,8 @@ static void test_agp_gart_dma(void)
 #define M64_CONFIG_CHIP_ID      0x38
 #define M64_MEM_VGA_WP_SEL      0x2d
 #define M64_SRC_OFF_PITCH       0x60
+#define M64_HOST_DATA0          0x80
+#define M64_HOST_CNTL           0x90
 #define M64_SRC_Y_X             0x63
 #define M64_CLR_CMP_CLR         0xc0
 #define M64_CLR_CMP_MSK         0xc1
@@ -7569,6 +7571,48 @@ static void test_mach64_negative_x(void)
         g_assert_cmphex(qtest_readl(a.qts, a.fb + 2 * pitch + x * 4), ==,
                         x < 4 ? fg : bg);
         g_assert_cmphex(qtest_readl(a.qts, a.fb + 1 * pitch + x * 4), ==, bg);
+    }
+
+    mach64_dev_close(&a);
+}
+
+/*
+ * HOST_BYTE_ALIGN: each row of monochrome host data starts on a byte
+ * boundary (RAGE XL RRG HOST_CNTL MM 0_90), as Windows sends a glyph wider
+ * than eight pixels.  Rows of five pixels, the pad bits set to catch a
+ * model that packs them.
+ */
+static void test_mach64_host_byte_align(void)
+{
+    static const uint8_t rows[3] = { 0xaf, 0x57, 0xcf };   /* 5 bits + 111 */
+    const uint32_t pitch = 32;
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    m64_wr(&a, M64_DP_PIX_WIDTH, M64_PIX_WIDTH_8BPP);  /* src/host mono */
+    m64_wr(&a, M64_DST_OFF_PITCH, (32 / 8) << 22);
+    m64_wr(&a, M64_DP_FRGD_CLR, 0xaa);
+    m64_wr(&a, M64_DP_BKGD_CLR, 0x11);
+    m64_wr(&a, M64_DP_MIX, (0x7u << 16) | 0x7);
+    m64_wr(&a, M64_DP_SRC, (0x2u << 16) | (0x1u << 8)); /* mono from host */
+    m64_wr(&a, M64_DP_WRITE_MASK, 0xffffffff);
+    m64_wr(&a, M64_SC_LEFT, 0);
+    m64_wr(&a, M64_SC_RIGHT, 0x3fff);
+    m64_wr(&a, M64_SC_TOP, 0);
+    m64_wr(&a, M64_SC_BOTTOM, 0x3fff);
+    m64_wr(&a, M64_DST_CNTL, M64_DST_DIR_DOWN_RIGHT);
+    m64_wr(&a, M64_HOST_CNTL, 1);
+    m64_wr(&a, M64_DST_Y_X, 0);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (5u << 16) | 3);
+    m64_wr(&a, M64_HOST_DATA0, rows[0] | (rows[1] << 8) | (rows[2] << 16));
+
+    for (unsigned y = 0; y < 3; y++) {
+        for (unsigned x = 0; x < 5; x++) {
+            bool on = (rows[y] >> (7 - x)) & 1;
+
+            g_assert_cmphex(qtest_readb(a.qts, a.fb + y * pitch + x), ==,
+                            on ? 0xaa : 0x11);
+        }
     }
 
     mach64_dev_close(&a);
@@ -7934,6 +7978,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
                    test_mach64_2d_solid_fill);
     qtest_add_func("/ia64-vpc/mach64/negative-x", test_mach64_negative_x);
+    qtest_add_func("/ia64-vpc/mach64/host-byte-align",
+                   test_mach64_host_byte_align);
     qtest_add_func("/ia64-vpc/mach64/colour-compare",
                    test_mach64_colour_compare);
     qtest_add_func("/ia64-vpc/mach64/linear-aperture",

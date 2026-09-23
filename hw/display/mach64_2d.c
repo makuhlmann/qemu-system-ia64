@@ -391,6 +391,13 @@ void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
         bool x_l2r = s->regs[DST_CNTL] & DST_X_DIR;
         bool y_t2b = s->regs[DST_CNTL] & DST_Y_DIR;
         bool lsb_first = s->regs[DP_PIX_WIDTH] & DP_BYTE_PIX_ORDER;
+        /*
+         * HOST_BYTE_ALIGN: "when the destination trajectory advances in the Y
+         * direction, pixels are consumed from the host data port until the
+         * nearest byte boundary is reached" (RAGE XL RRG HOST_CNTL MM 0_90).
+         * Windows sends a glyph wider than a byte this way, each row padded.
+         */
+        bool byte_align = s->regs[HOST_CNTL] & HOST_BYTE_ALIGN;
 
         for (unsigned n = 0; n < 32; n++) {
             if (s->host_data.y >= (unsigned)h) {
@@ -409,6 +416,9 @@ void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
             if (++s->host_data.x >= (unsigned)w) {
                 s->host_data.x = 0;
                 s->host_data.y++;
+                if (byte_align) {
+                    n |= 7;
+                }
             }
         }
     } else {
