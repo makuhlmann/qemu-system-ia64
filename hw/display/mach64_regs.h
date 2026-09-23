@@ -300,6 +300,7 @@
 #define DP_SRC_PIX_WIDTH_SHIFT  8
 #define DP_HOST_PIX_WIDTH       0x000f0000ul
 #define DP_HOST_PIX_WIDTH_SHIFT 16
+#define DP_HOST_TRIPLE_EN       0x00002000ul
 #define DP_BYTE_PIX_ORDER       0x01000000ul   /* 1 = LSB first in each byte */
 
 /* ---- DP_MIX ---- */
@@ -349,6 +350,9 @@
 #define DST_X_TILE              0x00000008ul
 #define DST_Y_TILE              0x00000010ul
 #define DST_LAST_PEL            0x00000020ul
+#define DST_24_ROT_EN           0x00000080ul
+#define DST_24_ROT              0x00000700ul
+#define DST_24_ROT_SHIFT        8
 
 /* ---- SRC_CNTL ---- */
 #define SRC_PATT_EN             0x00000001ul

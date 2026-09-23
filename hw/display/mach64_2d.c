@@ -32,6 +32,10 @@ typedef struct {
     uint32_t bkgd_clr;
     uint32_t write_mask;
     uint32_t px_mask;       /* the bits one pixel occupies */
+    /* packed 24 bpp: colour byte of the first destination byte, and where */
+    bool rot24;
+    int rot_x0;
+    int rot_p0;
     /* scissor (inclusive) */
     int sc_left, sc_right, sc_top, sc_bottom;
     /* colour-compare */
@@ -128,10 +132,38 @@ static bool cmp_keeps_dst(const Mach64Ctx *c, uint32_t src, uint32_t dst)
     }
 }
 
-static void blend_px(const Mach64Ctx *c, uint32_t off, unsigned mix,
+/*
+ * Packed 24 bpp is an 8 bpp draw with DST_24_ROT_EN set: the engine hands each
+ * destination byte one component of DP_FRGD_CLR, DP_BKGD_CLR and
+ * DP_WRITE_MASK, and treats three bytes as one pixel of the fixed 8x8 mono
+ * pattern (RAGE PRO PRG sec 6.4.1).  DST_24_ROT is the starting byte's dword
+ * number mod 6, which pins the component of that byte: bytes run
+ * component 0, 1, 2 from each pixel's first byte, so byte b holds component
+ * b mod 3 and b mod 24 = 4 * DST_24_ROT + (b & 3).
+ */
+static int rot_phase(const Mach64Ctx *c, int x)
+{
+    return ((c->rot_p0 + (x - c->rot_x0)) % 3 + 3) % 3;
+}
+
+static uint32_t rot_clr(const Mach64Ctx *c, uint32_t clr, int x)
+{
+    return c->rot24 ? (clr >> (8 * rot_phase(c, x))) & 0xff : clr;
+}
+
+/* The pixel a destination byte belongs to, for the pattern. */
+static int rot_pixel(const Mach64Ctx *c, int x)
+{
+    int first = x - rot_phase(c, x);
+
+    return c->rot24 ? (first >= 0 ? first / 3 : (first - 2) / 3) : x;
+}
+
+static void blend_px(const Mach64Ctx *c, uint32_t off, int x, unsigned mix,
                      uint32_t src)
 {
     uint32_t dst = px_read(c, off);
+    uint32_t wm = rot_clr(c, c->write_mask, x);
     uint32_t res;
 
     if (cmp_keeps_dst(c, src, dst)) {
@@ -139,7 +171,7 @@ static void blend_px(const Mach64Ctx *c, uint32_t off, unsigned mix,
     }
     res = apply_mix(mix, src, dst);
 
-    res = (res & c->write_mask) | (dst & ~c->write_mask);
+    res = (res & wm) | (dst & ~wm);
     px_write(c, off, res);
 }
 
@@ -177,6 +209,13 @@ static bool ctx_init(Mach64VGAState *s, Mach64Ctx *c)
         return false;
     }
     c->px_mask = c->bypp >= 4 ? ~0u : (1u << (c->bypp * 8)) - 1;
+    c->rot24 = c->bypp == 1 && (s->regs[DST_CNTL] & DST_24_ROT_EN);
+    if (c->rot24) {
+        int rot = (s->regs[DST_CNTL] & DST_24_ROT) >> DST_24_ROT_SHIFT;
+
+        c->rot_x0 = yx_x(s->regs[DST_Y_X]);
+        c->rot_p0 = (4 * rot + (c->rot_x0 & 3)) % 3;
+    }
     c->dst_pitch = mach64_dst_pitch_bytes(s);
     c->dst_base = mach64_dst_base(s);
 
@@ -257,14 +296,14 @@ static void fill_rect(Mach64Ctx *c, int x0, int y0, int w, int h,
                 continue;
             }
             if (pattern) {
-                bool bit = pat_mono_bit(s, x, y);
+                bool bit = pat_mono_bit(s, rot_pixel(c, x), y);
                 mix = bit ? c->frgd_mix : c->bkgd_mix;
                 src = bit ? c->frgd_clr : c->bkgd_clr;
             } else {
                 mix = c->frgd_mix;
                 src = c->frgd_clr;
             }
-            blend_px(c, off, mix, src);
+            blend_px(c, off, x, mix, rot_clr(c, src, x));
         }
     }
 }
@@ -293,7 +332,7 @@ static void copy_rect(Mach64Ctx *c, int dx0, int dy0, int sx0, int sy0,
                 continue;
             }
             src = px_read(c, soff);
-            blend_px(c, doff, c->frgd_mix, src);
+            blend_px(c, doff, dx, c->frgd_mix, src);
         }
     }
 }
@@ -425,27 +464,41 @@ void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
          * Windows sends a glyph wider than a byte this way, each row padded.
          */
         bool byte_align = s->regs[HOST_CNTL] & HOST_BYTE_ALIGN;
+        /*
+         * DP_HOST_TRIPLE_EN "enable[s] triplication of monochrome host data"
+         * (RAGE XL RRG DP_PIX_WIDTH MM 0_B4): each bit covers the three bytes
+         * of a packed 24 bpp pixel, which is how the ATI driver sends text.
+         */
+        int reps = (s->regs[DP_PIX_WIDTH] & DP_HOST_TRIPLE_EN) ? 3 : 1;
 
         for (unsigned n = 0; n < 32; n++) {
+            bool bit = host_mono_bit(data, n, lsb_first, x_l2r);
+            bool row_done = false;
+
+            for (int r = 0; r < reps && !row_done; r++) {
+                if (s->host_data.y >= (unsigned)h) {
+                    break;
+                }
+                int x = x0 + (int)s->host_data.x * (x_l2r ? 1 : -1);
+                int y = y0 + (int)s->host_data.y * (y_t2b ? 1 : -1);
+                uint32_t off = dst_off(&c, x, y);
+                unsigned mix = bit ? c.frgd_mix : c.bkgd_mix;
+                uint32_t src = bit ? c.frgd_clr : c.bkgd_clr;
+
+                if (in_scissor(&c, x, y) && off_ok(&c, off)) {
+                    blend_px(&c, off, x, mix, rot_clr(&c, src, x));
+                }
+                if (++s->host_data.x >= (unsigned)w) {
+                    s->host_data.x = 0;
+                    s->host_data.y++;
+                    if (byte_align) {
+                        n |= 7;
+                        row_done = true;
+                    }
+                }
+            }
             if (s->host_data.y >= (unsigned)h) {
                 break;
-            }
-            bool bit = host_mono_bit(data, n, lsb_first, x_l2r);
-            int x = x0 + (int)s->host_data.x * (x_l2r ? 1 : -1);
-            int y = y0 + (int)s->host_data.y * (y_t2b ? 1 : -1);
-            uint32_t off = dst_off(&c, x, y);
-            unsigned mix = bit ? c.frgd_mix : c.bkgd_mix;
-            uint32_t src = bit ? c.frgd_clr : c.bkgd_clr;
-
-            if (in_scissor(&c, x, y) && off_ok(&c, off)) {
-                blend_px(&c, off, mix, src);
-            }
-            if (++s->host_data.x >= (unsigned)w) {
-                s->host_data.x = 0;
-                s->host_data.y++;
-                if (byte_align) {
-                    n |= 7;
-                }
             }
         }
     } else {
@@ -472,7 +525,7 @@ void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
             uint32_t off = dst_off(&c, x, y);
 
             if (in_scissor(&c, x, y) && off_ok(&c, off)) {
-                blend_px(&c, off, c.frgd_mix, src);
+                blend_px(&c, off, x, c.frgd_mix, src);
             }
             if (++s->host_data.x >= (unsigned)w) {
                 s->host_data.x = 0;
@@ -513,7 +566,7 @@ void mach64_2d_line_trigger(Mach64VGAState *s)
         uint32_t off = dst_off(&c, x, y);
 
         if (in_scissor(&c, x, y) && off_ok(&c, off)) {
-            blend_px(&c, off, c.frgd_mix, c.frgd_clr);
+            blend_px(&c, off, x, c.frgd_mix, c.frgd_clr);
         }
         minx = MIN(minx, x); miny = MIN(miny, y);
         maxx = MAX(maxx, x); maxy = MAX(maxy, y);

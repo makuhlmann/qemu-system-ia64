@@ -7663,6 +7663,62 @@ static void test_mach64_tile_side_effect(void)
     mach64_dev_close(&a);
 }
 
+/*
+ * Packed 24 bpp is an 8 bpp draw with DST_24_ROT_EN: each byte takes one
+ * component of the colour, starting where DST_24_ROT says (RAGE PRO PRG sec
+ * 6.4.1), and DP_HOST_TRIPLE_EN spends each monochrome host bit on the three
+ * bytes of a pixel (RAGE XL RRG DP_PIX_WIDTH MM 0_B4).
+ */
+static void test_mach64_packed_24bpp(void)
+{
+    const uint32_t fg = 0x00aabbcc, bg = 0x00010203, pitch = 64;
+    const uint8_t bits = 0xb1;                      /* 1011 0001 */
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    for (unsigned i = 0; i < 2 * pitch; i++) {
+        qtest_writeb(a.qts, a.fb + i, 0);
+    }
+    m64_wr(&a, M64_DP_PIX_WIDTH, M64_PIX_WIDTH_8BPP);
+    m64_wr(&a, M64_DST_OFF_PITCH, (64 / 8) << 22);
+    m64_wr(&a, M64_DP_WRITE_MASK, 0x00ffffff);
+    m64_wr(&a, M64_SC_LEFT, 0);
+    m64_wr(&a, M64_SC_RIGHT, 0x3fff);
+    m64_wr(&a, M64_SC_TOP, 0);
+    m64_wr(&a, M64_SC_BOTTOM, 0x3fff);
+
+    /* three pixels from pixel 2: DST_X = 6, DST_24_ROT = (6 / 4) mod 6 = 1 */
+    m64_wr(&a, M64_DP_FRGD_CLR, fg);
+    m64_wr(&a, M64_DP_MIX, 0x7u << 16);
+    m64_wr(&a, M64_DP_SRC, 0x1u << 8);
+    m64_wr(&a, M64_DST_CNTL, 0x83 | (1u << 8));
+    m64_wr(&a, M64_DST_Y_X, 6u << 16);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (9u << 16) | 1);
+    for (unsigned b = 0; b < 18; b++) {
+        uint8_t want = (b >= 6 && b < 15) ? (fg >> (8 * (b % 3))) & 0xff : 0;
+
+        g_assert_cmphex(qtest_readb(a.qts, a.fb + b), ==, want);
+    }
+
+    /* eight pixels of text, one host bit each */
+    m64_wr(&a, M64_DP_PIX_WIDTH, M64_PIX_WIDTH_8BPP | 0x2000);
+    m64_wr(&a, M64_DP_BKGD_CLR, bg);
+    m64_wr(&a, M64_DP_MIX, (0x7u << 16) | 0x7);
+    m64_wr(&a, M64_DP_SRC, (0x2u << 16) | (0x1u << 8));
+    m64_wr(&a, M64_DST_CNTL, 0x83);
+    m64_wr(&a, M64_DST_Y_X, 1);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (24u << 16) | 1);
+    m64_wr(&a, M64_HOST_DATA0, bits);
+    for (unsigned b = 0; b < 24; b++) {
+        uint32_t clr = ((bits >> (7 - b / 3)) & 1) ? fg : bg;
+
+        g_assert_cmphex(qtest_readb(a.qts, a.fb + pitch + b), ==,
+                        (clr >> (8 * (b % 3))) & 0xff);
+    }
+
+    mach64_dev_close(&a);
+}
+
 static void test_mach64_2d_solid_fill(void)
 {
     Mach64TestDev a;
@@ -8027,6 +8083,8 @@ int main(int argc, char **argv)
                    test_mach64_host_byte_align);
     qtest_add_func("/ia64-vpc/mach64/tile-side-effect",
                    test_mach64_tile_side_effect);
+    qtest_add_func("/ia64-vpc/mach64/packed-24bpp",
+                   test_mach64_packed_24bpp);
     qtest_add_func("/ia64-vpc/mach64/colour-compare",
                    test_mach64_colour_compare);
     qtest_add_func("/ia64-vpc/mach64/linear-aperture",
