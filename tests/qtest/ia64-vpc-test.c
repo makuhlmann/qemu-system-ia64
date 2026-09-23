@@ -7342,6 +7342,9 @@ static void test_agp_gart_dma(void)
 #define M64_DST_WIDTH           0x44
 #define M64_DST_HEIGHT          0x45
 #define M64_SRC_CNTL            0x6d
+#define M64_PAT_REG0            0xa0
+#define M64_PAT_REG1            0xa1
+#define M64_PAT_CNTL            0xa2
 #define M64_HOST_DATA0          0x80
 #define M64_HOST_CNTL           0x90
 #define M64_SRC_Y_X             0x63
@@ -7864,6 +7867,48 @@ static void test_mach64_pattern_source(void)
     mach64_dev_close(&a);
 }
 
+/*
+ * DP_MONO_SRC = pattern: the 8x8 mono pattern chooses the foreground or the
+ * background source per pixel (RAGE XL RRG DP_SRC MM 0_B6), with the
+ * foreground source left on DP_FRGD_CLR.  With DP_BYTE_PIX_ORDER clear the
+ * leftmost pixel takes bit 7 of its row (Table 5-2).
+ */
+static void test_mach64_mono_pattern(void)
+{
+    const uint32_t pitch = 32;
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    m64_wr(&a, M64_DP_PIX_WIDTH, M64_PIX_WIDTH_8BPP);
+    m64_wr(&a, M64_DST_OFF_PITCH, (32 / 8) << 22);
+    m64_wr(&a, M64_DP_FRGD_CLR, 0xf0);
+    m64_wr(&a, M64_DP_BKGD_CLR, 0x0f);
+    m64_wr(&a, M64_DP_MIX, (0x7u << 16) | 0x7);
+    m64_wr(&a, M64_DP_SRC, (0x1u << 16) | (0x1u << 8)); /* mono = pattern */
+    m64_wr(&a, M64_PAT_REG0, 0x0ff00180);          /* rows 80 01 f0 0f */
+    m64_wr(&a, M64_PAT_REG1, 0);
+    m64_wr(&a, M64_PAT_CNTL, 1);
+    m64_wr(&a, M64_DP_WRITE_MASK, 0xffffffff);
+    m64_wr(&a, M64_SC_LEFT, 0);
+    m64_wr(&a, M64_SC_RIGHT, 0x3fff);
+    m64_wr(&a, M64_SC_TOP, 0);
+    m64_wr(&a, M64_SC_BOTTOM, 0x3fff);
+    m64_wr(&a, M64_DST_CNTL, M64_DST_DIR_DOWN_RIGHT);
+    m64_wr(&a, M64_DST_Y_X, 0);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (8u << 16) | 4);
+
+    for (unsigned y = 0; y < 4; y++) {
+        uint8_t row = 0x0ff00180 >> (8 * y);
+
+        for (unsigned x = 0; x < 8; x++) {
+            g_assert_cmphex(qtest_readb(a.qts, a.fb + y * pitch + x), ==,
+                            ((row >> (7 - x)) & 1) ? 0xf0 : 0x0f);
+        }
+    }
+
+    mach64_dev_close(&a);
+}
+
 static void test_mach64_2d_solid_fill(void)
 {
     Mach64TestDev a;
@@ -8236,6 +8281,7 @@ int main(int argc, char **argv)
                    test_mach64_dst_width_launch);
     qtest_add_func("/ia64-vpc/mach64/pattern-source",
                    test_mach64_pattern_source);
+    qtest_add_func("/ia64-vpc/mach64/mono-pattern", test_mach64_mono_pattern);
     qtest_add_func("/ia64-vpc/mach64/colour-compare",
                    test_mach64_colour_compare);
     qtest_add_func("/ia64-vpc/mach64/linear-aperture",

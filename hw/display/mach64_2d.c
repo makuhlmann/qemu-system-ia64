@@ -264,13 +264,19 @@ static bool off_ok(const Mach64Ctx *c, uint32_t off)
 
 /* ---- pattern (8x8) ---- */
 
+/*
+ * Row y of the pattern is byte y of PAT_REG0:PAT_REG1, and DST_X 0 takes its
+ * bit 7 unless DP_BYTE_PIX_ORDER reverses the order (RAGE XL RRG Tables 5-2
+ * and 5-3).
+ */
 static bool pat_mono_bit(const Mach64VGAState *s, int x, int y)
 {
     uint64_t pat = (uint64_t)s->regs[PAT_REG0] |
                    ((uint64_t)s->regs[PAT_REG1] << 32);
-    int bit = (y & 7) * 8 + (x & 7);
+    int bit = (s->regs[DP_PIX_WIDTH] & DP_BYTE_PIX_ORDER) ? (x & 7)
+                                                         : 7 - (x & 7);
 
-    return (pat >> bit) & 1;
+    return (pat >> ((y & 7) * 8 + bit)) & 1;
 }
 
 /* ---- solid / pattern rectangle fill ---- */
@@ -449,12 +455,15 @@ void mach64_2d_dst_trigger(Mach64VGAState *s)
         int sy = yx_y(s->regs[SRC_Y_X]);
 
         copy_rect(&c, x, y, sx, sy, w, h, x_l2r, y_t2b);
-    } else if (frgd_src == SRC_PATTERN ||
-               (s->regs[SRC_CNTL] & SRC_PATT_EN)) {
-        fill_rect(&c, x_l2r ? x : x - w + 1, y_t2b ? y : y - h + 1, w, h, true);
     } else {
+        /*
+         * DP_MONO_SRC = pattern: the 8x8 mono pattern picks the foreground
+         * or the background source for every pixel (RAGE XL RRG DP_SRC
+         * MM 0_B6).  Windows' XOR drag outlines and dither brushes are drawn
+         * this way, with DP_FRGD_SRC left on the foreground colour.
+         */
         fill_rect(&c, x_l2r ? x : x - w + 1, y_t2b ? y : y - h + 1, w, h,
-                  false);
+                  mono_src == DP_MONO_SRC_PATTERN || frgd_src == SRC_PATTERN);
     }
     mach64_2d_set_dirty(s, c.dst_base, x_l2r ? x : x - w + 1,
                         y_t2b ? y : y - h + 1, w, h);
