@@ -67,12 +67,12 @@ static const MemoryRegionOps ia64_460gx_post_ops = {
  * FEB0_0CC0h "is used for BSP selection.  It is a write once register in
  * the SAC" (SSDM 4.1.3).  The vendor firmware's normal reset path never
  * stores to it: SAL_B loads the word, polls until bit 7 is set and compares
- * the low seven bits with its own LID.id (link 0x400A90; SAL_A's recovery
- * path additionally stores 80h | id first, 0xFFFF32C2).  So the first
+ * the low seven bits with its own LID.id (link 0x400710; SAL_A's recovery
+ * path additionally stores 80h | id first, 0xFFFF32C0).  So the first
  * processor whose access reaches the SAC claims it -- the system bus carries
  * the requesting agent's id -- and every later access reads that claim.
  * The poll is a single load: "ld4.acq r3=[r4]; tbit.z p7,p6=r3,7;;
- * (p07) br.cond 0x400AA0" branches to its own bundle, so the word must
+ * (p07) br.cond 0x400720" branches to its own bundle, so the word must
  * already carry the claim when the first load returns -- the SAC decides on
  * that access, it does not leave the processor to try again.
  *
@@ -1015,7 +1015,7 @@ static void ia64_460gx_realize(DeviceState *dev, Error **errp)
  * The SAC's scratch block keeps its contents instead: SAL_A hands the result
  * of one boot pass to the next one there, across a reset it asks for itself.
  * Its recovery-check pass sizes and initializes the DRAM, sets bit 0 of the
- * word at +0xCB0 (bios130.BIN @0xFFFF4F98) and resets the platform through
+ * word at +0xCB0 (bios130.BIN @0xFFFF4FC0) and resets the platform through
  * port 0xCF9 (0x02 then 0x06); the pass after the reset reads that word
  * (@0xFFFF4B80: "ld4.acq r35=[r34]; tbit.z p7,p6=r35,0"), finds bit 0 set and
  * branches past the memory initialization.  The BSP-arbitration read-modify-
