@@ -7337,6 +7337,7 @@ static void test_agp_gart_dma(void)
 #define M64_CONFIG_CHIP_ID      0x38
 #define M64_MEM_VGA_WP_SEL      0x2d
 #define M64_SRC_OFF_PITCH       0x60
+#define M64_SRC_CNTL            0x6d
 #define M64_HOST_DATA0          0x80
 #define M64_HOST_CNTL           0x90
 #define M64_SRC_Y_X             0x63
@@ -7719,6 +7720,36 @@ static void test_mach64_packed_24bpp(void)
     mach64_dev_close(&a);
 }
 
+/*
+ * A launch with COLOR_REG_WRITE_EN only loads the SGRAM colour register
+ * (RAGE XL RRG SRC_CNTL MM 0_6D); the 1x1 rectangle drivers aim at 0,0 must
+ * not land on the screen.
+ */
+static void test_mach64_colour_reg_write(void)
+{
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    qtest_writeb(a.qts, a.fb, 0x5a);
+    m64_wr(&a, M64_DP_PIX_WIDTH, M64_PIX_WIDTH_8BPP);
+    m64_wr(&a, M64_DST_OFF_PITCH, (32 / 8) << 22);
+    m64_wr(&a, M64_DP_FRGD_CLR, 0xc3);
+    m64_wr(&a, M64_DP_MIX, 0x7u << 16);
+    m64_wr(&a, M64_DP_SRC, 0x1u << 8);
+    m64_wr(&a, M64_DP_WRITE_MASK, 0xffffffff);
+    m64_wr(&a, M64_SC_LEFT, 0);
+    m64_wr(&a, M64_SC_RIGHT, 0x3fff);
+    m64_wr(&a, M64_SC_TOP, 0);
+    m64_wr(&a, M64_SC_BOTTOM, 0x3fff);
+    m64_wr(&a, M64_DST_CNTL, M64_DST_DIR_DOWN_RIGHT);
+    m64_wr(&a, M64_SRC_CNTL, 0x2040);      /* FAST_FILL_EN | COLOR_REG_WRITE */
+    m64_wr(&a, M64_DST_Y_X, 0);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (1u << 16) | 1);
+    g_assert_cmphex(qtest_readb(a.qts, a.fb), ==, 0x5a);
+
+    mach64_dev_close(&a);
+}
+
 static void test_mach64_2d_solid_fill(void)
 {
     Mach64TestDev a;
@@ -8085,6 +8116,8 @@ int main(int argc, char **argv)
                    test_mach64_tile_side_effect);
     qtest_add_func("/ia64-vpc/mach64/packed-24bpp",
                    test_mach64_packed_24bpp);
+    qtest_add_func("/ia64-vpc/mach64/colour-reg-write",
+                   test_mach64_colour_reg_write);
     qtest_add_func("/ia64-vpc/mach64/colour-compare",
                    test_mach64_colour_compare);
     qtest_add_func("/ia64-vpc/mach64/linear-aperture",

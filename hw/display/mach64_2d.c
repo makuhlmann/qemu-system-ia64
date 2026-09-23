@@ -389,6 +389,15 @@ void mach64_2d_dst_trigger(Mach64VGAState *s)
     if (w <= 0 || h <= 0) {
         return;
     }
+    /*
+     * COLOR_REG_WRITE_EN makes the launch a "color register blit for SGRAM"
+     * (RAGE XL RRG SRC_CNTL MM 0_6D): it loads the colour a following block
+     * write fill uses and puts no pixel in memory.  Drivers aim it at 0,0 with
+     * a 1x1 rectangle (WXPSP1 drivers/video/ms/ati/disp/bltm64-2.c:145).
+     */
+    if (s->regs[SRC_CNTL] & SRC_COLOR_REG_WRITE_EN) {
+        return;
+    }
     if (!ctx_init(s, &c)) {
         return;
     }

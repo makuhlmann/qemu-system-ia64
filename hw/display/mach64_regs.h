@@ -359,6 +359,7 @@
 #define SRC_PATT_ROT_EN         0x00000002ul
 #define SRC_LINEAR_EN           0x00000004ul
 #define SRC_BYTE_ALIGN          0x00000008ul
+#define SRC_COLOR_REG_WRITE_EN  0x00002000ul
 
 /* ---- PAT_CNTL ---- */
 #define PAT_MONO_EN             0x00000001ul
