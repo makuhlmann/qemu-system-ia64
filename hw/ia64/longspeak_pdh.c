@@ -568,7 +568,7 @@ static void longspeak_pdh_unrealize(DeviceState *dev)
  * The rendezvous state is cleared, the chipset registers are not: SAL_B
  * leaves its boot mode in the scratch byte (FFE79060) before it resets the
  * box, and SAL_A reads that byte in its first instructions (FFFE0346).  The
- * NVM and the SRAM keep their contents.
+ * NVM, the SRAM and the BMC's tokens keep their contents.
  */
 static void longspeak_pdh_reset(DeviceState *dev)
 {
@@ -582,6 +582,17 @@ static void longspeak_pdh_reset(DeviceState *dev)
            IA64_PDH_DILLON_STATUSES * sizeof(s->reg[0]));
 }
 
+static const VMStateDescription vmstate_longspeak_pdh_bmc_tokens = {
+    .name = TYPE_LONGSPEAK_PDH "/bmc-tokens",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(bmc_tokens, LongspeakPDHState,
+                            LONGSPEAK_BMC_TOKEN_BYTES),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_longspeak_pdh = {
     .name = TYPE_LONGSPEAK_PDH,
     .version_id = 2,
@@ -594,6 +605,10 @@ static const VMStateDescription vmstate_longspeak_pdh = {
         VMSTATE_UINT64(scratch1, LongspeakPDHState),
         VMSTATE_UINT64(misc, LongspeakPDHState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_longspeak_pdh_bmc_tokens,
+        NULL
     },
 };
 

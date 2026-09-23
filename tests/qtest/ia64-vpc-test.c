@@ -1584,18 +1584,21 @@ static size_t bmc_kcs_command(QTestState *qts, uint64_t kcs,
     return n;
 }
 
-/* One BT request: the network function, the command, and a sequence byte. */
+/* One BT request: the network function, a sequence byte, the command, data. */
 static size_t bmc_bt_command(QTestState *qts, uint64_t bt, uint8_t netfn,
-                             uint8_t cmd, uint8_t seq, uint8_t *rsp,
-                             size_t rsp_max)
+                             uint8_t cmd, uint8_t seq, const uint8_t *data,
+                             size_t data_len, uint8_t *rsp, size_t rsp_max)
 {
     size_t i, len;
 
     qtest_writeb(qts, bt, IPMI_BT_CLR_WR_PTR);
-    qtest_writeb(qts, bt + 1, 3);
+    qtest_writeb(qts, bt + 1, 3 + data_len);
     qtest_writeb(qts, bt + 1, netfn);
     qtest_writeb(qts, bt + 1, seq);
     qtest_writeb(qts, bt + 1, cmd);
+    for (i = 0; i < data_len; i++) {
+        qtest_writeb(qts, bt + 1, data[i]);
+    }
     qtest_writeb(qts, bt, IPMI_BT_H2B_ATN);
     g_assert_cmphex(qtest_readb(qts, bt), ==, IPMI_BT_B2H_ATN);
     qtest_writeb(qts, bt, IPMI_BT_H_BUSY);
@@ -1867,35 +1870,6 @@ static void test_pdh_bmc(void)
     g_assert_cmphex(sum, ==, 0);
 
     /*
-     * HP's own network function: command 0x01 on token 0 is the read the
-     * firmware halts on when it is refused, and 0x03 follows it per token.
-     * Both answer the requested number of bytes; a command the board does
-     * not carry is refused.
-     */
-    {
-        const uint8_t read[] = { IPMI_NETFN_HP_TOKEN_LUN0, 0x01, 0x00, 5 };
-        const uint8_t after[] = { IPMI_NETFN_HP_TOKEN_LUN0, 0x03, 0x0a, 5 };
-        const uint8_t unknown[] = { IPMI_NETFN_HP_TOKEN_LUN0, 0x42 };
-        const uint8_t *tokens[] = { read, after };
-        unsigned c;
-
-        for (c = 0; c < G_N_ELEMENTS(tokens); c++) {
-            g_assert_cmpuint(bmc_kcs_command(qts, kcs, tokens[c], 4,
-                                             rsp, sizeof(rsp)), ==, 3 + 5);
-            g_assert_cmphex(rsp[0], ==, IPMI_NETFN_HP_TOKEN_LUN0 | 0x04);
-            g_assert_cmphex(rsp[1], ==, tokens[c][1]);
-            g_assert_cmphex(rsp[2], ==, 0x00);
-            for (i = 0; i < 5; i++) {
-                g_assert_cmphex(rsp[3 + i], ==, 0x00);
-            }
-        }
-        g_assert_cmpuint(bmc_kcs_command(qts, kcs, unknown,
-                                         G_N_ELEMENTS(unknown),
-                                         rsp, sizeof(rsp)), ==, 3);
-        g_assert_cmphex(rsp[2], ==, 0xc1);
-    }
-
-    /*
      * Each processor has an information area of its own in FRU device
      * 0x20 + n, with a second device at 0x24 + n.  They are present but not
      * programmed, so the byte the firmware tests first reads zero.
@@ -1933,7 +1907,7 @@ static void test_pdh_bmc(void)
 
     /* The same self test over the BT, which carries a length and a sequence. */
     g_assert_cmpuint(bmc_bt_command(qts, bt, IPMI_NETFN_APP_LUN0,
-                                    IPMI_CMD_SELF_TEST, 0x77,
+                                    IPMI_CMD_SELF_TEST, 0x77, NULL, 0,
                                     rsp, sizeof(rsp)),
                      ==, G_N_ELEMENTS(expect) + 1);
     g_assert_cmphex(rsp[0], ==, expect[0]);
@@ -1947,11 +1921,135 @@ static void test_pdh_bmc(void)
      * retries at all.
      */
     g_assert_cmpuint(bmc_bt_command(qts, bt, IPMI_NETFN_APP_LUN0, 0x36, 0x78,
-                                    rsp, sizeof(rsp)), ==, 9);
+                                    NULL, 0, rsp, sizeof(rsp)), ==, 9);
     g_assert_cmphex(rsp[3], ==, 0x00);
     g_assert_cmphex(rsp[5], ==, IA64_PDH_BMC_BT_BUFFER);
     g_assert_cmphex(rsp[6], ==, IA64_PDH_BMC_BT_BUFFER);
     g_assert_cmphex(rsp[8], ==, IA64_PDH_BMC_BT_RETRIES);
+
+    qtest_quit(qts);
+}
+
+#define IPMI_HP_TOKEN_INFO       0x01U
+#define IPMI_HP_TOKEN_READ       0x02U
+#define IPMI_HP_TOKEN_WRITE      0x03U
+#define IPMI_HP_TOKEN_READ_PART  0x08U
+#define IPMI_HP_TOKEN_WRITE_PART 0x09U
+
+/*
+ * HP's token commands: the BMC keeps what the firmware writes through either
+ * interface, and moves a value too long for one BT message in parts.
+ */
+static void test_pdh_bmc_tokens(void)
+{
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    const uint64_t bt = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_BT;
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t rsp[128];
+    unsigned i, part;
+
+    /* The first-boot token: one byte, zero on a new BMC, 18 once loaded. */
+    {
+        const uint8_t info[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_INFO,
+                                 0x00, 0x05 };
+        const uint8_t read[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_READ,
+                                 0x00, 0x05 };
+        const uint8_t loaded[] = { 0x00, 0x05, 18 };
+        const uint8_t longer[] = { 0x00, 0x05, 18, 0 };
+
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, G_N_ELEMENTS(info),
+                                         rsp, sizeof(rsp)), ==, 5);
+        g_assert_cmphex(rsp[0], ==, IPMI_NETFN_HP_TOKEN_LUN0 | 0x04);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        g_assert_cmphex(rsp[3], ==, 0x00);
+        g_assert_cmpuint(rsp[4], ==, 1);
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                         rsp, sizeof(rsp)), ==, 4);
+        g_assert_cmphex(rsp[3], ==, 0);
+
+        g_assert_cmpuint(bmc_bt_command(qts, bt, IPMI_NETFN_HP_TOKEN_LUN0,
+                                        IPMI_HP_TOKEN_WRITE, 0x11, loaded,
+                                        G_N_ELEMENTS(loaded), rsp,
+                                        sizeof(rsp)), ==, 4);
+        g_assert_cmphex(rsp[3], ==, 0x00);
+        g_assert_cmpuint(bmc_bt_command(qts, bt, IPMI_NETFN_HP_TOKEN_LUN0,
+                                        IPMI_HP_TOKEN_WRITE, 0x12, longer,
+                                        G_N_ELEMENTS(longer), rsp,
+                                        sizeof(rsp)), ==, 4);
+        g_assert_cmphex(rsp[3], ==, 0xc7);
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                         rsp, sizeof(rsp)), ==, 4);
+        g_assert_cmpuint(rsp[3], ==, 18);
+    }
+
+    /* FW_REV_S, 64 bytes: written and read in parts, then read whole. */
+    {
+        const uint8_t info[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_INFO,
+                                 0x20, 0x0a };
+        const uint8_t read[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_READ,
+                                 0x20, 0x0a };
+        const uint8_t read_part[] = { IPMI_NETFN_HP_TOKEN_LUN0,
+                                      IPMI_HP_TOKEN_READ_PART,
+                                      0x20, 0x0a, 40, 0, 24 };
+        const uint8_t beyond[] = { IPMI_NETFN_HP_TOKEN_LUN0,
+                                   IPMI_HP_TOKEN_READ_PART,
+                                   0x20, 0x0a, 60, 0, 8 };
+        uint8_t write_part[5 + 32] = { 0x20, 0x0a, 0, 0, 32 };
+
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, G_N_ELEMENTS(info),
+                                         rsp, sizeof(rsp)), ==, 5);
+        g_assert_cmpuint(rsp[4], ==, 64);
+
+        for (part = 0; part < 2; part++) {
+            write_part[2] = part * 32;
+            for (i = 0; i < 32; i++) {
+                write_part[5 + i] = (part * 32 + i) ^ 0x5a;
+            }
+            g_assert_cmpuint(bmc_bt_command(qts, bt, IPMI_NETFN_HP_TOKEN_LUN0,
+                                            IPMI_HP_TOKEN_WRITE_PART, part,
+                                            write_part,
+                                            G_N_ELEMENTS(write_part), rsp,
+                                            sizeof(rsp)), ==, 4);
+            g_assert_cmphex(rsp[3], ==, 0x00);
+        }
+
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, read_part,
+                                         G_N_ELEMENTS(read_part),
+                                         rsp, sizeof(rsp)), ==, 3 + 24);
+        for (i = 0; i < 24; i++) {
+            g_assert_cmphex(rsp[3 + i], ==, (40 + i) ^ 0x5a);
+        }
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                         rsp, sizeof(rsp)), ==, 3 + 64);
+        for (i = 0; i < 64; i++) {
+            g_assert_cmphex(rsp[3 + i], ==, i ^ 0x5a);
+        }
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, beyond,
+                                         G_N_ELEMENTS(beyond),
+                                         rsp, sizeof(rsp)), ==, 3);
+        g_assert_cmphex(rsp[2], ==, 0xc9);
+    }
+
+    /* A token the BMC does not keep is empty and takes a write. */
+    {
+        const uint8_t info[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_INFO,
+                                 0x0a, 0x05 };
+        const uint8_t write[] = { IPMI_NETFN_HP_TOKEN_LUN0,
+                                  IPMI_HP_TOKEN_WRITE, 0x0a, 0x05, 1, 2 };
+        const uint8_t unknown[] = { IPMI_NETFN_HP_TOKEN_LUN0, 0x42 };
+
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, G_N_ELEMENTS(info),
+                                         rsp, sizeof(rsp)), ==, 5);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        g_assert_cmpuint(rsp[4], ==, 0);
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, write, G_N_ELEMENTS(write),
+                                         rsp, sizeof(rsp)), ==, 3);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, unknown,
+                                         G_N_ELEMENTS(unknown),
+                                         rsp, sizeof(rsp)), ==, 3);
+        g_assert_cmphex(rsp[2], ==, 0xc1);
+    }
 
     qtest_quit(qts);
 }
@@ -8196,6 +8294,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pdh/unimp-logged-once",
                    test_pdh_unimp_logged_once);
     qtest_add_func("/ia64-vpc/pdh/bmc", test_pdh_bmc);
+    qtest_add_func("/ia64-vpc/pdh/bmc-tokens", test_pdh_bmc_tokens);
     qtest_add_func("/ia64-vpc/pdh/clock", test_pdh_clock);
     qtest_add_func("/ia64-vpc/pdh/dimm-spd", test_pdh_dimm_spd);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",

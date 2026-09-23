@@ -3,14 +3,21 @@
  *
  * The BMC of the Longs Peak (HP zx1 board).
  *
- * HP's firmware keeps a set of "tokens" in its BMC and configures nothing
- * until it can read them: it polls tokens 0x13 to 0x15, then reads token 0,
- * and halts with POST 0x0012A0 "error reading bmc first boot token" if that
- * one is refused.  The commands are HP's own -- IPMI network function 0x32 is
- * controller-specific and carries no defined payload (IPMI v2.0 table 5-1) --
- * so only their shape is known from the traffic: one byte of token number and
- * one of length, answered with that many bytes.  The content is checked: all
- * zeros is accepted, 0xAA is not.
+ * HP's firmware keeps copies of its settings in the BMC, as "tokens": the
+ * console devices, the boot timeout, the language and more, each a small
+ * value under a 16-bit number.  Token 0x500 is the BMC's own and reads 18
+ * once the firmware has loaded the others; a refused read of it halts POST
+ * with 0x0012A0 "error reading bmc first boot token", and any other value is
+ * a "bmc first boot", on which the firmware sets the clock to 1998-01-01
+ * (FFF5AB1C calls FFF3E290) and loads the tokens again.  A BMC that forgets
+ * them is therefore a new BMC on every power-on.
+ *
+ * The commands are HP's own -- IPMI network function 0x32 carries no defined
+ * payload (IPMI v2.0 table 5-1) -- and the firmware's trace strings name
+ * them.  Each request starts with the token number, little-endian.  Both the
+ * reader (FFF53640) and the writer (FFF53F60) take the size of the value from
+ * GET_TOKEN_INFO, not from their caller, and move a value that does not fit
+ * in one message in parts.
  *
  * Each processor has an information area of its own behind the BMC, in FRU
  * device 0x20 + n, with a second device at 0x24 + n.  The area is not an IPMI
@@ -40,9 +47,12 @@
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "longspeak_pdh.h"
 
-#define LONGSPEAK_BMC_NETFN_TOKEN   0x32
-#define LONGSPEAK_BMC_TOKEN_FIRST   0x01
-#define LONGSPEAK_BMC_TOKEN_LAST    0x03
+#define LONGSPEAK_BMC_NETFN_TOKEN       0x32
+#define LONGSPEAK_BMC_TOKEN_INFO        0x01
+#define LONGSPEAK_BMC_TOKEN_READ        0x02
+#define LONGSPEAK_BMC_TOKEN_WRITE       0x03
+#define LONGSPEAK_BMC_TOKEN_READ_PART   0x08
+#define LONGSPEAK_BMC_TOKEN_WRITE_PART  0x09
 
 #define LONGSPEAK_BMC_NETFN_STORAGE 0x0a
 #define LONGSPEAK_BMC_CMD_FRU_INFO  0x10
@@ -257,18 +267,169 @@ static int longspeak_bmc_dimm_slot_of(uint8_t device)
     return -1;
 }
 
-static bool longspeak_bmc_token(uint8_t *cmd, unsigned int cmd_len,
-                                RspBuffer *rsp)
-{
-    unsigned int i;
+typedef struct LongspeakBmcToken {
+    uint16_t id;
+    uint8_t size;
+} LongspeakBmcToken;
 
-    if (cmd_len < 4 || cmd[1] < LONGSPEAK_BMC_TOKEN_FIRST ||
-        cmd[1] > LONGSPEAK_BMC_TOKEN_LAST) {
+/*
+ * The tokens the firmware copies to the BMC: its table at FFF96FB8 holds 40
+ * bytes a token, the BMC token at +0 (0 for a token kept only in the NVM) and
+ * the size at +2; the name at +24 is the next entry's.  0x500 and 0xD02
+ * (FFF55790 writes 16 bytes) are the BMC's own.  GET_TOKEN_INFO flag bit 6
+ * would put a checksum byte in front of a value (FFF53870); no token here
+ * has one, so the firmware sends none of the checksum commands 10 and 11.
+ */
+static const LongspeakBmcToken longspeak_bmc_tokens[] = {
+    { 0x0067,  1 },     /* WAKE_LAN */
+    { 0x0500,  1 },     /* first boot */
+    { 0x0501,  1 },     /* BMC_FLSH */
+    { 0x0502,  1 },     /* E_BUZZER */
+    { 0x0503,  1 },     /* LAN_1GB */
+    { 0x0504,  1 },     /* MANG_LAN */
+    { 0x0505,  1 },     /* SERIAL_1 */
+    { 0x0506,  1 },     /* SERIAL_2 */
+    { 0x0509,  1 },     /* BMC_OP_M */
+    { 0x0511,  1 },     /* SPR_SPEC */
+    { 0x0513,  1 },     /* DEBUG */
+    { 0x0514,  1 },     /* SPARE_01 to SPARE_12 */
+    { 0x0515,  1 },
+    { 0x0516,  1 },
+    { 0x0517,  1 },
+    { 0x0518,  1 },
+    { 0x0519,  1 },
+    { 0x051a,  1 },
+    { 0x051b,  1 },
+    { 0x051c,  1 },
+    { 0x051d,  1 },
+    { 0x051e,  1 },
+    { 0x051f,  1 },
+    { 0x0900,  8 },     /* SPEEDY_B */
+    { 0x0901,  8 },     /* SPEEDY_D */
+    { 0x0920,  2 },     /* CPU_MON */
+    { 0x0921,  2 },     /* CELL_MON */
+    { 0x0922,  1 },     /* MON_ALGO */
+    { 0x0940,  4 },     /* EFI_LANG */
+    { 0x0941,  2 },     /* EFI_TIME */
+    { 0x0942,  8 },     /* EFI_DEBG */
+    { 0x0a00,  2 },     /* ROM_RELS */
+    { 0x0a01,  4 },     /* ROM_DATE */
+    { 0x0a03,  2 },     /* SALA_REV */
+    { 0x0a04,  2 },     /* SALB_REV */
+    { 0x0a05,  2 },     /* ACPI_REV */
+    { 0x0a06,  2 },     /* EFI_REV */
+    { 0x0a07,  2 },     /* EFI_SPEC */
+    { 0x0a08,  2 },     /* EFI_INTL */
+    { 0x0a09,  2 },     /* POSE_REV */
+    { 0x0a0a,  2 },     /* IPMI_REV */
+    { 0x0a0b,  8 },     /* BIOS_REV */
+    { 0x0a0c,  8 },     /* GSP_REV */
+    { 0x0a0d,  2 },     /* SAL_NVMR */
+    { 0x0a0e,  2 },     /* EFI_NVMR */
+    { 0x0a20, 64 },     /* FW_REV_S */
+    { 0x0a21, 10 },     /* DATE_STR */
+    { 0x0c10, 40 },     /* CONDEV00 to CONDEV05 */
+    { 0x0c11, 40 },
+    { 0x0c12, 40 },
+    { 0x0c13, 40 },
+    { 0x0c14, 40 },
+    { 0x0c15, 40 },
+    { 0x0d02, 16 },
+};
+
+/* The token, and where its value starts in the store. */
+static const LongspeakBmcToken *longspeak_bmc_token_find(uint16_t id,
+                                                         unsigned int *base)
+{
+    unsigned int i, at = 0;
+
+    for (i = 0; i < ARRAY_SIZE(longspeak_bmc_tokens); i++) {
+        if (longspeak_bmc_tokens[i].id == id) {
+            *base = at;
+            return &longspeak_bmc_tokens[i];
+        }
+        at += longspeak_bmc_tokens[i].size;
+    }
+    return NULL;
+}
+
+/*
+ * A token the BMC does not keep reads as an empty value and takes any write:
+ * the firmware reads a few more of the BMC's own (0x508, 0x50A, 0x510, 0x512,
+ * 0xA02) and writes 0xD01, none of them with a known size.
+ */
+static bool longspeak_bmc_token(IPMIBmc *s, uint8_t *cmd,
+                                unsigned int cmd_len, RspBuffer *rsp)
+{
+    LongspeakPDHState *pdh = (LongspeakPDHState *)
+        object_dynamic_cast(OBJECT(s)->parent, TYPE_LONGSPEAK_PDH);
+    const LongspeakBmcToken *token = NULL;
+    unsigned int base = 0, size = 0, offset, count, i;
+    uint8_t *value = NULL;
+
+    switch (cmd[1]) {
+    case LONGSPEAK_BMC_TOKEN_INFO:
+    case LONGSPEAK_BMC_TOKEN_READ:
+    case LONGSPEAK_BMC_TOKEN_WRITE:
+    case LONGSPEAK_BMC_TOKEN_READ_PART:
+    case LONGSPEAK_BMC_TOKEN_WRITE_PART:
+        break;
+    default:
         return false;
     }
+    if (cmd_len < 4) {
+        rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_LENGTH_INVALID);
+        return true;
+    }
+    if (pdh != NULL) {
+        token = longspeak_bmc_token_find(lduw_le_p(cmd + 2), &base);
+    }
+    if (token != NULL) {
+        size = token->size;
+        value = pdh->bmc_tokens + base;
+    }
 
-    for (i = 0; i < cmd[3]; i++) {
+    switch (cmd[1]) {
+    case LONGSPEAK_BMC_TOKEN_INFO:
         rsp_buffer_push(rsp, 0);
+        rsp_buffer_push(rsp, size);
+        return true;
+    case LONGSPEAK_BMC_TOKEN_READ:
+        for (i = 0; i < size; i++) {
+            rsp_buffer_push(rsp, value[i]);
+        }
+        return true;
+    case LONGSPEAK_BMC_TOKEN_WRITE:
+        if (token == NULL) {
+            return true;
+        }
+        if (cmd_len != 4 + size) {
+            rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_LENGTH_INVALID);
+            return true;
+        }
+        memcpy(value, cmd + 4, size);
+        return true;
+    }
+
+    /* The partial commands: a 16-bit offset and a count follow the token. */
+    if (cmd_len < 7) {
+        rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_LENGTH_INVALID);
+        return true;
+    }
+    offset = lduw_le_p(cmd + 4);
+    count = cmd[6];
+    if (offset + count > size) {
+        rsp_buffer_set_error(rsp, IPMI_CC_PARM_OUT_OF_RANGE);
+        return true;
+    }
+    if (cmd[1] == LONGSPEAK_BMC_TOKEN_READ_PART) {
+        for (i = 0; i < count; i++) {
+            rsp_buffer_push(rsp, value[offset + i]);
+        }
+    } else if (cmd_len != 7 + count) {
+        rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_LENGTH_INVALID);
+    } else if (count > 0) {
+        memcpy(value + offset, cmd + 7, count);
     }
     return true;
 }
@@ -369,7 +530,7 @@ static void longspeak_bmc_handle_command(IPMIBmc *s, uint8_t *cmd,
 
         switch (cmd[0] >> 2) {
         case LONGSPEAK_BMC_NETFN_TOKEN:
-            handled = longspeak_bmc_token(cmd, cmd_len, &rsp);
+            handled = longspeak_bmc_token(s, cmd, cmd_len, &rsp);
             break;
         case LONGSPEAK_BMC_NETFN_STORAGE:
             if (cmd[1] == LONGSPEAK_BMC_CMD_FRU_INFO ||
@@ -395,6 +556,12 @@ static void longspeak_bmc_class_init(ObjectClass *oc, const void *data)
 {
     IPMIBmcClass *bk = IPMI_BMC_CLASS(oc);
     LongspeakBmcClass *bc = LONGSPEAK_BMC_CLASS(oc);
+    unsigned int i, bytes = 0;
+
+    for (i = 0; i < ARRAY_SIZE(longspeak_bmc_tokens); i++) {
+        bytes += longspeak_bmc_tokens[i].size;
+    }
+    assert(bytes <= LONGSPEAK_BMC_TOKEN_BYTES);
 
     bc->parent_handle_command = bk->handle_command;
     bk->handle_command = longspeak_bmc_handle_command;

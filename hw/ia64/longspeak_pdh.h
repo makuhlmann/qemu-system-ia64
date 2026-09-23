@@ -19,6 +19,8 @@
 #define TYPE_LONGSPEAK_RTC "longspeak-rtc"
 OBJECT_DECLARE_SIMPLE_TYPE(LongspeakPDHState, LONGSPEAK_PDH)
 
+#define LONGSPEAK_BMC_TOKEN_BYTES 512
+
 /* The register blocks, in sysbus MMIO order after the two SRAMs. */
 typedef enum LongspeakPDHBlockId {
     LONGSPEAK_PDH_DEV5B,
@@ -65,6 +67,8 @@ struct LongspeakPDHState {
     DeviceState *uart[IA64_PDH_UARTS];
     DeviceState *bt;               /* IPMI BT, FF5B_00E4 */
     DeviceState *kcs;              /* IPMI KCS, FF5B_0CA2 */
+    /* The BMC's tokens, which both interfaces reach (longspeak_bmc.c). */
+    uint8_t bmc_tokens[LONGSPEAK_BMC_TOKEN_BYTES];
     DeviceState *rtc;              /* the clock, FF5B_8000 */
 };
 
