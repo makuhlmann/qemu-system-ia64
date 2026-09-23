@@ -1000,6 +1000,10 @@ static void test_flash_part_longspeak(void)
     g_rmdir(tmpdir);
 }
 
+/* The BMC's tokens follow the battery-backed part in a zx1 `nvram=` file. */
+#define IA64_PDH_STORE_BMC      0x1000U
+#define IA64_PDH_STORE_SIZE     (IA64_PDH_BBSRAM_SIZE + IA64_PDH_STORE_BMC)
+
 /*
  * The zx1 board keeps both firmwares' settings in the PDH battery-backed
  * SRAM, so `nvram=` images that part: a new file is created blank, what the
@@ -1028,7 +1032,7 @@ static void test_pdh_store_persists(void)
     qtest_quit(qts);
 
     g_assert_true(g_file_get_contents(path, &contents, &length, &error));
-    g_assert_cmpuint(length, ==, IA64_PDH_BBSRAM_SIZE);
+    g_assert_cmpuint(length, ==, IA64_PDH_STORE_SIZE);
 
     qts = qtest_initf("-machine zx1,nvram=%s -m 256M", quoted);
     g_assert_cmphex(qtest_readq(qts, IA64_PDH_BBSRAM_BASE), ==,
@@ -1043,6 +1047,16 @@ static void test_pdh_store_persists(void)
     qts = qtest_initf("-machine zx1,nvram=%s -m 256M", quoted);
     g_assert_cmphex(qtest_readq(qts, IA64_PDH_SRAM_BASE), ==, 0);
     qtest_quit(qts);
+
+    /* A file of just the part, from before the BMC kept its tokens. */
+    g_assert_true(g_file_set_contents(path, contents, IA64_PDH_BBSRAM_SIZE,
+                                      &error));
+    qts = qtest_initf("-machine zx1,nvram=%s -m 256M", quoted);
+    g_assert_cmphex(qtest_readq(qts, last), ==, 0x1122334455667788ULL);
+    qtest_quit(qts);
+    g_free(contents);
+    g_assert_true(g_file_get_contents(path, &contents, &length, &error));
+    g_assert_cmpuint(length, ==, IA64_PDH_STORE_SIZE);
 
     g_assert_cmpint(g_unlink(path), ==, 0);
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
@@ -2052,6 +2066,47 @@ static void test_pdh_bmc_tokens(void)
     }
 
     qtest_quit(qts);
+}
+
+/*
+ * The tokens are the BMC's own memory, which outlives the machine: in the
+ * `nvram=` file, a token the firmware wrote reads back at the next start.
+ */
+static void test_pdh_bmc_tokens_persist(void)
+{
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    const uint8_t write[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_WRITE,
+                              0x00, 0x05, 18 };
+    const uint8_t read[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_READ,
+                             0x00, 0x05 };
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = g_dir_make_tmp("ia64-vpc-bmc-XXXXXX", &error);
+    g_autofree char *path = NULL;
+    g_autofree char *quoted = NULL;
+    QTestState *qts;
+    uint8_t rsp[16];
+
+    g_assert_no_error(error);
+    path = g_build_filename(tmpdir, "zx1.nvram", NULL);
+    quoted = g_shell_quote(path);
+
+    qts = qtest_initf("-machine zx1,nvram=%s -m 256M", quoted);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                     rsp, sizeof(rsp)), ==, 4);
+    g_assert_cmpuint(rsp[3], ==, 0);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, write, G_N_ELEMENTS(write),
+                                     rsp, sizeof(rsp)), ==, 3);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    qtest_quit(qts);
+
+    qts = qtest_initf("-machine zx1,nvram=%s -m 256M", quoted);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                     rsp, sizeof(rsp)), ==, 4);
+    g_assert_cmpuint(rsp[3], ==, 18);
+    qtest_quit(qts);
+
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
 #define IA64_ISP_REG_ISTATUS    0x0aU
@@ -8295,6 +8350,8 @@ int main(int argc, char **argv)
                    test_pdh_unimp_logged_once);
     qtest_add_func("/ia64-vpc/pdh/bmc", test_pdh_bmc);
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens", test_pdh_bmc_tokens);
+    qtest_add_func("/ia64-vpc/pdh/bmc-tokens-persist",
+                   test_pdh_bmc_tokens_persist);
     qtest_add_func("/ia64-vpc/pdh/clock", test_pdh_clock);
     qtest_add_func("/ia64-vpc/pdh/dimm-spd", test_pdh_dimm_spd);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",

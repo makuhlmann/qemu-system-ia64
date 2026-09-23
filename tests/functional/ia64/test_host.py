@@ -463,13 +463,32 @@ class Ia64NvramTool(unittest.TestCase):
             src.write_bytes(self.make_own_store())
             self.assertEqual(tool.main(["convert", str(src), str(dst)]), 0)
             out = dst.read_bytes()
-            self.assertEqual(len(out), tool.PDH_STORE_SIZE)
+            self.assertEqual(len(out), tool.ZX1_FILE_SIZE)
             self.assertEqual(tool.own_store(out), self.make_own_store())
+            # The BMC in the new file is a new one.
+            self.assertIsNone(tool.bmc_tokens(out))
             # The vendor parts of the store stay blank for the firmware to form.
             for offset, tag, _name in tool.VENDOR_TAGS:
                 self.assertNotEqual(out[offset:offset + len(tag)], tag)
             # A store that is already converted is refused, not converted twice.
             self.assertEqual(tool.main(["convert", str(dst), str(src)]), 1)
+
+    def test_bmc_tokens(self):
+        tool = self.tool
+        image = bytearray(tool.ZX1_FILE_SIZE)
+        area = tool.PDH_STORE_SIZE
+        image[area:area + 8] = tool.BMC_TOKENS_TAG
+        struct.pack_into("<HBB", image, area + 8, 0x500, 1, 18)
+        struct.pack_into("<HB2s", image, area + 12, 0x941, 2, b"\x0a\x00")
+        self.assertEqual(tool.bmc_tokens(bytes(image)),
+                         {0x500: b"\x12", 0x941: b"\x0a\x00"})
+        # A file of just the part keeps no tokens yet, and both are zx1 files.
+        self.assertIsNone(tool.bmc_tokens(bytes(image[:area])))
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / "zx1.nvram"
+            src.write_bytes(bytes(image))
+            self.assertEqual(tool.main(["convert", str(src),
+                                        str(Path(directory) / "x")]), 1)
 
     def test_convert_from_flash(self):
         tool = self.tool

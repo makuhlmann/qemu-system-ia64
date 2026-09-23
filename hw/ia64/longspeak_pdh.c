@@ -385,7 +385,8 @@ static DeviceState *longspeak_pdh_bmc_port(LongspeakPDHState *s,
  * the file already holds instead, and write back only the blocks that differ:
  * once a second while the machine runs, and again whenever it stops.  A
  * machine that never runs therefore never writes the file, which is why the
- * qtest for this starts one.
+ * qtest for this starts one.  The BMC's tokens follow the part in the file
+ * and go the same way.
  */
 #define LONGSPEAK_PDH_STORE_BLOCK   4096
 #define LONGSPEAK_PDH_STORE_PERIOD  1000
@@ -393,16 +394,22 @@ static DeviceState *longspeak_pdh_bmc_port(LongspeakPDHState *s,
 static void longspeak_pdh_store_flush(LongspeakPDHState *s)
 {
     const uint8_t *ram = memory_region_get_ram_ptr(&s->bbsram);
+    uint8_t bmc[LONGSPEAK_PDH_STORE_BMC];
     uint64_t offset;
 
-    for (offset = 0; offset < IA64_PDH_BBSRAM_SIZE;
+    QEMU_BUILD_BUG_ON(LONGSPEAK_PDH_STORE_BMC % LONGSPEAK_PDH_STORE_BLOCK);
+    longspeak_bmc_tokens_save(s->bmc_tokens, bmc);
+    for (offset = 0; offset < LONGSPEAK_PDH_STORE_SIZE;
          offset += LONGSPEAK_PDH_STORE_BLOCK) {
+        const uint8_t *now = offset < IA64_PDH_BBSRAM_SIZE
+                             ? ram + offset
+                             : bmc + (offset - IA64_PDH_BBSRAM_SIZE);
         uint8_t *kept = s->store_shadow + offset;
 
-        if (memcmp(ram + offset, kept, LONGSPEAK_PDH_STORE_BLOCK) == 0) {
+        if (memcmp(now, kept, LONGSPEAK_PDH_STORE_BLOCK) == 0) {
             continue;
         }
-        memcpy(kept, ram + offset, LONGSPEAK_PDH_STORE_BLOCK);
+        memcpy(kept, now, LONGSPEAK_PDH_STORE_BLOCK);
         if (blk_pwrite(s->store, offset, LONGSPEAK_PDH_STORE_BLOCK, kept,
                        0) < 0) {
             qemu_log_mask(LOG_GUEST_ERROR, "longspeak-pdh: cannot write the "
@@ -471,15 +478,18 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(sbd, &s->bbsram);
     sysbus_init_mmio(sbd, &s->sram);
     if (s->store != NULL) {
-        uint8_t *ram = memory_region_get_ram_ptr(&s->bbsram);
+        g_autofree uint8_t *file = g_malloc(LONGSPEAK_PDH_STORE_SIZE);
 
         if (blk_set_perm(s->store, BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE,
                          BLK_PERM_ALL, errp) < 0 ||
-            !blk_check_size_and_read_all(s->store, dev, ram,
-                                         IA64_PDH_BBSRAM_SIZE, errp)) {
+            !blk_check_size_and_read_all(s->store, dev, file,
+                                         LONGSPEAK_PDH_STORE_SIZE, errp)) {
             return;
         }
-        s->store_shadow = g_memdup2(ram, IA64_PDH_BBSRAM_SIZE);
+        memcpy(memory_region_get_ram_ptr(&s->bbsram), file,
+               IA64_PDH_BBSRAM_SIZE);
+        longspeak_bmc_tokens_load(s->bmc_tokens, file + IA64_PDH_BBSRAM_SIZE);
+        s->store_shadow = g_steal_pointer(&file);
         s->store_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
                                       longspeak_pdh_store_timer, s);
         s->store_vmstate =

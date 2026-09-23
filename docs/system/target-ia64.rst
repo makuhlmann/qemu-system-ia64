@@ -58,10 +58,13 @@ Machine properties
 ``firmware-console=serial|vga``
   Select the primary console advertised by HCDP.  The default is ``vga``.
 
-``nvram=auto|none|PATH``
-  Select the 64 KiB EFI variable store.  ``auto`` places ``nvram`` beside the
-  selected firmware, ``none`` keeps variables process-local, and a path names
-  an explicit backing file.  Use a separate file for each VM.
+``nvram=none|PATH``
+  Select the file that keeps the board's settings across runs.  On ``460gx``
+  it is an image of the firmware flash.  On ``zx1`` it is an image of the PDH
+  battery-backed SRAM, followed by the settings tokens that the BMC keeps.
+  ``none`` (the default; ``auto`` is accepted too) keeps them for one run
+  only.  Use a separate file for each VM.  ``scripts/ia64-nvram.py``
+  identifies a file and converts an older one.
 
 ``alat=zero|full``
   Select the ALAT model.  ``zero`` is the default.  The full model is not

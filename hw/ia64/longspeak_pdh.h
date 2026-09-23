@@ -21,6 +21,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(LongspeakPDHState, LONGSPEAK_PDH)
 
 #define LONGSPEAK_BMC_TOKEN_BYTES 512
 
+/*
+ * The nvram= file: the battery-backed part, then the BMC's tokens, which the
+ * board keeps in the BMC's own memory.
+ */
+#define LONGSPEAK_PDH_STORE_BMC   0x1000
+#define LONGSPEAK_PDH_STORE_SIZE \
+    (IA64_PDH_BBSRAM_SIZE + LONGSPEAK_PDH_STORE_BMC)
+
 /* The register blocks, in sysbus MMIO order after the two SRAMs. */
 typedef enum LongspeakPDHBlockId {
     LONGSPEAK_PDH_DEV5B,
@@ -49,7 +57,7 @@ struct LongspeakPDHState {
 
     /* nvram=: the file that stands in for the battery (see the .c file). */
     BlockBackend *store;
-    uint8_t *store_shadow;         /* what the file holds already         */
+    uint8_t *store_shadow;         /* what the file holds already, whole  */
     QEMUTimer *store_timer;
     VMChangeStateEntry *store_vmstate;
     LongspeakPDHBlock block[LONGSPEAK_PDH_BLOCKS];
@@ -74,6 +82,10 @@ struct LongspeakPDHState {
 
 /* Re-sync the store's file copy after the machine seeded its own record. */
 void longspeak_pdh_store_seeded(DeviceState *dev);
+
+/* The BMC's tokens in and out of their area of the nvram= file. */
+void longspeak_bmc_tokens_save(const uint8_t *tokens, uint8_t *area);
+void longspeak_bmc_tokens_load(uint8_t *tokens, const uint8_t *area);
 
 /* sysbus MMIO indexes */
 #define LONGSPEAK_PDH_MMIO_BBSRAM  0

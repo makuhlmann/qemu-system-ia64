@@ -44,6 +44,7 @@
 #include "hw/southbridge/intel_82468gx.h"
 #include "hw/ia64/ia64_460gx_identity.h"
 #include "ia64_vpc_internal.h"
+#include "longspeak_pdh.h"
 #include "hw/acpi/acpi.h"
 #ifdef CONFIG_IA64_VPC_STORAGE
 #include "hw/scsi/isp12160.h"
@@ -3948,16 +3949,18 @@ static bool ia64_vpc_read_firmware(IA64VpcMachineState *s,
 }
 
 /*
- * The zx1 board keeps its settings in the PDH battery-backed SRAM, so its
- * `nvram=` file is a raw image of that part.  A file of another size belongs
- * to another part -- a flash image, or the 64 KiB store this firmware used to
- * keep in one -- and scripts/ia64-nvram.py converts it.  Only the size is
- * checked: a store of the right size that this firmware cannot read is the
- * firmware's own business, which asks before it resets one.
+ * The zx1 board keeps its settings in the PDH battery-backed SRAM and in its
+ * BMC, so its `nvram=` file is a raw image of that part followed by the BMC's
+ * tokens.  A file of just the part was kept before the BMC was, and gains the
+ * area of a new BMC.  A file of another size belongs to another part -- a
+ * flash image, or the 64 KiB store this firmware used to keep in one -- and
+ * scripts/ia64-nvram.py converts it.  Only the size is checked: a store of the
+ * right size that this firmware cannot read is the firmware's own business,
+ * which asks before it resets one.
  */
 BlockBackend *ia64_vpc_open_pdh_store(const char *path, Error **errp)
 {
-    const uint64_t size = IA64_PDH_BBSRAM_SIZE;
+    const uint64_t size = LONGSPEAK_PDH_STORE_SIZE;
     g_autofree char *existing = NULL;
     gsize existing_size = 0;
     GError *gerr = NULL;
@@ -3980,11 +3983,26 @@ BlockBackend *ia64_vpc_open_pdh_store(const char *path, Error **errp)
             g_error_free(gerr);
             return NULL;
         }
+    } else if (existing_size == IA64_PDH_BBSRAM_SIZE) {
+        g_autofree char *blank = g_malloc0(LONGSPEAK_PDH_STORE_BMC);
+        int fd = qemu_open(path, O_WRONLY | O_APPEND, errp);
+
+        if (fd < 0) {
+            return NULL;
+        }
+        if (qemu_write_full(fd, blank, LONGSPEAK_PDH_STORE_BMC) !=
+            LONGSPEAK_PDH_STORE_BMC) {
+            error_setg_errno(errp, errno, "nvram '%s': cannot write", path);
+            qemu_close(fd);
+            return NULL;
+        }
+        qemu_close(fd);
     } else if (existing_size != size) {
         error_setg(errp, "nvram '%s' is %" G_GSIZE_FORMAT " bytes, but this "
-                   "board keeps its settings in the %" PRIu64 "-byte PDH "
-                   "store; the file was not changed, convert it with "
-                   "scripts/ia64-nvram.py", path, existing_size, size);
+                   "board keeps its settings in a %" PRIu64 "-byte file, the "
+                   "PDH store and the BMC's tokens; the file was not changed, "
+                   "convert it with scripts/ia64-nvram.py", path,
+                   existing_size, size);
         return NULL;
     }
 

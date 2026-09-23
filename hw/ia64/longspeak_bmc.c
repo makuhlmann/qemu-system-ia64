@@ -434,6 +434,54 @@ static bool longspeak_bmc_token(IPMIBmc *s, uint8_t *cmd,
     return true;
 }
 
+/*
+ * In the file: a tag, then each token's number, size and value, up to a zero
+ * number.  A record of a token this BMC does not keep, or of another size, is
+ * left out on load, so the file outlives a change of the table.
+ */
+#define LONGSPEAK_BMC_STORE_TAG "BMCTOKEN"
+#define LONGSPEAK_BMC_STORE_TAG_LEN 8
+#define LONGSPEAK_BMC_STORE_RECORD 3
+
+void longspeak_bmc_tokens_save(const uint8_t *tokens, uint8_t *area)
+{
+    uint8_t *p = area + LONGSPEAK_BMC_STORE_TAG_LEN;
+    unsigned int i;
+
+    memset(area, 0, LONGSPEAK_PDH_STORE_BMC);
+    memcpy(area, LONGSPEAK_BMC_STORE_TAG, LONGSPEAK_BMC_STORE_TAG_LEN);
+    for (i = 0; i < ARRAY_SIZE(longspeak_bmc_tokens); i++) {
+        const LongspeakBmcToken *token = &longspeak_bmc_tokens[i];
+
+        stw_le_p(p, token->id);
+        p[2] = token->size;
+        memcpy(p + LONGSPEAK_BMC_STORE_RECORD, tokens, token->size);
+        tokens += token->size;
+        p += LONGSPEAK_BMC_STORE_RECORD + token->size;
+    }
+}
+
+void longspeak_bmc_tokens_load(uint8_t *tokens, const uint8_t *area)
+{
+    const uint8_t *p = area + LONGSPEAK_BMC_STORE_TAG_LEN;
+    const uint8_t *end = area + LONGSPEAK_PDH_STORE_BMC;
+    const LongspeakBmcToken *token;
+    unsigned int base;
+
+    if (memcmp(area, LONGSPEAK_BMC_STORE_TAG,
+               LONGSPEAK_BMC_STORE_TAG_LEN) != 0) {
+        return;                 /* a new BMC */
+    }
+    while (end - p >= LONGSPEAK_BMC_STORE_RECORD && lduw_le_p(p) != 0 &&
+           end - p >= LONGSPEAK_BMC_STORE_RECORD + p[2]) {
+        token = longspeak_bmc_token_find(lduw_le_p(p), &base);
+        if (token != NULL && token->size == p[2]) {
+            memcpy(tokens + base, p + LONGSPEAK_BMC_STORE_RECORD, p[2]);
+        }
+        p += LONGSPEAK_BMC_STORE_RECORD + p[2];
+    }
+}
+
 static bool longspeak_bmc_fru_image(uint8_t *cmd, unsigned int cmd_len,
                                     RspBuffer *rsp, const uint8_t *image,
                                     unsigned int size)
@@ -562,6 +610,9 @@ static void longspeak_bmc_class_init(ObjectClass *oc, const void *data)
         bytes += longspeak_bmc_tokens[i].size;
     }
     assert(bytes <= LONGSPEAK_BMC_TOKEN_BYTES);
+    assert(LONGSPEAK_BMC_STORE_TAG_LEN + bytes + 2 +
+           LONGSPEAK_BMC_STORE_RECORD * ARRAY_SIZE(longspeak_bmc_tokens) <=
+           LONGSPEAK_PDH_STORE_BMC);
 
     bc->parent_handle_command = bk->handle_command;
     bk->handle_command = longspeak_bmc_handle_command;

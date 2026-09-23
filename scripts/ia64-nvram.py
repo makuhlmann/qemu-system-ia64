@@ -4,16 +4,25 @@
 SPDX-License-Identifier: GPL-2.0-or-later
 
 `nvram=` names a different part on each board: the firmware flash on 460gx,
-the PDH battery-backed SRAM on zx1.  A file written for one is refused by the
-other, so a store that was kept on zx1 before the move has to be converted.
+the PDH battery-backed SRAM on zx1, followed there by the BMC's tokens.  A file
+written for one is refused by the other, so a store that was kept on zx1
+before the move has to be converted.
 """
 
 import argparse
 import struct
 import sys
 
-# The zx1 store is a raw image of the battery-backed part, FF400000 up.
+# The zx1 store is a raw image of the battery-backed part, FF400000 up, then
+# the BMC's tokens: a tag, and records of token number, size and value up to
+# a zero number.  QEMU adds the token area to a file of just the part.
 PDH_STORE_SIZE = 0x80000
+BMC_TOKENS_SIZE = 0x1000
+ZX1_FILE_SIZE = PDH_STORE_SIZE + BMC_TOKENS_SIZE
+BMC_TOKENS_TAG = b"BMCTOKEN"
+BMC_FIRST_BOOT_TOKEN = 0x500
+BMC_FIRST_BOOT_DONE = 18
+ZX1_SIZES = (PDH_STORE_SIZE, ZX1_FILE_SIZE)
 # What the vendor firmware writes there (plans/nvram-portability.md sec 2.2).
 VENDOR_TAGS = (
     (0x00100, b"TINI MVN", "SAL control block"),   # "NVM INIT", two DATA4s
@@ -55,11 +64,27 @@ def is_flash_image(image):
     return 0x100000000 - len(image) <= fit < 0x100000000
 
 
+def bmc_tokens(image):
+    """The BMC's tokens of a zx1 file as {number: value}, or None."""
+    area = image[PDH_STORE_SIZE:PDH_STORE_SIZE + BMC_TOKENS_SIZE]
+    if len(image) != ZX1_FILE_SIZE or area[:8] != BMC_TOKENS_TAG:
+        return None
+    tokens = {}
+    at = len(BMC_TOKENS_TAG)
+    while at + 3 <= len(area):
+        number, size = struct.unpack_from("<HB", area, at)
+        if number == 0 or at + 3 + size > len(area):
+            break
+        tokens[number] = area[at + 3:at + 3 + size]
+        at += 3 + size
+    return tokens
+
+
 def own_store(image):
     """The 64 KiB store of any file that carries one."""
     if len(image) == OWN_STORE_SIZE and image[:8] == OWN_STORE_MAGIC:
         return image
-    if len(image) == PDH_STORE_SIZE:
+    if len(image) in ZX1_SIZES:
         store = image[OWN_STORE_OFFSET:OWN_STORE_OFFSET + OWN_STORE_SIZE]
         if store[:8] == OWN_STORE_MAGIC:
             return store
@@ -70,13 +95,22 @@ def own_store(image):
 def describe(path):
     image = read(path)
     lines = ["%s: %d bytes" % (path, len(image))]
-    if len(image) == PDH_STORE_SIZE:
+    if len(image) in ZX1_SIZES:
         held = [name for off, tag, name in VENDOR_TAGS
                 if image[off:off + len(tag)] == tag]
         if own_store(image) is not None:
             held.append("project firmware variables")
         lines.append("  zx1 PDH battery-backed store")
         lines.append("  holds: " + (", ".join(held) if held else "nothing"))
+        tokens = bmc_tokens(image)
+        if tokens is None:
+            lines.append("  BMC tokens: none, a new BMC")
+        else:
+            done = tokens.get(BMC_FIRST_BOOT_TOKEN, b"")[:1] == \
+                bytes([BMC_FIRST_BOOT_DONE])
+            lines.append("  BMC tokens: %d, %s" % (
+                len(tokens), "loaded by the vendor firmware" if done
+                else "not loaded yet"))
     elif len(image) == OWN_STORE_SIZE and image[:8] == OWN_STORE_MAGIC:
         lines.append("  project firmware variable store (the 64 KiB form)")
         lines.append("  convert it before it is used on zx1")
@@ -95,7 +129,7 @@ def describe(path):
 
 def convert(src, dst):
     image = read(src)
-    if len(image) == PDH_STORE_SIZE:
+    if len(image) in ZX1_SIZES:
         print("%s is already a zx1 store" % src, file=sys.stderr)
         return 1
     store = own_store(image)
@@ -103,7 +137,7 @@ def convert(src, dst):
         print("%s holds no project firmware variable store" % src,
               file=sys.stderr)
         return 1
-    out = bytearray(PDH_STORE_SIZE)
+    out = bytearray(ZX1_FILE_SIZE)
     out[OWN_STORE_OFFSET:OWN_STORE_OFFSET + OWN_STORE_SIZE] = store
     with open(dst, "wb") as f:
         f.write(out)
