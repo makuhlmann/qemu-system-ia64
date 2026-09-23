@@ -274,6 +274,29 @@ test_pal_halt_wakes_on_due_itm = require_registers(
         "r31": 0x5a,
     }, entry=0x10)
 
+# PAL_HALT and PAL_HALT_LIGHT read the virtual clock.  Under -icount that is
+# only allowed in the last instruction of a TB, and the break bundle of the
+# PAL stub is followed by its br.ret: QEMU exited with "Bad icount read".
+def _icount_case(name, case):
+    def run(qemu):
+        _enc.run_program(qemu, case.bundles, entry=0x10,
+                         expected=case.expected, name=name,
+                         icount="shift=0")
+    return IA64Case(
+        name=name, runner=run, bundles=case.bundles,
+        expected=dict(case.expected),
+        metadata=CaseMetadata(
+            required_features=frozenset({"alat:full", "icount"})),
+    )
+
+
+test_pal_halt_light_stops_at_pal_continuation_icount = _icount_case(
+    "pal_halt_light_stops_at_pal_continuation_icount",
+    test_pal_halt_light_stops_at_pal_continuation)
+
+test_pal_halt_wakes_on_due_itm_icount = _icount_case(
+    "pal_halt_wakes_on_due_itm_icount", test_pal_halt_wakes_on_due_itm)
+
 _pal_cache_flush_patch_low, _pal_cache_flush_patch_high = bundle_words(
     0x11, nop_m(), adds(21, 2, 0), br_cond(0x120, 0x180)
 )
@@ -1875,9 +1898,11 @@ CASE_NAMES = (
     'pal_halt_info_reserved_arg',
     'pal_halt_invalid_state',
     'pal_halt_light_stops_at_pal_continuation',
+    'pal_halt_light_stops_at_pal_continuation_icount',
     'pal_halt_light_wakes_on_due_itm',
     'pal_halt_reserved_arg',
     'pal_halt_wakes_on_due_itm',
+    'pal_halt_wakes_on_due_itm_icount',
     'pal_logical_to_physical_current',
     'pal_logical_to_physical_multicore_thread',
     'pal_logical_to_physical_madison_unimplemented',

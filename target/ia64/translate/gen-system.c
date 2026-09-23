@@ -820,6 +820,11 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             TCGv_i32 flags = tcg_temp_new_i32();
             TCGLabel *no_exit = gen_new_label();
 
+            /* PAL_HALT and PAL_HALT_LIGHT read the clock and rearm the ITM. */
+            if (ia64_clock_access_needs_io(ctx)) {
+                translator_io_start(&ctx->base);
+                ctx->restart.exit_after_bundle = true;
+            }
             gen_helper_pal_dispatch(flags, tcg_env);
             tcg_gen_andi_i32(flags, flags,
                              IA64_PAL_DISPATCH_HALTED |
