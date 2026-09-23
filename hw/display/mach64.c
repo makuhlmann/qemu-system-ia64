@@ -1026,6 +1026,10 @@ static void mach64_dp_set_gui_engine(Mach64VGAState *s, uint32_t v)
     s->regs[SRC_Y_X] = 0;
     s->regs[SC_TOP_BOTTOM] = 0x3fff0000;
     s->regs[SC_LEFT_RIGHT] = 0x1fff0000;
+    s->regs[SC_TOP] = 0;                /* the engine reads these, not the */
+    s->regs[SC_BOTTOM] = 0x3fff;        /* composites above */
+    s->regs[SC_LEFT] = 0;
+    s->regs[SC_RIGHT] = 0x1fff;
     s->regs[DP_WRITE_MASK] = 0xffffffff;
     s->regs[CLR_CMP_CNTL] = 0;
 }

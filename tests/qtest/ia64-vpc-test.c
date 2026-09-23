@@ -7342,6 +7342,7 @@ static void test_agp_gart_dma(void)
 #define M64_DST_WIDTH           0x44
 #define M64_DST_HEIGHT          0x45
 #define M64_SRC_CNTL            0x6d
+#define M64_DP_SET_GUI_ENGINE   0xbf
 #define M64_PAT_REG0            0xa0
 #define M64_PAT_REG1            0xa1
 #define M64_PAT_CNTL            0xa2
@@ -7909,6 +7910,31 @@ static void test_mach64_mono_pattern(void)
     mach64_dev_close(&a);
 }
 
+/*
+ * DP_SET_GUI_ENGINE opens the scissors completely (RAGE XL RRG Table 5-11),
+ * so a rectangle outside the old scissor is drawn afterwards.
+ */
+static void test_mach64_sge_scissor(void)
+{
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    qtest_writeb(a.qts, a.fb + 20, 0);
+    m64_wr(&a, M64_SC_LEFT, 0);
+    m64_wr(&a, M64_SC_RIGHT, 3);
+    m64_wr(&a, M64_SC_TOP, 0);
+    m64_wr(&a, M64_SC_BOTTOM, 3);
+    /* 8 bpp, pitch 1024, DRAWING_COMBO 1 (solid foreground paint) */
+    m64_wr(&a, M64_DP_SET_GUI_ENGINE, 0x00102050);
+    m64_wr(&a, M64_DP_FRGD_CLR, 0x99);
+    m64_wr(&a, M64_DST_CNTL, M64_DST_DIR_DOWN_RIGHT);
+    m64_wr(&a, M64_DST_Y_X, 20u << 16);
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (1u << 16) | 1);
+    g_assert_cmphex(qtest_readb(a.qts, a.fb + 20), ==, 0x99);
+
+    mach64_dev_close(&a);
+}
+
 static void test_mach64_2d_solid_fill(void)
 {
     Mach64TestDev a;
@@ -8282,6 +8308,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/pattern-source",
                    test_mach64_pattern_source);
     qtest_add_func("/ia64-vpc/mach64/mono-pattern", test_mach64_mono_pattern);
+    qtest_add_func("/ia64-vpc/mach64/sge-scissor", test_mach64_sge_scissor);
     qtest_add_func("/ia64-vpc/mach64/colour-compare",
                    test_mach64_colour_compare);
     qtest_add_func("/ia64-vpc/mach64/linear-aperture",
