@@ -278,6 +278,7 @@ static bool longspeak_pdh_do_write(LongspeakPDHBlock *b, hwaddr addr,
              */
             if ((s->control & IA64_PDH_DILLON_COMMAND) ==
                 IA64_PDH_DILLON_RESET) {
+                s->reset_requested = true;
                 qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             }
             return true;
@@ -579,11 +580,20 @@ static void longspeak_pdh_unrealize(DeviceState *dev)
  * leaves its boot mode in the scratch byte (FFE79060) before it resets the
  * box, and SAL_A reads that byte in its first instructions (FFFE0346).  The
  * NVM, the SRAM and the BMC's tokens keep their contents.
+ *
+ * Only the reset asked for here keeps the scratch byte; any other reset
+ * returns it to its power-on 0.  Bits 5:0 are SAL's progress flags, and with
+ * bit 1 set SAL calls the PAL copy it left in RAM (FFE63270), before memory
+ * is configured.
  */
 static void longspeak_pdh_reset(DeviceState *dev)
 {
     LongspeakPDHState *s = LONGSPEAK_PDH(dev);
 
+    if (!s->reset_requested) {
+        s->reg[IA64_PDH_DILLON_SCRATCH0 / 8] = 0;
+    }
+    s->reset_requested = false;
     s->post = 0;
     s->semaphore = 0;
     s->reg[IA64_PDH_DILLON_CHECKIN / 8] = 0;

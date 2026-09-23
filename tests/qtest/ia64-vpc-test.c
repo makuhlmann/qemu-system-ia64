@@ -1434,8 +1434,12 @@ static void test_pdh_longspeak_map(void)
     g_assert_cmphex(qtest_readq(qts, IA64_PDH_DILLON_BASE +
                                 IA64_PDH_DILLON_SCRATCH1), ==, 2);
 
-    /* Reset: no processor checked in, semaphore free, POST 0; the part kept. */
-    qtest_writeb(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_SCRATCH0, 0);
+    /*
+     * A reset from outside: no processor checked in, semaphore free, POST 0,
+     * the part kept.  The scratch byte is back at 0: bit 1 would send SAL to
+     * a PAL copy in RAM that nothing prepared (FFE63270).
+     */
+    qtest_writeb(qts, IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_SCRATCH0, 0x4f);
     qtest_system_reset(qts);
     g_assert_cmphex(qtest_readl(qts, IA64_PDH_DILLON_BASE +
                                 IA64_PDH_DILLON_CHECKIN), ==, 0);

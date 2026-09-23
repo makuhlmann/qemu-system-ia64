@@ -68,6 +68,7 @@ struct LongspeakPDHState {
     uint8_t semaphore;             /* bit 0 held, bits 7:1 holder id */
     uint64_t reg[IA64_PDH_DILLON_REGS];        /* FF5F_0000 - FF5F_0090 */
     uint64_t control;              /* FF5F_1000 */
+    bool reset_requested;          /* the control register asked for it */
     uint64_t scratch1;             /* FF5F_1038 */
     uint64_t misc;                 /* FF5F_31C0 */
 
