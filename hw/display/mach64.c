@@ -152,6 +152,15 @@ void mach64_2d_set_dirty(Mach64VGAState *s, uint32_t base, int x, int y,
     int pitch = mach64_dst_pitch_bytes(s);
     hwaddr start, end;
 
+    /* Only the on-screen part of a rectangle drawn past the top or left. */
+    if (x < 0) {
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
     if (w <= 0 || h <= 0 || bypp == 0 || pitch == 0) {
         return;
     }
@@ -1156,15 +1165,15 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
      */
     case DST_X:
         s->regs[DST_Y_X] = (s->regs[DST_Y_X] & 0x0000ffff) |
-                           ((s->regs[reg] & 0x1fff) << 16);
+                           ((s->regs[reg] & 0x3fff) << 16);
         break;
     case DST_Y:
         s->regs[DST_Y_X] = (s->regs[DST_Y_X] & 0xffff0000) |
-                           (s->regs[reg] & 0x1fff);
+                           (s->regs[reg] & 0x7fff);
         break;
     case DST_X_Y:  /* X low, Y high */
-        s->regs[DST_Y_X] = ((s->regs[reg] & 0x1fff) << 16) |
-                           ((s->regs[reg] >> 16) & 0x1fff);
+        s->regs[DST_Y_X] = ((s->regs[reg] & 0x3fff) << 16) |
+                           ((s->regs[reg] >> 16) & 0x7fff);
         break;
     case DST_WIDTH:
         s->regs[DST_HEIGHT_WIDTH] = (s->regs[DST_HEIGHT_WIDTH] & 0x0000ffff) |
@@ -1175,19 +1184,19 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         s->regs[SC_RIGHT] = (s->regs[reg] >> 16) & 0x3fff;
         break;
     case SC_TOP_BOTTOM:  /* TOP low, BOTTOM high */
-        s->regs[SC_TOP] = s->regs[reg] & 0x3fff;
-        s->regs[SC_BOTTOM] = (s->regs[reg] >> 16) & 0x3fff;
+        s->regs[SC_TOP] = s->regs[reg] & 0x7fff;
+        s->regs[SC_BOTTOM] = (s->regs[reg] >> 16) & 0x7fff;
         break;
 
     /* Trajectory launches. */
     case DST_HEIGHT:  /* separate-register rect: W already set, H triggers */
         s->regs[DST_HEIGHT_WIDTH] = (s->regs[DST_HEIGHT_WIDTH] & 0xffff0000) |
-                                    (s->regs[reg] & 0x3fff);
+                                    (s->regs[reg] & 0x7fff);
         mach64_2d_dst_trigger(s);
         break;
     case DST_WIDTH_HEIGHT:  /* W low, H high */
         s->regs[DST_HEIGHT_WIDTH] = ((s->regs[reg] & 0x3fff) << 16) |
-                                    ((s->regs[reg] >> 16) & 0x3fff);
+                                    ((s->regs[reg] >> 16) & 0x7fff);
         mach64_2d_dst_trigger(s);
         break;
     case DST_HEIGHT_WIDTH:

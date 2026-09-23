@@ -7536,6 +7536,44 @@ static void test_mach64_colour_compare(void)
     mach64_dev_close(&a);
 }
 
+/*
+ * DST_X is a signed 14-bit number (RAGE XL RRG MM 0_41): a rectangle that
+ * starts left of the screen is clipped by the scissor, not wrapped to x=8188.
+ */
+static void test_mach64_negative_x(void)
+{
+    const uint32_t pitch = 32 * 4, bg = 0x00111111, fg = 0x00ff8800;
+    Mach64TestDev a;
+
+    mach64_dev_open(&a);
+    for (unsigned y = 0; y < 4; y++) {
+        for (unsigned x = 0; x < 32; x++) {
+            qtest_writel(a.qts, a.fb + y * pitch + x * 4, bg);
+        }
+    }
+    m64_wr(&a, M64_DP_PIX_WIDTH, M64_PIX_WIDTH_32BPP);
+    m64_wr(&a, M64_DST_OFF_PITCH, (32 / 8) << 22);
+    m64_wr(&a, M64_DP_FRGD_CLR, fg);
+    m64_wr(&a, M64_DP_MIX, 0x7u << 16);
+    m64_wr(&a, M64_DP_SRC, 0x1u << 8);
+    m64_wr(&a, M64_DP_WRITE_MASK, 0xffffffff);
+    m64_wr(&a, M64_SC_LEFT, 0);
+    m64_wr(&a, M64_SC_RIGHT, 31);
+    m64_wr(&a, M64_SC_TOP, 0);
+    m64_wr(&a, M64_SC_BOTTOM, 3);
+    m64_wr(&a, M64_DST_CNTL, M64_DST_DIR_DOWN_RIGHT);
+    m64_wr(&a, M64_DST_Y_X, (0x3ffcu << 16) | 2);       /* x = -4, y = 2 */
+    m64_wr(&a, M64_DST_HEIGHT_WIDTH, (8u << 16) | 1);
+
+    for (unsigned x = 0; x < 32; x++) {
+        g_assert_cmphex(qtest_readl(a.qts, a.fb + 2 * pitch + x * 4), ==,
+                        x < 4 ? fg : bg);
+        g_assert_cmphex(qtest_readl(a.qts, a.fb + 1 * pitch + x * 4), ==, bg);
+    }
+
+    mach64_dev_close(&a);
+}
+
 static void test_mach64_2d_solid_fill(void)
 {
     Mach64TestDev a;
@@ -7895,6 +7933,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ids", test_mach64_ids);
     qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
                    test_mach64_2d_solid_fill);
+    qtest_add_func("/ia64-vpc/mach64/negative-x", test_mach64_negative_x);
     qtest_add_func("/ia64-vpc/mach64/colour-compare",
                    test_mach64_colour_compare);
     qtest_add_func("/ia64-vpc/mach64/linear-aperture",

@@ -143,6 +143,23 @@ static void blend_px(const Mach64Ctx *c, uint32_t off, unsigned mix,
     px_write(c, off, res);
 }
 
+/*
+ * Coordinates are two's complement: DST_X, SRC_X and the left/right scissors
+ * are signed 14-bit numbers, DST_Y, SRC_Y and the top/bottom scissors signed
+ * 15-bit ones (RAGE XL RRG MM 0_41, 0_42, 0_61, 0_62, 0_A8-0_AC).  Windows
+ * draws a window dragged past the left or top edge of the screen at negative
+ * coordinates and lets the scissors clip it.
+ */
+static int yx_x(uint32_t yx)
+{
+    return sextract32(yx, 16, 14);
+}
+
+static int yx_y(uint32_t yx)
+{
+    return sextract32(yx, 0, 15);
+}
+
 static bool in_scissor(const Mach64Ctx *c, int x, int y)
 {
     return x >= c->sc_left && x <= c->sc_right &&
@@ -177,10 +194,10 @@ static bool ctx_init(Mach64VGAState *s, Mach64Ctx *c)
     c->bkgd_clr = s->regs[DP_BKGD_CLR];
     c->write_mask = s->regs[DP_WRITE_MASK] ? s->regs[DP_WRITE_MASK] : ~0u;
 
-    c->sc_left = s->regs[SC_LEFT] & 0x3fff;
-    c->sc_right = s->regs[SC_RIGHT] & 0x3fff;
-    c->sc_top = s->regs[SC_TOP] & 0x3fff;
-    c->sc_bottom = s->regs[SC_BOTTOM] & 0x3fff;
+    c->sc_left = sextract32(s->regs[SC_LEFT], 0, 14);
+    c->sc_right = sextract32(s->regs[SC_RIGHT], 0, 14);
+    c->sc_top = sextract32(s->regs[SC_TOP], 0, 15);
+    c->sc_bottom = sextract32(s->regs[SC_BOTTOM], 0, 15);
     if (c->sc_right < c->sc_left) {
         c->sc_right = 0x3fff;
     }
@@ -286,10 +303,10 @@ static void copy_rect(Mach64Ctx *c, int dx0, int dy0, int sx0, int sy0,
 void mach64_2d_dst_trigger(Mach64VGAState *s)
 {
     Mach64Ctx c;
-    int x = (s->regs[DST_Y_X] >> 16) & 0x1fff;
-    int y = s->regs[DST_Y_X] & 0x1fff;
+    int x = yx_x(s->regs[DST_Y_X]);
+    int y = yx_y(s->regs[DST_Y_X]);
     int w = (s->regs[DST_HEIGHT_WIDTH] >> 16) & 0x3fff;
-    int h = s->regs[DST_HEIGHT_WIDTH] & 0x3fff;
+    int h = s->regs[DST_HEIGHT_WIDTH] & 0x7fff;
     unsigned frgd_src = (s->regs[DP_SRC] >> DP_FRGD_SRC_SHIFT) & 7;
     unsigned mono_src = (s->regs[DP_SRC] & DP_MONO_SRC) >> DP_MONO_SRC_SHIFT;
     /*
@@ -321,8 +338,8 @@ void mach64_2d_dst_trigger(Mach64VGAState *s)
     }
 
     if (frgd_src == SRC_BLIT) {
-        int sx = (s->regs[SRC_Y_X] >> 16) & 0x1fff;
-        int sy = s->regs[SRC_Y_X] & 0x1fff;
+        int sx = yx_x(s->regs[SRC_Y_X]);
+        int sy = yx_y(s->regs[SRC_Y_X]);
 
         copy_rect(&c, x, y, sx, sy, w, h, x_l2r, y_t2b);
     } else if (frgd_src == SRC_PATTERN ||
@@ -358,10 +375,10 @@ static bool host_mono_bit(uint32_t data, unsigned n, bool lsb_first, bool l2r)
 void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
 {
     Mach64Ctx c;
-    int x0 = (s->regs[DST_Y_X] >> 16) & 0x1fff;
-    int y0 = s->regs[DST_Y_X] & 0x1fff;
+    int x0 = yx_x(s->regs[DST_Y_X]);
+    int y0 = yx_y(s->regs[DST_Y_X]);
     int w = (s->regs[DST_HEIGHT_WIDTH] >> 16) & 0x3fff;
-    int h = s->regs[DST_HEIGHT_WIDTH] & 0x3fff;
+    int h = s->regs[DST_HEIGHT_WIDTH] & 0x7fff;
 
     if (!s->host_data.active || w <= 0 || h <= 0) {
         return;
@@ -438,8 +455,8 @@ void mach64_2d_host_data(Mach64VGAState *s, uint32_t data)
 void mach64_2d_line_trigger(Mach64VGAState *s)
 {
     Mach64Ctx c;
-    int x = (s->regs[DST_Y_X] >> 16) & 0x1fff;
-    int y = s->regs[DST_Y_X] & 0x1fff;
+    int x = yx_x(s->regs[DST_Y_X]);
+    int y = yx_y(s->regs[DST_Y_X]);
     int len = s->regs[DST_BRES_LNTH] & 0x7fff;
     int err = (int32_t)s->regs[DST_BRES_ERR];
     int inc = (int32_t)s->regs[DST_BRES_INC];
