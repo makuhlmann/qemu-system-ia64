@@ -374,7 +374,7 @@ jobs:
 
       - name: Configure
         # Feature set and optimization settings follow the .deb pipeline in
-        # build/deb/in-container.sh: --without-default-features plus an
+        # contrib/packaging/deb/in-container.sh: --without-default-features plus an
         # explicit list, LTO, -Doptimization=2 (the level is set through Meson
         # only, never as -O in --extra-cflags, so exactly one reaches the
         # compiler) and install-time strip. The perf cflags are probed because
@@ -567,7 +567,7 @@ jobs:
         # the keg does ship and always records the formula's version and SPDX
         # identifier beside it. Best-effort throughout: a library that ships
         # nothing must not fail the build, exactly as in
-        # build/win-in-container.sh.
+        # contrib/packaging/win-in-container.sh.
         run: |
           lic=dist/qemu/licenses
           mkdir -p "$lic/thirdparty"
