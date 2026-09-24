@@ -9,7 +9,8 @@
  * instructions.  There is no Dillon ERS; everything here comes from the
  * firmware's code (HP System Firmware 2.31, zx2000 flash dump):
  *
- *   FF40_0000  the battery-backed SRAM, 512 KB (zx2000 O&M 02 p.16).  The
+ *   FF40_0000  the battery-backed SRAM, 512 KB (zx6000/rx2600 Operations and
+ *              Maintenance Guide, September 2002, p. 16).  The
  *              vendor firmware formats the first 256 KiB as its NVM and puts
  *              SAL_A's rendezvous record, SAL_B's first memory stack and RSE
  *              backing store in the rest.  "nvram=" stands in for the battery.

@@ -841,9 +841,9 @@ static void ia64_460gx_reset_cfg(IA64460GXState *s)
      * The chipset's own functions carry their real identities.  Without
      * them a firmware config read of the SAC, SDC or expander returns a
      * zero vendor id, which is neither "present" nor the architected
-     * "absent" 0xffff.  Device ids, revisions and classes per the 460GX
-     * SSDM Table 2-1 and upstream's intel_460gx_chipset.c (fda8a29);
-     * the same table places expander port n at bus CBN device 10h + n.
+     * "absent" 0xffff.  Device ids, revisions and classes follow
+     * upstream's intel_460gx_chipset.c (fda8a29); the 460GX SSDM
+     * Table 2-1 places expander port n at bus CBN device 10h + n.
      */
     ia64_460gx_init_chipset_identity(s, 0x00, 0, 0x84e0, 0x03,
                                           PCI_CLASS_BRIDGE_HOST, true);

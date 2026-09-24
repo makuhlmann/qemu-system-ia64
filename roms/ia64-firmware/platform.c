@@ -824,9 +824,9 @@ UINT64 fw_system_table_pointer_base(UINT64 LowRamEnd,
  * post-dates the advertised revision must not be offered.
  */
 /*
- * The core-chipset personality the machine selected via -machine chipset=,
- * or IA64_FW_CHIPSET_DERIVE for an old handoff (or the default) that leaves
- * the choice to the CPU family.
+ * The core-chipset personality that the machine type (-M 460gx or -M zx1)
+ * passes in the handoff, or IA64_FW_CHIPSET_DERIVE for an old handoff that
+ * leaves the choice to the CPU family.
  */
 static UINT64 fw_platform_chipset_profile(void)
 {
@@ -835,9 +835,9 @@ static UINT64 fw_platform_chipset_profile(void)
 
 /*
  * Platform personality: Merced machines model the 460GX
- * (i2000/SDV) and everything else the E8870 (SR870BH2).  The -machine
- * chipset= option (handoff version 14+) overrides this CPU-family default;
- * chipset=zx1 selects the HP zx1 (rx2600/zx2000/zx6000) profile.
+ * (i2000/SDV) and everything else the E8870 (SR870BH2).  The machine type
+ * overrides this CPU-family default through the handoff (version 14+);
+ * -M zx1 selects the HP zx1 (rx2600/zx2000/zx6000) profile.
  */
 BOOLEAN fw_platform_is_zx1(void)
 {
