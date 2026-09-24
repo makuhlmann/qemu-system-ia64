@@ -1784,15 +1784,23 @@ static uint32_t ia64_fpcvt_lane(uint32_t value, bool is_unsigned,
                                 bool is_trunc, float_status *status)
 {
     float32 f = make_float32(value);
+    uint32_t result;
 
     if (is_unsigned) {
-        return is_trunc ?
+        result = is_trunc ?
             float32_to_uint32_round_to_zero(f, status) :
             float32_to_uint32(f, status);
+    } else {
+        result = is_trunc ?
+            (uint32_t)float32_to_int32_round_to_zero(f, status) :
+            (uint32_t)float32_to_int32(f, status);
     }
-    return is_trunc ?
-        (uint32_t)float32_to_int32_round_to_zero(f, status) :
-        (uint32_t)float32_to_int32(f, status);
+    /*
+     * An unrepresentable lane is the 32-bit integer indefinite, not a
+     * saturated value (SDM Vol 3 fpcvt.fx).
+     */
+    return (get_float_exception_flags(status) & float_flag_invalid) ?
+           0x80000000U : result;
 }
 
 static void ia64_do_fpcvt(CPUIA64State *env, uint32_t r1, uint32_t r2,

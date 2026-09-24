@@ -253,6 +253,7 @@ fpabs_fpneg_decode
 fpack_decode
 fpcmp_parallel_decode
 fpcmp_simd_high_lane_fault_isr
+fpcvt_masked_invalid_lane_indefinite
 fpcvt_parallel_decode
 fpcvt_parallel_natval_propagates
 fpcvt_simd_high_lane_fault_isr

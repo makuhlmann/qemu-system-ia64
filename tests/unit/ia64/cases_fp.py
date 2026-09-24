@@ -1724,6 +1724,25 @@ test_fp_parallel_natval_propagates = require_registers(
     },
     entry=0x10)
 
+# An unrepresentable fpcvt lane is the 32-bit integer indefinite 0x80000000
+# (SDM Vol 3 fpcvt.fx).  High lane +Inf is invalid in both forms; low lane
+# -1.0 is valid signed and invalid unsigned.
+test_fpcvt_masked_invalid_lane_indefinite = require_registers(
+    "fpcvt_masked_invalid_lane_indefinite", [
+        (0x10, *movl_mlx(2, 0x7f800000bf800000)),
+        (0x20, 0x00, setf_sig(6, 2), nop_i(), nop_i()),
+        (0x30, 0x0d, nop_m(), fpcvt_fx(8, 6), nop_i()),
+        (0x40, 0x0d, nop_m(), fpcvt_fxu(9, 6), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "f8": ExpectedFP(0x80000000ffffffff, 0x1003e),
+        "f9": ExpectedFP(0x8000000080000000, 0x1003e),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (1 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_fpcvt_parallel_decode = require_registers(
     "fpcvt_parallel_decode", [
         (0x10, *movl_mlx(2, 0x3fc00000c0300000)),
@@ -3363,6 +3382,7 @@ CASE_NAMES = (
     'fpack_decode',
     'fpcmp_parallel_decode',
     'fpcmp_simd_high_lane_fault_isr',
+    'fpcvt_masked_invalid_lane_indefinite',
     'fpcvt_parallel_decode',
     'fpcvt_parallel_natval_propagates',
     'fpcvt_simd_high_lane_fault_isr',
