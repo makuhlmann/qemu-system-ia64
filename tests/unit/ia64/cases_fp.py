@@ -2448,6 +2448,61 @@ test_fcvt_fx_signed_trunc = require_registers("fcvt_fx_signed_trunc", [
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
 
+# An fcvt.fx/fcvt.fxu result that no 64-bit integer holds is the integer
+# indefinite 0x8000000000000000 with V set, not a saturated value (SDM Vol 3
+# fcvt.fx).  Inputs: 2^63, +Inf, -1.0 (unsigned), a QNaN and the
+# integer-format 2^64-1, which is a positive register-format value.
+test_fcvt_fx_out_of_range_integer_indefinite = require_registers(
+    "fcvt_fx_out_of_range_integer_indefinite", [
+        (0x10, *movl_mlx(2, 0x43e0000000000000)),
+        (0x20, *movl_mlx(3, 0x7ff0000000000000)),
+        (0x30, *movl_mlx(4, 0xbff0000000000000)),
+        (0x40, *movl_mlx(5, 0x7ff8000000000000)),
+        (0x50, *movl_mlx(14, 0xffffffffffffffff)),
+        (0x60, 0x09, setf_d(6, 2), setf_d(7, 3), nop_i()),
+        (0x70, 0x09, setf_d(8, 4), setf_d(9, 5), nop_i()),
+        (0x80, 0x09, setf_sig(10, 14), nop_m(), nop_i()),
+        (0x90, 0x0d, nop_m(), fcvt_fx(11, 6, trunc=True, sf=0), nop_i()),
+        (0xa0, 0x0d, nop_m(), fcvt_fxu(12, 7, sf=0), nop_i()),
+        (0xb0, 0x0d, nop_m(), fcvt_fxu(13, 8, trunc=False, sf=0), nop_i()),
+        (0xc0, 0x0d, nop_m(), fcvt_fx(15, 9, sf=0), nop_i()),
+        (0xd0, 0x0d, nop_m(), fcvt_fx(16, 10, sf=0), nop_i()),
+        (0xe0, 0x10, nop_m(), nop_i(), br_cond(0xe0, 0xe0)),
+    ], {
+        "ip": 0xe0,
+        "f11": ExpectedFP(0x8000000000000000, 0x1003e),
+        "f12": ExpectedFP(0x8000000000000000, 0x1003e),
+        "f13": ExpectedFP(0x8000000000000000, 0x1003e),
+        "f15": ExpectedFP(0x8000000000000000, 0x1003e),
+        "f16": ExpectedFP(0x8000000000000000, 0x1003e),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (1 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+# With the V fault enabled the same integer-format operand faults and f8
+# keeps its old value.
+test_fcvt_fx_integer_form_invalid_fault = require_registers(
+    "fcvt_fx_integer_form_invalid_fault", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~1)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0xffffffffffffffff)),
+        (0x40, 0x00, addl(4, 0x55, 0), nop_i(), nop_i()),
+        (0x50, 0x09, setf_sig(6, 3), setf_sig(8, 4), nop_i()),
+        (0x60, 0x0d, nop_m(), fcvt_fx(8, 6, sf=0), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x10,
+                 IA64_FP_FAULT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 1,
+        "f8": ExpectedFP(0x55, 0x1003e),
+        "ar_fpsr": DEFAULT_FPSR & ~1,
+    }, entry=0x10)
+
 test_fcvt_fxu_preserves_sig_payload = require_registers(
     "fcvt_fxu_preserves_sig_payload", [
         (0x10, 0x00, addl(2, 0x2a, 0), nop_i(),
@@ -3270,6 +3325,8 @@ CASE_NAMES = (
     'fcmp_status_field_decode',
     'fcvt_fx_signed_trunc',
     'fcvt_fxu_double_to_uint',
+    'fcvt_fx_integer_form_invalid_fault',
+    'fcvt_fx_out_of_range_integer_indefinite',
     'fcvt_fxu_preserves_sig_payload',
     'fcvt_fxu_rounds_sf0',
     'fcvt_xf_extreme_signed_round_trip',

@@ -203,6 +203,8 @@ fcmp_same_pred_illegal
 fcmp_status_field_decode
 fcvt_fx_signed_trunc
 fcvt_fxu_double_to_uint
+fcvt_fx_integer_form_invalid_fault
+fcvt_fx_out_of_range_integer_indefinite
 fcvt_fxu_preserves_sig_payload
 fcvt_fxu_rounds_sf0
 fcvt_xf_extreme_signed_round_trip

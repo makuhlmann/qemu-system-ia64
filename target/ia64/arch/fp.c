@@ -2280,6 +2280,8 @@ void ia64_fp_fcvt_xf(CPUIA64State *env, uint32_t r1, uint32_t r2)
                       magnitude << shift);
 }
 
+#define IA64_FP_INTEGER_INDEFINITE 0x8000000000000000ULL
+
 static void ia64_do_fcvt_fx(CPUIA64State *env, uint32_t r1, uint32_t r2,
                             uint32_t is_unsigned, uint32_t is_trunc)
 {
@@ -2298,6 +2300,11 @@ static void ia64_do_fcvt_fx(CPUIA64State *env, uint32_t r1, uint32_t r2,
      */
     if (ia64_fr_sig_get(env, r2) ||
         ia64_fr_looks_like_setf_sig_payload(value)) {
+        /* An integer-format value is positive: from 2^63 up it is too big. */
+        if (!is_unsigned && ia64_fr_sig_get(env, r2) && (int64_t)value < 0) {
+            float_raise(float_flag_invalid, &env->fp.fp_status);
+            value = IA64_FP_INTEGER_INDEFINITE;
+        }
         ia64_fr_write_sig(env, r1, value);
         return;
     }
@@ -2314,6 +2321,14 @@ static void ia64_do_fcvt_fx(CPUIA64State *env, uint32_t r1, uint32_t r2,
             (uint64_t)floatx80_to_int64_round_to_zero(
                 fp_value, &env->fp.fp_status) :
             (uint64_t)floatx80_to_int64(fp_value, &env->fp.fp_status);
+    }
+    /*
+     * softfloat saturates an unrepresentable result; fcvt.fx[u] gives the
+     * integer indefinite instead (SDM Vol 3 fcvt.fx).  Flags start clear
+     * for each FP instruction, so this invalid is the conversion's own.
+     */
+    if (get_float_exception_flags(&env->fp.fp_status) & float_flag_invalid) {
+        result = IA64_FP_INTEGER_INDEFINITE;
     }
     ia64_fr_write_sig(env, r1, result);
 }
