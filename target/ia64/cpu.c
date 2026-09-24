@@ -852,6 +852,12 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
     env->psr = 0;
     env->ip = info->firmware_entry;
     env->br[IA64_BR_RETURN_LINK] = info->firmware_entry;
+    /*
+     * The flat-image entry is a handoff with an empty frame, not a reset:
+     * every stacked physical register is invalid.
+     */
+    env->cfm_sof = 0;
+    env->rse.rse_invalid = IA64_STACKED_GR_COUNT;
     env->cr_iva = info->iva;
     /*
      * VHPT disabled (ve=0), size field at its architectural minimum.
@@ -930,8 +936,8 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.pr[IA64_PR_TRUE] = 1;
     cpu->env.psr = 0;
     cpu->env.ar_rsc = 0;
-    /* Empty frame: every stacked physical register is invalid. */
-    cpu->env.rse.rse_invalid = IA64_STACKED_GR_COUNT;
+    /* CFM.sof = 96 and the rest 0, BOF at GR32 (SDM Vol 2 6.12). */
+    cpu->env.cfm_sof = IA64_STACKED_GR_COUNT;
     cpu->env.ar_fpsr = IA64_FPSR_DEFAULT;
     cpu->env.cr_iva = 0;
     cpu->env.instruction_group_start = true;

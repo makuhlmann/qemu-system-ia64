@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .case import (CaseMetadata, CaseObservation, bind_cases)
 from .encoding import (
     CHECK_LOAD_DATA,
@@ -108,6 +110,7 @@ from .encoding import (
     st8,
     st8_postinc,
 )
+from .runner import read_reset_state
 
 # ── RSE tests ──
 
@@ -1716,6 +1719,51 @@ test_rse_loadrs_zero_sol_return_keeps_bsp_without_cover = require_registers(
         "cfm_sof": 8,
         "cfm_sol": 0,
     }, entry=0x10)
+def _empty_frame_prologue(address, target):
+    """Enter at address with an empty frame, then continue at target.
+
+    Cases that expect an empty caller frame set it themselves: reset leaves
+    CFM.sof = 96 (SDM Vol 2 6.12).
+    """
+    return [
+        (address, 0x00, alloc_m(2, 0, 0, 0, 0), nop_i(), nop_i()),
+        (address + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(address + 0x10, target)),
+    ]
+
+
+def _require_reset_frame(qemu, machine, cfm, partitions):
+    result = read_reset_state(qemu, machine=machine, cpu="madison")
+    fields = ("sof", "sol", "sor", "rrb_gr", "rrb_fr", "rrb_pr")
+    observed_cfm = tuple(result.state.cfm[field] for field in fields)
+    match = re.search(r"RSE: bol=(\d+) dirty=(-?\d+)/(-?\d+) "
+                      r"clean=(-?\d+)/(-?\d+) invalid=(-?\d+)",
+                      result.register_output)
+    if match is None:
+        raise RuntimeError("info registers has no RSE line:\n" +
+                           result.register_output)
+    observed_partitions = tuple(int(value) for value in match.groups())
+    if (observed_cfm, observed_partitions) != (cfm, partitions):
+        raise RuntimeError(
+            f"{machine} reset: expected CFM {cfm!r} and RSE {partitions!r}, "
+            f"got {observed_cfm!r} and {observed_partitions!r}\n"
+            f"{result.register_output}")
+
+
+# SDM Vol 2 6.12: at reset CFM.sof = 96, the other CFM fields are 0 and
+# BOF is GR32 (RSE line: bol, dirty/NaT, clean/NaT, invalid).
+def test_rse_architectural_reset_exposes_full_frame(qemu):
+    _require_reset_frame(qemu, "none", (96, 0, 0, 0, 0, 0),
+                         (0, 0, 0, 0, 0, 0))
+
+
+# The flat-image entry of a board without firmware is a handoff, not a
+# reset: it keeps an empty frame with all 96 stacked registers invalid.
+def test_rse_boot_handoff_preserves_empty_frame(qemu):
+    _require_reset_frame(qemu, "ia64-vpc,fw-relocate=off",
+                         (0, 0, 0, 0, 0, 0), (0, 0, 0, 0, 0, 96))
+
+
 HIGH_TR_TARGET = HIGH_TR_BASE + 0x8430
 HIGH_TR_PSR = ((1 << 13) | (1 << 17) | (1 << 27) |
                (1 << 36) | (1 << 44))
@@ -2278,6 +2326,7 @@ test_rse_rfi_advanced_iip_bspstore_switch_loads_external_frame = \
 
 test_rse_rfi_advanced_iip_preserves_nested_call_locals = require_registers(
     "rse_rfi_advanced_iip_preserves_nested_call_locals", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, *movl_mlx(2, 1 << 13)),
         (0x20, 0x10, mov_gr_psr_full(2), nop_i(),
          br_cond(0x20, 0x40)),
@@ -2338,10 +2387,11 @@ test_rse_rfi_advanced_iip_preserves_nested_call_locals = require_registers(
         "r8": 0x123456789abcdef0,
         "cfm_sof": 0,
         "cfm_sol": 0,
-    }, entry=0x10)
+    }, entry=0x800)
 
 test_rse_rfi_bypassed_call_drops_returned_frame = require_registers(
     "rse_rfi_bypassed_call_drops_returned_frame", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, *movl_mlx(2, 1 << 13)),
         (0x20, 0x10, mov_gr_psr_full(2), nop_i(),
          br_cond(0x20, 0x40)),
@@ -2390,7 +2440,7 @@ test_rse_rfi_bypassed_call_drops_returned_frame = require_registers(
         "r8": 0x123456789abcdef0,
         "cfm_sof": 0,
         "cfm_sol": 0,
-    }, entry=0x10)
+    }, entry=0x800)
 
 test_rse_manual_rfi_loadrs_restores_current_frame_base = require_registers(
     "rse_manual_rfi_loadrs_restores_current_frame_base", [
@@ -3929,6 +3979,7 @@ test_rse_loadrs_sets_tear_point = require_registers(
 
 test_rse_loadrs_preserves_clean_partial_rnat_collection = require_registers(
     "rse_loadrs_preserves_clean_partial_rnat_collection", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, *movl_mlx(3, 0x1001d8)),
         (0x20, *movl_mlx(4, 0xe000000012345678)),
         (0x30, 0x00, st8(3, 4), nop_i(),
@@ -3968,7 +4019,7 @@ test_rse_loadrs_preserves_clean_partial_rnat_collection = require_registers(
         "r40_nat": 0,
         "cfm_sof": 16,
         "cfm_sol": 16,
-    }, entry=0x10)
+    }, entry=0x800)
 
 # Mandatory loads after loadrs take NaT bits for slots whose collection
 # word was never read from the AR.RNAT contents software established
@@ -3978,6 +4029,7 @@ test_rse_loadrs_preserves_clean_partial_rnat_collection = require_registers(
 # and Windows' KiFlushRse depends on the accumulation surviving).
 test_rse_loadrs_reloads_same_collection_rnat = require_registers(
     "rse_loadrs_reloads_same_collection_rnat", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, *movl_mlx(3, 0x100120)),
         (0x20, *movl_mlx(4, 0xe000000087654321)),
         (0x30, 0x00, st8(3, 4), nop_i(),
@@ -4017,7 +4069,7 @@ test_rse_loadrs_reloads_same_collection_rnat = require_registers(
         "r35_nat": 1,
         "cfm_sof": 16,
         "cfm_sol": 16,
-    }, entry=0x10)
+    }, entry=0x800)
 
 test_rse_return_growth_keeps_dirty_bsp_distance = require_registers(
     "rse_return_growth_keeps_dirty_bsp_distance", [
@@ -4475,6 +4527,7 @@ test_clrrrb_rebases_rotating_floating_registers = require_registers(
 
 test_rse_rfi_selects_matching_outer_exception_frame = require_registers(
     "rse_rfi_selects_matching_outer_exception_frame", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, *movl_mlx(2, IA64_PSR_IC)),
         (0x20, *movl_mlx(3, 0x100000)),
         (0x30, 0x00, mov_ar(3, 18), nop_i(),
@@ -4541,7 +4594,7 @@ test_rse_rfi_selects_matching_outer_exception_frame = require_registers(
         "r10": 0,
         "cfm_sof": 0,
         "cfm_sol": 0,
-    }, entry=0x10)
+    }, entry=0x800)
 
 test_cover_requires_group_stop = require_exception(
     "cover_requires_group_stop", [
@@ -4569,8 +4622,9 @@ test_rsc_reserved_field_fault = require_exception(
 
 test_stacked_gr_destination_out_of_frame = require_exception(
     "stacked_gr_destination_out_of_frame", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, 0x00, nop_m(), adds(32, 1, 0), nop_i()),
-    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, entry=0x800)
 
 test_predicated_off_stacked_gr_destination_does_not_fault = require_registers(
     "predicated_off_stacked_gr_destination_does_not_fault", [
@@ -4584,8 +4638,9 @@ test_predicated_off_stacked_gr_destination_does_not_fault = require_registers(
 
 test_postincrement_base_out_of_frame = require_exception(
     "postincrement_base_out_of_frame", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, 0x08, lfetch_postinc(32, 8), nop_m(), nop_i()),
-    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, entry=0x800)
 
 test_br_ia_bspstore_mismatch_illegal = require_exception(
     "br_ia_bspstore_mismatch_illegal", [
@@ -4925,9 +4980,11 @@ CASE_NAMES = (
     'rsc_write_clips_pl_to_cpl',
     'rse_alloc_call_ret',
     'rse_alloc_preserves_ar_pfs',
+    'rse_architectural_reset_exposes_full_frame',
     'rse_big_endian_backing_store',
     'rse_big_endian_partial_rnat_store_preserves_backed_prefix',
     'rse_big_endian_rnat_collection',
+    'rse_boot_handoff_preserves_empty_frame',
     'rse_br_ret_ec_restored_before_target_fill_fault',
     'rse_br_ret_fill_dtlb_miss_retries_atomically',
     'rse_br_ret_fill_ignores_rsc_mode',
