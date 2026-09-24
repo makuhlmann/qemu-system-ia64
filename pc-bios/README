@@ -24,6 +24,12 @@
   BIOS tables into the image at load time, and the image leaves the pointer
   at 48h to them.
 
+- vgabios-mach64.bin is SeaVGABIOS (LGPLv3) for the mach64-vga device (ATI
+  RAGE XL), built the same way from roms/seabios, with roms/config.vga-mach64:
+  make -C roms seavgabios-mach64 FIRMWARE_EXTRAVERSION=-qemu-ia64 PYTHON=python3
+  It carries its own ATI BIOS tables and the INT 10h AH=A0h functions of the
+  native Windows drivers.
+
 - OpenBIOS (http://www.openbios.org/) is a free (GPL v2) portable
   firmware implementation. The goal is to implement a 100% IEEE
   1275-1994 (referred to as Open Firmware) compliant firmware.

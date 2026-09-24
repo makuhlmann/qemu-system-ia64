@@ -754,11 +754,11 @@ static uint32_t mach64_gui_traj_compose(const Mach64VGAState *s)
  * low half of each register paging the first window and the high half the
  * second (RRG 0_2D/0_2E).  They reach the whole 8 MiB.
  *
- * The adapter BIOS sizes video memory through them: for each candidate size it
- * writes a page-derived pattern to 32 bytes of every 32 KiB page and reads it
- * back (vgabios-mach64.bin offsets 0x7B96 and 0x7CAA).  Without the paging
- * every page aliases onto the same window, every candidate above one page
- * fails, and the BIOS leaves MEM_CNTL's MEM_SIZE at 1 MiB.
+ * ATI's adapter BIOS sizes video memory through them: for each candidate size
+ * it writes a page-derived pattern to 32 bytes of every 32 KiB page and reads
+ * it back (Rage II GT BIOS 113-38206-100, offsets 0x7B96 and 0x7CAA).  Without
+ * the paging every page aliases onto the same window, every candidate above
+ * one page fails, and the BIOS leaves MEM_CNTL's MEM_SIZE at 1 MiB.
  *
  * The PRG gates the apertures on accelerator or SVGA packed-pixel mode and
  * names CFG_MEM_VGA_AP_EN only as the gate for the memory-mapped registers.
