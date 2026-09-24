@@ -255,6 +255,8 @@ fp_writes_set_psr_mfl_mfh
 fpabs_fpneg_decode
 fpack_decode
 fpcmp_parallel_decode
+fpcmp_qnan_quiet_relations
+fpcmp_qnan_quiet_with_invalid_enabled
 fpcmp_simd_high_lane_fault_isr
 fpcvt_masked_invalid_lane_indefinite
 fpcvt_parallel_decode

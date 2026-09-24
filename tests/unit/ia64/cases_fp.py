@@ -1665,6 +1665,55 @@ test_fpcmp_parallel_decode = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+# fpcmp eq, unord, neq and ord are quiet on a QNaN; lt, le, nlt and nle
+# signal Invalid (SDM Vol 3 Table 2-30).
+test_fpcmp_qnan_quiet_relations = require_registers(
+    "fpcmp_qnan_quiet_relations", [
+        (0x10, *movl_mlx(2, 0x7fc123457fc54321)),
+        (0x20, *movl_mlx(3, 0x3f8000003f800000)),
+        (0x30, 0x09, setf_sig(6, 2), setf_sig(7, 3), nop_i()),
+        (0x40, 0x0d, nop_m(), fpcmp(0, 8, 6, 7, sf=0), nop_i()),
+        (0x50, 0x0d, nop_m(), fpcmp(3, 9, 6, 7, sf=1), nop_i()),
+        (0x60, 0x0d, nop_m(), fpcmp(4, 10, 6, 7, sf=2), nop_i()),
+        (0x70, 0x0d, nop_m(), fpcmp(7, 11, 6, 7, sf=3), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "f8": ExpectedFP(0, 0x1003e),
+        "f9": ExpectedFP(UINT64_MAX, 0x1003e),
+        "f10": ExpectedFP(UINT64_MAX, 0x1003e),
+        "f11": ExpectedFP(0, 0x1003e),
+        "ar_fpsr": DEFAULT_FPSR,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+# With V enabled, the quiet eq completes and the signaling lt faults with V
+# in both lanes.
+test_fpcmp_qnan_quiet_with_invalid_enabled = require_registers(
+    "fpcmp_qnan_quiet_with_invalid_enabled", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~1)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x7fc123457fc54321)),
+        (0x40, *movl_mlx(4, 0x3f8000003f800000)),
+        (0x50, 0x09, setf_sig(6, 3), setf_sig(7, 4), nop_i()),
+        (0x60, 0x00, setf_sig(9, 4), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fpcmp(0, 8, 6, 7), nop_i()),
+        (0x80, 0x0d, nop_m(), fpcmp(1, 9, 6, 7), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x20,
+                 IA64_FP_FAULT_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x11,
+        "f8": ExpectedFP(0, 0x1003e),
+        "f9": ExpectedFP(0x3f8000003f800000, 0x1003e),
+        "ar_fpsr": DEFAULT_FPSR & ~1,
+    }, entry=0x10)
+
 test_fpcmp_simd_high_lane_fault_isr = require_registers(
     "fpcmp_simd_high_lane_fault_isr", [
         (0x10, *movl_mlx(2, 0x33e)),
@@ -3441,6 +3490,8 @@ CASE_NAMES = (
     'fpabs_fpneg_decode',
     'fpack_decode',
     'fpcmp_parallel_decode',
+    'fpcmp_qnan_quiet_relations',
+    'fpcmp_qnan_quiet_with_invalid_enabled',
     'fpcmp_simd_high_lane_fault_isr',
     'fpcvt_masked_invalid_lane_indefinite',
     'fpcvt_parallel_decode',

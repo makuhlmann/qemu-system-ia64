@@ -1734,9 +1734,12 @@ static void ia64_do_fpminmax(CPUIA64State *env, uint32_t r1, uint32_t r2,
 static bool ia64_fpcmp_lane(uint32_t a_bits, uint32_t b_bits, uint32_t frel,
                             float_status *status)
 {
-    FloatRelation rel = float32_compare(make_float32(a_bits),
-                                        make_float32(b_bits),
-                                        status);
+    /* eq, unord, neq and ord are quiet on a QNaN (SDM Vol 3 Table 2-30). */
+    bool quiet = (frel & 3) == 0 || (frel & 3) == 3;
+    FloatRelation rel = quiet ?
+        float32_compare_quiet(make_float32(a_bits), make_float32(b_bits),
+                              status) :
+        float32_compare(make_float32(a_bits), make_float32(b_bits), status);
 
     switch (frel & 7) {
     case 0:
