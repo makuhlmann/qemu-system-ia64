@@ -426,9 +426,13 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 #define IA64_MERCED_PURGEABLE_PAGE_SIZE_MASK \
     (IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK | (1ULL << 32))
 
-/* ---- General exception codes ---- */
-#define IA64_GENEX_UNIMPL_DATA_ADDR 43
-#define IA64_GENEX_UNIMPL_INST_ADDR 69
+/*
+ * ISR.code of the unimplemented-address faults: code{7:4} = 3 on the General
+ * Exception vector; the ui bit (4) on the Lower-Privilege Transfer Trap
+ * vector (SDM Vol 2 chapter 8).
+ */
+#define IA64_GENEX_UNIMPL_DATA_ADDR (3 << 4)
+#define IA64_GENEX_UNIMPL_INST_ADDR (1 << 4)
 
 /* ---- Protection Key Register fields ---- */
 #define IA64_PKR_VALID       (1ULL << 0)

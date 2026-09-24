@@ -1316,7 +1316,7 @@ test_unimplemented_physical_load_faults = require_registers(
 # 245320-002 sec 3.2: Merced implements 54 virtual address bits, so
 # VA{60:51} must sign-extend VA{50}.  A region-0 address with bit 51 set and
 # bit 50 clear is unimplemented there and takes a General Exception with
-# ISR.code 43, while Itanium 2 implements the full VA{60:0} and merely misses
+# ISR.code 0x30, while Itanium 2 implements the full VA{60:0} and merely misses
 # in the TLB.
 MERCED_UNIMPLEMENTED_VA = 1 << 51
 

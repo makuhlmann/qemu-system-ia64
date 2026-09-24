@@ -125,8 +125,11 @@ IA64_VIRTUALIZATION_VECTOR = 0x6100
 IA64_IA32_EXCEPTION_VECTOR = 0x6900
 IA64_IA32_INTERCEPT_VECTOR = 0x6a00
 IA64_IA32_INTERRUPT_VECTOR = 0x6b00
-IA64_GENEX_UNIMPL_DATA_ADDR = 43
-IA64_GENEX_UNIMPL_INST_ADDR = 69
+# ISR.code: code{7:4} = 3 for Unimplemented Data Address, ui (bit 4) for
+# Unimplemented Instruction Address (SDM Vol 2 General Exception and
+# Lower-Privilege Transfer Trap vectors).
+IA64_GENEX_UNIMPL_DATA_ADDR = 3 << 4
+IA64_GENEX_UNIMPL_INST_ADDR = 1 << 4
 IA64_PKR_COUNT = 16
 IA64_PKR_VALID = 1 << 0
 IA64_PKR_WD = 1 << 1
