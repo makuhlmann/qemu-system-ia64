@@ -130,7 +130,7 @@ static void ia64_migration_reset_fp_status(CPUIA64State *env)
     set_float_3nan_prop_rule(float_3nan_prop_abc, &env->fp.fp_status);
     set_float_infzeronan_rule(float_infzeronan_dnan_never,
                               &env->fp.fp_status);
-    set_float_default_nan_pattern(0b01000000, &env->fp.fp_status);
+    set_float_default_nan_pattern(0b11000000, &env->fp.fp_status);
     set_float_rounding_mode(float_round_nearest_even, &env->fp.fp_status);
 
     /*

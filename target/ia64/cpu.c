@@ -946,7 +946,8 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     set_float_3nan_prop_rule(float_3nan_prop_abc, &cpu->env.fp.fp_status);
     set_float_infzeronan_rule(float_infzeronan_dnan_never,
                               &cpu->env.fp.fp_status);
-    set_float_default_nan_pattern(0b01000000, &cpu->env.fp.fp_status);
+    /* The QNaN Indefinite has sign 1 (SDM Vol 1 Table 5-2). */
+    set_float_default_nan_pattern(0b11000000, &cpu->env.fp.fp_status);
     cpu->env.cr[IA64_CR_SAPIC_LID] =
         ia64_sapic_lid(MAX(CPU(cpu)->cpu_index, 0), 0);
     cpu->env.cr[IA64_CR_SAPIC_TPR] = 0;

@@ -2467,6 +2467,27 @@ test_fcvt_fx_signed_trunc = require_registers("fcvt_fx_signed_trunc", [
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
 
+# A masked invalid result is the QNaN Indefinite, which has sign 1 (SDM
+# Vol 1 Table 5-2): +Inf * 0 in fmpy.s0 and in both lanes of fpma.
+test_masked_invalid_gives_negative_qnan_indefinite = require_registers(
+    "masked_invalid_gives_negative_qnan_indefinite", [
+        (0x10, *movl_mlx(3, 0x7ff0000000000000)),
+        (0x20, *movl_mlx(4, 0x7f8000007f800000)),
+        (0x30, 0x09, setf_d(7, 3), setf_sig(10, 4), nop_i()),
+        (0x40, 0x0d, nop_m(), fmpy_s0(8, 7, 0), nop_i()),
+        (0x50, 0x0d, nop_m(), fpma(9, 0, 10, 0), nop_i()),
+        (0x60, 0x01, getf_d(5, 8), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "r5": 0xfff8000000000000,
+        "f8": ExpectedFP(0xc000000000000000, 0x3ffff),
+        "f9": ExpectedFP(0xffc00000ffc00000, 0x1003e),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (1 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 # An fcvt.fx/fcvt.fxu result that no 64-bit integer holds is the integer
 # indefinite 0x8000000000000000 with V set, not a saturated value (SDM Vol 3
 # fcvt.fx).  Inputs: 2^63, +Inf, -1.0 (unsigned), a QNaN and the
@@ -3486,6 +3507,7 @@ CASE_NAMES = (
     'ldfps_expands_both_single_values',
     'ldfs_expands_single_memory_format',
     'ldfs_preserves_single_nan_payload',
+    'masked_invalid_gives_negative_qnan_indefinite',
     'nop_f_decode',
     'predicated_off_disabled_fp_does_not_fault',
     'setf_exp_decode',
