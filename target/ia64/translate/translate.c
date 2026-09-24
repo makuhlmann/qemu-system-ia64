@@ -317,6 +317,78 @@ bool ia64_insn_has_invalid_fp_pair(const Ia64Instruction *insn)
     }
 }
 
+static bool ia64_insn_writes_fr_f1(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_LDFS:
+    case IA64_OP_LDFD:
+    case IA64_OP_LDF8:
+    case IA64_OP_LDFE:
+    case IA64_OP_LDF_FILL:
+    case IA64_OP_SETF_S:
+    case IA64_OP_SETF_D:
+    case IA64_OP_SETF_EXP:
+    case IA64_OP_SETF_SIG:
+    case IA64_OP_FADD:
+    case IA64_OP_FSUB:
+    case IA64_OP_FMPY:
+    case IA64_OP_FMA:
+    case IA64_OP_FMS:
+    case IA64_OP_FNMA:
+    case IA64_OP_FNORM:
+    case IA64_OP_XMA_L:
+    case IA64_OP_XMA_H:
+    case IA64_OP_XMA_HU:
+    case IA64_OP_FMOV:
+    case IA64_OP_FMERGE:
+    case IA64_OP_FMERGE_S:
+    case IA64_OP_FMERGE_SE:
+    case IA64_OP_FCVT_XF:
+    case IA64_OP_FCVT_FX:
+    case IA64_OP_FCVT_FXU:
+    case IA64_OP_FMIN:
+    case IA64_OP_FMAX:
+    case IA64_OP_FAMIN:
+    case IA64_OP_FAMAX:
+    case IA64_OP_FRCPA:
+    case IA64_OP_FRSQRTA:
+    case IA64_OP_FSELECT:
+    case IA64_OP_FAND:
+    case IA64_OP_FANDCM:
+    case IA64_OP_FOR:
+    case IA64_OP_FXOR:
+    case IA64_OP_FSWAP:
+    case IA64_OP_FSWAP_NL:
+    case IA64_OP_FSWAP_NR:
+    case IA64_OP_FMIX_LR:
+    case IA64_OP_FMIX_R:
+    case IA64_OP_FMIX_L:
+    case IA64_OP_FSXT_R:
+    case IA64_OP_FSXT_L:
+    case IA64_OP_FPACK:
+    case IA64_OP_FPABS:
+    case IA64_OP_FPNEG:
+    case IA64_OP_FPNEGABS:
+    case IA64_OP_FPMERGE:
+    case IA64_OP_FPMERGE_S:
+    case IA64_OP_FPMERGE_SE:
+    case IA64_OP_FPMIN:
+    case IA64_OP_FPMAX:
+    case IA64_OP_FPAMIN:
+    case IA64_OP_FPAMAX:
+    case IA64_OP_FPCMP:
+    case IA64_OP_FPCVT:
+    case IA64_OP_FPMA:
+    case IA64_OP_FPMS:
+    case IA64_OP_FPNMA:
+    case IA64_OP_FPRCPA:
+    case IA64_OP_FPRSQRTA:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static bool ia64_insn_writes_gr_r1(const Ia64Instruction *insn)
 {
     Ia64Opcode opcode = insn->opcode;
@@ -2763,7 +2835,10 @@ static IA64PrepareResult ia64_gen_prepare_insn(
         ia64_gen_predicate_end(skip);
         return IA64_PREPARE_COMPLETE;
     }
-    if (ia64_compare_has_equal_targets(insn)) {
+    if (ia64_compare_has_equal_targets(insn) ||
+        /* FR 0 and FR 1 are read-only (SDM Vol 3 fp_check_target_register). */
+        (ia64_insn_writes_fr_f1(insn) &&
+         insn->operands.common.destination <= 1)) {
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
                                   insn->raw, insn->slot);
         if (skip == NULL) {

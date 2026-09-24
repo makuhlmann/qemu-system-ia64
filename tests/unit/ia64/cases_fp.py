@@ -655,7 +655,9 @@ test_stf_spill_preserves_natval = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
-test_ldf8_f1_does_not_change_fixed_register = require_registers(
+# An ldf to FR 1 does not change it: it is an Illegal Operation fault (SDM
+# Vol 3 fp_check_target_register).
+test_ldf8_f1_does_not_change_fixed_register = require_exception(
     "ldf8_f1_does_not_change_fixed_register", [
         (0x10, *movl_mlx(2, 0xdeadbeefcafebabe)),
         (0x20, 0x00, addl(3, 0x200, 0), nop_i(),
@@ -664,14 +666,7 @@ test_ldf8_f1_does_not_change_fixed_register = require_registers(
          nop_i()),
         (0x40, 0x00, ldf8(1, 3), nop_i(),
          nop_i()),
-        (0x50, 0x10, nop_m(), nop_i(),
-         br_cond(0x50, 0x50)),
-    ], {
-        "ip": 0x50,
-        "f1": ExpectedFP(0x8000000000000000, 0xffff),
-        "ar_fpsr": DEFAULT_FPSR,
-        "exception": IA64_EXCP_NONE,
-    }, entry=0x10)
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x40)
 
 test_stf_spill_ldf_fill_preserves_sig = require_registers(
     "stf_spill_ldf_fill_preserves_sig", [
@@ -2422,6 +2417,26 @@ test_fclass_unc_same_pred_pred_false_illegal = require_exception(
     fault_ip=0x10,
 )
 
+# Writing FR 0 or FR 1 is an Illegal Operation fault (SDM Vol 3
+# fp_check_target_register; Vol 2 General Exception vector), for F-unit
+# results as for setf and ldf; a false predicate makes it a nop.
+test_fma_f0_illegal_operation = require_exception(
+    "fma_f0_illegal_operation", [
+        (0x10, 0x0d, nop_m(), fma_s0(0, 1, 1, 1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_fand_f1_illegal_operation = require_exception(
+    "fand_f1_illegal_operation", [
+        (0x10, 0x0d, nop_m(), fand(1, 0, 1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_fp_fixed_target_predicated_off_is_nop = require_registers(
+    "fp_fixed_target_predicated_off_is_nop", [
+        (0x10, *movl_mlx(2, 0)),
+        (0x20, 0x00, setf_d(1, 2, qp=1), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE}, entry=0x10)
+
 test_fcvt_fxu_double_to_uint = require_registers("fcvt_fxu_double_to_uint", [
     (0x10, *movl_mlx(2, 0x400e000000000000)),
     (0x20, 0x00, setf_d(6, 2), nop_i(),
@@ -2681,17 +2696,12 @@ test_setf_sig_direct_scalar_operand = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
-test_fr1_is_read_only_one = require_registers("fr1_is_read_only_one", [
+# FR 1 is read-only: a setf to it is an Illegal Operation fault.
+test_fr1_is_read_only_one = require_exception("fr1_is_read_only_one", [
     (0x10, *movl_mlx(2, 0)),
     (0x20, 0x00, setf_d(1, 2), nop_i(),
      nop_i()),
-    (0x30, 0x10, nop_m(), nop_i(),
-     br_cond(0x30, 0x30)),
-], {
-    "ip": 0x30,
-    "f0": ExpectedFP(0, 0),
-    "f1": ExpectedFP(0x8000000000000000, 0xffff),
-}, entry=0x10)
+], IA64_EXCP_ILLEGAL, fault_ip=0x20)
 
 test_w2k_frcpa_capacity_calc = require_registers("w2k_frcpa_capacity_calc", [
     (0x10, 0x00, addl(24, 0x230, 0), adds(25, 0x28, 0),
@@ -3348,6 +3358,7 @@ CASE_NAMES = (
     'disabled_fp_low_fault',
     'disabled_fp_mixed_sets_reports_both',
     'disabled_fp_store_sets_isr_w',
+    'fand_f1_illegal_operation',
     'fchkf_branches_on_uncommitted_flag',
     'fchkf_negative_target_uses_bit36',
     'fchkf_no_branch_when_flags_committed',
@@ -3375,6 +3386,7 @@ CASE_NAMES = (
     'fcvt_xf_reads_register_significand',
     'fcvt_xf_signed_sig_to_float',
     'fma_d_s0_decode',
+    'fma_f0_illegal_operation',
     'fma_s_s0_high_f4_decode',
     'fma_preserves_extended_precision',
     'fmerge_forms_decode',
@@ -3391,6 +3403,7 @@ CASE_NAMES = (
     'fp_alat_does_not_satisfy_gr_check_load',
     'fp_arithmetic_natval_propagates',
     'fp_divzero_fault_discards_result',
+    'fp_fixed_target_predicated_off_is_nop',
     'fp_inexact_trap_commits_result',
     'fp_logical_and_swap_decode',
     'fp_logical_swap_natval_propagates',
