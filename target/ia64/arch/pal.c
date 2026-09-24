@@ -850,8 +850,12 @@ static void pal_mc_resume(CPUIA64State *env)
     uint64_t save_ptr = env->gr[IA64_PAL_GR_ARG2];
     uint64_t new_context = env->gr[IA64_PAL_GR_ARG3];
 
+    /*
+     * save_ptr has the rules of the PAL_MC_REGISTER_MEM address (SDM Vol.2
+     * PAL_MC_RESUME), so the uncacheable bit 63 is allowed there too.
+     */
     if (set_cmci > 1 || new_context > 1 ||
-        (save_ptr >> 63) != 0 || (save_ptr & 0x1ff) != 0) {
+        (save_ptr & 0x1ff) != 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_ERROR;

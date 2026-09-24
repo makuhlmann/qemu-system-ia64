@@ -748,6 +748,7 @@ pal_mc_resume_bad_args
 pal_mc_resume_bad_save_ptr
 pal_mc_resume_new_context_no_context
 pal_mc_resume_no_context
+pal_mc_resume_uc_save_ptr_no_context
 pal_mem_attrib
 pal_mem_attrib_reserved_arg
 pal_mem_for_test

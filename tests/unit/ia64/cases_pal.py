@@ -1730,6 +1730,17 @@ test_pal_mc_resume_no_context = require_registers(
      "r8": (-3 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+# save_ptr has the alignment and size rules of the PAL_MC_REGISTER_MEM
+# address (SDM Vol 2 PAL_MC_RESUME), which firmware passes with the
+# uncacheable bit 63 set.
+test_pal_mc_resume_uc_save_ptr_no_context = require_registers(
+    "pal_mc_resume_uc_save_ptr_no_context",
+    pal_call_program(PAL_MC_RESUME,
+                     [(29, 0), (30, (1 << 63) | 0x2000), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_MC_RESUME,
+     "r8": (-3 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
 test_pal_mc_resume_new_context_no_context = require_registers(
     "pal_mc_resume_new_context_no_context",
     pal_call_program(PAL_MC_RESUME, [(29, 1), (30, 0x2000), (31, 1)]),
@@ -1924,6 +1935,7 @@ CASE_NAMES = (
     'pal_mc_resume_bad_save_ptr',
     'pal_mc_resume_new_context_no_context',
     'pal_mc_resume_no_context',
+    'pal_mc_resume_uc_save_ptr_no_context',
     'pal_mem_attrib',
     'pal_mem_attrib_reserved_arg',
     'pal_mem_for_test',
