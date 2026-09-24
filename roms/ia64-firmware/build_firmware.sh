@@ -36,7 +36,7 @@ ACPI_SIZES_H="${OUT_DIR}/ia64-fw-acpi-aml.h"
 # included by firmware.c, so the AML byte arrays can never drift from the
 # .asl sources again.  -on -oi keep integer literals as typed opcodes
 # (Linux 2.4's ACPI CA rejects ZeroOp/OneOp *package elements* -- see
-# plans/status.md 2.3).
+# c392734).
 : > "$ACPI_SIZES_H"
 while IFS= read -r source || [ -n "$source" ]; do
     case "$source" in

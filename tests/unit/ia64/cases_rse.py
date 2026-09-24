@@ -775,8 +775,8 @@ test_rse_bspstore_rebase_onto_copied_backing_store = require_registers(
 # a stray NaT would fault the first consumer.
 #
 # NOTE: this passes on the code as of 2026-08-02 and is coverage for the
-# wrap/reload path, NOT a reproducer for the open clone2 bug in
-# status.md 3.9 -- that one is still unreproduced at microprogram level.
+# wrap/reload path, NOT a reproducer for the clone2 hang, which was a
+# hint.b decode bug (a34c669).
 def _clone_chain_level(base, next_base):
     bundles = [
         (base + 0x00, 0x00, alloc(34, 12, 10, 0, 0), mov_gr_b(35, 0),

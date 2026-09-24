@@ -724,8 +724,8 @@ void efi_init_memory_map(void)
      * ioremap(), which maps the physical window UC via the region-6 identity
      * area on its own, independent of the EFI map -- and adding a descriptor
      * here perturbs the descriptor layout the XP build-2600 SMP loader is
-     * exquisitely sensitive to (see plans/status.md 2.2 and the
-     * platform-map-460gx-realign notes), deadlocking that guest at kernel
+     * exquisitely sensitive to (see plans/highram-460gx-dma.md,
+     * "Approach A"), deadlocking that guest at kernel
      * bring-up.  The GART window is left an undescribed chipset gap, exactly
      * as it was before AGP support.
      */

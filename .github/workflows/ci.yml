@@ -1,14 +1,14 @@
 name: CI
 
 # Build QEMU (ia64-softmmu) + the IA-64 firmware, and run the ia64 regression
-# gate (unit(ia64) + qtest-ia64).
+# gate (unit(ia64) + qtest-ia64 + func-ia64).
 #
-# Both jobs run inside a Fedora container: Ubuntu has no IA-64 cross toolchain,
-# but Fedora packages gcc-ia64-linux-gnu / binutils-ia64-linux-gnu (a
-# kernel-style freestanding cross-compiler — exactly what the firmware's
-# -ffreestanding -nostdlib build needs). Fedora also carries the mingw64
-# toolchain upstream QEMU uses for Windows cross builds
-# (tests/docker/dockerfiles/fedora-win64-cross.docker).
+# The Linux and Windows jobs run inside a Fedora container: Ubuntu has no
+# IA-64 cross toolchain, but Fedora packages gcc-ia64-linux-gnu /
+# binutils-ia64-linux-gnu (a kernel-style freestanding cross-compiler —
+# exactly what the firmware's -ffreestanding -nostdlib build needs). Fedora
+# also carries the mingw64 toolchain upstream QEMU uses for Windows cross
+# builds (tests/docker/dockerfiles/fedora-win64-cross.docker).
 #
 # Pinned to fedora:44 to match the local development container.
 
