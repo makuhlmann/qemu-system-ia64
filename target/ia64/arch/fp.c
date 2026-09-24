@@ -1394,7 +1394,7 @@ static void ia64_do_fprcpa(CPUIA64State *env, uint32_t r1, uint32_t p2,
 
         set_float_exception_flags(hi_soft | lo_soft, &env->fp.fp_status);
         if (hi_fault || lo_fault) {
-            ia64_raise_fp_fault(env, lo_fault | (hi_fault << 4));
+            ia64_raise_fp_fault(env, hi_fault | (lo_fault << 4));
         }
     }
 
@@ -1833,7 +1833,7 @@ static void ia64_do_fpcvt(CPUIA64State *env, uint32_t r1, uint32_t r2,
 
         set_float_exception_flags(hi_soft | lo_soft, &env->fp.fp_status);
         if (hi_fault || lo_fault) {
-            ia64_raise_fp_fault(env, lo_fault | (hi_fault << 4));
+            ia64_raise_fp_fault(env, hi_fault | (lo_fault << 4));
         }
     }
 
@@ -1938,6 +1938,10 @@ static uint64_t ia64_fp_soft_flags_to_ia64(int soft)
     return flags;
 }
 
+/*
+ * A parallel FP fault reports the high lane in ISR.code{3:0} and the low
+ * lane in ISR.code{7:4} (SDM Vol 2 Floating-point Fault vector).
+ */
 static void ia64_fp_simd_fault_end(CPUIA64State *env, uint32_t sf,
                                    int hi_soft, int lo_soft)
 {
@@ -1947,7 +1951,7 @@ static void ia64_fp_simd_fault_end(CPUIA64State *env, uint32_t sf,
 
     set_float_exception_flags(hi_soft | lo_soft, &env->fp.fp_status);
     if (hi_fault || lo_fault) {
-        ia64_raise_fp_fault(env, lo_fault | (hi_fault << 4));
+        ia64_raise_fp_fault(env, hi_fault | (lo_fault << 4));
     }
 }
 
@@ -2485,7 +2489,7 @@ static void ia64_do_fprsqrta(CPUIA64State *env, uint32_t r1, uint32_t p2,
 
         set_float_exception_flags(hi_soft | lo_soft, &env->fp.fp_status);
         if (hi_fault || lo_fault) {
-            ia64_raise_fp_fault(env, lo_fault | (hi_fault << 4));
+            ia64_raise_fp_fault(env, hi_fault | (lo_fault << 4));
         }
     }
 

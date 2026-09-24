@@ -317,6 +317,7 @@ fpmodel_binary64_22
 fpmodel_binary64_23
 fprcpa_decode
 fprcpa_simd_high_lane_fault_isr
+fprcpa_simd_low_lane_fault_isr
 fprsqrta_decode
 fprsqrta_simd_high_lane_fault_isr
 fpsr_status_field_controls

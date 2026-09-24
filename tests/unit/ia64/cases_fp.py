@@ -1601,7 +1601,7 @@ test_fpminmax_simd_high_lane_fault_isr = require_registers(
     ], {
         "ip": IA64_FP_FAULT_VECTOR + 0x20,
         "exception": IA64_EXCP_NONE,
-        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x20,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x2,
         "f8": ExpectedFP(0x4000000040400000, 0x1003e),
         "ar_fpsr": 0x33d,
     }, entry=0x10)
@@ -1630,7 +1630,7 @@ test_fpminmax_nan_invalid_fault = require_registers(
     ], {
         "ip": IA64_FP_FAULT_VECTOR + 0x20,
         "exception": IA64_EXCP_NONE,
-        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x10,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x1,
         "f8": ExpectedFP(0x4000000040400000, 0x1003e),
         "ar_fpsr": 0x33e,
     }, entry=0x10)
@@ -1689,7 +1689,7 @@ test_fpcmp_simd_high_lane_fault_isr = require_registers(
     ], {
         "ip": IA64_FP_FAULT_VECTOR + 0x20,
         "exception": IA64_EXCP_NONE,
-        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x10,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x1,
         "f8": ExpectedFP(0x4000000040400000, 0x1003e),
         "ar_fpsr": 0x33e,
     }, entry=0x10)
@@ -1814,7 +1814,7 @@ test_fpcvt_simd_high_lane_fault_isr = require_registers(
     ], {
         "ip": IA64_FP_FAULT_VECTOR + 0x20,
         "exception": IA64_EXCP_NONE,
-        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x10,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x1,
         "f8": ExpectedFP(0x4000000040400000, 0x1003e),
         "ar_fpsr": 0x33e,
     }, entry=0x10)
@@ -1897,7 +1897,7 @@ test_fpma_simd_high_lane_fault_isr = require_registers(
     ], {
         "ip": IA64_FP_FAULT_VECTOR + 0x20,
         "exception": IA64_EXCP_NONE,
-        "r11": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x10,
+        "r11": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x1,
         "f10": ExpectedFP(0x4000000040400000, 0x1003e),
         "ar_fpsr": 0x33e,
     }, entry=0x10)
@@ -2143,7 +2143,7 @@ test_fprsqrta_simd_high_lane_fault_isr = require_registers(
     ], {
         "ip": IA64_FP_FAULT_VECTOR + 0x20,
         "exception": IA64_EXCP_NONE,
-        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x10,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x1,
         "f8": ExpectedFP(0x4000000040400000, 0x1003e),
         "ar_fpsr": 0x33e,
     }, entry=0x10)
@@ -3045,6 +3045,32 @@ test_fprcpa_simd_high_lane_fault_isr = require_registers(
     ], {
         "ip": IA64_FP_FAULT_VECTOR + 0x20,
         "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x4,
+        "f8": ExpectedFP(0x4000000040400000, 0x1003e),
+        "ar_fpsr": 0x33b,
+    }, entry=0x10)
+
+
+# A parallel FP fault reports the high lane in ISR.code{3:0} and the low
+# lane in ISR.code{7:4} (SDM Vol 2 Floating-point Fault vector).
+test_fprcpa_simd_low_lane_fault_isr = require_registers(
+    "fprcpa_simd_low_lane_fault_isr", [
+        (0x10, *movl_mlx(2, 0x33b)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x3f8000003f800000)),
+        (0x40, *movl_mlx(4, 0x3f80000000000000)),
+        (0x50, *movl_mlx(5, 0x4000000040400000)),
+        (0x60, 0x09, setf_sig(6, 3), setf_sig(7, 4), nop_i()),
+        (0x70, 0x00, setf_sig(8, 5), nop_i(), nop_i()),
+        (0x80, 0x0d, nop_m(), fprcpa(8, 6, 6, 7), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x10,
+                 IA64_FP_FAULT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
         "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x40,
         "f8": ExpectedFP(0x4000000040400000, 0x1003e),
         "ar_fpsr": 0x33b,
@@ -3477,6 +3503,7 @@ CASE_NAMES = (
     'fpmodel_binary64_23',
     'fprcpa_decode',
     'fprcpa_simd_high_lane_fault_isr',
+    'fprcpa_simd_low_lane_fault_isr',
     'fprsqrta_decode',
     'fprsqrta_simd_high_lane_fault_isr',
     'fpsr_status_field_controls',
