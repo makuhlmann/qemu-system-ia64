@@ -3,8 +3,6 @@
  *
  * Boot policy: BootOrder/Boot#### evaluation, BootCurrent maintenance,
  * the disk fallback boot, and the boot-shell console services.
- * Extracted verbatim from firmware.c (Phase 1 of
- * plans/firmware-rework-plan.md).
  */
 
 #include "fw-base.h"

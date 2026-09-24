@@ -3,8 +3,7 @@
  *
  * EFI memory-map state and API (efi_memmap.c).  The descriptor arrays
  * stay exported for now: the page allocator and GetMemoryMap in
- * firmware.c iterate them directly; hardening this into a closed API is
- * a later Phase 1 step.
+ * firmware.c iterate them directly; a closed API is not done yet.
  */
 
 #ifndef IA64_FIRMWARE_FW_MEMMAP_H

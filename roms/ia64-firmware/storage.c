@@ -2,8 +2,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * LSI53C895A SCSI + AHCI drivers and the storage abstraction layer.
- * Extracted verbatim from firmware.c (Phase 1 of
- * plans/firmware-rework-plan.md).
  */
 
 #include "fw-base.h"

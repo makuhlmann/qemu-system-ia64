@@ -6,7 +6,7 @@ ENTRY(_start)
 /*
  * The link base is overridable (ld --defsym FW_LINK_BASE=...) so the build
  * can produce alternate links whose binary diff yields the self-relocation
- * fixup table (see fw-fixups.py) - phase 2.2 of the firmware rework.  The
+ * fixup table (see fw-fixups.py; 1d35713).  The
  * shipping image stays linked at the historical 0x100000.
  */
 PROVIDE(FW_LINK_BASE = 0x100000);

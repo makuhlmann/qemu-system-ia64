@@ -7,7 +7,7 @@
  *
  * The 460GX SSDM (248704-001) is the authority; the register offsets it does
  * not publish are noted where they were measured against the vendor firmware
- * (plans/460gx-config-space-notes.md, plans/phase5-real-firmware-boot.md).
+ * (HP i2000 / SDV BIOS 1.30, bios130.BIN).
  */
 
 #include "qemu/osdep.h"
@@ -27,7 +27,7 @@
 
 /*
  * POST-code port 0x80/0x81 (SAL narrates boot progress there; the codes are
- * tabulated in plans/sdv-i2000-firmware-reference.md sec 6.5).  Logged on
+ * in the HP Workstation i2000 Owner's Guide, Tables 25 and 26).  Logged on
  * change only, so a code re-written in a wait loop cannot flood the log.
  */
 static uint64_t ia64_460gx_post_read(void *opaque, hwaddr addr, unsigned size)
@@ -143,9 +143,9 @@ static const MemoryRegionOps ia64_460gx_sac_ops = {
  * dev 00h/01h SAC,
  * 04h SDC, 05h/06h Memory Card A/B (MAC; SPD EEPROMs tunnel through its
  * higher functions over I2C), dev 10h the CBN-programming device.  The
- * public SSDM documents none of the platform-setup register offsets
- * (plans/460gx-config-space-notes.md), so the model is a write-store/
- * read-back scratch per function with the empirically required specials:
+ * public SSDM documents none of the platform-setup register offsets (it
+ * names them only in prose), so the model is a write-store/read-back
+ * scratch per function with the empirically required specials:
  * Memory Card A claims presence with a MAC ID, dev 10h reg 40h is the CBN.
  * Accesses to non-chipset device numbers forward to the QEMU PCI bus.
  */
@@ -241,13 +241,13 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
  * SPD EEPROMs served through the MAC's I2C pass-through: firmware writes the
  * DIMM's I2C address (bit 7 = read) into the SAC IIADR register (dev 00h fn 0
  * reg 0x68), then config reads of Memory Card fn 2/3 return the addressed
- * EEPROM's bytes at the register offset (observed protocol,
- * plans/phase5-real-firmware-boot.md sec 5.5; register naming per
- * plans/460gx-config-space-notes.md).  The card's eight rows are addressed
- * as two stacks of four: the stack by the I2C address (54h-57h and 50h-53h
- * = DIMM 0-3 of a row in either stack), the row within the stack by which of
- * the MAC's functions 4-7 has bit 0 of its register 48h set -- the firmware
- * raises exactly one before it reads a row's four EEPROMs (POST F0 trace).
+ * EEPROM's bytes at the register offset (the protocol of the vendor board
+ * module's SPD helper, b638df7; SSDM 2.2.1 names IIADR but not its offset).
+ * The card's eight rows are addressed as two stacks of four: the stack by
+ * the I2C address (54h-57h and 50h-53h = DIMM 0-3 of a row in either
+ * stack), the row within the stack by which of the MAC's functions 4-7 has
+ * bit 0 of its register 48h set -- the firmware raises exactly one before
+ * it reads a row's four EEPROMs (POST F0 trace).
  *
  * The sizing loop reads bytes 2 (memory type, must say SDRAM), 3, 4, 5 and
  * 17 (row and column address bits, ranks, banks per device) and requires
@@ -843,8 +843,7 @@ static void ia64_460gx_reset_cfg(IA64460GXState *s)
      * zero vendor id, which is neither "present" nor the architected
      * "absent" 0xffff.  Device ids, revisions and classes per the 460GX
      * SSDM Table 2-1 and upstream's intel_460gx_chipset.c (fda8a29);
-     * expander device numbers per plans/sdv-i2000-firmware-reference.md,
-     * which places expander port n at bus CBN device 10h + n.
+     * the same table places expander port n at bus CBN device 10h + n.
      */
     ia64_460gx_init_chipset_identity(s, 0x00, 0, 0x84e0, 0x03,
                                           PCI_CLASS_BRIDGE_HOST, true);
@@ -968,8 +967,9 @@ static void ia64_460gx_reset_cfg(IA64460GXState *s)
 
     /*
      * Memory Card A (dev 05h fn 0) claims presence with the MAC identity
-     * (8086:84E3, rev B-1 = 03h; pci.ids, flagged unverified in
-     * plans/460gx-config-space-notes.md).  Memory Card B stays absent.
+     * (8086:84E3 from pci.ids: no 460GX document gives the MAC's PCI ids;
+     * rev B-1 = 03h per the spec update 249731-002).  Memory Card B stays
+     * absent.
      */
     mac_a = ia64_460gx_chipset_cfg(s, 0xff, 0x05, 0);
     stw_le_p(mac_a + PCI_VENDOR_ID, 0x8086);

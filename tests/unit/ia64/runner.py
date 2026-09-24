@@ -111,7 +111,7 @@ def _command(qemu: str, program: MicroProgram) -> list[str]:
     # The battery loads microprograms over the firmware's historical 1 MB
     # home and relies on the identity window there; pin the machine to the
     # unrelocated layout (the shipping firmware runs from the RAM-top
-    # shadow by default since rework phase 2.2).
+    # shadow by default since 55e553d).
     machine = f"{program.machine},fw-relocate=off"
     if program.machine_args:
         machine += "," + ",".join(program.machine_args)

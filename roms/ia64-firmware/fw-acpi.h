@@ -24,7 +24,7 @@
 /*
  * ITR(0) as published in the SST: a 1 MB translation at the image shadow
  * base - exactly the firmware-context identity window the emulator models
- * (rework D11; the OS purges this register with these VA/size values).
+ * (a5f80b2; the OS purges this register with these VA/size values).
  */
 #define SAL_TR_PAGE_SHIFT            20U
 #define SAL_TR_ENCODED_PAGE_SIZE     (SAL_TR_PAGE_SHIFT << 2)

@@ -2,17 +2,16 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * The platform -> EFI-core handoff, modeled on the Intel EFI 1.10
- * sample's SALEFIHANDOFF contract (NOTES/SalEfiHandOffState.pdf; see
- * plans/firmware-rework-efi-sample-survey.md 4.4): the platform side
+ * sample's SALEFIHANDOFF contract (NOTES/SalEfiHandOffState.pdf in that
+ * sample): the platform side
  * (platform.c, efi_memmap.c, platform_tables.c) produces the memory
  * map and the guest platform tables and exposes them, plus the entry
  * points the core needs, through one struct.  The EFI core (firmware.c)
  * consumes it via fw_platform().
  *
  * The flat descriptor array stays directly visible to the core's page
- * allocator for now (fw-memmap.h); Phase 2's map rework replaces that
- * access path, at which point MemDesc/MemDescCount/MapKey here become
- * the only channel.
+ * allocator for now (fw-memmap.h); once that access path closes,
+ * MemDesc/MemDescCount/MapKey here become the only channel.
  */
 
 #ifndef IA64_FIRMWARE_FW_PLATFORM_HANDOFF_H

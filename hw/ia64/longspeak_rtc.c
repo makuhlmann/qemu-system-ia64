@@ -5,19 +5,20 @@
  *
  * A DS1501/1511-class part behind the PDH bus: time in registers 0 to 7,
  * control in 14 and 15, and a 256-byte battery-backed window addressed
- * through register 16 and read and written through register 19
- * (plans/nvram-portability.md sec 2.2, from the board's O&M manual; there is
- * no Dillon ERS).  The part has no hundredths register: register 0 is the
- * seconds, and the vendor firmware sets all eight time registers in one go
- * (FFF3E640, 1998-01-01 with the month register's E32K bit).
+ * through register 16 and read and written through register 19, as the
+ * vendor firmware uses it (FFF3E426; battery-backed per the zx6000/rx2600
+ * O&M Guide, Sept 2002, p.88; there is no Dillon ERS).  The part has no
+ * hundredths register: register 0 is the seconds, and the vendor firmware
+ * sets all eight time registers in one go (FFF3E640, 1998-01-01 with the
+ * month register's E32K bit).
  *
  * The seconds carry the board's frequency reference: the firmware waits for
  * bit 0 of register 0 to change twice and takes the ITC difference between
  * the two edges (FFF3F750).  A clock that ticks at any other rate gives a
  * wrong reference, and POST 0x000F23 "invalid real time clock cleared".
  *
- * The window is battery-backed on the board and volatile here, like the PDH
- * NVM (plans/one-hardware-model-plan.md P6.7).
+ * The window is battery-backed on the board and volatile here: nvram= holds
+ * only the PDH SRAM and the BMC tokens.
  */
 
 #include "qemu/osdep.h"

@@ -40,10 +40,11 @@
 #define IA64_VPC_MAX_CPUS             8U
 
 /*
- * Memory-map quirk bits (IA64NvramDefaults.MapQuirkDisable).  Each bit DISABLES one guest-specific map workaround the firmware
- * applies by default; all-zero keeps the validated default map.  The
- * motivating guest bug for each lives at the emission site in
- * roms/ia64-firmware/efi_memmap.c and in plans/firmware-rework-plan.md.
+ * Memory-map quirk bits (IA64NvramDefaults.MapQuirkDisable).  Each set bit
+ * DISABLES one guest-specific map workaround in the firmware; the machine's
+ * default mask is IA64_VPC_FW_QUIRK_DEFAULT_DISABLE (hw/ia64/ia64_base.c).
+ * The motivating guest bug for each lives at the emission site in
+ * roms/ia64-firmware/efi_memmap.c.
  */
 #define IA64_FW_QUIRK_LOADER_SPLIT_PAGE    (1ULL << 0) /* 8K page below 32 MB */
 #define IA64_FW_QUIRK_LOW_BOUNDARIES       (1ULL << 1) /* 32/48/64/80 MB no-coalesce */
@@ -59,10 +60,10 @@
  *
  * Real IA-64 firmware keeps low DRAM contiguous from 1 MiB up to the PCI/MMIO
  * aperture and carves its own SAL/boot scratch from the TOP of installed RAM
- * (460GX SDV: "allocate PAL/SAL memory near top of RAM"; E8870 SR870BH2: a
- * SAL data block at negative offsets from a RAM-top base holding the BSP
- * backing store and MP buffers - plans/sdv-i2000-firmware-reference.md 6.1,
- * plans/sr870bh2-firmware-reference.md 6.2).  The fork does the same: the
+ * (SAL spec 245359-001 3.2.3 step 8: "Allocate memory for use by PAL and SAL
+ * near the top of physical memory"; the E8870 SR870BH2 BIOS 86B.0183.P02
+ * keeps a 512 KB SAL data block, tagged ___BSP__, MPBUFSTR and others, at
+ * negative offsets from a RAM-top base).  The fork does the same: the
  * 2 MiB CPU-assist region (per-CPU SAL re-entry slots, debug contexts and
  * stacks, initial RSE backing stores, and the boot memory stacks) sits at
  * [low_ram_end - 2 MiB, low_ram_end), where low_ram_end is installed RAM
@@ -140,7 +141,7 @@
     (IA64_FW_CPU_ASSIST_SIZE - IA64_FW_BOOT_STACK_SIZE)
 
 /*
- * RAM-top firmware image shadow (rework phase 2.2).  The machine loads the
+ * RAM-top firmware image shadow (55e553d).  The machine loads the
  * firmware binary at IA64_FW_IMAGE_BASE_FOR(ram_size) - 1 MB aligned, sized
  * for the image plus bss with headroom (the linker asserts the real span
  * fits) - applies the image's self-relocation fixup table for the delta from
@@ -232,19 +233,18 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * The PCI/MMIO aperture sits just below the fixed chipset/SAPIC/firmware
  * region [0xFE000000, 4 GiB), mirroring real 460GX hardware, which keeps a
  * single MMIO gap at the top of the 32-bit space so DRAM stays contiguous up
- * to it and any displaced RAM is remapped above 4 GiB (see
- * plans/sdv-i2000-firmware-reference.md 7.1).
+ * to it and any displaced RAM is remapped above 4 GiB (SSDM 4.1.3, 4.1.5).
  */
 #define IA64_PCI_MMIO_BASE            IA64_U64(0x00000000ee000000)
 #define IA64_PCI_MMIO_SIZE            IA64_U64(0x0000000010000000)
 
 /*
  * IA-64 legacy I/O port block and PCI config space.  (Deviation from real
- * hardware for the CONFIG space: the 460GX has no MMCFG at all -- see
- * plans/firmware-rework-target-model.md D7.)  The I/O port block sits at the
- * architected default: the top 64 MB of the 44-bit PA space (rework D6,
- * phase 3; formerly the invented 0x800010000000, which needed 48 PA bits no
- * real Merced or Madison implements).
+ * hardware for the CONFIG space: the 460GX has no MMCFG at all, only
+ * mechanism #1 at CF8/CFC, SSDM 2.1.)  The I/O port block sits at the
+ * architected default: the 64 MB below the top of the 44-bit PA space
+ * (SAL spec 245359-001 3.2.1), where bios130.BIN's I/O helper at
+ * 0xFFFEA350 also puts it.
  */
 #define IA64_PCI_IO_BASE              IA64_U64(0x00000ffffc000000)
 #define IA64_PCI_IO_SIZE              IA64_U64(0x0000000001000000)
@@ -252,11 +252,12 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 /* Sparse IA-64 port encoding expands the legacy 16-bit I/O port space. */
 #define IA64_PCI_IO_SPARSE_SIZE       IA64_U64(0x0000000004000000)
 /*
- * PCI config window at the E8870's MMCFG home (SR870BH2 reference: 64 MB at
+ * PCI config window at the E8870's MMCFG home (E8870 SNC datasheet 4.1.4:
+ * 64 MB above 4 GB; the SR870BH2 BIOS 86B.0183.P02 puts it at
  * 0xFFFF8000000, directly below the architected I/O block).  ECAM semantics
  * are an interim simplification (real E8870 encodes 16 bytes per dword);
  * the 460GX profile does not advertise it at all - no MCFG, no descriptor -
- * so 460GX-profile guests use SAL_PCI_CONFIG, as on real hardware (D7).
+ * so 460GX-profile guests use SAL_PCI_CONFIG, as on real hardware.
  */
 #define IA64_PCI_CONFIG_BASE          IA64_U64(0x00000ffff8000000)
 #define IA64_PCI_CONFIG_SIZE          IA64_U64(0x0000000004000000)
@@ -321,10 +322,9 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * hw/ia64/longspeak.c and fw_zx1_iova_hole_active() in the firmware).  Carving it
  * for a smaller guest would move the top of low RAM -- and the firmware image,
  * CPU-assist region and SRAT/SMBIOS ranges pinned near it -- which needs a
- * hole-aware low_ram_end the firmware does not yet compute; see
- * plans/zx1-chipset-port-plan.md.  hw/ia64/longspeak.c (RAM map),
- * roms/ia64-firmware/efi_memmap.c (EFI map) and platform.c (high-RAM ranges)
- * carve this hole in lockstep.
+ * hole-aware low_ram_end the firmware does not yet compute.
+ * hw/ia64/longspeak.c (RAM map), roms/ia64-firmware/efi_memmap.c (EFI map)
+ * and platform.c (high-RAM ranges) carve this hole in lockstep.
  */
 #define IA64_SBA_IOVA_BASE            IA64_U64(0x0000000040000000)
 #define IA64_SBA_IOVA_SIZE            IA64_U64(0x0000000040000000) /* 1 GiB */
@@ -406,7 +406,7 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * four-function device carrying the LPC/ISA bridge, the IDE controller, the
  * UHCI host controller and the SMBus controller.  Device 3 is where the real
  * SDV firmware expects it -- it pokes the south bridge's config register
- * 0xd0 at 00:03.0 for its CPU-frequency mailbox (plans/phase5 SESSION 17).
+ * 0xd0 at 00:03.0 for its CPU-frequency mailbox (b18d80a).
  */
 /*
  * The Programmable Interrupt Device's seat on the compatibility bus, and the
@@ -434,8 +434,8 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 /*
  * Longs Peak (zx1 board) PDH devices below the flash.  The mio sends
  * FF00_0000-FFFF_FFFF to the Dillon ASIC over the PDH bus (mio ERS 2.1);
- * the HP firmware reaches these blocks from its first instructions
- * (plans/zx1-real-firmware-reference.md sec 7.3).  No Dillon ERS exists: the
+ * the HP firmware reaches these blocks from its first instructions (see
+ * hw/ia64/longspeak_pdh.c for the addresses).  No Dillon ERS exists: the
  * block bounds are the ones the firmware's code shows, and only these blocks
  * decode.  The project firmware uses none of them.
  */
@@ -502,10 +502,9 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_DILLON_MISC          0x31c0U   /* last of the tested file */
 /*
  * The flash's NVRAM sector, the EFI variable store.  The real i2000/SDV
- * flash keeps its NVRAM/variable scratch block at 0xFFF90000 (FIT type
- * 0x1E - plans/sdv-i2000-firmware-reference.md sec 11); the project
- * firmware's image declares one 64 KiB block there and programs it through
- * the flash's command interface.
+ * flash keeps its NVRAM/variable scratch block at 0xFFF90000 (bios130.BIN
+ * FIT entry 5, type 0x1E); the project firmware's image declares one 64 KiB
+ * block there and programs it through the flash's command interface.
  */
 #define IA64_NVRAM_BASE               IA64_U64(0x00000000fff90000)
 #define IA64_NVRAM_SIZE               IA64_U64(0x0000000000010000)

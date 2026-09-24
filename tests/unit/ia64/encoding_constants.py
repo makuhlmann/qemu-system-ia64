@@ -144,7 +144,7 @@ LONG_VHPT_RID1_TAG = 1 << (IA64_IMPL_VA_MSB + 1 - 12)
 LONG_VHPT_RID2_TAG = 2 << (IA64_IMPL_VA_MSB + 1 - 12)
 LONG_VHPT_RID2_TAG_BYTE_SWAPPED = int.from_bytes(
     LONG_VHPT_RID2_TAG.to_bytes(8, "little"), "big")
-# The firmware IVT moved into the image at base + 0x8000 (rework phase 2.2);
+# The firmware IVT moved into the image at base + 0x8000 (77899fb);
 # the battery runs with fw-relocate=off, so the image base is 0x100000.
 IA64_FIRMWARE_IVT_BASE = 0x108000
 PAL_PROC_ENTRY = 0x100060

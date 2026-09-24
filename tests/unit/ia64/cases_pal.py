@@ -1551,7 +1551,7 @@ test_pal_copy_pal_ap_entry_callable = require_registers(
 # with the return in b0), and then reads the relocated return bundle back: its
 # first word must be the br.many encoding (0x0000000100000011), never the
 # br.ret encoding (0x0000000100000010).  See target/ia64/arch/pal.c
-# pal_copy_pal and plans/phase5-real-firmware-boot.md.
+# pal_copy_pal and 64703dd.
 test_pal_copy_pal_relocated_entry_plain_branch = require_registers(
     "pal_copy_pal_relocated_entry_plain_branch", [
         # Relocate PAL to PAL_COPY_TARGET (standard stacked call).

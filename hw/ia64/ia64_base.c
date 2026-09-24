@@ -100,7 +100,7 @@
  * Real-firmware (realfw) mode: a vendor flash image mapped so that it ends
  * exactly at 4 GiB, with the architected reset pointer block in its last
  * 48 bytes (SAL sec 2.5): 4 GiB-48 = PAL_A FIT entry, -32 = FIT pointer,
- * -24 = SALE_ENTRY pointer.  See plans/phase5-real-firmware-boot.md.
+ * -24 = SALE_ENTRY pointer.
  */
 #define IA64_REALFW_WINDOW_END    IA64_U64(0x0000000100000000)
 #define IA64_REALFW_MAX_SIZE      IA64_U64(0x0000000000800000)
@@ -121,7 +121,7 @@
  * storm.  With it, a fatal fault instead freezes at the IVT base + vector
  * with all GRs, the RSE frame, ISR and IIPA preserved - the fault class is
  * the offset from the IVT base, and the interrupted state is inspectable
- * via the monitor.  See plans/phase5-real-firmware-boot.md.
+ * via the monitor.
  */
 #define IA64_PAL_RESET_IVT_BASE   IA64_U64(0x00000000ff300000)
 #define IA64_PAL_RESET_IVT_SIZE   0x8000
@@ -139,11 +139,11 @@
 /* LSI BAR0 is 0x100 bytes and therefore requires 0x100-byte alignment. */
 /*
  * The chipset routes I/O in 4 KiB segments, one or more per logical PCI bus
- * (SSDM 4; plans/sdv-i2000-firmware-reference.md 8.3), so a device behind an
- * expander root takes a port range out of a segment that belongs to that
- * root rather than a hole punched in the compatibility bus's.  Segment B is
- * the first WXB root's, D the AGP root's and E the second WXB root's; the
- * compatibility bus keeps the rest, including the legacy ports.
+ * (SSDM 4.2), so a device behind an expander root takes a port range out of
+ * a segment that belongs to that root rather than a hole punched in the
+ * compatibility bus's.  Segment B is the first WXB root's, D the AGP
+ * root's and E the second WXB root's; the compatibility bus keeps the rest,
+ * including the legacy ports.
  */
 /*
  * The SCSI seat's ports come out of segment B, the first WXB root's; the
@@ -170,13 +170,12 @@
  * 0x7B before it ever reaches the disk.
  *
  * The 460GX decodes one n x 32 MB aperture per logical PCI bus out of the
- * gap below 4 GiB - 32 MiB (SSDM 4; plans/sdv-i2000-firmware-reference.md
- * 7.1), so each root owns a whole number of those units and nothing is
- * carved out of another root's range: the compatibility bus takes the unit
- * at the bottom of the gap, graphics takes the five units its framebuffer
- * and register apertures need, and the two WXB roots take one unit each at
- * the top.  The DSDT windows in roms/ia64-firmware/dsdt-pci-root.asl mirror
- * the split exactly.
+ * gap below 4 GiB - 32 MiB (SSDM 4.1.3.1), so each root owns a whole number
+ * of those units and nothing is carved out of another root's range: the
+ * compatibility bus takes the unit at the bottom of the gap, graphics takes
+ * the five units its framebuffer and register apertures need, and the two
+ * WXB roots take one unit each at the top.  The DSDT windows in
+ * roms/ia64-firmware/dsdt-pci-root.asl mirror the split exactly.
  */
 #define IA64_PCI_MMIO_UNIT      0x02000000ULL
 #define IA64_WXB0_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 6 * IA64_PCI_MMIO_UNIT)
@@ -209,7 +208,7 @@
 /*
  * The south bridge's SMBus host controller.  The real SDV firmware programs
  * this BAR to 0xFFF0 and drives the board's sensor chips through it
- * (plans/phase5 SESSION 8), so use the same base here.
+ * (87c211f), so use the same base here.
  */
 #define IA64_IFB_SMBUS_IO_BASE   0x0000fff0U
 #define IA64_CS4281_BA0_PCI_BASE (IA64_PCI_MMIO_BASE + 0x01800000ULL)
@@ -1108,7 +1107,12 @@ static void ia64_int10_ati_bios(IA64VpcMachineState *s)
          */
         q[0x0b] = 0x05;                         /* q_memory_size: index 5 = 8MiB */
         q[0x0c] = 0x00;                         /* q_DAC_type: 0 = internal (CT) DAC */
-        q[0x0d] = 0x0a;                         /* q_memory_type: SDRAM */
+        /*
+         * q_memory_type: 0x0a is no Rage XL value.  RAGE PRO Programmer's
+         * Guide (PRG-215R3) Table A-6 defines 4 = SDRAM 1:1 and 5 = SGRAM
+         * 1:1, and the model's CONFIG_STAT0 strap says 5.
+         */
+        q[0x0d] = 0x0a;
         q[0x0e] = 0x07;                         /* q_bus_type: BUS_PCI */
         q[0x0f] = 0x00;                         /* q_monitor_cntl */
         stw_le_p(q + 0x10, IA64_VGA_FB_PCI_BASE >> 20); /* q_aperture_addr (MiB) */
@@ -1363,21 +1367,24 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      * the NULL table pointer it is left with when the signature is absent.
      *
      * The Server 2003 (build 3790) inbox *mach64* miniport (ati2mpad.sys)
-     * needs it too: its GetVgaEnabledRomImage scans offsets 30h..80h of the
-     * C0000h shadow for "761295520" (Get_BIOS_Seg, WSRV03 drivers/video/ms/
-     * ati/mini/services.c:1472) and, when absent, returns a NULL RomImage
-     * that RageProEnable->InitializeBiosInfoStructure dereferences unchecked
-     * at base+78h -> STOP 0x8E in videoprt!VideoPortReadRegisterBufferUchar.
-     * So the signature is published for every ATI adapter, not just Rage128.
+     * needs it too: its GetVgaEnabledRomImage (RVA 0xDDC60) scans the first
+     * 256 bytes of the C0000h shadow for "761295520" (VideoPortScanRom,
+     * WSRV03 drivers/video/ms/port/videoprt.c:5985) and, when absent,
+     * returns a NULL RomImage that RageProEnable->InitializeBiosInfoStructure
+     * dereferences unchecked at base+78h -> STOP 0x8E in
+     * videoprt!VideoPortReadRegisterBufferUchar.  So the signature is
+     * published for every ATI adapter, not just Rage128.
      */
     memcpy(rom + IA64_INT10_ROM_ATI_SIG_OFFSET, " 761295520", 10);
 
     if (device != IA64_ATI_RAGE128_PF_ID) {
         /*
-         * mach64 (DEV_4752 Rage XL): ati2mpad reads its adapter configuration
-         * through the a009 INT 10h query (ia64_int10_ati_bios), not the legacy
-         * 48h Rage128 PLL pointer chain, so only the signature is required
-         * here.  Do not publish the Rage128-format header/PLL block below.
+         * mach64 (DEV_4752 Rage XL): do not publish the Rage128-format
+         * header/PLL block below.  The mach64 miniports (XP atimpae.sys,
+         * 2003 ati2mpad.sys) do follow word 48h, but into the mach64 ROM
+         * table, whose clock table pointer is at +10h and whose +30h is the
+         * TV-out word, not a PLL pointer.  This stub leaves 48h zero and
+         * answers the A009 INT 10h query (ia64_int10_ati_bios) instead.
          */
         return;
     }
@@ -1819,27 +1826,23 @@ static const struct {
 };
 
 /*
- * Quirks disabled by default (plans/firmware-rework-plan.md; re-enable any
- * of them with fw-quirks=+name):
- *  - acpi-low-island: retired in phase 2.2 - ACPI staging now sits in the
- *    RAM-top firmware block, validated on 2462/XP2600/XP2002-installer/
- *    checked-3790.
- *  - 2g-scratch: retired in phase 2.3 - experiment E2 showed the XP 2600
- *    SMP deadlock it once papered over no longer reproduces (3/3 SMP boots
- *    to desktop with the page removed, control green).
- *  - low-boundaries: retired in phase 2.3 on the relocated map - the
- *    32/48/64/80 MB no-coalesce boundaries' motivating lanes (XP 2600
- *    ntoskrnl-missing class; 2003 SP1 installer error 16) pass without
- *    them.
- *  - low-anchor + anchor-version-sniff: retired in phase 2.4 - on the
- *    relocated map the XP-era MiInitMachineDependent reset class no
- *    longer fires (XP 2600 UP+SMP desktops, 2462 logon, XP 2002 and
- *    2003 SP1 installers to text setup, XP SP1 desktop, all A/B'd with
- *    the anchor off).  With the sniff gone the map is no longer
- *    guest-build-specific.
+ * Quirks disabled by default (re-enable any of them with fw-quirks=+name):
+ *  - acpi-low-island (0c5b748): ACPI staging sits in the RAM-top firmware
+ *    block, validated on 2462/XP2600/XP2002-installer/checked-3790.
+ *  - 2g-scratch (fd54528): the XP 2600 SMP deadlock it once papered over
+ *    no longer reproduces with the page removed.
+ *  - low-boundaries (5f8c24a): with the firmware image out of low RAM
+ *    (55e553d) the 32/48/64/80 MB no-coalesce boundaries' motivating lanes
+ *    (XP 2600 ntoskrnl-missing class; 2003 SP1 installer error 16) pass
+ *    without them.
+ *  - low-anchor + anchor-version-sniff (980ef84): the XP-era
+ *    MiInitMachineDependent reset class no longer fires without them.
+ *    With the sniff gone the map is no longer guest-build-specific.
  *
- *  NOT retired: split-page - the XP 2002 installer wedges in kernel-init
- *  memmove without it (see the expected-state ledger); pal-8k-page.
+ *  NOT retired: split-page - without it the XP 2002 installer's loader heap
+ *  grows past the kernel's [16, 64) MB loader-TR coverage (WXPSP1
+ *  base/boot/lib/blmemory.c:927) and MiConvertToLoaderVirtual bugchecks
+ *  0x1A (WXPSP1 base/ntos/mm/ia64/initia64.c:2425); pal-8k-page.
  */
 #define IA64_VPC_FW_QUIRK_DEFAULT_DISABLE \
     (IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G | \
@@ -2418,8 +2421,7 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
      * trivially consistent.  For a guest at or below the aperture the layout is
      * identical to 460gx (a single contiguous low run) -- carving the hole there
      * would move the top of low RAM and the firmware image with it, which needs
-     * a hole-aware low_ram_end the firmware does not yet compute.  See
-     * plans/zx1-chipset-port-plan.md for the mid-range follow-up.
+     * a hole-aware low_ram_end the firmware does not yet compute.
      *
      * Keep this in lockstep with fw_init_guest_high_ram_ranges() +
      * efi_add_low_ram_band() in roms/ia64-firmware/.
@@ -3531,9 +3533,9 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                  * SALE_ENTRY once, with function RESET: the vendor 460GX
                  * firmware's recovery-check pass initializes the DRAM,
                  * resets the platform itself and then spins in a software
-                 * delay loop of its RAM-resident recovery module, so it
-                 * never reaches its boot manager
-                 * (plans/phase6-zx1-real-firmware-boot.md session 2).
+                 * delay loop of its RAM-resident recovery module (bios130.BIN
+                 * PspRecover, loop at RAM 0x02011C10), so it never reaches
+                 * its boot manager (0edbeda).
                  */
                 .raw_pal_reset_return =
                     IA64_VPC_MACHINE_GET_CLASS(s)->sale_recovery_check ?
@@ -4852,8 +4854,8 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "2g-scratch, pal-8k-page, acpi-low-island.  Retired quirks "
         "(acpi-low-island, 2g-scratch, low-boundaries, low-anchor, "
         "anchor-version-sniff) default off, the rest default on; "
-        "toggling changes the guest-visible EFI memory map -- "
-        "A/B rig for plans/firmware-rework-plan.md Phase 2");
+        "toggling changes the guest-visible EFI memory map "
+        "(an A/B rig for guest loader bugs)");
     object_class_property_add_str(oc, "firmware-console",
                                   ia64_vpc_get_firmware_console,
                                   ia64_vpc_set_firmware_console);

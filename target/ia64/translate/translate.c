@@ -2825,9 +2825,8 @@ bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,
  * fires the first time a TB whose entry pc lands in <trigger-va>'s 4 KiB page
  * is translated, writing guest-physical [<phys-base>, +<length>) to <file>.
  * Debug rig for capturing an OS loader's phase-0 memory-descriptor lists at a
- * precise code point without a debugger (plans/firmware-rework-plan.md
- * experiment E1; generalizes the scratch IA64_DUMP_TRIM hook from the RC 3663
- * investigation).  Zero cost unless the environment variable is set.
+ * precise code point without a debugger.  Zero cost unless the environment
+ * variable is set.
  */
 static void ia64_dump_on_translate(uint64_t pc)
 {

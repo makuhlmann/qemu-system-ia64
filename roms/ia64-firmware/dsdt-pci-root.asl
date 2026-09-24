@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Source for the DSDT AML byte array in firmware.c (mDsdt).  Recompile with
+// The 460gx-profile DSDT.  build_firmware.sh compiles it with
 //     iasl -on -oi dsdt-pci-root.asl
-// (-on suppresses the \_SB -> _SB name optimisation so the encoding stays
-// byte-identical to what is shipping) and splice the AML body back in; see
-// plans/runbook.md.
+// (-on suppresses the \_SB -> _SB name optimisation) into the AML fragment
+// that platform_tables.c includes (c8023ba).
 //
 // -oi, and the 0x00 constants inside _S5 and _PRT below, are load-bearing:
 // together they keep every *package element* encoded as a typed literal

@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * OHCI host-controller driver and the boot-time USB keyboard client.
- * Extracted from firmware.c (Phase 1); the EFI USB protocol layer in
- * usb_protocols.c consumes the exported usb_ohci_* primitives.
+ * The EFI USB protocol layer in usb_protocols.c consumes the exported
+ * usb_ohci_* primitives.
  */
 
 #include "fw-base.h"

@@ -1,9 +1,8 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * ECMA-167 / UDF 2.01 read-only optical filesystem.  Extracted verbatim
- * from firmware.c (Phase 1 of plans/firmware-rework-plan.md); the shared
- * EFI_FILE_PROTOCOL layer in firmware.c consumes the fw_udf_* API.
+ * ECMA-167 / UDF 2.01 read-only optical filesystem.  The shared
+ * EFI_FILE_PROTOCOL layer in filesystem.c consumes the fw_udf_* API.
  */
 
 #include "fw-base.h"

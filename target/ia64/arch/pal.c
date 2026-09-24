@@ -491,8 +491,8 @@ static void pal_copy_pal(CPUIA64State *env)
      * caller's frame without an alloc, so the caller reaches PAL_PROC by a
      * plain branch with the return address in b0.  A br.ret here would pop a
      * frame that was never pushed and corrupt the caller's stacked
-     * registers (observed with real SDV firmware, which branches to the
-     * relocated entry via br.few; see plans/phase5-real-firmware-boot.md).
+     * registers (observed with bios130.BIN, whose SAL_B at 0xFFE797E0
+     * reaches the relocated entry via br.few b5; 64703dd).
      */
     static const uint64_t pal_proc_words[] = {
         0x000002000000000aULL,

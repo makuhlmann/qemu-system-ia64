@@ -2,8 +2,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * ATA/ATAPI PIO + bus-master DMA (CMD646) IDE driver, both channels.
- * Extracted verbatim from firmware.c (Phase 1 of
- * plans/firmware-rework-plan.md).
  */
 
 #include "fw-base.h"

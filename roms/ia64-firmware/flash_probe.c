@@ -13,7 +13,7 @@
  *
  * Memory: the 460GX sizes DRAM from the DIMMs' SPD EEPROMs through the
  * Memory Card's I2C pass-through (SSDM 5.5.1; the protocol the vendor
- * firmware uses, plans/phase5-real-firmware-boot.md 5.5).  The zx1 mio ERS
+ * firmware uses, see hw/ia64/ia64_460gx.c).  The zx1 mio ERS
  * publishes no memory-sizing register, so there DRAM is sized by presence
  * probing at 64 MB steps, refined to 1 MB -- below the PCI aperture, where
  * the band may carry the SBA IOVA hole, and again from 4 GB up.

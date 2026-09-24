@@ -7,7 +7,8 @@
  * synchronous MMIO register writes, so it never touches the 460GX AGP GART and
  * cannot hit the >4 GiB AGP-DRI hazard.  Guaranteed inbox drivers exist on
  * Windows XP SP1 / Server 2003 (ati.sys, PCI\VEN_1002&DEV_4754) and Debian
- * (atimisc/atyfb).  See plans/mach64-design.md.
+ * (atimisc/atyfb).  Registers per the ATI mach64 Register Reference Guide for
+ * the 264VT and 3D RAGE (RRG-G02700).
  *
  * This work is licensed under the GNU GPL license version 2 or later.
  */

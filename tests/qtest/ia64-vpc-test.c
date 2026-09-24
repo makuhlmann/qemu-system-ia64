@@ -1285,8 +1285,8 @@ static void test_sba_mio_registers(void)
     (IA64_PDH_DILLON_BASE + IA64_PDH_DILLON_MONARCH)
 
 /*
- * Longs Peak PDH devices below the flash (plans/zx1-real-firmware-reference.md
- * sec 7.3): the battery-backed part and the SRAM above it are memory, the
+ * Longs Peak PDH devices below the flash (hw/ia64/longspeak_pdh.c): the
+ * battery-backed part and the SRAM above it are memory, the
  * presence byte is active low per socket, the POST byte and the two scratch
  * latches read back, and the semaphore is claimed by a read and freed by
  * writing 0 at the holder's slot.
@@ -1546,7 +1546,7 @@ static void test_pdh_unimp_logged_once(void)
  */
 /*
  * The QLogic holds the board's SCSI seat at 01:00.0 on the first WXB root
- * (see plans/460gx-i2000-fidelity-plan.md), so its BARs come out of that
+ * (sdv_seat() in hw/ia64/sdv.c), so its BARs come out of that
  * root's aperture, and it is there by default.
  */
 #define IA64_ISP_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x0c000000ULL)
@@ -5036,7 +5036,7 @@ static void test_realfw_chipset_identity(void)
      * 82468GX at 00:03.0, not from a shadow in the config store.  Its
      * frequency mailbox at register D0h reads back with the done flag set,
      * which is what lets the firmware's frequency detection finish instead
-     * of rebooting through 0xCF9 forever (plans/phase5 SESSION 17).
+     * of rebooting through 0xCF9 forever (b18d80a).
      */
     g_assert_cmphex(realfw_cfg_readl_bus(qts, 0, IA64_460GX_IFB_SLOT, 0,
                                          PCI_VENDOR_ID), ==, 0x76008086);

@@ -6,9 +6,8 @@
  * The mio sends the firmware space FF00_0000-FFFF_FFFF to the "Dillon" ASIC
  * over the 4-bit PDH bus (mio ERS 2.1).  Dillon decodes the boot flash at
  * the top and, below it, the devices the HP firmware uses from its first
- * instructions.  There is no Dillon ERS in docs/; everything here comes from
- * the firmware's code (HP System Firmware 2.31, zx2000 flash dump), see
- * plans/zx1-real-firmware-reference.md sec 5.3, 6 and 7.3:
+ * instructions.  There is no Dillon ERS; everything here comes from the
+ * firmware's code (HP System Firmware 2.31, zx2000 flash dump):
  *
  *   FF40_0000  the battery-backed SRAM, 512 KB (zx2000 O&M 02 p.16).  The
  *              vendor firmware formats the first 256 KiB as its NVM and puts
@@ -26,7 +25,7 @@
  *              PNP0501 in the firmware's device table at FFF8E918).  They
  *              take the second and third -serial chardev.
  *   FF5F_0000  Dillon registers.  0x20 and 0x68 are scratch latches the
- *              processors share (0x68 bits 19:16: check-in, SAL_A sec 5.3;
+ *              processors share (0x68 bits 19:16: SAL_A's rendezvous check-in;
  *              0x20 bits 7:6: boot mode, FFFE0346); 0xB0 + 8 * id is one
  *              semaphore (below); 0x1010 bit 0 selects mx2 modules.
  *

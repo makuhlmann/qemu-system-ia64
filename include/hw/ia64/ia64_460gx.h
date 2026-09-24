@@ -5,8 +5,7 @@
  * the CF8/CFC configuration mechanism with the chipset's own bus-CBN
  * configuration space (SAC, SDC, memory cards, expander ports), the memory
  * cards' SPD tunnel, the PCIS-programmed DRAM/PCI gap, and the diagnostic
- * port.  Moved out of the machine file as one device; see
- * plans/one-hardware-model-plan.md.
+ * port.
  */
 
 #ifndef HW_IA64_460GX_H

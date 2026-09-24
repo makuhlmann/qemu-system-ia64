@@ -64,8 +64,7 @@ static const IA64IntxRoute longspeak_pci0_intx[] = {
  * trivially consistent.  For a guest at or below the aperture the layout is
  * identical to 460gx (a single contiguous low run) -- carving the hole there
  * would move the top of low RAM and the firmware image with it, which needs
- * a hole-aware low_ram_end the firmware does not yet compute.  See
- * plans/zx1-chipset-port-plan.md for the mid-range follow-up.
+ * a hole-aware low_ram_end the firmware does not yet compute.
  *
  * Keep this in lockstep with fw_init_guest_high_ram_ranges() +
  * efi_add_low_ram_band() in roms/ia64-firmware/.
@@ -334,11 +333,10 @@ static unsigned int longspeak_root_gsi_base(const IA64VpcMachineState *s,
  * A Longs Peak processor's geographic id is its position on the bus:
  * (module << 1) | core.  The vendor SAL_A derives the id it publishes from
  * it with czx2.r(GR33 >> 1) -- the module -- and takes the core from the
- * module-layout register at FF5F_1010 (ref sec 6), so two single-core
- * processors have to arrive as ids 0 and 2, not 0 and 1: with 0 and 1 SAL_A
- * gives both the id 0, and its recovery-check rendezvous then has the two
- * processors sharing one check-in bit
- * (plans/phase6-zx1-real-firmware-boot.md session 1, finding 5).
+ * module-layout register at FF5F_1010 (SAL_A FFFE_0EF0, SAL_B FFE7_94B0),
+ * so two single-core processors have to arrive as ids 0 and 2, not 0 and 1:
+ * with 0 and 1 SAL_A gives both the id 0, and its recovery-check rendezvous
+ * then has the two processors sharing one check-in bit (cccfce6).
  *
  * The board has two sockets, so the first two processors fill the two
  * modules and the next two are those modules' second cores (an mx2 pair).
@@ -367,7 +365,8 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     /*
      * PALE_RESET calls SALE_ENTRY with function RECOVERY_CHECK first: the
      * zx1 firmware rendezvouses its processors in that pass and SAL_B reads
-     * the record the pass leaves in the PDH SRAM (ref sec 5.3, sec 6).
+     * the record the pass leaves in the PDH SRAM at FF46_4800 (SAL_B reads
+     * it at FFE5_2446).
      */
     imc->sale_recovery_check = true;
     imc->processor_ids = longspeak_processor_ids;
@@ -397,7 +396,8 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->acpi_s5_slp_typ = 5;
     /*
      * One soldered Intel 28F640J3 StrataFlash, 8 MiB in 64 blocks of 128 KiB,
-     * named in the zx2000 dump (plans/zx1-real-firmware-reference.md sec 8).
+     * the part the zx2000 flash dump is named for
+     * (HP_ZX2000_IPF_Intel_28F640J3_00-7FFFFF.bin).
      * It has no FWH register interface: the J3 locks blocks by command.  The
      * vendor firmware issues none over a POST to the EFI shell, so the lock
      * commands stay unmodelled and the part answers unlocked.

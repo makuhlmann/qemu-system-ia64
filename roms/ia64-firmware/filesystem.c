@@ -5,8 +5,7 @@
  * Block I/O / Disk I/O protocols, El Torito, MBR/GPT partition discovery
  * and the partition driver binding, device-path construction, and the
  * shared EFI_FILE_PROTOCOL / Simple File System layer serving FAT, ISO
- * and UDF.  Extracted verbatim from firmware.c (Phase 1 of
- * plans/firmware-rework-plan.md).
+ * and UDF.
  */
 
 #include "fw-base.h"

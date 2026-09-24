@@ -2,8 +2,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * EFI Unicode Collation protocol (ISO 8859-1 case folding, FAT 8.3
- * conversion).  Extracted verbatim from firmware.c (Phase 1 of
- * plans/firmware-rework-plan.md).
+ * conversion).
  */
 
 #include "fw-base.h"

@@ -4,9 +4,7 @@
  * Guest-visible platform layout: fixed BAR assignments, the low-RAM
  * loader-contract landmarks (32/48/64/80/128 MB), ACPI staging, the
  * firmware/RTC/NVRAM windows, and the EFI descriptor constants.  Single
- * source for firmware.c and efi_memmap.c.  The layout's real-hardware
- * fidelity status is documented per entry in
- * plans/firmware-rework-target-model.md and the rework plan.
+ * source for firmware.c and efi_memmap.c.
  */
 
 #ifndef IA64_FIRMWARE_FW_PLATFORM_LAYOUT_H
@@ -17,7 +15,7 @@
 
 /* Owned by firmware.c; several layout macros are relative to it. */
 extern UINT64 mCpuAssistBase;
-/* Linker-defined image bounds; relocated with the image (phase 2.2). */
+/* Linker-defined image bounds; relocated with the image. */
 extern char __fw_image_start[];
 
 #define PCI_OHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00010000ULL)
@@ -40,11 +38,10 @@ extern char __fw_image_start[];
 /*
  * ACPI staging region: one FACS EfiACPIMemoryNVS page followed by the
  * reclaimable tables, 128 KiB total.  Its base is chosen at map-init time:
- * with the acpi-low-island quirk enabled (the historical, validated default)
- * it sits at the invented 8 MB low-RAM island; with the quirk disabled it
- * sits directly below the RAM-top CPU-assist region, adjacent to the rest of
- * the firmware reservation, the way real 460GX/E8870 firmware stages ACPI
- * tables (target-model doc sec 2; phase 2.2 of the rework plan).
+ * by default (0c5b748) it sits directly below the RAM-top CPU-assist region,
+ * adjacent to the rest of the firmware reservation, the way real 460GX/E8870
+ * firmware stages ACPI tables; with the acpi-low-island quirk on it sits at
+ * the invented 8 MB low-RAM island.
  */
 #define FW_ACPI_REGION_SIZE IA64_FW_ACPI_REGION_SIZE
 #define FW_LOW_ACPI_ISLAND_BASE 0x0000000000800000ULL
@@ -95,9 +92,10 @@ extern UINT64 mAcpiRegionBase;
 #define FW_LOW_IMAGE_ALIGNED_END (FW_LOW_IMAGE_BASE + FW_LOW_IMAGE_ALIGN)
 #define FW_LOW_IMAGE_END  0x0000000005000000ULL
 /*
- * FW_LOW_IMAGE_END (80 MB) is the Windows setup loader's TR-staging line.  It
- * is a conventional-memory DESCRIPTOR boundary (XP-era sumain.c:760 must not
- * see a descriptor straddling it), but no longer a reserved guard page: the
+ * FW_LOW_IMAGE_END (80 MB) is the Windows setup loader's TR-staging line.
+ * Only the low-boundaries quirk (off since 5f8c24a) keeps it a
+ * conventional-memory descriptor boundary (XP-era sumain.c:760 must not see
+ * a descriptor straddling it), and it is no reserved guard page: the
  * heap-carve bound that page provided is the job of the 32 MB split page, and
  * all RAM from 32 MB up to the RAM-top CPU-assist region is free so loaders
  * that map with large TRs (Server 2003 SP1 setupldr: one 64 MB page at
@@ -147,7 +145,9 @@ extern UINT64 mAcpiRegionBase;
 #define IA64_EFI_MIN_STACK_BYTES   0x0000000000020000ULL
 #define IA64_EFI_MIN_BACKING_BYTES 0x0000000000004000ULL
 /*
- * 8 KiB reserved "SAL boot-structure" anchor at 128 MB (FW_LOW_ANCHOR_BASE).
+ * 8 KiB reserved "SAL boot-structure" anchor at 128 MB (FW_LOW_ANCHOR_BASE),
+ * armed only by the low-anchor quirk: it and anchor-version-sniff are off by
+ * default since 980ef84, as the reset class below no longer fires.
  * XP-era kernels (2002/2462/2600) place their Phase-0 allocations and the
  * PFN database in the largest free descriptor below 256 MB; with low RAM one
  * unbroken run from the kernel image to the RAM top that descriptor starts
@@ -166,10 +166,11 @@ extern UINT64 mAcpiRegionBase;
  * it derives the heap base from the first free descriptor at or above 128 MB
  * - with the anchor there it silently takes 0x8002000, maps it with a 64 MB
  * identity TR and every KSEG0 address is then off by one page (bugcheck 0xD1
- * on SharedUserData, measured).  The XP-era kernels need the anchor (see
+ * on SharedUserData, measured).  The XP-era kernels needed the anchor (see
  * efi_init_memory_map); the 2003 kernels (RTM measured both ways) do not.  So
- * the firmware's PE loader drops the anchor when the EFI application it is
- * about to start carries a VS_FIXEDFILEINFO file version 5.2.3790.0 (Server
+ * with the anchor-version-sniff quirk on, the firmware's PE loader drops the
+ * anchor when the EFI application it is about to start carries a
+ * VS_FIXEDFILEINFO file version 5.2.3790.0 (Server
  * 2003 RTM, whose rewritten Mm has no such descriptor-reset path and which
  * was measured fine without the anchor) or later
  * (pe_image_wants_contiguous_low_ram); 5.1.x loaders (XP, 2462) keep it.

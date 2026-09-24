@@ -8,7 +8,7 @@
  * carry the 64-bit PCI buses, and the GXB carries AGP.  Each presents its own
  * root bus with its own bus number and its own block of four INTx inputs on
  * the Programmable Interrupt Device, which is why the i2000 needs a 64-input
- * controller (see plans/460gx-i2000-fidelity-plan.md).
+ * controller (SSDM 2.6.3).
  *
  * This models one such downstream root bus.  The bridge's own configuration
  * registers live on the chipset's bus CBN and are answered separately (the

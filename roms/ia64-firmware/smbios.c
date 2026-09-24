@@ -2,9 +2,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * SMBIOS 2.7 table generation, published through the EFI configuration
- * table.  Extracted verbatim from firmware.c (Phase 1 of
- * plans/firmware-rework-plan.md); guest RAM/topology facts come through
- * the fw_guest_* accessors.
+ * table.  Guest RAM/topology facts come through the fw_guest_*
+ * accessors.
  */
 
 #include "fw-base.h"

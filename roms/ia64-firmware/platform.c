@@ -5,8 +5,8 @@
  * NVRAM defaults record, the SAL procedure set and dispatcher, PCI
  * config-space access, the CPU register / SAL-handoff assembly bridge,
  * and AP bring-up.  Together with efi_memmap.c and platform_tables.c
- * this is the producer side of the plan's milestone-6
- * SALEFIHANDOFF-shaped platform boundary; firmware.c retains the EFI
+ * this is the producer side of the SALEFIHANDOFF-shaped platform
+ * boundary (fw-platform-handoff.h); firmware.c retains the EFI
  * core (allocator, events, protocol database, services).
  */
 
@@ -834,7 +834,7 @@ static UINT64 fw_platform_chipset_profile(void)
 }
 
 /*
- * Platform personality (rework phase 3): Merced machines model the 460GX
+ * Platform personality: Merced machines model the 460GX
  * (i2000/SDV) and everything else the E8870 (SR870BH2).  The -machine
  * chipset= option (handoff version 14+) overrides this CPU-family default;
  * chipset=zx1 selects the HP zx1 (rx2600/zx2000/zx6000) profile.

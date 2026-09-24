@@ -5,9 +5,9 @@
  * the Workstation i2000: Merced processors on the 460GX chipset, the
  * 82468GX south bridge, four PCI roots.  Machine type "460gx".
  *
- * The 460GX SSDM (docs/Intel 460GX Chipset/248704-001) and the vendor
- * firmware's own DSDT (plans/sdv-i2000-firmware-reference.md) are the
- * authorities for what is modelled here.
+ * The 460GX SSDM (248704-001) and the DSDT the vendor firmware (bios130.BIN)
+ * builds, read back from guest RAM after its POST, are the authorities for
+ * what is modelled here.
  */
 
 #include "qemu/osdep.h"
@@ -185,9 +185,9 @@ static bool sdv_build_chipset(IA64VpcMachineState *s, DeviceState *pci_host,
      * bus.  Each is a root in its own right, sharing the primary host
      * bridge's identity-mapped windows the way the zx1 Mercury root does, and
      * each owns its own block of four PID inputs rather than sharing bus 0's
-     * -- which is why the Programmable Interrupt Device has 64 of them.  They
-     * are created empty here; devices move onto them in a later step of
-     * plans/460gx-i2000-fidelity-plan.md.
+     * -- which is why the Programmable Interrupt Device has 64 of them
+     * (SSDM 2.6.3).  They are created empty here; sdv_seat() puts the
+     * board's devices on them.
      */
     {
         static const struct {
@@ -296,8 +296,9 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
      * firmware's FADT (PM1a_EVT A00h, PM1a_CNT A04h, SMI_CMD B2h with
      * ACPI_ENABLE A0h), its DSDT and its PMI handler all expect it.  That
      * firmware's own pokes for it (00:03.0 @44h = 0, @40h = 0A00h,
-     * @44h = 1) sit in a chipset-init script this build never reaches
-     * (plans/phase5, session 23), so the machine supplies their result.
+     * @44h = 1) sit in a chipset-init script (bios130.BIN offset 0x2C7A80)
+     * that nothing here reaches (d35d664), so the machine supplies their
+     * result.
      * The project firmware makes the same pokes itself and publishes this
      * block; the board has no other PM block.
      */
@@ -467,8 +468,8 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
      * and initializes the DRAM, hands the result to the next pass through
      * the SAC (see ia64_460gx_reset), resets the platform, and the pass
      * after the reset stalls in a software delay loop of its RAM-resident
-     * recovery module -- 30 minutes with no further progress and no boot
-     * manager (plans/phase6-zx1-real-firmware-boot.md session 2).
+     * recovery module (PspRecover, loop at RAM 0x02011C10) -- 30 minutes
+     * with no further progress and no boot manager (0edbeda).
      */
     imc->processor_ids = sdv_processor_ids;
     imc->nprocessor_ids = ARRAY_SIZE(sdv_processor_ids);

@@ -23,7 +23,8 @@ BMC_TOKENS_TAG = b"BMCTOKEN"
 BMC_FIRST_BOOT_TOKEN = 0x500
 BMC_FIRST_BOOT_DONE = 18
 ZX1_SIZES = (PDH_STORE_SIZE, ZX1_FILE_SIZE)
-# What the vendor firmware writes there (plans/nvram-portability.md sec 2.2).
+# What the vendor firmware (HP System Firmware 2.31) leaves there, read back
+# at its EFI shell (FFE64260 writes the NVM INIT tag, FFF74D40 the tokens).
 VENDOR_TAGS = (
     (0x00100, b"TINI MVN", "SAL control block"),   # "NVM INIT", two DATA4s
     (0x15A00, b"TOK_INIT", "token store"),

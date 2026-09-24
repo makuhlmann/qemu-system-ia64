@@ -123,7 +123,7 @@ fi
 "$OBJCOPY" -O binary "$FW_ELF" "${OUT_BIN}.raw"
 "$SIZE" -A "$FW_ELF" > "$FW_SECTIONS"
 
-# Self-relocation fixup table (rework phase 2.2): link twice more at shifted
+# Self-relocation fixup table (1d35713): link twice more at shifted
 # bases, derive the table from the binary diffs, prove it by reconstruction,
 # and inject it into the reserved .fw_fixups region.  See fw-fixups.py.
 FW_ALT1_DELTA=0x80000

@@ -5,7 +5,7 @@
  * synchronous MMIO rectangle/line/host blitter over a linear framebuffer,
  * with a VGA-compatible core provided by VGACommonState.  There is no command
  * processor, ring, DMA or AGP on this chip, so none of the r128 CCE machinery
- * applies.  See plans/mach64-design.md.
+ * applies.
  *
  * This work is licensed under the GNU GPL license version 2 or later.
  */

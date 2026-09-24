@@ -111,7 +111,7 @@ struct Intel82468GXIFBState {
      * through port 0xCF9 if they disagree.  Real silicon latches the value
      * and the register is battery-backed, so this cell survives reset (a
      * cleared mailbox makes the detection fall back to a sentinel and the
-     * reboot repeat forever).  See plans/phase5 SESSION 17.
+     * reboot repeat forever; b18d80a).
      */
     uint32_t freq_mailbox;
     uint8_t rtc_ext_index;

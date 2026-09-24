@@ -4,9 +4,7 @@
  * Guest platform tables: the SAL System Table (SST_) and every ACPI table
  * (FACS/FADT/DSDT/SSDT/XSDT/RSDT/RSDP/MADT/MCFG/SRAT/SLIT/HCDP/DBGP), their
  * placement in the ACPI reclaim window, the SSDT byte-patching helpers, and
- * the table integrity selftest.  Extracted verbatim from firmware.c
- * (Phase 1 milestone 4 of plans/firmware-rework-plan.md); the split of
- * efi_init_platform_tables into per-table builders is the follow-up step.
+ * the table integrity selftest.
  */
 
 #include "fw-base.h"
@@ -434,7 +432,7 @@ static void efi_init_sal_system_table(void)
     mSalSystemTable.SalAVersion = 0x0100;
     mSalSystemTable.SalBVersion = 0x0100;
     /*
-     * Reference-platform identity per personality (rework D13): the SDV /
+     * Reference-platform identity per personality (a5f80b2): the SDV /
      * i2000 for the 460GX profile, the SR870BH2 for the E8870 profile.
      */
     {
@@ -549,7 +547,7 @@ static void efi_init_sal_system_table(void)
         mSalSystemTable.TranslationRegister.Reserved0[i] = 0;
     }
     /*
-     * Truthful ITR(0) (rework D11): name the firmware's actual identity
+     * Truthful ITR(0) (a5f80b2): name the firmware's actual identity
      * mapping - the 1 MB window at the image shadow base - instead of a
      * fictitious VA 0.
      */

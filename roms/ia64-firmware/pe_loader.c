@@ -4,8 +4,7 @@
  * PE32+ image loader: base selection, IA-64 IMM64/DIR64 relocation,
  * memory-type marking, HII resource extraction, runtime-image virtual
  * relocation, and the VS_FIXEDFILEINFO loader-version probe behind the
- * anchor-version-sniff quirk.  Extracted verbatim from firmware.c
- * (Phase 1 of plans/firmware-rework-plan.md).
+ * anchor-version-sniff quirk.
  */
 
 #include "fw-base.h"

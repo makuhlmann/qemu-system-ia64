@@ -19,7 +19,7 @@ finally injects the encoded table into the reserved .fw_fixups region of
 the primary binary (whose content is offsets only, hence identical - all
 zeroes - in all three links).
 
-This gives the phase-2.2 firmware relocation a machine-checked fixup
+This gives the firmware's self-relocation a machine-checked fixup
 table without trusting any relocation metadata (--emit-relocs does not
 cover linker-synthesized GOT/OPD words; the diff sees everything).
 

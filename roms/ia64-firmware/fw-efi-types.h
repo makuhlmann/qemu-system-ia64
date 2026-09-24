@@ -2,8 +2,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * EFI protocol/structure typedefs shared by the firmware modules.
- * Receives definitions moved out of firmware.c as units are extracted
- * (Phase 1 of plans/firmware-rework-plan.md).
  */
 
 #ifndef IA64_FIRMWARE_FW_EFI_TYPES_H

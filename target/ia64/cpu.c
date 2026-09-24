@@ -797,9 +797,9 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
         /*
          * Architected PALE_RESET exit state (SDM Vol.2 rev 1.1 sec 11.2.2)
          * for a healthy normal cold boot, synthesized so real SAL firmware
-         * can be entered at SALE_ENTRY without running real PAL_A/PAL_B
-         * (plans/phase5-real-firmware-boot.md sec 3).  reset_hold has just
-         * zeroed the whole env; only the non-zero pieces are set here.
+         * can be entered at SALE_ENTRY without running real PAL_A/PAL_B.
+         * reset_hold has just zeroed the whole env; only the non-zero pieces
+         * are set here.
          *
          * PSR.bn = 1 selects bank 1 for GR16-31.  Both banks are zero at
          * this point, so setting the bit without a bank swap is consistent;
@@ -1181,8 +1181,7 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
  * Original Itanium (Merced), 800 MHz / 133 MHz bus / 4 MB L3 SKU (249634-002
  * datasheet; CPUID table 249720-009).  brl is not implemented
  * (cpuid_features = 0) and the post-Merced PAL procedures are absent
- * (245318-001/-002 §11.8).  See plans/merced-model-notes.md for full
- * citations.
+ * (245318-001/-002 §11.8).
  *
  * Cache geometry, 245473-002 sec 4.1-4.4 and 248701-002 sec 2.5.4:
  *   L1I  16 KB, 4-way, 32 B lines
@@ -1425,7 +1424,7 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
  * cpuid_features = 0: brl is not implemented (CPUID[4].lb = 0, 245319-002 brl
  * page), which is what Windows' KF_BRL check expects on Merced.  Asymmetric TR
  * file: 8 ITR / 48 DTR (248701-002 §2.5.6).  No 16-byte atomics, no
- * virtualization.  See plans/merced-model-notes.md.
+ * virtualization.
  */
 static const IA64CPUModelDef ia64_cpu_model_merced = {
     .cpuid_version = 0x0000000007000804ULL,

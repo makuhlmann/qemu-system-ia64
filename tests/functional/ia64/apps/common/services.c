@@ -199,14 +199,14 @@ typedef struct {
 #define TEST_UART_BASE               0x00000047f0000000ULL
 #define TEST_UART_SIZE               0x0000000000002000ULL
 /*
- * The RTC is a legacy CMOS device on the I/O ports now (rework D8); it no
+ * The RTC is a legacy CMOS device on the I/O ports now (f610823); it no
  * longer has a memory-mapped runtime descriptor of its own.  This suite runs
  * on the zx1 board, which keeps the variable store in the PDH part and not in
  * the flash.
  */
 #define TEST_NVRAM_BASE              0x00000000ff420000ULL
 #define TEST_NVRAM_SIZE              0x0000000000010000ULL
-/* PCI config window at the E8870 MMCFG home, 64 MiB = 64 buses (rework D7). */
+/* PCI config window at the E8870 MMCFG home, 64 MiB = 64 buses (28ea66e). */
 #define TEST_ECAM_BASE               0x00000ffff8000000ULL
 #define TEST_ECAM_SIZE               0x0000000004000000ULL
 #define TEST_PCI_MMIO_BASE           0x00000000ee000000ULL

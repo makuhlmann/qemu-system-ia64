@@ -418,7 +418,7 @@ static UINTN                  mRuntimeResetControl;
 static UINT8                  mRuntimeResetValue;
 /* The configuration window (ECAM, or the I/O ports); set with the board. */
 UINTN                         mRuntimePciConfigEcam;
-/* MC146818 CMOS RTC index port; the data port is index + 1 (rework D8). */
+/* MC146818 CMOS RTC index port; the data port is index + 1 (f610823). */
 static UINTN                  mRuntimeRtc = LEGACY_IO_BASE + 0x70U;
 /*
  * The NVRAM sector's contents, kept in RAM: the variable store, the time
@@ -1321,7 +1321,7 @@ static BOOLEAN efi_find_any_pages(UINT64 Size, UINT64 Alignment,
     unsigned pass;
 
     /*
-     * Real EFI cores satisfy AllocateAnyPages top-down (rework plan 2.5):
+     * Real EFI cores satisfy AllocateAnyPages top-down (e9bc271):
      * boot-services allocations cluster directly below the RAM-top firmware
      * reservation instead of fragmenting the low RAM the Windows loaders
      * carve their heaps and images from ([1 MB, ~256 MB)).  Cap at the low
@@ -14336,7 +14336,7 @@ EFI_HANDLE fw_scsi_controller_handle(VOID)
 /*
  * firmware_main phases.  Pure mechanical split of the former 700-line
  * script -- call order is unchanged.  This is the seam a replaceable EFI
- * core (or the SALEFIHANDOFF-shaped platform boundary, plan milestone 6)
+ * core (or the SALEFIHANDOFF-shaped platform boundary)
  * slots into: platform state -> EFI core init -> device/storage bring-up
  * -> protocol/selftest battery -> boot policy.
  */

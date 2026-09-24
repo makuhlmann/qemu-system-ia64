@@ -1,13 +1,11 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * EFI memory-map construction and mutation.  Extracted verbatim from
- * firmware.c (Phase 1 of plans/firmware-rework-plan.md): the builder
+ * EFI memory-map construction and mutation: the builder
  * (efi_init_memory_map + primitives), the coalescer with its preserved
  * loader-contract boundaries, the 128 MB anchor arming/release, and the
  * memory-map selftest.  Every guest-specific map workaround is
- * documented at its site; the reification into an explicit quirk table
- * is the next step of the plan.
+ * documented at its site and switched through fw_map_quirk_enabled().
  */
 
 #include "fw-base.h"
@@ -74,9 +72,10 @@ void efi_insert_memory_descriptor(UINTN Index,
 
 /*
  * Guest-specific map workarounds ("quirks"), each keyed to a named guest
- * bug at its emission site.  All default ON -- the validated map.  Each can
- * be disabled for A/B experiments with -machine ia64-vpc,fw-quirks=-<name>
- * (plans/firmware-rework-plan.md Phase 2 retires them one by one).
+ * bug at its emission site.  The machine sets the defaults
+ * (IA64_VPC_FW_QUIRK_DEFAULT_DISABLE in hw/ia64/ia64_base.c): split-page and
+ * pal-8k-page are on, the retired ones off.  Each can be toggled for A/B
+ * experiments with -machine <type>,fw-quirks=+<name> or -<name>.
  */
 BOOLEAN fw_map_quirk_enabled(UINT64 QuirkBit)
 {
@@ -537,7 +536,7 @@ void efi_init_memory_map(void)
 
     /*
      * The sub-1 MB compatibility area, published the way real 460GX/E8870
-     * firmware does (target-model doc sec 1.3/2): the whole megabyte is
+     * firmware does (363d9cd): the whole megabyte is
      * DRAM-capable, and only the VGA aperture is genuine MMIO.
      *
      * [0, 0x2000)       reserved WB DRAM: the IA-32 IVT/BDA (the INT10
@@ -580,9 +579,10 @@ void efi_init_memory_map(void)
 
     /*
      * IA-64 loaders commonly build page lists from EFI descriptors before
-     * reserving image pages.  Expose the natural 32 MiB/64 MiB low-image
-     * boundaries while also keeping the legacy 48 MiB/80 MiB staging bounds
-     * visible as descriptor boundaries.
+     * reserving image pages.  With the low-boundaries quirk on, the
+     * 32/48/64/80 MiB lines stay descriptor boundaries
+     * (efi_preserve_memory_map_boundary()); by default (5f8c24a) the free
+     * runs coalesce across them.
      */
     if (fw_map_quirk_enabled(IA64_FW_QUIRK_ACPI_LOW_ISLAND)) {
         efi_add_memory_range(&index, EfiConventionalMemory, low_conv_start,
@@ -630,18 +630,20 @@ void efi_init_memory_map(void)
     /*
      * [32 MB, CPU-assist base) is all conventional RAM, as on real 460GX /
      * E8870 platforms where low DRAM is contiguous up to the firmware's
-     * RAM-top scratch.  The historical reserved guard PAGE at the 80 MB
-     * staging line is gone (the setup loader's heap carve is bounded by the
-     * 32 MB split page), but the 80 MB DESCRIPTOR boundary stays: the XP-era
-     * sumain.c:760 (WXPSP1 base/boot/efi/sumain.c) turns the sub-80 MB part
-     * of any conventional descriptor that straddles 80 MB into
-     * MemoryFirmwareTemporary, after which the kernel carve finds no free
-     * block ("ntoskrnl.exe is missing or corrupt" on an installed XP 2002 -
-     * measured).  Two adjacent free descriptors cost the Server 2003 SP1
+     * RAM-top scratch, and by default its free runs coalesce.  The 32 MB
+     * split page bounds the setup loader's heap carve, so no guard page
+     * sits at the 80 MB staging line.
+     *
+     * The low-boundaries quirk (off since 5f8c24a) keeps an 80 MB descriptor
+     * boundary: the XP-era sumain.c:760 (WXPSP1 base/boot/efi/sumain.c)
+     * turns the sub-80 MB part of any conventional descriptor that straddles
+     * 80 MB into MemoryFirmwareTemporary, after which the kernel carve found
+     * no free block ("ntoskrnl.exe is missing or corrupt" on an installed
+     * XP 2002) while the firmware image still sat in low RAM (before
+     * 55e553d).  Two adjacent free descriptors cost the Server 2003 SP1
      * loader nothing: its ARC list merges adjacent MemoryFree runs, so the
      * 64 MB-aligned 64 MB large page it maps the kernel with at
-     * [64 MB, 128 MB) still fits (previously ENOMEM, load error 16).
-     * efi_preserve_memory_map_boundary() keeps the two from coalescing.
+     * [64 MB, 128 MB) still fits.
      */
     efi_add_memory_range(&index, EfiConventionalMemory, FW_LOW_IMAGE_BASE,
                          FW_LOW_IMAGE_END, EFI_MEMORY_WB);
@@ -663,10 +665,10 @@ void efi_init_memory_map(void)
     }
 
     /*
-     * XP RTM (build 2600) SMP bring-up requires the 2 GiB firmware scratch
-     * page to appear as a reserved descriptor: without it the two processors
-     * deadlock spinning during kernel init (measured -- the IOSAPIC relocation
-     * is harmless, this descriptor is what XP needs).  The page only fits as a
+     * The 2g-scratch quirk (off since fd54528) reserves the 1 MiB page at
+     * 2 GiB.  It was a bisection result for an XP RTM (build 2600) SMP
+     * deadlock in kernel init, with no understood mechanism, and the
+     * deadlock no longer reproduces without it.  The page only fits as a
      * reserved hole while it lies above installed low RAM; once low DRAM runs
      * past 2 GiB (contiguous to the aperture, as real 460GX provides) the page
      * is ordinary WB DRAM and must not be carved out, so gate on the low-RAM
@@ -723,14 +725,13 @@ void efi_init_memory_map(void)
      * memory-map descriptor for it: Linux's i460-agp reaches the GATT through
      * ioremap(), which maps the physical window UC via the region-6 identity
      * area on its own, independent of the EFI map -- and adding a descriptor
-     * here perturbs the descriptor layout the XP build-2600 SMP loader is
-     * exquisitely sensitive to (see plans/highram-460gx-dma.md,
-     * "Approach A"), deadlocking that guest at kernel
-     * bring-up.  The GART window is left an undescribed chipset gap, exactly
-     * as it was before AGP support.
+     * here perturbed the descriptor layout the XP build-2600 SMP loader was
+     * sensitive to, deadlocking that guest at kernel bring-up (72a5a63).
+     * The GART window is left an undescribed chipset gap, exactly as it was
+     * before AGP support.
      */
 
-    /* The RTC is a CMOS device at legacy ports now (rework D8). */
+    /* The RTC is a CMOS device at legacy ports now (f610823). */
     {
         UINT64 store = fw_nvram_base();
 

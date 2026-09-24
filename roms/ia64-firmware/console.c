@@ -7,8 +7,7 @@
  * Console stack: UART primitives, the PS/2 controller front-end, the
  * software VGA text renderer, and the EFI SimpleTextOutput /
  * SimpleTextInput(+Ex) protocols with their PS/2, USB-keyboard and
- * serial key sources.  Extracted verbatim from firmware.c (Phase 1 of
- * plans/firmware-rework-plan.md).
+ * serial key sources.
  */
 
 #include "fw-base.h"
