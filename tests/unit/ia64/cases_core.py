@@ -2700,6 +2700,44 @@ test_br_wexit_false_predicate_drains_epilog = require_registers(
         (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
     ], {"ip": 0x80, "r4": 1, "r5": 0, "r6": 0}, entry=0x10)
 
+# A taken modulo-scheduled loop branch to address 0 must branch; bundle 0
+# sets r8 = 1, the fall-through path r8 = 2.
+test_br_ctop_taken_target_zero = require_registers(
+    "br_ctop_taken_target_zero", [
+        (0x00, 0x10, nop_m(), adds(8, 1, 0), br_cond(0x00, 0x60)),
+        (0x10, 0x01, nop_m(), nop_i(), mov_lc_imm(1)),
+        (0x20, 0x13, nop_m(), nop_b(), br_ctop_many(0x20, 0x00)),
+        (0x30, 0x10, nop_m(), adds(8, 2, 0), br_cond(0x30, 0x60)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {"ip": 0x60, "exception": IA64_EXCP_NONE, "r8": 1}, entry=0x10)
+
+test_br_cexit_taken_target_zero = require_registers(
+    "br_cexit_taken_target_zero", [
+        (0x00, 0x10, nop_m(), adds(8, 1, 0), br_cond(0x00, 0x60)),
+        (0x10, 0x01, nop_m(), mov_lc_imm(0), mov_i_imm_ar(66, 1)),
+        (0x20, 0x13, nop_m(), nop_b(),
+         ip_relative_branch_btype(6, 0x20, 0x00)),
+        (0x30, 0x10, nop_m(), adds(8, 2, 0), br_cond(0x30, 0x60)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {"ip": 0x60, "exception": IA64_EXCP_NONE, "r8": 1}, entry=0x10)
+
+test_br_wtop_taken_target_zero = require_registers(
+    "br_wtop_taken_target_zero", [
+        (0x00, 0x10, nop_m(), adds(8, 1, 0), br_cond(0x00, 0x60)),
+        (0x10, 0x13, nop_m(), nop_b(), br_wtop(0x10, 0x00, qp=0)),
+        (0x20, 0x10, nop_m(), adds(8, 2, 0), br_cond(0x20, 0x60)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {"ip": 0x60, "exception": IA64_EXCP_NONE, "r8": 1}, entry=0x10)
+
+test_br_wexit_taken_target_zero = require_registers(
+    "br_wexit_taken_target_zero", [
+        (0x00, 0x10, nop_m(), adds(8, 1, 0), br_cond(0x00, 0x60)),
+        (0x10, 0x01, nop_m(), mov_i_imm_ar(66, 0), nop_i()),
+        (0x20, 0x13, nop_m(), nop_b(), br_wexit(0x20, 0x00, qp=1)),
+        (0x30, 0x10, nop_m(), adds(8, 2, 0), br_cond(0x30, 0x60)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {"ip": 0x60, "exception": IA64_EXCP_NONE, "r8": 1}, entry=0x10)
+
 test_pmc_pmd_registers_are_independent = require_registers("pmc_pmd_registers_are_independent", [
     (0x10, 0x00, adds(9, 1, 0), adds(20, 0x77, 0),
      nop_i()),
@@ -2869,6 +2907,8 @@ CASE_NAMES = (
     'br_ctop_rotating_pipeline',
     'br_ctop_self_loop_budgeted',
     'br_ctop_strcpy_pipeline_stops_on_first_zero_word',
+    'br_ctop_taken_target_zero',
+    'br_cexit_taken_target_zero',
     'br_ia_executes_ia32_and_jmpe_returns_to_ia64',
     'br_ia_invalidates_global_alat_entries',
     'br_ia_montecito_native_ia32_disabled_fault',
@@ -2892,6 +2932,8 @@ CASE_NAMES = (
     'br_indirect_predicate_false_falls_through',
     'br_wexit_false_predicate_drains_epilog',
     'br_wtop_false_predicate_drains_epilog',
+    'br_wexit_taken_target_zero',
+    'br_wtop_taken_target_zero',
     'brl_call_mlx_decode',
     'brl_call_mlx_negative_lslot_decode',
     'brl_call_mlx_no_stop_decode',

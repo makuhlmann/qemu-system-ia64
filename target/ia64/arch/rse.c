@@ -1444,7 +1444,7 @@ void ia64_rse_load(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
 
 /* ---- Loop branch helpers ---- */
 
-uint64_t ia64_rse_br_cexit(CPUIA64State *env, uint64_t target, uint32_t b_reg)
+bool ia64_rse_br_cexit(CPUIA64State *env)
 {
     uint64_t lc = env->ar_lc;
     uint64_t ec = env->ar_ec;
@@ -1462,10 +1462,10 @@ uint64_t ia64_rse_br_cexit(CPUIA64State *env, uint64_t target, uint32_t b_reg)
         env->pr[IA64_PR_LAST] = 0;
     }
 
-    return active ? 0 : ((b_reg == 0) ? target : env->br[b_reg]);
+    return !active;
 }
 
-uint64_t ia64_rse_br_ctop(CPUIA64State *env, uint64_t target, uint32_t b_reg)
+bool ia64_rse_br_ctop(CPUIA64State *env)
 {
     uint64_t lc = env->ar_lc;
     uint64_t ec = env->ar_ec;
@@ -1483,7 +1483,7 @@ uint64_t ia64_rse_br_ctop(CPUIA64State *env, uint64_t target, uint32_t b_reg)
         env->pr[IA64_PR_LAST] = 0;
     }
 
-    return active ? ((b_reg == 0) ? target : env->br[b_reg]) : 0;
+    return active;
 }
 
 static bool ia64_update_while_loop(CPUIA64State *env, uint32_t qp)
@@ -1505,14 +1505,14 @@ static bool ia64_update_while_loop(CPUIA64State *env, uint32_t qp)
     return pipeline_active;
 }
 
-uint64_t ia64_rse_br_wexit(CPUIA64State *env, uint64_t target, uint32_t qp)
+bool ia64_rse_br_wexit(CPUIA64State *env, uint32_t qp)
 {
-    return ia64_update_while_loop(env, qp) ? 0 : target;
+    return !ia64_update_while_loop(env, qp);
 }
 
-uint64_t ia64_rse_br_wtop(CPUIA64State *env, uint64_t target, uint32_t qp)
+bool ia64_rse_br_wtop(CPUIA64State *env, uint32_t qp)
 {
-    return ia64_update_while_loop(env, qp) ? target : 0;
+    return ia64_update_while_loop(env, qp);
 }
 
 void ia64_rse_clrrrb(CPUIA64State *env, uint32_t predicate_only)
