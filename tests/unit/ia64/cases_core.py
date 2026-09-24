@@ -13,11 +13,14 @@ from .encoding import (
     IA64_EXCP_VIRTUALIZATION,
     IA64_GENERAL_VECTOR,
     IA64_ISR_EI_SHIFT,
+    IA64_PSR_AC,
+    IA64_PSR_BN,
     IA64_PSR_CPL3,
     IA64_PSR_DI,
     IA64_PSR_I,
     IA64_PSR_IC,
     IA64_PSR_IS,
+    IA64_PSR_MC,
     IA64_PSR_SP,
     IA64_PSR_UP,
     UINT64_MAX,
@@ -1094,6 +1097,18 @@ test_bsw0_in_b_slot_falls_through = require_registers("bsw0_in_b_slot_falls_thro
     (0x50, 0x10, nop_m(), nop_i(),
      br_cond(0x50, 0x50)),
 ], {"ip": 0x50, "psr": 0, "r2": 0x33}, entry=0x10)
+
+# mov r=psr returns only PSR{36:35,31:0}; the other bits read as 0 (SDM
+# Vol 2 3.3.2), so PSR.bn must not show while PSR.mc and PSR.ac do.
+test_mov_psr_read_omits_bn = require_registers("mov_psr_read_omits_bn", [
+    (0x10, *movl_mlx(18, IA64_PSR_BN | IA64_PSR_MC | IA64_PSR_AC)),
+    (0x20, *movl_mlx(19, 0x80)),
+    *rfi_to_gr(0x30, 18, 19),
+    (0x80, 0x01, mov_m_psr_gr(8), nop_i(), nop_i()),
+    (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+], {"ip": 0x90, "exception": IA64_EXCP_NONE,
+    "r8": IA64_PSR_MC | IA64_PSR_AC,
+    "psr": IA64_PSR_BN | IA64_PSR_MC | IA64_PSR_AC}, entry=0x10)
 
 test_bsw1_sets_bn_bit = require_registers("bsw1_sets_bn_bit", [
     (0x10, 0x10, nop_m(), nop_i(),
@@ -2947,6 +2962,7 @@ CASE_NAMES = (
     'bsw0_in_b_slot_falls_through',
     'bsw1_sets_bn_bit',
     'bsw_switches_r16_r31_bank',
+    'mov_psr_read_omits_bn',
     'cdboot_word_add_cloop_decode',
     'clrrrb_b_decode',
     'clrrrb_pr_b_decode',

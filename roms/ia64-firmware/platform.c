@@ -2225,7 +2225,8 @@ void prepare_sal_loader_handoff(void)
 
 BOOLEAN __attribute__((noinline)) sal_loader_handoff_selftest(void)
 {
-    UINT64 expected_psr = sal_loader_psr_low() | IA64_PSR_BN;
+    /* mov r=psr cannot show the bank-1 entry: PSR.bn reads as 0. */
+    UINT64 expected_psr = sal_loader_psr_low();
     UINTN i;
 
     fw_set_mem(&mSalHandoffProbe, sizeof(mSalHandoffProbe), 0xff);

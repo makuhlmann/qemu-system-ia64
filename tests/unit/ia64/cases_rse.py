@@ -3889,7 +3889,8 @@ test_rse_loadrs_clamps_stacked_grs = require_registers(
     ], {
         "ip": HIGH_TR_BASE + 0x84a0,
         "exception": IA64_EXCP_NONE,
-        "r31": HIGH_TR_PSR,
+        # mov r=psr does not return PSR.bn (SDM Vol 2 3.3.2).
+        "r31": HIGH_TR_PSR & ~(1 << 44),
     }, entry=0x10)
 
 test_rse_loadrs_sets_tear_point = require_registers(

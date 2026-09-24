@@ -807,13 +807,8 @@ void ia64_system_rsm(CPUIA64State *env, uint64_t imm)
 uint64_t ia64_system_mov_psrgr_read(CPUIA64State *env, uint32_t unused)
 {
     (void)unused;
-    /*
-     * PSR.ri is only defined as an rfi restart selector and becomes
-     * undefined after the restarted IA-64 instruction begins execution.
-     * The translator keeps it live internally to select a nonzero TB entry
-     * slot, so expose the chosen architectural undefined value of zero.
-     */
-    return env->psr & ~IA64_PSR_RI_MASK;
+    /* Only PSR{36:35,31:0}; the other bits read as zero (SDM Vol 2 3.3.2). */
+    return env->psr & (IA64_PSR_IT | IA64_PSR_MC | 0xffffffffULL);
 }
 
 /* ---- mov to PSR helper ---- */

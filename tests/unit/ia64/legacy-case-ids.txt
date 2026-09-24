@@ -604,6 +604,7 @@ mov_pkr_nat_index_consumes
 mov_pmc_nat_value_consumes
 mov_pr_nat_source_consumes
 mov_pr_rot_imm_sign_extends
+mov_psr_read_omits_bn
 mov_psr_nat_source_consumes
 mov_psr_um_reserved_bit_fault
 mov_rr_indexed_decode
