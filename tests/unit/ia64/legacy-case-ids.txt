@@ -671,6 +671,7 @@ pal_cache_info_l0_data
 pal_cache_info_l1_data
 pal_cache_info_l1_instruction
 pal_cache_info_l2_unified
+pal_cache_info_l2_unified_madison
 pal_cache_info_l2_unified_bad_type
 pal_cache_info_merced_l0_d
 pal_cache_info_merced_l0_i

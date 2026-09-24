@@ -1124,9 +1124,10 @@ static const IA64PalProfile ia64_pal_profile_madison = {
                     .load_latency = 5, .tag_lsb = 15, .unified = true },
         },
         [2] = {
+            /* L3 load latency: 251110-003 Table 2-5 (12 is McKinley's). */
             [1] = { .size = 3 * MiB, .associativity = 12, .line_shift = 7,
                     .stride_shift = 7, .attribute = 1, .store_latency = 1,
-                    .load_latency = 12, .tag_lsb = 18, .unified = true },
+                    .load_latency = 14, .tag_lsb = 18, .unified = true },
         },
     },
     .tc_levels = 2,

@@ -421,6 +421,16 @@ test_pal_cache_info_l2_unified = require_registers(
      "r9": PAL_CACHE_INFO_L2_U_1, "r10": PAL_CACHE_INFO_L2_U_2,
      "r11": 0}, entry=0x10)
 
+# Madison L3: 12-way, 128-byte lines, load latency at least 14 cycles
+# (251110-003 Table 2-5; 12 cycles is the McKinley value).
+test_pal_cache_info_l2_unified_madison = require_registers(
+    "pal_cache_info_l2_unified_madison",
+    pal_call_program(PAL_CACHE_INFO, [(29, 2), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
+     "r9": (1 | (1 << 1) | (12 << 8) | (7 << 16) | (7 << 24) | (1 << 32) |
+            (14 << 40))},
+    entry=0x10, cpu="madison")
+
 test_pal_cache_info_invalid = require_registers("pal_cache_info_invalid",
     pal_call_program(PAL_CACHE_INFO, [(29, 3), (30, 1), (31, 0)]),
     {"ip": 0x60, "r28": PAL_CACHE_INFO,
@@ -1847,6 +1857,7 @@ CASE_NAMES = (
     'pal_cache_info_l1_data',
     'pal_cache_info_l1_instruction',
     'pal_cache_info_l2_unified',
+    'pal_cache_info_l2_unified_madison',
     'pal_cache_info_l2_unified_bad_type',
     'pal_cache_init',
     'pal_cache_init_invalid',
