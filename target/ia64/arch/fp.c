@@ -1847,18 +1847,17 @@ static uint32_t ia64_fpma_lane(uint32_t addend_bits, uint32_t multiplicand_bits,
                                uint32_t multiplier_bits, uint32_t form,
                                float_status *status)
 {
-    float32 addend = make_float32(addend_bits);
-    float32 multiplicand = make_float32(multiplicand_bits);
-    float32 multiplier = make_float32(multiplier_bits);
+    /*
+     * The negation applies only when no operand is a NaN (SDM Vol 3 fpms,
+     * fpnma); softfloat picks the NaN before it applies these flags.
+     */
+    int flags = form == 1 ? float_muladd_negate_c :
+                form == 2 ? float_muladd_negate_product : 0;
 
-    if (form == 1) {
-        addend = float32_chs(addend);
-    } else if (form == 2) {
-        multiplicand = float32_chs(multiplicand);
-    }
-
-    return float32_val(float32_muladd(multiplicand, multiplier, addend,
-                                      0, status));
+    return float32_val(float32_muladd(make_float32(multiplicand_bits),
+                                      make_float32(multiplier_bits),
+                                      make_float32(addend_bits),
+                                      flags, status));
 }
 
 static void ia64_do_fpma(CPUIA64State *env, uint32_t r1, uint32_t r2,

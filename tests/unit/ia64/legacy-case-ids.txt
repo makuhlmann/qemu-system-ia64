@@ -317,6 +317,8 @@ fpmodel_binary64_20
 fpmodel_binary64_21
 fpmodel_binary64_22
 fpmodel_binary64_23
+fpms_fpnma_qnan_preserves_sign
+fpms_fpnma_snan_quiets_without_sign_flip
 fprcpa_decode
 fprcpa_simd_high_lane_fault_isr
 fprcpa_simd_low_lane_fault_isr

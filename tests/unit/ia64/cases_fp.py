@@ -1921,6 +1921,47 @@ test_fpma_parallel_natval_propagates = require_registers(
     },
     entry=0x10)
 
+# fpms and fpnma negate the addend or the product only when no operand is a
+# NaN: a propagated NaN keeps its sign, and an SNaN is only quieted (SDM
+# Vol 3 fpms, fpnma).
+test_fpms_fpnma_qnan_preserves_sign = require_registers(
+    "fpms_fpnma_qnan_preserves_sign", [
+        (0x10, *movl_mlx(2, 0x7fc001a17fc001a2)),
+        (0x20, *movl_mlx(3, 0x3f8000003f800000)),
+        (0x30, *movl_mlx(4, 0x7fc002b17fc002b2)),
+        (0x40, 0x09, setf_sig(6, 2), setf_sig(7, 3), nop_i()),
+        (0x50, 0x09, setf_sig(8, 4), setf_sig(9, 3), nop_i()),
+        (0x60, 0x0d, nop_m(), fpms(10, 6, 7, 7), nop_i()),
+        (0x70, 0x0d, nop_m(), fpnma(11, 9, 8, 7, sf=1), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "f10": ExpectedFP(0x7fc001a17fc001a2, 0x1003e),
+        "f11": ExpectedFP(0x7fc002b17fc002b2, 0x1003e),
+        "ar_fpsr": DEFAULT_FPSR,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fpms_fpnma_snan_quiets_without_sign_flip = require_registers(
+    "fpms_fpnma_snan_quiets_without_sign_flip", [
+        (0x10, *movl_mlx(2, 0x7f8001a17f8001a2)),
+        (0x20, *movl_mlx(3, 0x3f8000003f800000)),
+        (0x30, *movl_mlx(4, 0x7f8002b17f8002b2)),
+        (0x40, 0x09, setf_sig(6, 2), setf_sig(7, 3), nop_i()),
+        (0x50, 0x09, setf_sig(8, 4), setf_sig(9, 3), nop_i()),
+        (0x60, 0x0d, nop_m(), fpms(10, 6, 7, 7), nop_i()),
+        (0x70, 0x0d, nop_m(), fpnma(11, 9, 8, 7, sf=1), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "f10": ExpectedFP(0x7fc001a17fc001a2, 0x1003e),
+        "f11": ExpectedFP(0x7fc002b17fc002b2, 0x1003e),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (1 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT)) |
+                    (1 << (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_fpma_simd_high_lane_fault_isr = require_registers(
     "fpma_simd_high_lane_fault_isr", [
         (0x10, *movl_mlx(2, 0x33e)),
@@ -3552,6 +3593,8 @@ CASE_NAMES = (
     'fpmodel_binary64_21',
     'fpmodel_binary64_22',
     'fpmodel_binary64_23',
+    'fpms_fpnma_qnan_preserves_sign',
+    'fpms_fpnma_snan_quiets_without_sign_flip',
     'fprcpa_decode',
     'fprcpa_simd_high_lane_fault_isr',
     'fprcpa_simd_low_lane_fault_isr',
