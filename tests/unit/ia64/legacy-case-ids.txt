@@ -508,6 +508,7 @@ ld16_acq_hint_decode
 ld16_loads_gr_and_csd
 ld16_madison_illegal_operation
 ld16_uc_unsupported_data_reference
+ld16_unaligned_always_faults
 ld1_acq_decode
 ld1_postinc_decode
 ld1_reg_postinc_decode
@@ -1314,3 +1315,4 @@ spec_stacked_nat_survives_interrupt_flush_bit_62
 rse_loadrs_reestablishes_rnat_authority_at_boundary
 self_loop_nat_consumption_not_elided
 predicated_off_stacked_write_keeps_following_write_valid
+st16_unaligned_always_faults

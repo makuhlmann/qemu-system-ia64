@@ -441,8 +441,23 @@ test_ld8_c_clr_address_mismatch_reloads = require_registers(
          0),
     ], {"ip": 0x50, "r4": CHECK_LOAD_MISMATCH_DATA}, entry=0x10)
 
+# An unaligned ld16 or st16 is an Unaligned Data Reference fault whatever
+# PSR.ac is (SDM Vol 2 4.5); PSR.ac is 0 here.
+test_ld16_unaligned_always_faults = require_exception(
+    "ld16_unaligned_always_faults", [
+        (0x10, 0x00, addl(3, 0x108, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld16(8, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="montecito")
+
+test_st16_unaligned_always_faults = require_exception(
+    "st16_unaligned_always_faults", [
+        (0x10, 0x00, addl(3, 0x208, 0), nop_i(), nop_i()),
+        (0x20, *movl_mlx(4, 0x1122334455667788)),
+        (0x30, 0x00, st16(3, 4), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x30, cpu="montecito")
+
 test_ld16_loads_gr_and_csd = require_registers("ld16_loads_gr_and_csd", [
-    (0x10, 0x00, addl(3, 0x104, 0), addl(4, 0x10c, 0),
+    (0x10, 0x00, addl(3, 0x100, 0), addl(4, 0x108, 0),
      nop_i()),
     (0x20, *movl_mlx(16, 0x0123456789abcdef)),
     (0x30, *movl_mlx(17, 0xfedcba9876543210)),
@@ -486,7 +501,7 @@ test_ld16_acq_hint_decode = require_registers("ld16_acq_hint_decode", [
 }, entry=0x10)
 
 test_st16_stores_gr_and_csd = require_registers("st16_stores_gr_and_csd", [
-    (0x10, 0x00, addl(3, 0x204, 0), addl(4, 0x20c, 0),
+    (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x208, 0),
      nop_i()),
     (0x20, *movl_mlx(15, 0x0123456789abcdef)),
     (0x30, *movl_mlx(5, 0xfedcba9876543210)),
@@ -2862,6 +2877,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'ld16_loads_gr_and_csd',
     'ld16_madison_illegal_operation',
     'ld16_uc_unsupported_data_reference',
+    'ld16_unaligned_always_faults',
     'ld1_acq_decode',
     'ld1_postinc_decode',
     'ld1_reg_postinc_decode',
@@ -2933,6 +2949,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'st16_rel_stores_gr_and_csd',
     'st16_stores_gr_and_csd',
     'st16_uc_unsupported_data_reference',
+    'st16_unaligned_always_faults',
     'st1_postinc_decode',
     'st4_variants_preserve_adjacent_halfword',
     'st8_postinc_same_base_value_uses_old_base',

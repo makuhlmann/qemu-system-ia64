@@ -777,7 +777,7 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
                            tcg_temp_new_i64();
 
             ia64_gen_check_nat_access(insn, op->base, false);
-            ia64_gen_check_alignment(insn, ia64_gr_src(op->base), 16, false,
+            ia64_gen_check_alignment(insn, ia64_gr_src(op->base), 16, true,
                                      false);
             ia64_gen_sync_ip_for_helper(insn);
             gen_helper_check_montecito_16byte_access(
@@ -804,7 +804,7 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
 
             ia64_gen_check_nat_access(insn, op->base, true);
             ia64_gen_check_nat_access(insn, op->source, true);
-            ia64_gen_check_alignment(insn, ia64_gr_src(op->base), 16, false,
+            ia64_gen_check_alignment(insn, ia64_gr_src(op->base), 16, true,
                                      true);
             ia64_gen_sync_ip_for_helper(insn);
             gen_helper_check_montecito_16byte_access(
