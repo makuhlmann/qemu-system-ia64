@@ -818,7 +818,9 @@ void ia64_apply_mlx_long_fixup(uint8_t template_code,
     if (ia64_is_i_break(x_slot)) {
         *insn = ia64_base_insn(IA64_OP_BREAK, IA64_UNIT_X, x_slot,
                                insn->address, slot);
-        insn->operands.decoder.imm = ia64_mlx_x1_imm62(l_slot, x_slot);
+        /* Only imm62{20:0} reaches IIM (SDM Vol 3 break). */
+        insn->operands.decoder.imm =
+            ia64_mlx_x1_imm62(l_slot, x_slot) & 0x1fffffULL;
         *skip_x_slot = true;
     } else if (ia64_b_op(x_slot) == 0xc &&
                ia64_bits(x_slot, 6, 3) == 0) {

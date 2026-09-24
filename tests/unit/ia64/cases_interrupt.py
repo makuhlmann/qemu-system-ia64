@@ -1757,12 +1757,13 @@ test_exception_break_f = require_exception("exception_break_f", [
     (0x10, 0x0d, nop_m(), break_f(0x42), nop_i()),
 ], IA64_EXCP_BREAK, fault_ip=0x10, fault_imm=0x42)
 
+# break.x places only the low 21 bits of imm62 in IIM (SDM Vol 3 break).
 test_exception_break_x = require_registers("exception_break_x", [
     (0x100000, *movl_mlx(2, 1 << 13)),
     (0x100010, 0x10, mov_gr_psr_full(2), nop_i(),
      br_cond(0x100010, 0x10)),
     (0x10, *break_x_mlx(0x34b630b4b820032b)),
-    (IA64_BREAK_VECTOR, 0x00, nop_m(), nop_i(), nop_i()),
+    (IA64_BREAK_VECTOR, 0x00, mov_m_cr_gr(8, 24), nop_i(), nop_i()),
     (IA64_BREAK_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
     (IA64_BREAK_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
      br_cond(IA64_BREAK_VECTOR + 0x20, IA64_BREAK_VECTOR + 0x20)),
@@ -1770,7 +1771,8 @@ test_exception_break_x = require_registers("exception_break_x", [
     "ip": IA64_BREAK_VECTOR + 0x20,
     "exception": IA64_EXCP_NONE,
     "fault_ip": 0x10,
-    "fault_imm": 0x34b630b4b820032b,
+    "fault_imm": 0x32b,
+    "r8": 0x32b,
 }, entry=0x100000)
 
 test_exception_records_slot_ri = require_registers(
