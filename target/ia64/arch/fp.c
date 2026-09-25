@@ -1524,7 +1524,11 @@ void ia64_fp_fclass(CPUIA64State *env, uint32_t p1, uint32_t p2,
     ia64_fpreg_to_spill(env, f2, &mant, &high);
     exp = (high & 0xffff) | (((high >> 16) & 1) << 16);
     is_neg = (high >> 17) & 1;
-    is_zero = !is_nat && mant == 0 && exp != IA64_FP_REG_SPECIAL_EXP;
+    /*
+     * A pseudo-zero is an unnormal, and a pseudo-NaN or pseudo-infinity is
+     * in no class (SDM Vol 1 5.1.3, Table 5-2; Vol 3 fclass).
+     */
+    is_zero = !is_nat && mant == 0 && exp == 0;
     is_inf = !is_nat && exp == IA64_FP_REG_SPECIAL_EXP &&
              mant == IA64_FP_SIGNIFICAND_INTEGER_BIT;
     is_qnan = !is_nat && exp == IA64_FP_REG_SPECIAL_EXP &&
@@ -1535,8 +1539,8 @@ void ia64_fp_fclass(CPUIA64State *env, uint32_t p1, uint32_t p2,
     is_unorm = !is_nat && !is_zero &&
                 exp != IA64_FP_REG_SPECIAL_EXP &&
                 (!(mant & IA64_FP_SIGNIFICAND_INTEGER_BIT) || exp == 0);
-    is_normal = !is_nat && !is_zero && !is_unorm && !is_inf &&
-                !is_qnan && !is_snan;
+    is_normal = !is_nat && exp != 0 && exp != IA64_FP_REG_SPECIAL_EXP &&
+                (mant & IA64_FP_SIGNIFICAND_INTEGER_BIT);
     sign_match = ((fclass9 & 0x001) && !is_neg) ||
                  ((fclass9 & 0x002) && is_neg);
     type_match = ((fclass9 & 0x004) && is_zero) ||

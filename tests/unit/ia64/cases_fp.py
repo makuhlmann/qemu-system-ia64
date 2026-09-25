@@ -5149,6 +5149,50 @@ test_frcpa_unsupported_invalid_enabled_rolls_back = require_registers(
     }, entry=0x10)
 
 
+test_fclass_raw_unsupported_and_pseudozero = require_registers(
+    "fclass_raw_unsupported_and_pseudozero", [
+        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(5, 0x210, 0)),
+        (0x20, 0x00, addl(6, 0x218, 0), addl(7, 0x220, 0),
+         addl(8, 0x228, 0)),
+        (0x30, 0x00, addl(21, 0x12345, 0), addl(23, 0x1ffff, 0),
+         addl(25, 0x3ffff, 0)),
+        (0x40, 0x05, *movl_mlx(22, 0x4000000000000000)[1:]),
+        # Raw spill records: +pseudo-zero, +pseudo-NaN, -pseudo-infinity.
+        (0x50, 0x08, st8(3, 0), st8(4, 21),
+         nop_i()),
+        (0x60, 0x08, st8(5, 22), st8(6, 23),
+         nop_i()),
+        (0x70, 0x09, st8(7, 0), st8(8, 25),
+         nop_i()),
+        (0x80, 0x08, ldf_fill_postinc(6, 3, 0),
+         ldf_fill_postinc(7, 5, 0), nop_i()),
+        (0x90, 0x01, ldf_fill_postinc(8, 7, 0), nop_i(), nop_i()),
+        # Pseudo-zero is an unnormal supported operand, not a zero.
+        (0xa0, 0x1c, nop_m(), fclass_m(6, 7, 6, 0x005), nop_b()),
+        (0xb0, 0x1c, nop_m(), fclass_m(8, 9, 6, 0x009), nop_b()),
+        (0xc0, 0x1c, nop_m(), fclass_m(10, 11, 6, 0x1ff), nop_b()),
+        # Unsupported pseudo-NaN/pseudo-infinity match neither normal nor
+        # the architectural "any supported operand" mask.
+        (0xd0, 0x1c, nop_m(), fclass_m(12, 13, 7, 0x013), nop_b()),
+        (0xe0, 0x1c, nop_m(), fclass_m(14, 15, 7, 0x1ff), nop_b()),
+        (0xf0, 0x1c, nop_m(), fclass_m(16, 17, 8, 0x013), nop_b()),
+        (0x100, 0x1c, nop_m(), fclass_m(18, 19, 8, 0x1ff), nop_b()),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0x110)),
+    ], {
+        "ip": 0x110,
+        "f6": ExpectedFP(0, 0x12345),
+        "f7": ExpectedFP(0x4000000000000000, 0x1ffff),
+        "f8": ExpectedFP(0, 0x3ffff),
+        "pr_mask": ExpectedBits(
+            mask=sum(1 << predicate for predicate in range(6, 20)),
+            value=sum(1 << predicate for predicate in
+                      (7, 8, 10, 13, 15, 17, 19))),
+        "ar_fpsr": DEFAULT_FPSR,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+
 def _fp_representation_case(name, value, width, model):
     if width == 32:
         value &= 0xffffffff
@@ -5221,6 +5265,7 @@ CASE_NAMES = (
     'fchkf_positive_target_ignores_bit26',
     'fclass_m_decode',
     'fclass_m_ignored_bits_decode',
+    'fclass_raw_unsupported_and_pseudozero',
     'fclass_same_pred_pred_false_noop',
     'fclass_unc_same_pred_pred_false_illegal',
     'fcmp_invalid_fault_restores_predicates',
