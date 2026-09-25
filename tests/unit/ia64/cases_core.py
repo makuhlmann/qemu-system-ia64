@@ -3135,6 +3135,118 @@ test_pmd_cpl3_privileged_monitor_reads_zero = _pmd_cpl3_read_case(
 test_pmd_cpl3_secure_monitor_reads_zero = _pmd_cpl3_read_case(
     "pmd_cpl3_secure_monitor_reads_zero", IA64_PSR_SP, 0, 0)
 
+# 245320-003 §6.2: ignored PMC fields read 0; PMC14 is not populated.
+test_pmc_merced_ignored_fields_and_unimplemented_register = require_registers(
+    "pmc_merced_ignored_fields_and_unimplemented_register", [
+        (0x10, *movl_mlx(20, UINT64_MAX)),
+        (0x20, 0x00, nop_m(), adds(8, 0, 0), adds(9, 4, 0)),
+        (0x30, 0x00, nop_m(), adds(10, 6, 0), adds(11, 8, 0)),
+        (0x40, 0x00, nop_m(), adds(12, 10, 0), adds(13, 11, 0)),
+        (0x50, 0x00, nop_m(), adds(14, 12, 0), adds(15, 13, 0)),
+        (0x60, 0x00, nop_m(), adds(16, 14, 0), nop_i()),
+        (0x70, 0x00, mov_grpmc_indexed(8, 20), nop_i(), nop_i()),
+        (0x80, 0x00, mov_pmcgr_indexed(30, 8), nop_i(), nop_i()),
+        (0x90, 0x00, mov_grpmc_indexed(9, 20), nop_i(), nop_i()),
+        (0xa0, 0x00, mov_pmcgr_indexed(31, 9), nop_i(), nop_i()),
+        (0xb0, 0x00, mov_grpmc_indexed(10, 20), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_pmcgr_indexed(29, 10), nop_i(), nop_i()),
+        (0xd0, 0x00, mov_grpmc_indexed(11, 20), nop_i(), nop_i()),
+        (0xe0, 0x00, mov_pmcgr_indexed(28, 11), nop_i(), nop_i()),
+        (0xf0, 0x00, mov_grpmc_indexed(12, 20), nop_i(), nop_i()),
+        (0x100, 0x00, mov_pmcgr_indexed(27, 12), nop_i(), nop_i()),
+        (0x110, 0x00, mov_grpmc_indexed(13, 20), nop_i(), nop_i()),
+        (0x120, 0x00, mov_pmcgr_indexed(26, 13), nop_i(), nop_i()),
+        (0x130, 0x00, mov_grpmc_indexed(14, 20), nop_i(), nop_i()),
+        (0x140, 0x00, mov_pmcgr_indexed(25, 14), nop_i(), nop_i()),
+        (0x150, 0x00, mov_grpmc_indexed(15, 20), nop_i(), nop_i()),
+        (0x160, 0x00, mov_pmcgr_indexed(24, 15), nop_i(), nop_i()),
+        (0x170, 0x00, mov_grpmc_indexed(16, 20), nop_i(), nop_i()),
+        (0x180, 0x00, mov_pmcgr_indexed(23, 16), nop_i(), nop_i()),
+        (0x190, 0x10, nop_m(), nop_i(), br_cond(0x190, 0x190)),
+    ], {
+        "ip": 0x190,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0xf1,
+        "r31": 0x037f7f7f,
+        "r29": 0x033f7f7f,
+        "r28": 0xfffffffe3ffffff8,
+        "r27": 0x030f00cf,
+        "r26": 0x130f00cf,
+        "r25": 0x0000ffcf,
+        "r24": 1,
+        "r23": 0,
+    }, entry=0x10, cpu="merced")
+
+# Bits 60:51 of an EAR address read as bit 50; PMD18 is not populated.
+test_pmd_merced_address_fields_and_unimplemented_register = require_registers(
+    "pmd_merced_address_fields_and_unimplemented_register", [
+        (0x10, *movl_mlx(20, 0x1ff800000000001f)),
+        (0x20, 0x00, adds(8, 0, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0x40, 0x00, mov_pmdgr_indexed(30, 8), nop_i(), nop_i()),
+        (0x50, *movl_mlx(20, 0xe004000000000123)),
+        (0x60, 0x00, adds(8, 2, 0), nop_i(), nop_i()),
+        (0x70, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0x80, 0x00, mov_pmdgr_indexed(31, 8), nop_i(), nop_i()),
+        (0x90, *movl_mlx(20, 0x3ff800000000000f)),
+        (0xa0, 0x00, adds(8, 17, 0), nop_i(), nop_i()),
+        (0xb0, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_pmdgr_indexed(29, 8), nop_i(), nop_i()),
+        (0xd0, *movl_mlx(20, UINT64_MAX)),
+        (0xe0, 0x00, adds(8, 18, 0), nop_i(), nop_i()),
+        (0xf0, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0x100, 0x00, mov_pmdgr_indexed(28, 8), nop_i(), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0x110)),
+    ], {
+        "ip": 0x110,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0x3,
+        "r31": 0xfffc000000000123,
+        "r29": 0x200000000000000d,
+        "r28": 0,
+    }, entry=0x10, cpu="merced")
+
+def _pmd_counter_sign_extension_case(name, cpu, value, expected):
+    return require_registers(name, [
+        (0x10, *movl_mlx(20, value)),
+        (0x20, 0x00, adds(9, 4, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_grpmd_indexed(9, 20), nop_i(), nop_i()),
+        (0x40, 0x00, mov_pmdgr_indexed(30, 9), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "exception": IA64_EXCP_NONE,
+        "r30": expected,
+    }, entry=0x10, cpu=cpu)
+
+# 245320-003 Figure 6-12 and 251110-003 Table 10-7.
+test_pmd_merced_counter_is_32_bit_sign_extended = (
+    _pmd_counter_sign_extension_case(
+        "pmd_merced_counter_is_32_bit_sign_extended", "merced",
+        0x1234567880000001, 0xffffffff80000001))
+
+test_pmd_madison_counter_sign_extends_overflow_bit = (
+    _pmd_counter_sign_extension_case(
+        "pmd_madison_counter_sign_extends_overflow_bit", "madison",
+        0x1234800000000001, 0xffff800000000001))
+
+# 251110-003 Table 10-8: only PMC0{7:4,0} are populated.
+test_pmc_madison_ignored_fields = require_registers(
+    "pmc_madison_ignored_fields", [
+        (0x10, *movl_mlx(20, UINT64_MAX)),
+        (0x20, 0x00, adds(8, 0, 0), adds(9, 1, 0), nop_i()),
+        (0x30, 0x00, mov_grpmc_indexed(8, 20), nop_i(), nop_i()),
+        (0x40, 0x00, mov_grpmc_indexed(9, 20), nop_i(), nop_i()),
+        (0x50, 0x00, mov_pmcgr_indexed(30, 8), nop_i(), nop_i()),
+        (0x60, 0x00, mov_pmcgr_indexed(31, 9), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0xf1,
+        "r31": 0,
+    }, entry=0x10, cpu="madison")
+
 test_pmc_pmd_indexed_decode = require_registers("pmc_pmd_indexed_decode", [
     (0x10, 0x00, adds(9, 1, 0), adds(10, 0x77, 0),
      nop_i()),
@@ -3415,12 +3527,17 @@ CASE_NAMES = (
     'pavg_decode',
     'pcmp1_eq_decode',
     'pcmp1_eq_m_slot_decode',
+    'pmc_madison_ignored_fields',
+    'pmc_merced_ignored_fields_and_unimplemented_register',
     'pmc_pmd_indexed_decode',
     'pmc_pmd_registers_are_independent',
     'pmc_pmd_unimplemented_index_does_not_fault',
     'pmd_cpl0_secure_monitor_remains_visible',
     'pmd_cpl3_privileged_monitor_reads_zero',
     'pmd_cpl3_secure_monitor_reads_zero',
+    'pmd_madison_counter_sign_extends_overflow_bit',
+    'pmd_merced_address_fields_and_unimplemented_register',
+    'pmd_merced_counter_is_32_bit_sign_extended',
     'pminmax_pack_decode',
     'pmpy2_decode',
     'pmpyshr2_decode',

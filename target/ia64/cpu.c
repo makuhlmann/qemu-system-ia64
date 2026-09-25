@@ -1158,6 +1158,9 @@ static const IA64PalProfile ia64_pal_profile_madison = {
         [0] = { IA64_PAL_TC_ITANIUM2_L1, IA64_PAL_TC_ITANIUM2_L1 },
         [1] = { IA64_PAL_TC_ITANIUM2_L2, IA64_PAL_TC_ITANIUM2_L2 },
     },
+    /* 251110-003 Table 10-28 */
+    .perf_counter_width = 48,
+    .perf_retired_mask = 0xf0,
 };
 
 static const IA64PalProfile ia64_pal_profile_montecito = {
@@ -1205,6 +1208,8 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
         [0] = { IA64_PAL_TC_ITANIUM2_L1, IA64_PAL_TC_ITANIUM2_L1 },
         [1] = { IA64_PAL_TC_ITANIUM2_L2, IA64_PAL_TC_ITANIUM2_L2 },
     },
+    .perf_counter_width = 48,
+    .perf_retired_mask = 0xf0,
 };
 
 /*
@@ -1301,6 +1306,9 @@ static const IA64PalProfile ia64_pal_profile_merced = {
                     .page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK },
         },
     },
+    /* 245320-003 Table 6-24 */
+    .perf_counter_width = 32,
+    .perf_retired_mask = 0x10,
 };
 
 static const Property ia64_cpu_properties[] = {
@@ -1384,6 +1392,7 @@ typedef struct IA64CPUModelDef {
     bool unaligned_windows;
     bool unaligned_uc_exempt;
     const IA64PalProfile *pal;
+    const IA64PmuLayout *pmu;
 } IA64CPUModelDef;
 
 static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
@@ -1411,7 +1420,64 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->unaligned_windows = model->unaligned_windows;
     icc->unaligned_uc_exempt = model->unaligned_uc_exempt;
     icc->pal = model->pal;
+    icc->pmu = model->pmu;
 }
+
+/* 245320-003 §6.2: bits 60:51 of an EAR or BTB address read as bit 50. */
+#define IA64_MERCED_PMU_ADDR_SEXT \
+    .sext_mask = 0x1ff8000000000000ULL, .sext_bit = 50
+
+/*
+ * 245320-003 §6.2 and Table 6-24: PMC0-13 and PMD0-17 are populated and the
+ * counters are 32 bits wide.
+ */
+static const IA64PmuLayout ia64_pmu_layout_merced = {
+    .pmc = {
+        [0] = { .mask = 0xf1 },                         /* Table 6-7 */
+        [4 ... 5] = { .mask = 0x037f7f7f },             /* Figure 6-13 */
+        [6 ... 7] = { .mask = 0x033f7f7f },             /* Figure 6-14 */
+        [8 ... 9] = { .mask = 0xfffffffe3ffffff8ULL },  /* Figure 6-17 */
+        [10] = { .mask = 0x030f00cf },                  /* Figure 6-18 */
+        [11] = { .mask = 0x130f00cf },                  /* Figure 6-20 */
+        [12] = { .mask = 0xffcf },                      /* Figure 6-22 */
+        [13] = { .mask = 0x1 },                         /* Figure 6-16 */
+    },
+    .pmd = {
+        /* Figure 6-19 */
+        [0] = { .mask = 0xe007ffffffffffe3ULL, IA64_MERCED_PMU_ADDR_SEXT },
+        [1] = { .mask = 0xfff },
+        /* Figure 6-21 */
+        [2] = { .mask = 0xe007ffffffffffffULL, IA64_MERCED_PMU_ADDR_SEXT },
+        [3] = { .mask = 0xc000000000000fffULL },
+        /* Figure 6-12 */
+        [4 ... 7] = { .mask = 0xffffffff,
+                      .sext_mask = 0xffffffff00000000ULL, .sext_bit = 31 },
+        /* Figure 6-23: software may write any value to bits 60:51. */
+        [8 ... 15] = { .mask = UINT64_MAX },
+        [16] = { .mask = 0xf },                         /* Figure 6-24 */
+        [17] = { .mask = 0xe007fffffffffffdULL, IA64_MERCED_PMU_ADDR_SEXT },
+    },
+};
+
+/*
+ * 251110-003 §10.3: PMC0-15 and PMD0-17 (Table 10-4).  Only the overflow
+ * status registers (Table 10-8) and the 47-bit counters with their overflow
+ * bit (Table 10-7) have their fields modelled.  PAL_PERF_MON_INFO in Table
+ * 10-28 lists PMC0-13 only, but sections 10.3.4 and 10.3.5 define PMC14 and
+ * PMC15, so they stay.
+ */
+static const IA64PmuLayout ia64_pmu_layout_madison = {
+    .pmc = {
+        [0] = { .mask = 0xf1 },
+        [4 ... 15] = { .mask = UINT64_MAX },
+    },
+    .pmd = {
+        [0 ... 3] = { .mask = UINT64_MAX },
+        [4 ... 7] = { .mask = 0x0000ffffffffffffULL,
+                      .sext_mask = 0xffff000000000000ULL, .sext_bit = 47 },
+        [8 ... 17] = { .mask = UINT64_MAX },
+    },
+};
 
 /*
  * Translation-register file size is implementation-specific; the SDM only
@@ -1444,6 +1510,7 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .has_virtualization = false,
     .unaligned_windows = true,
     .pal = &ia64_pal_profile_madison,
+    .pmu = &ia64_pmu_layout_madison,
 };
 
 static const IA64CPUModelDef ia64_cpu_model_montecito = {
@@ -1523,6 +1590,7 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
     .is_montecito = false,
     .unaligned_uc_exempt = true,
     .pal = &ia64_pal_profile_merced,
+    .pmu = &ia64_pmu_layout_merced,
 };
 
 static const TypeInfo ia64_cpu_type_info[] = {

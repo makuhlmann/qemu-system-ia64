@@ -604,6 +604,17 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
     }
 }
 
+/* The value a PMC or PMD holds after a write, per the model's layout. */
+static uint64_t ia64_pmu_written_value(const IA64PmuRegister *reg,
+                                       uint64_t value)
+{
+    value &= reg->mask;
+    if (reg->sext_mask && (value >> reg->sext_bit) & 1) {
+        value |= reg->sext_mask;
+    }
+    return value;
+}
+
 uint64_t ia64_system_read_pmc(CPUIA64State *env, uint32_t index)
 {
     if (index >= IA64_PMC_COUNT) {
@@ -614,10 +625,13 @@ uint64_t ia64_system_read_pmc(CPUIA64State *env, uint32_t index)
 
 void ia64_system_write_pmc(CPUIA64State *env, uint32_t index, uint64_t value)
 {
+    const IA64PmuLayout *pmu = ia64_env_cpu_class(env)->pmu;
+
     if (index >= IA64_PMC_COUNT) {
         return;
     }
-    env->pmc[index] = value;
+    env->pmc[index] = pmu ? ia64_pmu_written_value(&pmu->pmc[index], value) :
+                            value;
 }
 
 uint64_t ia64_system_read_pmc_indexed(CPUIA64State *env, uint64_t index)
@@ -632,11 +646,7 @@ uint64_t ia64_system_read_pmc_indexed(CPUIA64State *env, uint64_t index)
 void ia64_system_write_pmc_indexed(CPUIA64State *env, uint64_t index,
                               uint64_t value)
 {
-    index &= 0xff;
-    if (index >= IA64_PMC_COUNT) {
-        return;
-    }
-    env->pmc[index] = value;
+    ia64_system_write_pmc(env, index & 0xff, value);
 }
 
 uint64_t ia64_system_read_pmd(CPUIA64State *env, uint32_t index)
@@ -665,10 +675,13 @@ uint64_t ia64_system_read_pmd_checked(CPUIA64State *env, uint64_t index)
 
 void ia64_system_write_pmd(CPUIA64State *env, uint32_t index, uint64_t value)
 {
+    const IA64PmuLayout *pmu = ia64_env_cpu_class(env)->pmu;
+
     if (index >= IA64_PMD_COUNT) {
         return;
     }
-    env->pmd[index] = value;
+    env->pmd[index] = pmu ? ia64_pmu_written_value(&pmu->pmd[index], value) :
+                            value;
 }
 
 uint64_t ia64_system_read_pmd_indexed(CPUIA64State *env, uint64_t index)
@@ -683,11 +696,7 @@ uint64_t ia64_system_read_pmd_indexed(CPUIA64State *env, uint64_t index)
 void ia64_system_write_pmd_indexed(CPUIA64State *env, uint64_t index,
                               uint64_t value)
 {
-    index &= 0xff;
-    if (index >= IA64_PMD_COUNT) {
-        return;
-    }
-    env->pmd[index] = value;
+    ia64_system_write_pmd(env, index & 0xff, value);
 }
 
 

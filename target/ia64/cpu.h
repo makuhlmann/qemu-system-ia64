@@ -1880,7 +1880,28 @@ typedef struct IA64PalProfile {
     IA64PalTcLevel tc[IA64_PAL_CACHE_LEVELS][IA64_PAL_CACHE_TYPES];
     uint8_t tc_levels;
     uint8_t unique_tcs;
+
+    /* PAL_PERF_MON_INFO: PAL_WIDTH and the low word of PAL_RETIRED_MASK. */
+    uint8_t perf_counter_width;
+    uint64_t perf_retired_mask;
 } IA64PalProfile;
+
+/*
+ * One PMC or PMD of a model's PMU.  Bits outside mask are ignored: writes
+ * drop them and reads return 0 (SDM Vol. 1 3.1.1), so a register with no
+ * mask reads 0 like an unimplemented one.  Reads return bit sext_bit in the
+ * bits of sext_mask.
+ */
+typedef struct IA64PmuRegister {
+    uint64_t mask;
+    uint64_t sext_mask;
+    uint8_t sext_bit;
+} IA64PmuRegister;
+
+typedef struct IA64PmuLayout {
+    IA64PmuRegister pmc[IA64_PMC_COUNT];
+    IA64PmuRegister pmd[IA64_PMD_COUNT];
+} IA64PmuLayout;
 
 struct IA64CPUClass {
     CPUClass parent_class;
@@ -1943,6 +1964,8 @@ struct IA64CPUClass {
      */
     bool unaligned_uc_exempt;
     const IA64PalProfile *pal;
+    /* NULL keeps all IA64_PMC_COUNT/IA64_PMD_COUNT registers as storage. */
+    const IA64PmuLayout *pmu;
 };
 
 static inline IA64CPU *ia64_cpu_from_cpu_state(CPUState *cs)

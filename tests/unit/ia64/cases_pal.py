@@ -1247,26 +1247,34 @@ test_pal_register_info_reserved_arg = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
-test_pal_perf_mon_info = require_registers("pal_perf_mon_info", [
-    (0x10, *movl_mlx(29, PAL_PERF_BUFFER)),
-    (0x20, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
-    (0x30, 0x00, nop_m(), addl(28, PAL_PERF_MON_INFO, 0), nop_i()),
-    (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, PAL_PROC_ENTRY)),
-    (0x50, *movl_mlx(2, PAL_PERF_BUFFER)),
-    (0x60, 0x00, ld8(20, 2), adds(2, 8, 2), nop_i()),
-    (0x70, 0x00, ld8(21, 2), adds(2, 0x18, 2), nop_i()),
-    (0x80, 0x00, ld8(22, 2), adds(2, 8, 2), nop_i()),
-    (0x90, 0x00, ld8(23, 2), adds(2, 0x18, 2), nop_i()),
-    (0xa0, 0x00, ld8(24, 2), adds(2, 0x20, 2), nop_i()),
-    (0xb0, 0x00, ld8(25, 2), nop_i(), nop_i()),
-    (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
-    (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
-    (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
-], {"ip": 0xc0, "r28": PAL_PERF_MON_INFO, "r8": 0,
-    "r9": 0x08123004, "r10": 0, "r11": 0,
-    "r20": 0x3fff, "r21": 0, "r22": 0x3ffff, "r23": 0,
-    "r24": 0xf0, "r25": 0xf0},
-    entry=0x10)
+def _pal_perf_mon_info_case(name, info, retired_mask, cpu=None):
+    return require_registers(name, [
+        (0x10, *movl_mlx(29, PAL_PERF_BUFFER)),
+        (0x20, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
+        (0x30, 0x00, nop_m(), addl(28, PAL_PERF_MON_INFO, 0), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, PAL_PROC_ENTRY)),
+        (0x50, *movl_mlx(2, PAL_PERF_BUFFER)),
+        (0x60, 0x00, ld8(20, 2), adds(2, 8, 2), nop_i()),
+        (0x70, 0x00, ld8(21, 2), adds(2, 0x18, 2), nop_i()),
+        (0x80, 0x00, ld8(22, 2), adds(2, 8, 2), nop_i()),
+        (0x90, 0x00, ld8(23, 2), adds(2, 0x18, 2), nop_i()),
+        (0xa0, 0x00, ld8(24, 2), adds(2, 0x20, 2), nop_i()),
+        (0xb0, 0x00, ld8(25, 2), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ], {"ip": 0xc0, "r28": PAL_PERF_MON_INFO, "r8": 0,
+        "r9": info, "r10": 0, "r11": 0,
+        "r20": 0x3fff, "r21": 0, "r22": 0x3ffff, "r23": 0,
+        "r24": 0xf0, "r25": retired_mask},
+        entry=0x10, cpu=cpu)
+
+test_pal_perf_mon_info = _pal_perf_mon_info_case(
+    "pal_perf_mon_info", 0x08123004, 0xf0)
+
+# 245320-003 Table 6-24: 32-bit counters; only PMD4 counts retired instructions.
+test_pal_perf_mon_info_merced = _pal_perf_mon_info_case(
+    "pal_perf_mon_info_merced", 0x08122004, 0x10, cpu="merced")
 
 test_pal_perf_mon_info_bad_buffer = require_registers(
     "pal_perf_mon_info_bad_buffer",
@@ -2028,6 +2036,7 @@ CASE_NAMES = (
     'pal_mem_attrib_reserved_arg',
     'pal_mem_for_test',
     'pal_perf_mon_info',
+    'pal_perf_mon_info_merced',
     'pal_perf_mon_info_bad_buffer',
     'pal_perf_mon_info_reserved_arg',
     'pal_platform_addr_bad_type',
