@@ -1231,6 +1231,8 @@ test_speculative_load_no_recovery_tlb_miss_faults = require_registers(
         "r31": IA64_ISR_R | IA64_ISR_SP,
     }, entry=0x10)
 
+# mov r=psr reads PSR{36:35,31:0} only, so the final PSR shows that the retried
+# load cleared PSR.ed.
 test_speculative_load_handler_psr_ed_defers_retry = require_registers(
     "speculative_load_handler_psr_ed_defers_retry", [
         (0x10, *movl_mlx(2, 0xa000000100020000)),
@@ -1241,15 +1243,8 @@ test_speculative_load_handler_psr_ed_defers_retry = require_registers(
          nop_i()),
         (0x50, 0x00, ld8_s_postinc(4, 2, 8), nop_i(),
          nop_i()),
-        (0x60, 0x00, mov_m_psr_gr(8), nop_i(),
-         nop_i()),
-        (0x70, 0x00, nop_m(), nop_i(), nop_i()),
-        (0x80, 0x00, nop_m(), tbit_z(3, 4, 8, 43),
-         nop_i()),
-        (0x90, 0x00, nop_m(), addl(9, 1, 0, qp=3),
-         addl(10, 1, 0, qp=4)),
-        (0xa0, 0x10, nop_m(), nop_i(),
-         br_cond(0xa0, 0xa0)),
+        (0x60, 0x10, nop_m(), nop_i(),
+         br_cond(0x60, 0x60)),
         (IA64_ALT_DTLB_VECTOR, 0x00, mov_m_cr_gr(20, 16),
          nop_i(), nop_i()),
         (IA64_ALT_DTLB_VECTOR + 0x10, *movl_mlx(21, IA64_PSR_ED)),
@@ -1260,12 +1255,11 @@ test_speculative_load_handler_psr_ed_defers_retry = require_registers(
         (IA64_ALT_DTLB_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
          rfi_b()),
     ], {
-        "ip": 0xa0,
+        "ip": 0x60,
         "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_IC | IA64_PSR_DT,
         "r2": 0xa000000100020008,
         "r4_nat": 1,
-        "r9": 1,
-        "r10": 0,
     }, entry=0x10)
 
 test_speculative_unaligned_no_recovery_faults = require_registers(
