@@ -70,7 +70,7 @@ from .encoding import (
     PAL_MC_REGISTER_MEM,
     PAL_MC_RESUME,
     PAL_MEM_ATTRIB,
-    PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     PAL_MERCED_INSERTABLE_PAGE_SIZE_MASK,
     PAL_MERCED_PURGE_PAGE_SIZE_MASK,
     PAL_CACHE_INFO_MERCED_L0_D_1,
@@ -144,6 +144,7 @@ from .encoding import (
     br_ret,
     bundle_words,
     cmp_ltu_unc,
+    extr_u,
     itr_d,
     itr_i,
     ld8,
@@ -927,7 +928,29 @@ test_pal_cache_prot_info_unified_bad_type = require_registers(
 test_pal_mem_attrib = require_registers("pal_mem_attrib",
     pal_call_program(PAL_MEM_ATTRIB),
     {"ip": 0x30, "r28": PAL_MEM_ATTRIB, "r8": 0,
-     "r9": PAL_MEM_ATTRIB_WB_UC_UCE_WC, "r10": 0, "r11": 0}, entry=0x10)
+     "r9": PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE, "r10": 0, "r11": 0},
+    entry=0x10)
+
+# NaTPage (ma 7) is architected (SDM Vol. 2 Table 4-11), so PAL_MEM_ATTRIB
+# reports bit 7 on every model.
+def _pal_mem_attrib_natpage_program():
+    return [
+        (0x10, 0x00, nop_m(), addl(28, PAL_MEM_ATTRIB, 0), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_call(0, 0x20, PAL_PROC_ENTRY)),
+        (0x30, 0x00, nop_m(), extr_u(12, 9, 7, 1), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ]
+
+
+test_pal_mem_attrib_natpage_madison = require_registers(
+    "pal_mem_attrib_natpage_madison", _pal_mem_attrib_natpage_program(),
+    {"ip": 0x40, "r8": 0, "r12": 1}, entry=0x10, cpu="madison")
+
+test_pal_mem_attrib_natpage_merced = require_registers(
+    "pal_mem_attrib_natpage_merced", _pal_mem_attrib_natpage_program(),
+    {"ip": 0x40, "r8": 0, "r12": 1}, entry=0x10, cpu="merced")
 
 test_pal_mem_attrib_reserved_arg = require_registers(
     "pal_mem_attrib_reserved_arg",
@@ -1955,6 +1978,8 @@ CASE_NAMES = (
     'pal_mc_resume_no_context',
     'pal_mc_resume_uc_save_ptr_no_context',
     'pal_mem_attrib',
+    'pal_mem_attrib_natpage_madison',
+    'pal_mem_attrib_natpage_merced',
     'pal_mem_attrib_reserved_arg',
     'pal_mem_for_test',
     'pal_perf_mon_info',

@@ -247,8 +247,10 @@ PAL_RATIO_4_3 = (4 << 32) | 3
 PAL_RATIO_8_1 = (8 << 32) | 1
 PAL_RATIO_2_1 = (2 << 32) | 1
 # WB(0), UC(4), UCE(5) and WC(6) are all implemented by both supported
-# generations (251110-003 sec 12.1; 245320-002 ch. 4 for Merced's WC buffer).
-PAL_MEM_ATTRIB_WB_UC_UCE_WC = (1 << 0) | (1 << 4) | (1 << 5) | (1 << 6)
+# generations (251110-003 sec 12.1; 245320-002 ch. 4 for Merced's WC buffer);
+# NaTPage(7) is architected (SDM Vol. 2 Table 4-11).
+PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE = (
+    (1 << 0) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7))
 # config_info_2{39:32} is alias_boundary (SDM Vol.2 rev 1.1 Fig. 11-18):
 # log2 of the way span, which equals tag_lsb for every modelled cache.
 PAL_CACHE_INFO_L0_I_1 = ((4 << 8) | (6 << 16) |
@@ -551,7 +553,7 @@ __all__ = (
     'PAL_RATIO_4_3',
     'PAL_RATIO_8_1',
     'PAL_RATIO_2_1',
-    'PAL_MEM_ATTRIB_WB_UC_UCE_WC',
+    'PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE',
     'PAL_CACHE_INFO_L0_I_1',
     'PAL_CACHE_INFO_L0_D_1',
     'PAL_CACHE_INFO_L0_2',

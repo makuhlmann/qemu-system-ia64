@@ -751,6 +751,8 @@ pal_mc_resume_new_context_no_context
 pal_mc_resume_no_context
 pal_mc_resume_uc_save_ptr_no_context
 pal_mem_attrib
+pal_mem_attrib_natpage_madison
+pal_mem_attrib_natpage_merced
 pal_mem_attrib_reserved_arg
 pal_mem_for_test
 pal_perf_mon_info

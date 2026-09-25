@@ -1072,11 +1072,14 @@ static const TCGCPUOps ia64_tcg_ops = {
  * ("supports WB, UC, and WC ... The UCE memory attribute is also supported"),
  * and Merced's write-coalescing buffer has a chapter of its own in
  * 245320-002 ch. 4.  This emulation implements all four identically on every
- * model, so every model reports all four.
+ * model, so every model reports all four.  NaTPage (encoding 7) is an
+ * architected attribute, not a model option (SDM Vol. 2 Table 4-11), and
+ * every model implements it.
  */
-#define IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC \
+#define IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE \
     ((1ULL << IA64_PTE_MA_WB) | (1ULL << IA64_PTE_MA_UC) | \
-     (1ULL << IA64_PTE_MA_UCE) | (1ULL << IA64_PTE_MA_WC))
+     (1ULL << IA64_PTE_MA_UCE) | (1ULL << IA64_PTE_MA_WC) | \
+     (1ULL << IA64_PTE_MA_NATPAGE))
 
 /*
  * Itanium 2 (Madison) translation caches, 251110-003 sec 6.1.1 and 6.1.2:
@@ -1105,7 +1108,7 @@ static const IA64PalProfile ia64_pal_profile_madison = {
     .pal_vendor = 1,
     .pal_a_model = 2, .pal_a_revision = 0x23,
     .pal_b_model = 2, .pal_b_revision = 0x23,
-    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 4,
     .cache = {
@@ -1149,7 +1152,7 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     .pal_vendor = 1,
     .pal_a_model = 2, .pal_a_revision = 0x23,
     .pal_b_model = 2, .pal_b_revision = 0x23,
-    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 5,
     .cache = {
@@ -1233,7 +1236,7 @@ static const IA64PalProfile ia64_pal_profile_merced = {
     .pal_vendor = 1,
     .pal_a_model = 8, .pal_a_revision = 0x30,
     .pal_b_model = 8, .pal_b_revision = 0x30,
-    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 4,
     .cache = {
