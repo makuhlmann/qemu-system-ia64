@@ -3198,7 +3198,7 @@ test_rse_br_ret_fill_dtlb_miss_retries_atomically = require_registers(
          adds(7, EIGHT_K_ITIR, 0), nop_i(), nop_i()),
         (IA64_ALT_DTLB_VECTOR + 0x20, 0x00,
          mov_m_gr_cr(7, 21), nop_i(), nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00,
+        (IA64_ALT_DTLB_VECTOR + 0x30, 0x08,
          itc_d(18), adds(29, 0x77, 0),
          nop_i()),
         (IA64_ALT_DTLB_VECTOR + 0x40, 0x10, nop_m(), nop_i(),

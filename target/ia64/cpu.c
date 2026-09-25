@@ -1282,6 +1282,13 @@ static const Property ia64_cpu_properties[] = {
     DEFINE_PROP_UINT32("geographic-id", IA64CPU, geographic_id, UINT32_MAX),
 };
 
+/*
+ * Madison's IA-32 cache descriptors.  The L3 descriptor reports 3 MB even on
+ * larger-cache parts, matching hardware erratum 6.  EDX is architecturally
+ * reserved for this implementation.
+ */
+#define IA64_MADISON_IA32_CPUID_LEAF2 { 0x7e776701, 0x0000008d, 0, 0x80000000 }
+
 static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -1312,6 +1319,9 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     icc->cpuid_version = 0x000000001f010504ULL;
     icc->cpuid_features = IA64_CPUID4_LB;
     icc->ia32_cpuid_version = 0x00000673;
+    memcpy(icc->ia32_cpuid_leaf2,
+           (const uint32_t[4])IA64_MADISON_IA32_CPUID_LEAF2,
+           sizeof(icc->ia32_cpuid_leaf2));
     icc->itr_count = 64;
     icc->dtr_count = 64;
     icc->insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK;
@@ -1331,6 +1341,7 @@ typedef struct IA64CPUModelDef {
     uint64_t cpuid_version;
     uint64_t cpuid_features;
     uint32_t ia32_cpuid_version;
+    uint32_t ia32_cpuid_leaf2[4];
     uint8_t itr_count;
     uint8_t dtr_count;
     uint64_t insertable_page_mask;
@@ -1354,6 +1365,8 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->cpuid_version = model->cpuid_version;
     icc->cpuid_features = model->cpuid_features;
     icc->ia32_cpuid_version = model->ia32_cpuid_version;
+    memcpy(icc->ia32_cpuid_leaf2, model->ia32_cpuid_leaf2,
+           sizeof(icc->ia32_cpuid_leaf2));
     icc->itr_count = model->itr_count;
     icc->dtr_count = model->dtr_count;
     icc->insertable_page_mask = model->insertable_page_mask;
@@ -1386,6 +1399,7 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .cpuid_features = IA64_CPUID4_LB,
     /* P6-class IA-32 engine identity: family 6, model 7, stepping 3. */
     .ia32_cpuid_version = 0x00000673,
+    .ia32_cpuid_leaf2 = IA64_MADISON_IA32_CPUID_LEAF2,
     .itr_count = 64,
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
@@ -1406,6 +1420,7 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
     /* brl and 16-byte atomics; spontaneous deferral stays unimplemented. */
     .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_AO,
     .ia32_cpuid_version = 0x00000673,
+    .ia32_cpuid_leaf2 = IA64_MADISON_IA32_CPUID_LEAF2,
     .itr_count = 64,
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
@@ -1444,6 +1459,11 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
      * with a hardware dump value if one ever surfaces.
      */
     .ia32_cpuid_version = 0x00000708,
+    /*
+     * 245320-003 §8.4 Table 8-2; <L2> in EBX is 0x89, the 4 MB cache of
+     * this model's PAL_CACHE_INFO.
+     */
+    .ia32_cpuid_leaf2 = { 0x00151001, 0x0000891a, 0x009b9690, 0x80000000 },
     .itr_count = 8,
     .dtr_count = 48,
     .insertable_page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK,

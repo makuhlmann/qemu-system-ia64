@@ -2633,16 +2633,25 @@ static void ia64_gen_check_disabled_fp(const Ia64Instruction *insn)
     gen_set_label(done);
 }
 
-/* Instructions gated by the CPUID[4].ao 16-byte atomic capability bit. */
-static bool ia64_insn_needs_16byte_atomics(const Ia64Instruction *insn)
+/*
+ * The CPUID[4] capability bit an optional instruction needs, 0 for none.
+ * clz, mpy4 and mpyshl4 fault only when PR[qp] is 1 (SDM Vol 3 clz, mpy4,
+ * mpyshl4 operation).
+ */
+static uint64_t ia64_insn_cpuid4_feature(const Ia64Instruction *insn)
 {
     switch (insn->opcode) {
     case IA64_OP_LD16:
     case IA64_OP_ST16:
     case IA64_OP_CMP8XCHG16:
-        return true;
+        return IA64_CPUID4_AO;
+    case IA64_OP_CLZ:
+        return IA64_CPUID4_CZ;
+    case IA64_OP_MPY4:
+    case IA64_OP_MPYSHL4:
+        return IA64_CPUID4_X2;
     default:
-        return false;
+        return 0;
     }
 }
 
@@ -2739,6 +2748,22 @@ static IA64PrepareResult ia64_gen_prepare_insn(
                                   insn->raw, insn->slot);
         return IA64_PREPARE_NORETURN;
     }
+    if (ia64_insn_needs_long_branch(insn) &&
+        !(ia64_env_cpu_class(ctx->env)->cpuid_features & IA64_CPUID4_LB)) {
+        /*
+         * 245319-002 Vol. 3, brl: "This instruction is not implemented on the
+         * Intel Itanium processor, which takes an Illegal Operation fault
+         * whenever a long branch instruction is encountered, regardless of
+         * whether the branch is taken or not...  Presence of this
+         * instruction is indicated by a 1 in the lb bit of CPUID register
+         * 4."  The fault ignores the qualifying predicate (SDM Vol 2 §7.4).
+         * Windows keys KF_BRL off that bit and emulates brl from its Illegal
+         * Operation handler when it is clear.
+         */
+        ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
+                                  insn->raw, insn->slot);
+        return IA64_PREPARE_NORETURN;
+    }
     ia64_gen_clear_unc_compare_targets(insn);
     if (insn->clear_p2_before_predicate &&
         insn->operands.common.auxiliary2 != 0) {
@@ -2770,29 +2795,12 @@ static IA64PrepareResult ia64_gen_prepare_insn(
         ia64_gen_predicate_end(skip);
         return IA64_PREPARE_COMPLETE;
     }
-    if (ia64_insn_needs_16byte_atomics(insn) &&
-        !(ia64_env_cpu_class(ctx->env)->cpuid_features & IA64_CPUID4_AO)) {
+    if (ia64_insn_cpuid4_feature(insn) &
+        ~ia64_env_cpu_class(ctx->env)->cpuid_features) {
         /*
-         * The encoding is reserved on a model that clears CPUID[4].ao, so
-         * refuse it the same way an unimplemented opcode is refused.
-         */
-        ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
-                                  insn->raw, insn->slot);
-        if (skip == NULL) {
-            return IA64_PREPARE_NORETURN;
-        }
-        ia64_gen_predicate_end(skip);
-        return IA64_PREPARE_COMPLETE;
-    }
-    if (ia64_insn_needs_long_branch(insn) &&
-        !(ia64_env_cpu_class(ctx->env)->cpuid_features & IA64_CPUID4_LB)) {
-        /*
-         * 245319-002 Vol. 3, brl: "This instruction is not implemented on the
-         * Intel Itanium processor, which takes an Illegal Operation fault
-         * whenever a long branch instruction is encountered...  Presence of
-         * this instruction is indicated by a 1 in the lb bit of CPUID
-         * register 4."  Windows keys KF_BRL off that bit and emulates brl
-         * from its Illegal Operation handler when it is clear.
+         * The instruction is not implemented on a model that clears its
+         * CPUID[4] bit, so refuse it the way an unimplemented opcode is
+         * refused.
          */
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
                                   insn->raw, insn->slot);

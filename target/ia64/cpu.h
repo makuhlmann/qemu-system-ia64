@@ -57,6 +57,8 @@
 #define IA64_CPUID4_LB   (1ULL << 0)  /* brl, long branch */
 #define IA64_CPUID4_SD   (1ULL << 1)  /* spontaneous deferral */
 #define IA64_CPUID4_AO   (1ULL << 2)  /* ld16/st16/cmp8xchg16 atomics */
+#define IA64_CPUID4_CZ   (1ULL << 32) /* clz */
+#define IA64_CPUID4_X2   (1ULL << 33) /* mpy4, mpyshl4 */
 
 /*
  * Direct-mapped lookup for modeled TR/TC entries.  IA-64's minimum page is
@@ -1874,6 +1876,8 @@ struct IA64CPUClass {
      * reports a P6-class identity instead.
      */
     uint32_t ia32_cpuid_version;
+    /* IA-32 CPUID(2) cache and TLB descriptors: EAX, EBX, ECX, EDX. */
+    uint32_t ia32_cpuid_leaf2[4];
     /*
      * Translation-register file sizes.  These are asymmetric on the original
      * Itanium (8 ITR / 48 DTR, 248701-002 §2.5.6); Madison/Montecito use 64 of
