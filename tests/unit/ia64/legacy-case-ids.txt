@@ -766,6 +766,7 @@ pal_platform_addr_io_merced_rejects_itanium2
 pal_platform_addr_unmapped
 pal_pmi_entrypoint
 pal_prefetch_vis
+pal_prefetch_vis_physical
 pal_prefetch_vis_merced_unimplemented
 pal_prefetch_vis_reserved_arg
 pal_proc_entry_virtual_itr

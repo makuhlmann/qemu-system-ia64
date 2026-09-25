@@ -321,13 +321,20 @@ static bool pal_halt(CPUIA64State *env)
 
 static void pal_prefetch_vis(CPUIA64State *env)
 {
-    if (pal_reserved_args_are_zero(env)) {
+    uint64_t trans_type = env->gr[IA64_PAL_GR_ARG1];
+
+    /*
+     * trans_type 0 transitions virtual attributes only and 1 physical or
+     * mixed ones; the three returns after status are reserved (SDM Vol. 2,
+     * PAL_PREFETCH_VISIBILITY).
+     */
+    if (trans_type <= 1 && env->gr[IA64_PAL_GR_ARG2] == 0 &&
+        env->gr[IA64_PAL_GR_ARG3] == 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->gr[IA64_PAL_GR_RESULT1] = (1ULL << 0) | (1ULL << 1);
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
-        env->gr[IA64_PAL_GR_RESULT1] = 0;
     }
+    env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }

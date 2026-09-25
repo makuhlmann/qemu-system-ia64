@@ -852,7 +852,14 @@ test_pal_proc_entry_virtual_itr = require_registers(
 test_pal_prefetch_vis = require_registers("pal_prefetch_vis",
     pal_call_program(PAL_PREFETCH_VIS),
     {"ip": 0x30, "r28": PAL_PREFETCH_VIS, "r8": 0,
-     "r9": ((1 << 0) | (1 << 1)), "r10": 0}, entry=0x10)
+     "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+
+# trans_type 1 (physical or mixed attributes) is defined as well.
+test_pal_prefetch_vis_physical = require_registers(
+    "pal_prefetch_vis_physical",
+    pal_call_program(PAL_PREFETCH_VIS, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PREFETCH_VIS, "r8": 0,
+     "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
 
 test_pal_prefetch_vis_reserved_arg = require_registers(
     "pal_prefetch_vis_reserved_arg",
@@ -1963,6 +1970,7 @@ CASE_NAMES = (
     'pal_platform_addr_unmapped',
     'pal_pmi_entrypoint',
     'pal_prefetch_vis',
+    'pal_prefetch_vis_physical',
     'pal_prefetch_vis_reserved_arg',
     'pal_proc_entry_virtual_itr',
     'pal_impl_proc_response_timeout',
