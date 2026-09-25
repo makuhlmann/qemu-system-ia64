@@ -1813,6 +1813,43 @@ test_rse_uses_rsc_pl_for_access_rights = require_registers(
         "r31": 0,
     }, entry=0x10)
 
+# RSE stores at RSC.pl 0, then 3, then 0 again over a PL0-only page: each
+# level must get its own access-rights check, with no stale translation of
+# the other level (SDM Vol.2 6.5.1).
+test_rse_rsc_pl_change_checks_rights_at_new_level = require_registers(
+    "rse_rsc_pl_change_checks_rights_at_new_level", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+        (0x70, 0x00, mov_m_gr_ar(0, 16), nop_i(), nop_i()),
+        (0x80, *movl_mlx(3, HIGH_TR_BASE + 0x8000)),
+        (0x90, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_RT)),
+        (0xb0, 0x01, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0xc0, 0x00, nop_m(), alloc(1, 1, 0, 0, 0), nop_i()),
+        (0xd0, *movl_mlx(32, 0x1111111111111111)),
+        (0xe0, 0x18, nop_m(), nop_m(), cover_b()),
+        (0xf0, 0x01, flushrs_enc(), nop_i(), nop_i()),
+        (0x100, *movl_mlx(5, IA64_RSC_PL3)),
+        (0x110, 0x01, mov_m_gr_ar(5, 16), nop_i(), nop_i()),
+        (0x120, 0x00, nop_m(), alloc(1, 1, 0, 0, 0), nop_i()),
+        (0x130, *movl_mlx(32, 0x2222222222222222)),
+        (0x140, 0x18, nop_m(), nop_m(), cover_b()),
+        # Faults at pl 3; the handler returns to it at pl 0.
+        (0x150, 0x01, flushrs_enc(), nop_i(), nop_i()),
+        (0x160, 0x09, ld8(8, 3), mov_m_ar_gr(10, 16), adds(4, 8, 3)),
+        (0x170, 0x01, ld8(9, 4), nop_i(), nop_i()),
+        (0x180, 0x10, nop_m(), nop_i(), br_cond(0x180, 0x180)),
+        (IA64_DATA_ACCESS_VECTOR, 0x01, mov_m_gr_ar(0, 16),
+         adds(31, 1, 31), nop_i()),
+        (IA64_DATA_ACCESS_VECTOR + 0x10, 0x10, nop_m(), nop_i(), rfi_b()),
+    ], {
+        "ip": 0x180,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x1111111111111111,
+        "r9": 0x2222222222222222,
+        "r10": 0,
+        "r31": 1,
+    }, entry=0x10)
+
 test_rse_rt_enables_protection_key_checks = require_registers(
     "rse_rt_enables_protection_key_checks", [
         (0x10, *movl_mlx(18, 0x0010000000400661)),
@@ -5552,6 +5589,7 @@ CASE_NAMES = (
     'rse_untracked_return_restores_high_caller_local',
     'rse_untracked_return_resyncs_trimmed_rnat',
     'rse_untracked_return_uses_each_rnat_collection',
+    'rse_rsc_pl_change_checks_rights_at_new_level',
     'rse_uses_rsc_pl_for_access_rights',
     'rse_write_only_rnat_store_preserves_backed_prefix',
     'rse_zero_sol_cover_return_restores_bsp_base',

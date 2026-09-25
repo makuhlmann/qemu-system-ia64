@@ -21,16 +21,26 @@
 #define MMU_IDX_VIRT_CPL1  2
 #define MMU_IDX_VIRT_CPL2  3
 #define MMU_IDX_VIRT_CPL3  4
-#define MMU_IDX_RSE        5
+/*
+ * PSR.rt = 1 RSE references, one index per RSC.pl: the level decides the
+ * access rights, so a change of RSC.pl needs no TLB flush.
+ */
+#define MMU_IDX_RSE_PL0    5
+#define MMU_IDX_RSE_PL1    6
+#define MMU_IDX_RSE_PL2    7
+#define MMU_IDX_RSE_PL3    8
 /* PSR.rt = 0 RSE references: physical, but faults still set ISR.rs. */
-#define MMU_IDX_RSE_PHYS   6
-#define NB_MMU_MODES       7
+#define MMU_IDX_RSE_PHYS   9
+#define NB_MMU_MODES       10
 
 #define MMU_IDX_VIRT_CPL(cpl) (MMU_IDX_VIRT_CPL0 + (cpl))
 #define MMU_IDX_VIRT_MASK \
     (((1u << 4) - 1) << MMU_IDX_VIRT_CPL0)
+#define MMU_IDX_RSE_PL(pl) (MMU_IDX_RSE_PL0 + (pl))
+#define MMU_IDX_RSE_MASK \
+    (((1u << 4) - 1) << MMU_IDX_RSE_PL0)
 #define MMU_IDX_TRANSLATED_MASK \
-    (MMU_IDX_VIRT_MASK | (1u << MMU_IDX_RSE))
+    (MMU_IDX_VIRT_MASK | MMU_IDX_RSE_MASK)
 
 #define IA64_GR_COUNT    128
 #define IA64_STACKED_GR_BASE   32

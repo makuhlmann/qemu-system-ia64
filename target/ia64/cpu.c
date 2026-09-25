@@ -425,7 +425,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     uint32_t rid;
     IA64Exception excp;
     bool is_rse = !is_ifetch &&
-                  (mmu_idx == MMU_IDX_RSE || mmu_idx == MMU_IDX_RSE_PHYS);
+                  ((MMU_IDX_RSE_MASK >> mmu_idx) & 1 ||
+                   mmu_idx == MMU_IDX_RSE_PHYS);
     uint8_t access_level;
     bool virt_translation_enabled;
 
@@ -463,7 +464,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     }
 
     if (is_rse) {
-        access_level = ia64_rsc_pl(cpu->env.ar_rsc);
+        access_level = mmu_idx - MMU_IDX_RSE_PL0;
     } else {
         g_assert(mmu_idx >= MMU_IDX_VIRT_CPL0 &&
                  mmu_idx <= MMU_IDX_VIRT_CPL3);
