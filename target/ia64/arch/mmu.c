@@ -902,6 +902,27 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
     ia64_assert_pending_purge_counts(env);
 }
 
+/*
+ * tlb_translate_nonaccess() (SDM Vol 3 Table 3-1, spec update 248699 item 3b)
+ * checks no protection key, dirty bit or access bit.  Every TLB.ar grants
+ * read at privilege level 0, so the read-rights check restricts only fc and
+ * fc.i at CPL > 0, as their instruction page requires.
+ */
+static IA64Exception ia64_nonaccess_exception_for_pte(uint64_t pte,
+                                                      uint8_t perm)
+{
+    if (!(pte & IA64_PTE_PRESENT)) {
+        return IA64_EXCP_PAGE_NOT_PRESENT;
+    }
+    if (ia64_pte_ma(pte) == IA64_PTE_MA_NATPAGE) {
+        return IA64_EXCP_NAT_CONSUMPTION;
+    }
+    if (!(perm & IA64_TLB_R)) {
+        return IA64_EXCP_DATA_ACCESS;
+    }
+    return IA64_EXCP_NONE;
+}
+
 uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
 {
     CPUState *cs = env_cpu(env);
@@ -926,9 +947,7 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
         if (entry) {
             ia64_tlb_entry_translate(entry, va, ia64_psr_cpl(env->psr), &pa,
                                      &perm);
-            excp = ia64_tlb_exception_for_access(env, entry, perm,
-                                                 IA64_TLB_R, false, false,
-                                                 false);
+            excp = ia64_nonaccess_exception_for_pte(entry->pte, perm);
             if (excp != IA64_EXCP_NONE) {
                 goto tpa_fault;
             }
@@ -939,12 +958,8 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
         if (ia64_vhpt_walk_full(env, va, rid, false, false,
                                 ia64_psr_cpl(env->psr), &pa, &perm, &pte,
                                 &key, &entry)) {
-            excp = entry ?
-                ia64_tlb_exception_for_access(env, entry, perm, IA64_TLB_R,
-                                              false, false, false) :
-                ia64_translation_exception_for_access(env, pte, key, perm,
-                                                      IA64_TLB_R, false,
-                                                      false, false);
+            excp = ia64_nonaccess_exception_for_pte(entry ? entry->pte : pte,
+                                                    perm);
             if (excp != IA64_EXCP_NONE) {
                 goto tpa_fault;
             }
@@ -971,8 +986,7 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
         if (entry) {
             ia64_tlb_entry_translate(entry, va, ia64_psr_cpl(env->psr),
                                      &pa, &perm);
-            excp = ia64_tlb_exception_for_access(
-                env, entry, perm, IA64_TLB_R, false, false, false);
+            excp = ia64_nonaccess_exception_for_pte(entry->pte, perm);
             if (excp != IA64_EXCP_NONE) {
                 goto tpa_fault;
             }
@@ -982,6 +996,7 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
     }
 
 tpa_fault:
+    env->exception_state.fault_addr = va;
     if (env->psr & IA64_PSR_IC) {
         env->cr_ifa = va;
         if (ia64_exception_initializes_iha(excp)) {
@@ -994,8 +1009,13 @@ tpa_fault:
         env->cr_isr = IA64_ISR_NA;
         if (excp == IA64_EXCP_UNIMPL_DATA_ADDR) {
             env->cr_isr |= IA64_GENEX_UNIMPL_DATA_ADDR;
+        } else if (excp == IA64_EXCP_NAT_CONSUMPTION) {
+            /* SDM Vol 2 NaT Consumption vector: ISR.code{7:4} = 2. */
+            env->cr_isr |= IA64_ISR_CODE_NAT_PAGE;
         }
     }
+    env->exception_state.fault_ip = ia64_ip_bundle_addr(env->ip);
+    env->exception_state.exception = excp;
     cs->exception_index = excp;
     cpu_loop_exit(cs);
 }

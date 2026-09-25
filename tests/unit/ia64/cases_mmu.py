@@ -2991,11 +2991,11 @@ test_ssm_pk_invalidates_cached_keyless_access = require_registers(
         "r31": 0x74,
     }, entry=0x10)
 
-test_tpa_key_miss_raises_data_key_miss = require_registers(
-    "tpa_key_miss_raises_data_key_miss", [
+test_tpa_ignores_key_and_access_bit = require_registers(
+    "tpa_ignores_key_and_access_bit", [
         (0x10, *movl_mlx(2, KEY_TEST_VA)),
         (0x20, *movl_mlx(16, KEY_TEST_RR)),
-        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE & ~PTE_ACCESSED)),
         (0x40, *movl_mlx(7, KEY_TEST_ITIR)),
         (0x50, 0x00, mov_rr_write(16, 0), nop_i(),
          nop_i()),
@@ -3012,18 +3012,37 @@ test_tpa_key_miss_raises_data_key_miss = require_registers(
          nop_i()),
         (0xc0, 0x00, tpa(31, 2), nop_i(),
          nop_i()),
-        (IA64_DATA_KEY_MISS_VECTOR, 0x00, mov_m_cr_gr(30, 20),
-         nop_i(), nop_i()),
-        (IA64_DATA_KEY_MISS_VECTOR + 0x10, 0x00, mov_m_cr_gr(31, 17),
-         nop_i(), nop_i()),
-        (IA64_DATA_KEY_MISS_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
-         br_cond(IA64_DATA_KEY_MISS_VECTOR + 0x20,
-                 IA64_DATA_KEY_MISS_VECTOR + 0x20)),
+        (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0xd0)),
     ], {
-        "ip": IA64_DATA_KEY_MISS_VECTOR + 0x20,
+        "ip": 0xd0,
         "exception": IA64_EXCP_NONE,
-        "r30": KEY_TEST_VA,
-        "r31": IA64_ISR_NA,
+        "r31": 0x4001000,
+    }, entry=0x10)
+
+test_tpa_natpage_reports_nonaccess_without_read = require_registers(
+    "tpa_natpage_reports_nonaccess_without_read", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000,
+                           pte_flags=DTR_PTE_NATPAGE),
+        (0x70, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x80, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x90, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(2, HIGH_TR_BASE + 0x208)),
+        (0xb0, 0x00, tpa(31, 2), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR, 0x00,
+         mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_NAT_CONSUMPTION_VECTOR + 0x20,
+                 IA64_NAT_CONSUMPTION_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_NAT_CONSUMPTION_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_NAT_CONSUMPTION,
+        "fault_ip": 0xb0,
+        "r30": HIGH_TR_BASE + 0x208,
+        "r31": IA64_ISR_NA | 0x20,
     }, entry=0x10)
 
 # The non-faulting probe forms evaluate the address with the architected
@@ -6820,7 +6839,8 @@ CASE_NAMES = (
     'tpa_dt_disabled_miss_raises_alt_dtlb',
     'tpa_dt_disabled_uses_dtlb_entry',
     'tpa_indexed_decode',
-    'tpa_key_miss_raises_data_key_miss',
+    'tpa_ignores_key_and_access_bit',
+    'tpa_natpage_reports_nonaccess_without_read',
     'tpa_nat_source_consumes_non_access',
     'tpa_region5_kernel_dtr_large_page',
     'tpa_uses_short_vhpt_walk',
