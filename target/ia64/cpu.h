@@ -57,6 +57,8 @@
 #define IA64_CPUID4_LB   (1ULL << 0)  /* brl, long branch */
 #define IA64_CPUID4_SD   (1ULL << 1)  /* spontaneous deferral */
 #define IA64_CPUID4_AO   (1ULL << 2)  /* ld16/st16/cmp8xchg16 atomics */
+#define IA64_CPUID4_CZ   (1ULL << 32) /* clz */
+#define IA64_CPUID4_X2   (1ULL << 33) /* mpy4, mpyshl4 */
 
 /*
  * Direct-mapped lookup for modeled TR/TC entries.  IA-64's minimum page is

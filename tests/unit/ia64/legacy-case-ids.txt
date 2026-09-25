@@ -88,6 +88,7 @@ clrrrb_b_decode
 clrrrb_pr_b_decode
 clrrrb_rebases_rotating_floating_registers
 clz_decode
+clz_unsupported_true_illegal
 cmp4_eq_imm_decode
 cmp4_eq_ne_or_decode
 cmp4_eq_unc_imm_p0_decode
@@ -632,7 +633,9 @@ mov_to_ivr_illegal
 mov_to_read_only_cr_predicate_false
 mov_um_nat_source_consumes
 mpy4_decode
+mpy4_unsupported_true_illegal
 mpyshl4_decode
+mpyshl4_unsupported_true_illegal
 mux1_brcst_decode
 mux1_rev_decode
 mux2_imm_decode

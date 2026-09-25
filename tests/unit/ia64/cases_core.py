@@ -292,20 +292,24 @@ test_popcnt_decode = require_registers("popcnt_decode", [
      br_cond(0x30, 0x30)),
 ], {"ip": 0x30, "r4": 32, "exception": IA64_EXCP_NONE}, entry=0x10)
 
+# No modelled processor sets CPUID[4].cz or .x2 (251110-003 Table 12-3:
+# bits 63:3 reserved), so clz, mpy4 and mpyshl4 execute only as nops with a
+# false predicate and raise Illegal Operation with a true one.
 test_clz_decode = require_registers("clz_decode", [
-    (0x10, *movl_mlx(3, 0x0000f00000000000)),
-    (0x20, 0x00, nop_m(), clz(4, 3),
-     nop_i()),
-    (0x30, 0x00, nop_m(), clz(5, 0),
-     nop_i()),
-    (0x40, 0x10, nop_m(), nop_i(),
-     br_cond(0x40, 0x40)),
+    (0x10, 0x00, nop_m(), addl(31, 4, 0), adds(4, 0x55, 0)),
+    (0x20, 0x00, mov_cpuid(29, 31), clz(4, 0, qp=1), nop_i()),
+    (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
 ], {
-    "ip": 0x40,
-    "r4": 16,
-    "r5": 64,
+    "ip": 0x30,
+    "r4": 0x55,
+    "r29": 0,
     "exception": IA64_EXCP_NONE,
-}, entry=0x10)
+}, entry=0x10, cpu="merced")
+
+test_clz_unsupported_true_illegal = require_exception(
+    "clz_unsupported_true_illegal", [
+        (0x10, 0x00, nop_m(), clz(4, 0), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="merced")
 
 test_pmpy2_decode = require_registers("pmpy2_decode", [
     (0x10, *movl_mlx(29, 0xffff800000020003)),
@@ -1666,23 +1670,38 @@ test_shl_var_ignored_bit_decode = require_registers(
     ], {"ip": 0x30, "r10": 0x120}, entry=0x10)
 
 test_mpy4_decode = require_registers("mpy4_decode", [
-    (0x10, *movl_mlx(8, 0x00000000ffffffff)),
-    (0x20, 0x00, nop_m(), addl(9, 2, 0),
-     nop_i()),
-    (0x30, 0x00, nop_m(), nop_i(),
-     mpy4(10, 8, 9, ignored=1)),
-    (0x40, 0x10, nop_m(), nop_i(),
-     br_cond(0x40, 0x40)),
-], {"ip": 0x40, "r10": 0x00000001fffffffe}, entry=0x10)
+    (0x10, 0x00, nop_m(), addl(31, 4, 0), adds(10, 0x55, 0)),
+    (0x20, 0x00, mov_cpuid(29, 31), nop_i(),
+     mpy4(10, 0, 0, ignored=1, qp=1)),
+    (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+], {
+    "ip": 0x30,
+    "r10": 0x55,
+    "r29": 1,
+    "exception": IA64_EXCP_NONE,
+}, entry=0x10, cpu="madison")
+
+test_mpy4_unsupported_true_illegal = require_exception(
+    "mpy4_unsupported_true_illegal", [
+        (0x10, 0x00, nop_m(), nop_i(), mpy4(10, 0, 0)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="madison")
 
 test_mpyshl4_decode = require_registers("mpyshl4_decode", [
-    (0x10, *movl_mlx(8, 0x00000002000000ff)),
-    (0x20, *movl_mlx(9, 0xffff000000000003)),
-    (0x30, 0x00, nop_m(), nop_i(),
-     mpyshl4(10, 8, 9, ignored=1)),
-    (0x40, 0x10, nop_m(), nop_i(),
-     br_cond(0x40, 0x40)),
-], {"ip": 0x40, "r10": 0x0000000600000000}, entry=0x10)
+    (0x10, 0x00, nop_m(), addl(31, 4, 0), adds(10, 0x55, 0)),
+    (0x20, 0x00, mov_cpuid(29, 31), nop_i(),
+     mpyshl4(10, 0, 0, ignored=1, qp=1)),
+    (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+], {
+    "ip": 0x30,
+    "r10": 0x55,
+    "r29": 5,
+    "exception": IA64_EXCP_NONE,
+}, entry=0x10, cpu="montecito")
+
+test_mpyshl4_unsupported_true_illegal = require_exception(
+    "mpyshl4_unsupported_true_illegal", [
+        (0x10, 0x00, nop_m(), nop_i(), mpyshl4(10, 0, 0)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="montecito")
 
 test_pshr_decode = require_registers("pshr_decode", [
     (0x10, *movl_mlx(24, 0x800000007fffffff)),
@@ -2980,6 +2999,7 @@ CASE_NAMES = (
     'clrrrb_b_decode',
     'clrrrb_pr_b_decode',
     'clz_decode',
+    'clz_unsupported_true_illegal',
     'cmp4_eq_imm_decode',
     'cmp4_eq_ne_or_decode',
     'cmp4_eq_unc_imm_p0_decode',
@@ -3048,7 +3068,9 @@ CASE_NAMES = (
     'mov_pr_rot_imm_sign_extends',
     'mov_psr_um_reserved_bit_fault',
     'mpy4_decode',
+    'mpy4_unsupported_true_illegal',
     'mpyshl4_decode',
+    'mpyshl4_unsupported_true_illegal',
     'mux1_brcst_decode',
     'mux1_rev_decode',
     'mux2_imm_decode',
