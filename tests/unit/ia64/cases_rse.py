@@ -52,6 +52,7 @@ from .encoding import (
     bundle_words,
     chk_s_i,
     clrrrb_b,
+    clrrrb_pr_b,
     cmp4_eq_imm,
     cmp_eq_imm,
     cover_b,
@@ -79,6 +80,7 @@ from .encoding import (
     mov_b_gr,
     mov_gr_b,
     mov_gr_psr_full,
+    mov_gr_pr,
     mov_i_imm_ar,
     mov_lc_gr,
     mov_m_ar_gr,
@@ -88,6 +90,7 @@ from .encoding import (
     mov_m_gr_cr,
     mov_m_imm_ar,
     mov_m_psr_gr,
+    mov_pr_gr,
     mov_pr_rot_imm,
     movl_mlx,
     nop_b,
@@ -4491,6 +4494,100 @@ test_cover_rfi_rebases_rotating_general_registers = require_registers(
         "cfm_rrb_gr": 31,
     }, entry=0x10)
 
+test_cover_rfi_restores_rotating_predicates_by_physical_number = \
+    require_registers(
+        "cover_rfi_restores_rotating_predicates_by_physical_number", [
+            (0x10, *movl_mlx(2, IA64_PSR_IC)),
+            (0x20, 0x00, mov_gr_psr_full(2), mov_i_imm_ar(66, 1),
+             nop_i()),
+            (0x30, 0x01, nop_m(), mov_pr_rot_imm(1 << 16), nop_i()),
+            # One rotation leaves physical p16 set, but exposes it as the
+            # logical p17 while CFM.rrb.pr is 47.
+            (0x40, 0x13, nop_m(), nop_b(),
+             br_ctop_many(0x40, 0x40)),
+            (0x50, 0x00, nop_m(), mov_pr_gr(8), nop_i()),
+            (0x60, 0x00, break_m(0x42), nop_i(), nop_i()),
+            (0x70, 0x00, nop_m(), adds(9, 1, 9, qp=17),
+             mov_pr_gr(11)),
+            (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+
+            # Linux saves PR before cover and restores it before rfi.  mov
+            # r=pr and mov pr=r both address the physical PR file as though
+            # RRB.PR were zero; cover/rfi rebase the logical view around it.
+            (IA64_BREAK_VECTOR, 0x10, nop_m(), mov_pr_gr(31), cover_b()),
+            (IA64_BREAK_VECTOR + 0x10, 0x00, nop_m(),
+             adds(10, 1, 10, qp=16), mov_gr_pr(31, -2)),
+            (IA64_BREAK_VECTOR + 0x20, *movl_mlx(20, 0x70)),
+            (IA64_BREAK_VECTOR + 0x30, 0x00,
+             mov_m_gr_cr(20, 19), nop_i(), nop_i()),
+            (IA64_BREAK_VECTOR + 0x40, 0x10,
+             nop_m(), nop_i(), rfi_b()),
+        ], {
+            "ip": 0x80,
+            "exception": IA64_EXCP_NONE,
+            "r8": (1 << 16) | 1,
+            "r9": 1,
+            "r10": 1,
+            "r11": (1 << 16) | 1,
+            "cfm_rrb_pr": 47,
+        }, entry=0x10)
+
+test_mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates = \
+    require_registers(
+        "mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates", [
+            (0x10, *movl_mlx(2, IA64_PSR_IC)),
+            (0x20, 0x00, mov_gr_psr_full(2), mov_i_imm_ar(66, 1),
+             nop_i()),
+            (0x30, 0x13, nop_m(), nop_b(), br_ctop_many(0x30, 0x30)),
+            # Physical p16 is logical p17 while CFM.rrb.pr is 47.
+            (0x40, 0x01, nop_m(), mov_pr_rot_imm(1 << 16), nop_i()),
+            (0x50, 0x00, nop_m(), adds(8, 1, 8, qp=17),
+             adds(9, 1, 9, qp=16)),
+            (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+        ], {
+            "ip": 0x60,
+            "exception": IA64_EXCP_NONE,
+            "r8": 1,
+            "r9": 0,
+            "cfm_rrb_pr": 47,
+        }, entry=0x10)
+
+# br.call and br.ret, and clrrrb.pr, change CFM.rrb.pr without rotating: the
+# physical predicates keep their values under the new rename base.
+test_br_call_ret_rebases_rotating_predicates = require_registers(
+    "br_call_ret_rebases_rotating_predicates", [
+        (0x10, 0x00, nop_m(), mov_i_imm_ar(66, 1), nop_i()),
+        (0x20, 0x01, nop_m(), mov_pr_rot_imm(1 << 16), nop_i()),
+        # Physical p16 is logical p17 while CFM.rrb.pr is 47.
+        (0x30, 0x13, nop_m(), nop_b(), br_ctop_many(0x30, 0x30)),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, 0x100)),
+        (0x50, 0x00, nop_m(), adds(9, 1, 9, qp=17), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+        (0x100, 0x00, nop_m(), adds(10, 1, 10, qp=16), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x60,
+        "exception": IA64_EXCP_NONE,
+        "r9": 1,
+        "r10": 1,
+        "cfm_rrb_pr": 47,
+    }, entry=0x10)
+
+test_clrrrb_pr_rebases_rotating_predicates = require_registers(
+    "clrrrb_pr_rebases_rotating_predicates", [
+        (0x10, 0x00, nop_m(), mov_i_imm_ar(66, 1), nop_i()),
+        (0x20, 0x01, nop_m(), mov_pr_rot_imm(1 << 16), nop_i()),
+        (0x30, 0x13, nop_m(), nop_b(), br_ctop_many(0x30, 0x30)),
+        (0x40, 0x13, nop_m(), nop_b(), clrrrb_pr_b()),
+        (0x50, 0x00, nop_m(), adds(10, 1, 10, qp=16), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "exception": IA64_EXCP_NONE,
+        "r10": 1,
+        "cfm_rrb_pr": 0,
+    }, entry=0x10)
+
 test_br_call_ret_rebases_rotating_floating_registers = require_registers(
     "br_call_ret_rebases_rotating_floating_registers", [
         (0x10, *movl_mlx(3, 0x12345678)),
@@ -4965,15 +5062,19 @@ CASE_NAMES = (
     'alloc_predicated_illegal',
     'alloc_requires_group_start',
     'br_call_ret_rebases_rotating_floating_registers',
+    'br_call_ret_rebases_rotating_predicates',
     'br_ctop_strcpy_pipeline_survives_cover_rfi',
     'br_ia_bspstore_mismatch_illegal',
+    'clrrrb_pr_rebases_rotating_predicates',
     'clrrrb_rebases_rotating_floating_registers',
     'cover_b_ignored_fields_decode',
     'cover_requires_group_stop',
     'cover_rfi_rebases_rotating_floating_registers',
     'cover_rfi_rebases_rotating_general_registers',
+    'cover_rfi_restores_rotating_predicates_by_physical_number',
     'gcc_alloc_and_ar_lc',
     'loadrs_rejects_nonzero_rsc_mode',
+    'mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates',
     'postincrement_base_out_of_frame',
     'predicated_off_stacked_gr_destination_does_not_fault',
     'rsc_reserved_field_fault',

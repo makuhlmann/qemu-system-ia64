@@ -744,7 +744,7 @@ static void ia64_rse_restore_frame(CPUIA64State *env, uint32_t preserved,
         env->cfm_sor = 0;
         env->cfm_rrb_gr = 0;
         ia64_set_cfm_rrb_fr(env, 0);
-        env->cfm_rrb_pr = 0;
+        ia64_set_cfm_rrb_pr(env, 0);
         return;
     }
 
@@ -861,7 +861,8 @@ static void ia64_rse_return_to_frame(CPUIA64State *env, uint64_t pfm,
     env->cfm_rrb_gr = (pfm & IA64_CFM_RRB_GR_MASK) >> IA64_CFM_RRB_GR_SHIFT;
     ia64_set_cfm_rrb_fr(env, (pfm & IA64_CFM_RRB_FR_MASK) >>
                              IA64_CFM_RRB_FR_SHIFT);
-    env->cfm_rrb_pr = (pfm & IA64_CFM_RRB_PR_MASK) >> IA64_CFM_RRB_PR_SHIFT;
+    ia64_set_cfm_rrb_pr(env, (pfm & IA64_CFM_RRB_PR_MASK) >>
+                             IA64_CFM_RRB_PR_SHIFT);
     env->rse.rse_bol = ia64_rse_wrap_phys((int32_t)env->rse.rse_bol -
                                       (int32_t)preserved);
 
@@ -1020,7 +1021,7 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
         env->cfm_sor = 0;
         env->cfm_rrb_gr = 0;
         ia64_set_cfm_rrb_fr(env, 0);
-        env->cfm_rrb_pr = 0;
+        ia64_set_cfm_rrb_pr(env, 0);
         ia64_rse_invalidate_non_current(env);
         ia64_alat_invala(env);
         ia64_ia32_enter(env);
@@ -1123,6 +1124,25 @@ static void ia64_rotate_predicates_right(CPUIA64State *env)
     env->pr[IA64_PR_TRUE] = 1;
 }
 
+/*
+ * Change CFM.rrb.pr without rotating: the physical predicates keep their
+ * values, so the logical view in env->pr[] is rebased onto the new base.
+ */
+void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb)
+{
+    uint32_t shift = (new_rrb % 48 + 48 - env->cfm_rrb_pr % 48) % 48;
+
+    if (shift != 0) {
+        uint64_t old[48];
+
+        memcpy(old, &env->pr[IA64_PR_ROTATING_BASE], sizeof(old));
+        for (uint32_t i = 0; i < 48; i++) {
+            env->pr[IA64_PR_ROTATING_BASE + i] = old[(i + shift) % 48];
+        }
+    }
+    env->cfm_rrb_pr = new_rrb;
+}
+
 static void ia64_rotate_loop_regs(CPUIA64State *env)
 {
     ia64_rse_check(env, "ctop");
@@ -1170,7 +1190,7 @@ void ia64_rse_br_call(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
     ia64_set_cfm_rrb_fr(env, 0);
-    env->cfm_rrb_pr = 0;
+    ia64_set_cfm_rrb_pr(env, 0);
     if (!move_outputs) {
         ia64_rse_sync_frame_in(env);
     }
@@ -1218,7 +1238,7 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
     ia64_set_cfm_rrb_fr(env, 0);
-    env->cfm_rrb_pr = 0;
+    ia64_set_cfm_rrb_pr(env, 0);
     ia64_rse_invalidate_non_current(env);
     ia64_alat_invala(env);
     ia64_ia32_enter(env);
@@ -1332,7 +1352,7 @@ void ia64_rse_cover(CPUIA64State *env)
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
     ia64_set_cfm_rrb_fr(env, 0);
-    env->cfm_rrb_pr = 0;
+    ia64_set_cfm_rrb_pr(env, 0);
     ia64_invalidate_stacked_alat(env);
     ia64_rse_check(env, "cover");
     IA64_TRACE_RSE_STATE(env, "cover");
@@ -1524,11 +1544,11 @@ void ia64_rse_clrrrb(CPUIA64State *env, uint32_t predicate_only)
      */
     ia64_rse_sync_frame_out(env);
     if (predicate_only) {
-        env->cfm_rrb_pr = 0;
+        ia64_set_cfm_rrb_pr(env, 0);
     } else {
         env->cfm_rrb_gr = 0;
         ia64_set_cfm_rrb_fr(env, 0);
-        env->cfm_rrb_pr = 0;
+        ia64_set_cfm_rrb_pr(env, 0);
     }
     ia64_rse_sync_frame_in(env);
     ia64_invalidate_stacked_alat(env);

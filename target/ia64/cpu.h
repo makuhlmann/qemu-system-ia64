@@ -1146,6 +1146,7 @@ static inline void ia64_rse_mark_gr_dirty(CPUIA64State *env, uint32_t reg)
 }
 
 void ia64_set_cfm_rrb_fr(CPUIA64State *env, uint32_t new_rrb);
+void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb);
 void ia64_flush_suppressed_tlb(CPUIA64State *env);
 void ia64_firmware_debug_capture(CPUIA64State *env, uint16_t vector,
                                  bool collected);

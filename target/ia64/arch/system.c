@@ -20,12 +20,29 @@
 
 
 static void ia64_swap_banked_gr(CPUIA64State *env);
+
+/*
+ * env->pr[] holds the logical (renamed) view.  mov r=pr, mov pr= and
+ * mov pr.rot= address the predicates as though CFM.rrb.pr were 0 (SDM Vol 1
+ * 4.3.4, Vol 3 mov pr), so bit i is physical predicate i.
+ */
+static uint32_t ia64_pr_logical_index(const CPUIA64State *env,
+                                      uint32_t physical)
+{
+    if (physical < IA64_PR_ROTATING_BASE) {
+        return physical;
+    }
+    return IA64_PR_ROTATING_BASE +
+           (physical - IA64_PR_ROTATING_BASE + 48 - env->cfm_rrb_pr % 48) %
+           48;
+}
+
 uint64_t ia64_system_read_pr(CPUIA64State *env)
 {
     uint64_t value = 0;
 
     for (uint32_t i = 0; i < IA64_PR_COUNT; i++) {
-        value |= (env->pr[i] & 1) << i;
+        value |= (env->pr[ia64_pr_logical_index(env, i)] & 1) << i;
     }
 
     return value;
@@ -115,7 +132,7 @@ void ia64_system_write_pr(CPUIA64State *env, uint64_t value, uint64_t mask)
     if (ctpop64(mask) > IA64_PR_COUNT / 2) {
         for (uint32_t i = 1; i < IA64_PR_COUNT; i++) {
             if (mask & (1ULL << i)) {
-                env->pr[i] = (value >> i) & 1;
+                env->pr[ia64_pr_logical_index(env, i)] = (value >> i) & 1;
             }
         }
         env->pr[IA64_PR_TRUE] = 1;
@@ -125,7 +142,7 @@ void ia64_system_write_pr(CPUIA64State *env, uint64_t value, uint64_t mask)
         uint32_t i = ctz64(mask);
 
         mask &= mask - 1;
-        env->pr[i] = (value >> i) & 1;
+        env->pr[ia64_pr_logical_index(env, i)] = (value >> i) & 1;
     }
     env->pr[IA64_PR_TRUE] = 1;
 }
