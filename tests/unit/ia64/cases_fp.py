@@ -4306,6 +4306,186 @@ test_scalar_muladd_f0_signed_zero_is_pure_multiply = require_registers(
     }, entry=0x10)
 
 
+test_fp_nan_register_priority = require_registers(
+    "fp_nan_register_priority", [
+        (0x10, *movl_mlx(2, 0x7ff80000000000a1)),
+        (0x20, *movl_mlx(3, 0xfff80000000000b2)),
+        (0x30, *movl_mlx(4, 0x7ff80000000000c3)),
+        (0x40, *movl_mlx(5, 0x3ff0000000000000)),
+        (0x50, 0x09, setf_d(6, 2), setf_d(7, 3), nop_i()),
+        (0x60, 0x09, setf_d(8, 4), setf_d(9, 5), nop_i()),
+        # fsub takes the NaN of f2, fmpy the NaN of f4.
+        (0x70, 0x1c, nop_m(), fsub_d_s0(10, 6, 7), nop_b()),
+        (0x80, 0x1c, nop_m(), fmpy_s0(11, 6, 7), nop_b()),
+        # NaN priority is f4, then f2, then f3 (SDM Vol 1 5.4.6).
+        (0x90, 0x0d, nop_m(), fma_s0(12, 6, 7, 8), nop_i()),
+        (0xa0, 0x0d, nop_m(), fma_s0(13, 6, 9, 8), nop_i()),
+        # fadd is decoded from fma with f4=f1.
+        (0xb0, 0x0d, nop_m(), fma_s0(14, 6, 1, 7), nop_i()),
+        (0xc0, *movl_mlx(20, 0x7fc000a17fc000a2)),
+        (0xd0, *movl_mlx(21, 0xffc000b17fc000b2)),
+        (0xe0, *movl_mlx(22, 0x7fc000c1ffc000c2)),
+        (0xf0, *movl_mlx(23, 0x3f8000003f800000)),
+        (0x100, 0x09, setf_sig(20, 20), setf_sig(21, 21), nop_i()),
+        (0x110, 0x09, setf_sig(22, 22), setf_sig(23, 23), nop_i()),
+        (0x120, 0x0d, nop_m(), fpma(24, 22, 20, 21), nop_i()),
+        (0x130, 0x0d, nop_m(), fpma(25, 22, 20, 23), nop_i()),
+        (0x140, 0x10, nop_m(), nop_i(), br_cond(0x140, 0x140)),
+    ], {
+        "ip": 0x140,
+        "f10": ExpectedFP(*binary64_to_spill(0xfff80000000000b2)),
+        "f11": ExpectedFP(*binary64_to_spill(0xfff80000000000b2)),
+        "f12": ExpectedFP(*binary64_to_spill(0xfff80000000000b2)),
+        "f13": ExpectedFP(*binary64_to_spill(0x7ff80000000000c3)),
+        "f14": ExpectedFP(*binary64_to_spill(0xfff80000000000b2)),
+        "f24": ExpectedFP(0xffc000b17fc000b2, 0x1003e),
+        "f25": ExpectedFP(0x7fc000c1ffc000c2, 0x1003e),
+        "ar_fpsr": DEFAULT_FPSR,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+# With f2 = f0, fpma, fpms and fpnma compute only the product (SDM Vol 3
+# fpma, fpms, fpnma).
+_FP_SIGNED_ZERO_SF0_RC_SHIFT = FPSR_SF0_SHIFT + 4
+_FP_SIGNED_ZERO_PARALLEL_FPSR = (
+    (DEFAULT_FPSR & ~(3 << _FP_SIGNED_ZERO_SF0_RC_SHIFT)) |
+    (1 << _FP_SIGNED_ZERO_SF0_RC_SHIFT)
+)
+
+test_parallel_muladd_f0_signed_zero_is_pure_multiply = require_registers(
+    "parallel_muladd_f0_signed_zero_is_pure_multiply", [
+        (0x10, *movl_mlx(2, _FP_SIGNED_ZERO_PARALLEL_FPSR)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        # Packed (-0, +0) multiplied by (+1, +1).
+        (0x30, *movl_mlx(3, 0x8000000000000000)),
+        (0x40, *movl_mlx(4, 0x3f8000003f800000)),
+        (0x50, 0x09, setf_sig(6, 3), setf_sig(7, 4), nop_i()),
+        (0x60, 0x0d, nop_m(), fpma(8, 0, 6, 7, sf=1), nop_i()),
+        # Round-down must not turn the low +0 product into -0 via -f0.
+        (0x70, 0x0d, nop_m(), fpms(9, 0, 6, 7, sf=0), nop_i()),
+        (0x80, 0x0d, nop_m(), fpnma(10, 0, 6, 7, sf=2), nop_i()),
+        (0x90, 0x00, getf_sig(8, 8), nop_i(), nop_i()),
+        (0xa0, 0x00, getf_sig(9, 9), nop_i(), nop_i()),
+        (0xb0, 0x00, getf_sig(10, 10), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+    ], {
+        "ip": 0xc0,
+        "r8": 0x8000000000000000,
+        "r9": 0x8000000000000000,
+        "r10": 0x0000000080000000,
+        "f8": ExpectedFP(0x8000000000000000, 0x1003e),
+        "f9": ExpectedFP(0x8000000000000000, 0x1003e),
+        "f10": ExpectedFP(0x0000000080000000, 0x1003e),
+        "ar_fpsr": _FP_SIGNED_ZERO_PARALLEL_FPSR,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fpma_packed_inexact_trap_maps_lane_fpa = require_registers(
+    "fpma_packed_inexact_trap_maps_lane_fpa", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 5))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        # HI is an RN tie with an odd retained LSB; LO rounds downward.
+        (0x30, *movl_mlx(3, 0x3fc000003fa00000)),
+        (0x40, *movl_mlx(4, 0x3f8000013f800001)),
+        (0x50, 0x09, setf_sig(6, 3), setf_sig(7, 4), nop_i()),
+        (0x60, 0x0d, nop_m(), fpma(8, 0, 6, 7, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x6201,
+        "f8": ExpectedFP(0x3fc000023fa00001, 0x1003e),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 5)) |
+                    (0x20 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fpma_packed_overflow_reports_concurrent_masked_inexact = require_registers(
+    "fpma_packed_overflow_reports_concurrent_masked_inexact", [
+        # Enable O but leave I masked.  Figure 5-12 still requires ISR.i.
+        # The enabled O response keeps the biased exponent modulo 2^8 (SDM
+        # Vol 1 5.4.2): 255 here, so the lane has the bits of a NaN.
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 3))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        # The high product overflows and its significand rounds upward.
+        (0x30, *movl_mlx(3, 0x7f4000003f800000)),
+        (0x40, *movl_mlx(4, 0x400000013f800000)),
+        (0x50, 0x09, setf_sig(6, 3), setf_sig(7, 4), nop_i()),
+        (0x60, 0x0d, nop_m(), fpma(8, 0, 6, 7, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        # HI O/I/FPA are bits 11/13/14 even though global I is masked.
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x6801,
+        "f8": ExpectedFP(0x7fc000023f800000, 0x1003e),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 3)) |
+                    (0x28 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fpma_packed_enabled_ou_wraps_and_maps_lanes = require_registers(
+    "fpma_packed_enabled_ou_wraps_and_maps_lanes", [
+        (0x10, *movl_mlx(
+            2, DEFAULT_FPSR & ~((1 << 3) | (1 << 4)))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        # High max-finite * 2 overflows; low min-normal * 0.5 underflows.
+        (0x30, *movl_mlx(3, 0x7f7fffff00800000)),
+        (0x40, *movl_mlx(4, 0x400000003f000000)),
+        (0x50, 0x09, setf_sig(6, 3), setf_sig(7, 4), nop_i()),
+        (0x60, 0x0d, nop_m(), fpma(8, 0, 6, 7, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        # HI O is bit 11; concurrent LO U is bit 8.
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x0901,
+        # Enabled packed O/U keeps the biased exponent modulo 2^8 (SDM Vol 1
+        # 5.4.2, 5.4.3): 255 for 2^128 and 0 for 2^-127.
+        "f8": ExpectedFP(0x7fffffff00000000, 0x1003e),
+        "ar_fpsr": ((DEFAULT_FPSR & ~((1 << 3) | (1 << 4))) |
+                    (0x18 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fpma_packed_ftz_sets_ui_and_traps_inexact = require_registers(
+    "fpma_packed_ftz_sets_ui_and_traps_inexact", [
+        # Enable FTZ and I while leaving U masked.
+        (0x10, *movl_mlx(
+            2, (DEFAULT_FPSR | (1 << FPSR_SF0_SHIFT)) & ~(1 << 5))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        # High min-normal * 0.5 is exact but tiny; low 1.0 * 1.0 is exact.
+        (0x30, *movl_mlx(3, 0x008000003f800000)),
+        (0x40, *movl_mlx(4, 0x3f0000003f800000)),
+        (0x50, 0x09, setf_sig(6, 3), setf_sig(7, 4), nop_i()),
+        (0x60, 0x0d, nop_m(), fpma(8, 0, 6, 7, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        # FTZ sets U|I; only enabled HI I is reported and FPA stays clear.
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x2001,
+        "f8": ExpectedFP(0x000000003f800000, 0x1003e),
+        "ar_fpsr": (((DEFAULT_FPSR | (1 << FPSR_SF0_SHIFT)) &
+                     ~(1 << 5)) |
+                    (0x30 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+
 def _fp_representation_case(name, value, width, model):
     if width == 32:
         value &= 0xffffffff
@@ -4451,6 +4631,7 @@ CASE_NAMES = (
     'fp_muladd_wre1_enabled_exact_underflow_wraps',
     'fp_muladd_wre1_enabled_overflow_wraps_and_sets_fpa',
     'fp_muladd_wre1_fused_cancellation',
+    'fp_nan_register_priority',
     'fp_parallel_natval_propagates',
     'fp_unary_natval_propagates',
     'fp_writes_set_psr_mfl_mfh',
@@ -4464,6 +4645,10 @@ CASE_NAMES = (
     'fpcvt_parallel_decode',
     'fpcvt_parallel_natval_propagates',
     'fpcvt_simd_high_lane_fault_isr',
+    'fpma_packed_enabled_ou_wraps_and_maps_lanes',
+    'fpma_packed_ftz_sets_ui_and_traps_inexact',
+    'fpma_packed_inexact_trap_maps_lane_fpa',
+    'fpma_packed_overflow_reports_concurrent_masked_inexact',
     'fpma_parallel_decode',
     'fpma_parallel_natval_propagates',
     'fpma_simd_high_lane_fault_isr',
@@ -4570,6 +4755,7 @@ CASE_NAMES = (
     'ldfs_preserves_single_nan_payload',
     'masked_invalid_gives_negative_qnan_indefinite',
     'nop_f_decode',
+    'parallel_muladd_f0_signed_zero_is_pure_multiply',
     'predicated_off_disabled_fp_does_not_fault',
     'scalar_muladd_f0_signed_zero_is_pure_multiply',
     'setf_exp_decode',

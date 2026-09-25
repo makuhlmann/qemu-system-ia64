@@ -147,6 +147,9 @@ static uint32_t ia64_fpsr_sf_shift(uint32_t sf);
 static uint64_t ia64_fpsr_sf_controls(const CPUIA64State *env, uint32_t sf);
 static void ia64_fp_simd_fault_end(CPUIA64State *env, uint32_t sf,
                                    int hi_soft, int lo_soft);
+static void ia64_fp_simd_end(CPUIA64State *env, uint32_t sf,
+                             uint32_t hi_flags, uint32_t lo_flags,
+                             uint32_t hi_trap, uint32_t lo_trap);
 
 static floatx80 ia64_register_format_to_floatx80(CPUIA64State *env,
                                                   bool sign, uint32_t exp,
@@ -1927,29 +1930,110 @@ static void ia64_do_fpcvt(CPUIA64State *env, uint32_t r1, uint32_t r2,
     ia64_fr_write_sig(env, r1, ia64_pack_fp32_lanes(hi, lo));
 }
 
+static IA64FPReg ia64_fp_single_to_reg(uint32_t bits)
+{
+    uint32_t exp = (bits >> 23) & 0xff;
+    uint64_t frac = (uint64_t)(bits & 0x7fffff) << 40;
+    IA64FPReg value = { .sign = bits >> 31 };
+
+    if (exp == 0xff) {
+        value.exp = IA64_FP_EXP_SPECIAL;
+        value.sig = IA64_FP_INT_BIT | frac;
+    } else if (exp == 0) {
+        value.exp = frac ? IA64_FP_BIAS - 126 : 0;
+        value.sig = frac;
+    } else {
+        value.exp = IA64_FP_BIAS - 127 + exp;
+        value.sig = IA64_FP_INT_BIT | frac;
+    }
+    return value;
+}
+
+/*
+ * The single-format lane of a rounded result.  The enabled O and U
+ * responses keep the biased exponent modulo 2^8 (SDM Vol 1 5.4.2, 5.4.3).
+ */
+static uint32_t ia64_fp_rounded_to_single(const IA64FPRounded *rounded)
+{
+    uint32_t bits = (uint32_t)rounded->sign << 31;
+
+    if (rounded->exp == IA64_FP_EXP_SPECIAL) {
+        return bits | 0x7f800000;
+    }
+    if (!(rounded->sig & IA64_FP_INT_BIT)) {
+        return bits | (uint32_t)(rounded->sig >> 40);
+    }
+    return bits | (((rounded->exp - IA64_FP_BIAS + 127) & 0xff) << 23) |
+           ((uint32_t)(rounded->sig >> 40) & 0x7fffff);
+}
+
+/*
+ * One lane of fpma, fpms or fpnma: the fma operand checks, the exact
+ * result and one rounding in the single format (SDM Vol 3 fpma, fpms,
+ * fpnma; Vol 1 Table 5-6).  The negations apply only to a numeric result.
+ */
 static uint32_t ia64_fpma_lane(uint32_t addend_bits, uint32_t multiplicand_bits,
                                uint32_t multiplier_bits, uint32_t form,
-                               float_status *status)
+                               bool has_addend, const IA64FPFormat *fmt,
+                               uint32_t *flags, uint32_t *trap)
 {
-    /*
-     * The negation applies only when no operand is a NaN (SDM Vol 3 fpms,
-     * fpnma); softfloat picks the NaN before it applies these flags.
-     */
-    int flags = form == 1 ? float_muladd_negate_c :
-                form == 2 ? float_muladd_negate_product : 0;
+    IA64FPReg a = ia64_fp_single_to_reg(multiplicand_bits);
+    IA64FPReg b = ia64_fp_single_to_reg(multiplier_bits);
+    IA64FPReg c = ia64_fp_single_to_reg(has_addend ? addend_bits : 0);
+    bool negate_product = form == 2;
+    bool negate_addend = form == 1;
+    bool product_sign = a.sign ^ b.sign ^ negate_product;
+    bool product_inf = ia64_fpr_is_inf(&a) || ia64_fpr_is_inf(&b);
+    IA64FPExact exact;
+    IA64FPRounded rounded;
 
-    return float32_val(float32_muladd(make_float32(multiplicand_bits),
-                                      make_float32(multiplier_bits),
-                                      make_float32(addend_bits),
-                                      flags, status));
+    *flags = 0;
+    *trap = 0;
+    if (ia64_fpr_is_nan(&a) || ia64_fpr_is_nan(&b) ||
+        ia64_fpr_is_nan(&c)) {
+        if (ia64_fpr_is_snan(&a) || ia64_fpr_is_snan(&b) ||
+            ia64_fpr_is_snan(&c)) {
+            *flags = IA64_FP_FLAG_V;
+        }
+        /* NaN operand priority is f4, f2, f3 (Vol 1 5.4.6). */
+        return (ia64_fpr_is_nan(&b) ? multiplier_bits :
+                ia64_fpr_is_nan(&c) ? addend_bits :
+                multiplicand_bits) | 0x00400000;
+    }
+    if ((product_inf && (a.sig == 0 || b.sig == 0)) ||
+        (product_inf && ia64_fpr_is_inf(&c) &&
+         product_sign != (c.sign ^ negate_addend))) {
+        *flags = IA64_FP_FLAG_V;
+        return 0xffc00000;
+    }
+    if (ia64_fpr_is_unnormal(&a) || ia64_fpr_is_unnormal(&b) ||
+        ia64_fpr_is_unnormal(&c)) {
+        *flags = IA64_FP_FLAG_D;
+    }
+    if (product_inf || ia64_fpr_is_inf(&c)) {
+        return ((uint32_t)(product_inf ? product_sign :
+                           c.sign ^ negate_addend) << 31) | 0x7f800000;
+    }
+    if (!ia64_fpa_muladd(&exact, &a, &b, has_addend ? &c : NULL,
+                         negate_product, negate_addend, fmt->rc)) {
+        return (uint32_t)exact.sign << 31;
+    }
+    ia64_fpa_round(&rounded, &exact, fmt);
+    *flags |= rounded.flags;
+    *trap = rounded.trap;
+    return ia64_fp_rounded_to_single(&rounded);
 }
 
 static void ia64_do_fpma(CPUIA64State *env, uint32_t r1, uint32_t r2,
                          uint32_t r3, uint32_t r4, uint32_t form,
                          uint32_t sf)
 {
-    float_status hi_status = env->fp.fp_status;
-    float_status lo_status = env->fp.fp_status;
+    bool has_addend = r2 != IA64_FR_ZERO_INDEX;
+    IA64FPFormat fmt;
+    uint32_t hi_flags;
+    uint32_t lo_flags;
+    uint32_t hi_trap;
+    uint32_t lo_trap;
     uint32_t hi;
     uint32_t lo;
 
@@ -1957,12 +2041,15 @@ static void ia64_do_fpma(CPUIA64State *env, uint32_t r1, uint32_t r2,
         return;
     }
 
+    /* A pair of singles ignores the pc and wre controls (Table 5-6). */
+    ia64_fpa_format(&fmt, ia64_fpsr_sf_controls(env, sf) & ~2ULL, 1,
+                    ia64_fp_active_traps(env, sf));
     hi = ia64_fpma_lane(env->fp.fr[r2] >> 32, env->fp.fr[r3] >> 32,
-                        env->fp.fr[r4] >> 32, form, &hi_status);
+                        env->fp.fr[r4] >> 32, form, has_addend, &fmt,
+                        &hi_flags, &hi_trap);
     lo = ia64_fpma_lane(env->fp.fr[r2], env->fp.fr[r3], env->fp.fr[r4], form,
-                        &lo_status);
-    ia64_fp_simd_fault_end(env, sf, get_float_exception_flags(&hi_status),
-                           get_float_exception_flags(&lo_status));
+                        has_addend, &fmt, &lo_flags, &lo_trap);
+    ia64_fp_simd_end(env, sf, hi_flags, lo_flags, hi_trap, lo_trap);
 
     ia64_fr_write_sig(env, r1, ia64_pack_fp32_lanes(hi, lo));
 }
@@ -2026,19 +2113,30 @@ static uint64_t ia64_fp_soft_flags_to_ia64(int soft)
 
 /*
  * A parallel FP fault reports the high lane in ISR.code{3:0} and the low
- * lane in ISR.code{7:4} (SDM Vol 2 Floating-point Fault vector).
+ * lane in ISR.code{7:4} (SDM Vol 2 Floating-point Fault vector); a trap
+ * reports them in ISR.code{14:11} and {10:7} (Vol 2 Table 8-3).  The lane
+ * trap bits arrive in the high-lane positions.
  */
-static void ia64_fp_simd_fault_end(CPUIA64State *env, uint32_t sf,
-                                   int hi_soft, int lo_soft)
+static void ia64_fp_simd_end(CPUIA64State *env, uint32_t sf,
+                             uint32_t hi_flags, uint32_t lo_flags,
+                             uint32_t hi_trap, uint32_t lo_trap)
 {
     uint64_t traps = ia64_fp_active_traps(env, sf);
-    uint64_t hi_fault = ia64_fp_soft_flags_to_ia64(hi_soft) & ~traps & 0x7;
-    uint64_t lo_fault = ia64_fp_soft_flags_to_ia64(lo_soft) & ~traps & 0x7;
+    uint64_t hi_fault = hi_flags & ~traps & 0x7;
+    uint64_t lo_fault = lo_flags & ~traps & 0x7;
 
-    set_float_exception_flags(hi_soft | lo_soft, &env->fp.fp_status);
     if (hi_fault || lo_fault) {
         ia64_raise_fp_fault(env, hi_fault | (lo_fault << 4));
     }
+    env->fp.transaction.flags |= hi_flags | lo_flags;
+    env->fp.transaction.trap |= hi_trap | (lo_trap >> 4);
+}
+
+static void ia64_fp_simd_fault_end(CPUIA64State *env, uint32_t sf,
+                                   int hi_soft, int lo_soft)
+{
+    ia64_fp_simd_end(env, sf, ia64_fp_soft_flags_to_ia64(hi_soft),
+                     ia64_fp_soft_flags_to_ia64(lo_soft), 0, 0);
 }
 
 static void ia64_fp_restore_state(CPUIA64State *env)
