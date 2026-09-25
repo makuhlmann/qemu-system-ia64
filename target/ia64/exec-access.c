@@ -264,6 +264,24 @@ bool ia64_exec_probe_host(CPUIA64State *env, uint64_t addr, int size,
     return flags == 0 && *host != NULL;
 }
 
+/*
+ * Host address behind a guest page whose TLB entry is present and needs no
+ * slow path for this access type: no MMIO, watchpoint, pending dirty tracking
+ * or plugin memory callback.  Unlike a probe it never faults, fills the TLB
+ * or clears TLB_NOTDIRTY.  The address is valid only until the TLB changes,
+ * so a caller keeps it for the rest of one helper at most.
+ */
+void *ia64_exec_direct_host(CPUIA64State *env, uint64_t addr,
+                            MMUAccessType access_type, int mmu_idx)
+{
+#ifdef CONFIG_PLUGIN
+    if (env_cpu(env)->neg.plugin_mem_cbs) {
+        return NULL;
+    }
+#endif
+    return tlb_vaddr_to_host(env, addr, access_type, mmu_idx);
+}
+
 bool ia64_exec_probe_writeback_ram(CPUIA64State *env, uint64_t addr,
                                    int size, MMUAccessType access_type,
                                    bool *direct, uintptr_t ra)

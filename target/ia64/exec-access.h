@@ -51,6 +51,8 @@ void ia64_exec_probe_write(CPUIA64State *env, uint64_t addr, int size,
 bool ia64_exec_probe_host(CPUIA64State *env, uint64_t addr, int size,
                           MMUAccessType access_type, int mmu_idx,
                           void **host, uintptr_t ra);
+void *ia64_exec_direct_host(CPUIA64State *env, uint64_t addr,
+                            MMUAccessType access_type, int mmu_idx);
 bool ia64_exec_probe_writeback_ram(CPUIA64State *env, uint64_t addr,
                                    int size, MMUAccessType access_type,
                                    bool *direct, uintptr_t ra);
