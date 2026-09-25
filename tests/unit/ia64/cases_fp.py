@@ -4486,6 +4486,53 @@ test_fpma_packed_ftz_sets_ui_and_traps_inexact = require_registers(
     }, entry=0x10)
 
 
+test_fpcvt_packed_inexact_trap_maps_high_fpa = require_registers(
+    "fpcvt_packed_inexact_trap_maps_high_fpa", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 5))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        # High +1.75 rounds away from zero; low +1.25 rounds toward zero.
+        (0x30, *movl_mlx(3, 0x3fe000003fa00000)),
+        (0x40, 0x00, setf_sig(6, 3), nop_i(), nop_i()),
+        (0x50, 0x0d, nop_m(), fpcvt_fx(8, 6, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        # HI I/FPA are ISR.code[13:14], LO I is bit 9.
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x6201,
+        "f8": ExpectedFP(0x0000000200000001, 0x1003e),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 5)) |
+                    (0x20 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fpcvt_packed_inexact_trap_maps_low_fpa = require_registers(
+    "fpcvt_packed_inexact_trap_maps_low_fpa", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 5))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        # Reverse the lanes to distinguish ISR.fpa[LO] from ISR.fpa[HI].
+        (0x30, *movl_mlx(3, 0x3fa000003fe00000)),
+        (0x40, 0x00, setf_sig(6, 3), nop_i(), nop_i()),
+        (0x50, 0x0d, nop_m(), fpcvt_fx(8, 6, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        # HI I is bit 13; LO I/FPA are bits 9:10.
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x2601,
+        "f8": ExpectedFP(0x0000000100000002, 0x1003e),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 5)) |
+                    (0x20 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+
 def _fp_representation_case(name, value, width, model):
     if width == 32:
         value &= 0xffffffff
@@ -4642,6 +4689,8 @@ CASE_NAMES = (
     'fpcmp_qnan_quiet_with_invalid_enabled',
     'fpcmp_simd_high_lane_fault_isr',
     'fpcvt_masked_invalid_lane_indefinite',
+    'fpcvt_packed_inexact_trap_maps_high_fpa',
+    'fpcvt_packed_inexact_trap_maps_low_fpa',
     'fpcvt_parallel_decode',
     'fpcvt_parallel_natval_propagates',
     'fpcvt_simd_high_lane_fault_isr',

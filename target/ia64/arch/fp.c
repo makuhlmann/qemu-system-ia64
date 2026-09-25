@@ -1871,20 +1871,27 @@ static void ia64_do_fpcmp(CPUIA64State *env, uint32_t r1, uint32_t r2,
 }
 
 static uint32_t ia64_fpcvt_lane(uint32_t value, bool is_unsigned,
-                                bool is_trunc, float_status *status)
+                                bool is_trunc, float_status *status,
+                                bool *fpa)
 {
     float32 f = make_float32(value);
+    float_status chop = *status;
     uint32_t result;
+    uint32_t truncated;
 
     if (is_unsigned) {
         result = is_trunc ?
             float32_to_uint32_round_to_zero(f, status) :
             float32_to_uint32(f, status);
+        truncated = float32_to_uint32_round_to_zero(f, &chop);
     } else {
         result = is_trunc ?
             (uint32_t)float32_to_int32_round_to_zero(f, status) :
             (uint32_t)float32_to_int32(f, status);
+        truncated = float32_to_int32_round_to_zero(f, &chop);
     }
+    /* A result other than the truncated one grew in magnitude. */
+    *fpa = result != truncated;
     /*
      * An unrepresentable lane is the 32-bit integer indefinite, not a
      * saturated value (SDM Vol 3 fpcvt.fx).
@@ -1893,16 +1900,29 @@ static uint32_t ia64_fpcvt_lane(uint32_t value, bool is_unsigned,
            0x80000000U : result;
 }
 
+/* An enabled Inexact trap of one result, with its ISR.fpa (Figure 5-12). */
+static uint32_t ia64_fp_inexact_trap(uint64_t traps, uint64_t flags,
+                                     bool fpa)
+{
+    if (!(flags & IA64_FP_FLAG_I) || (traps & IA64_FP_FLAG_I)) {
+        return 0;
+    }
+    return IA64_FP_TRAP_I | (fpa ? IA64_FP_TRAP_FPA : 0);
+}
+
 static void ia64_do_fpcvt(CPUIA64State *env, uint32_t r1, uint32_t r2,
                           uint32_t is_unsigned, uint32_t is_trunc,
                           uint32_t sf)
 {
     float_status hi_status = env->fp.fp_status;
     float_status lo_status = env->fp.fp_status;
+    uint64_t traps = ia64_fp_active_traps(env, sf);
+    uint64_t hi_flags;
+    uint64_t lo_flags;
     uint32_t hi;
     uint32_t lo;
-    int hi_soft;
-    int lo_soft;
+    bool hi_fpa;
+    bool lo_fpa;
 
     if (ia64_fr_nat_get(env, r2)) {
         ia64_fr_write_nat(env, r1);
@@ -1910,22 +1930,16 @@ static void ia64_do_fpcvt(CPUIA64State *env, uint32_t r1, uint32_t r2,
     }
 
     hi = ia64_fpcvt_lane(env->fp.fr[r2] >> 32, is_unsigned != 0,
-                         is_trunc != 0, &hi_status);
+                         is_trunc != 0, &hi_status, &hi_fpa);
     lo = ia64_fpcvt_lane(env->fp.fr[r2], is_unsigned != 0,
-                         is_trunc != 0, &lo_status);
-    hi_soft = get_float_exception_flags(&hi_status);
-    lo_soft = get_float_exception_flags(&lo_status);
-
-    {
-        uint64_t traps = ia64_fp_active_traps(env, sf);
-        uint64_t hi_fault = ia64_fp_soft_flags_to_ia64(hi_soft) & ~traps & 0x7;
-        uint64_t lo_fault = ia64_fp_soft_flags_to_ia64(lo_soft) & ~traps & 0x7;
-
-        set_float_exception_flags(hi_soft | lo_soft, &env->fp.fp_status);
-        if (hi_fault || lo_fault) {
-            ia64_raise_fp_fault(env, hi_fault | (lo_fault << 4));
-        }
-    }
+                         is_trunc != 0, &lo_status, &lo_fpa);
+    hi_flags = ia64_fp_soft_flags_to_ia64(
+        get_float_exception_flags(&hi_status));
+    lo_flags = ia64_fp_soft_flags_to_ia64(
+        get_float_exception_flags(&lo_status));
+    ia64_fp_simd_end(env, sf, hi_flags, lo_flags,
+                     ia64_fp_inexact_trap(traps, hi_flags, hi_fpa),
+                     ia64_fp_inexact_trap(traps, lo_flags, lo_fpa));
 
     ia64_fr_write_sig(env, r1, ia64_pack_fp32_lanes(hi, lo));
 }
