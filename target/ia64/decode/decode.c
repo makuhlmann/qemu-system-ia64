@@ -1225,10 +1225,8 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             return insn;
         }
         if (ia64_is_b_break(raw)) {
-            Ia64Instruction insn =
-                ia64_base_insn(IA64_OP_BREAK, unit, raw, address, slot);
-            insn.operands.decoder.imm = ia64_immu21(raw);
-            return insn;
+            /* The b_unit_form ignores imm21: IIM gets 0 (SDM Vol 3 break). */
+            return ia64_base_insn(IA64_OP_BREAK, unit, raw, address, slot);
         }
 
         /*

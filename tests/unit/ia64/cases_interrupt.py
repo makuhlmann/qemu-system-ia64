@@ -89,6 +89,7 @@ from .encoding import (
     br_cond,
     br_indirect,
     br_ret,
+    break_b,
     break_f,
     break_m,
     break_x_mlx,
@@ -1779,6 +1780,25 @@ test_exception_break_x = require_registers("exception_break_x", [
     "fault_imm": 0x32b,
     "r8": 0x32b,
 }, entry=0x100000)
+
+# break.b ignores imm21 and places 0 in IIM (SDM Vol 3 break).
+test_exception_break_b_iim_zero = require_registers(
+    "exception_break_b_iim_zero", [
+        (0x100000, *movl_mlx(2, 1 << 13)),
+        (0x100010, 0x10, mov_gr_psr_full(2), nop_i(),
+         br_cond(0x100010, 0x10)),
+        (0x10, 0x11, nop_m(), nop_i(), break_b(0x1abcde)),
+        (IA64_BREAK_VECTOR, 0x00, mov_m_cr_gr(8, 24), nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_BREAK_VECTOR + 0x20, IA64_BREAK_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_BREAK_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "fault_ip": 0x10,
+        "fault_imm": 0,
+        "r8": 0,
+    }, entry=0x100000)
 
 test_exception_records_slot_ri = require_registers(
     "exception_records_slot_ri", [
@@ -5270,6 +5290,7 @@ CASE_NAMES = (
     'cover_saves_interrupted_cfm_to_ifs',
     'exception_break',
     'exception_break_f',
+    'exception_break_b_iim_zero',
     'exception_break_x',
     'exception_clears_ifs_keeps_cfm',
     'exception_entry_initializes_psr',

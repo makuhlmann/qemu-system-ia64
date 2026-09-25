@@ -53,8 +53,12 @@ def hint_x_mlx(imm62, qp=0):
     )
     return (0x04, nop_m(), l_slot, x_slot)
 
-def break_b():
-    return 0
+def break_b(imm=0, qp=0):
+    return (
+        bitfield(imm & 0xfffff, 6, 20)
+        | bitfield((imm >> 20) & 1, 36, 1)
+        | bitfield(qp, 0, 6)
+    )
 
 def break_f(imm=0, qp=0):
     return (

@@ -173,6 +173,7 @@ dtr_match_ignores_vrn
 epc_b_ignored_fields_decode
 exception_break
 exception_break_f
+exception_break_b_iim_zero
 exception_break_x
 exception_clears_ifs_keeps_cfm
 exception_entry_initializes_psr
