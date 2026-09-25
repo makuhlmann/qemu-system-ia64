@@ -4024,6 +4024,25 @@ test_tpa_dt_disabled_miss_raises_alt_dtlb = require_registers(
         "r31": IA64_ISR_NA,
     }, entry=0x10)
 
+# SDM Vol. 3 tpa: with PSR.dt = 0 and PSR.ic = 0 a DTLB miss is a Data
+# Nested TLB fault.
+test_tpa_dt_disabled_miss_with_ic_clear_raises_data_nested_tlb = (
+    require_registers(
+        "tpa_dt_disabled_miss_with_ic_clear_raises_data_nested_tlb", [
+            (0x10, *movl_mlx(2, HIGH_TR_BASE + 0x90000)),
+            (0x20, 0x00, adds(19, 0, 0), nop_i(), nop_i()),
+            (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+            (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+            (0x50, 0x00, tpa(31, 2), nop_i(), nop_i()),
+            (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+            (IA64_DATA_NESTED_TLB_VECTOR, 0x10, nop_m(), nop_i(),
+             br_cond(IA64_DATA_NESTED_TLB_VECTOR,
+                     IA64_DATA_NESTED_TLB_VECTOR)),
+        ], {
+            "ip": IA64_DATA_NESTED_TLB_VECTOR,
+            "exception": IA64_EXCP_NONE,
+        }, entry=0x10))
+
 test_tpa_uses_short_vhpt_walk = require_registers(
     "tpa_uses_short_vhpt_walk", [
         (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
@@ -7062,6 +7081,7 @@ CASE_NAMES = (
     'thash_same_reg_unimplemented_va_sets_nat',
     'thash_uses_pta_with_walker_disabled',
     'tpa_dt_disabled_miss_raises_alt_dtlb',
+    'tpa_dt_disabled_miss_with_ic_clear_raises_data_nested_tlb',
     'tpa_dt_disabled_uses_dtlb_entry',
     'tpa_indexed_decode',
     'tpa_ignores_key_and_access_bit',

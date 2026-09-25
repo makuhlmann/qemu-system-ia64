@@ -975,7 +975,9 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
             }
             return pa;
         }
-        excp = IA64_EXCP_ALT_DTLB;
+        /* SDM Vol. 3 tpa: with PSR.dt = 0 a miss nests when PSR.ic is 0. */
+        excp = ia64_data_nested_tlb_active(env) ? IA64_EXCP_DATA_NESTED_TLB :
+                                                  IA64_EXCP_ALT_DTLB;
     }
 
 tpa_fault:
