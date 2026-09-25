@@ -372,3 +372,54 @@ void ia64_fpa_round(IA64FPRounded *out, const IA64FPExact *x,
         }
     }
 }
+
+static int ia64_fpa_compare_magnitude(const IA64FPReg *a, const IA64FPReg *b)
+{
+    int32_t aexp;
+    int32_t bexp;
+    uint64_t asig;
+    uint64_t bsig;
+    int shift;
+
+    if (ia64_fpr_is_inf(a) || ia64_fpr_is_inf(b)) {
+        return ia64_fpr_is_inf(a) - ia64_fpr_is_inf(b);
+    }
+    shift = clz64(a->sig);
+    aexp = ia64_fpa_value_exp(a) - shift;
+    asig = a->sig << shift;
+    shift = clz64(b->sig);
+    bexp = ia64_fpa_value_exp(b) - shift;
+    bsig = b->sig << shift;
+    if (aexp != bexp) {
+        return aexp < bexp ? -1 : 1;
+    }
+    return asig < bsig ? -1 : asig > bsig;
+}
+
+/*
+ * Order two supported non-NaN operands by value, or by magnitude: zeros and
+ * pseudo-zeros are equal, unnormals count by their value.
+ */
+int ia64_fpa_compare(const IA64FPReg *a, const IA64FPReg *b, bool magnitude)
+{
+    bool asign = !magnitude && a->sign;
+    bool bsign = !magnitude && b->sign;
+    bool azero = ia64_fpr_is_zero_value(a);
+    bool bzero = ia64_fpr_is_zero_value(b);
+    int order;
+
+    if (azero && bzero) {
+        return 0;
+    }
+    if (azero) {
+        return bsign ? 1 : -1;
+    }
+    if (bzero) {
+        return asign ? -1 : 1;
+    }
+    if (asign != bsign) {
+        return asign ? -1 : 1;
+    }
+    order = ia64_fpa_compare_magnitude(a, b);
+    return asign ? -order : order;
+}

@@ -130,5 +130,7 @@ bool ia64_fpa_muladd(IA64FPExact *out, const IA64FPReg *a,
                      bool negate_product, bool negate_addend, uint32_t rc);
 void ia64_fpa_round(IA64FPRounded *out, const IA64FPExact *x,
                     const IA64FPFormat *fmt);
+int ia64_fpa_compare(const IA64FPReg *a, const IA64FPReg *b,
+                     bool magnitude);
 
 #endif /* TARGET_IA64_ARCH_FP_ARITH_H */

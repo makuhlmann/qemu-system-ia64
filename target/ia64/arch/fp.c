@@ -699,10 +699,40 @@ void ia64_fp_xma(CPUIA64State *env, uint32_t r1, uint32_t r2,
     }
 }
 
-static void ia64_do_fcmp(CPUIA64State *env, uint32_t p1, uint32_t p2,
-                         uint32_t r2, uint32_t r3, uint32_t cond_code)
+/*
+ * Supported non-NaN operands compare by value in the full register range;
+ * an unsupported operand is unordered with V, a NaN unordered with V when
+ * it is an SNaN or the relation signals (lt, le), and an unnormal sets D
+ * (SDM Vol 3 fcmp, Vol 1 Figure 5-11).  Returns the ordering, or 2 for
+ * unordered.
+ */
+static int ia64_fp_compare_checked(CPUIA64State *env, uint32_t sf,
+                                   const IA64FPReg *a, const IA64FPReg *b,
+                                   bool quiet, bool magnitude)
 {
-    FloatRelation rel;
+    if (ia64_fpr_is_unsupported(a) || ia64_fpr_is_unsupported(b)) {
+        ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_V);
+        return 2;
+    }
+    if (ia64_fpr_is_nan(a) || ia64_fpr_is_nan(b)) {
+        if (!quiet || ia64_fpr_is_snan(a) || ia64_fpr_is_snan(b)) {
+            ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_V);
+        }
+        return 2;
+    }
+    if (ia64_fpr_is_unnormal(a) || ia64_fpr_is_unnormal(b)) {
+        ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_D);
+    }
+    return ia64_fpa_compare(a, b, magnitude);
+}
+
+static void ia64_do_fcmp(CPUIA64State *env, uint32_t p1, uint32_t p2,
+                         uint32_t r2, uint32_t r3, uint32_t cond_code,
+                         uint32_t sf)
+{
+    IA64FPReg left;
+    IA64FPReg right;
+    int order;
     bool cond;
 
     if (ia64_fr_nat_get(env, r2) || ia64_fr_nat_get(env, r3)) {
@@ -711,34 +741,25 @@ static void ia64_do_fcmp(CPUIA64State *env, uint32_t p1, uint32_t p2,
         return;
     }
 
-    /*
-     * fcmp.eq/.neq (cond 0) and fcmp.unord/.ord (cond 3) are quiet: an
-     * unordered (QNaN) operand does not raise Invalid.  Only fcmp.lt/.le
-     * (cond 1/2) signal.  Using softfloat's signaling compare for every
-     * relation wrongly set V (and could take an FP fault) on a QNaN.
-     */
-    if ((cond_code & 3) == 0 || (cond_code & 3) == 3) {
-        rel = floatx80_compare_quiet(ia64_fr_to_floatx80(env, r2),
-                                     ia64_fr_to_floatx80(env, r3),
-                                     &env->fp.fp_status);
-    } else {
-        rel = floatx80_compare(ia64_fr_to_floatx80(env, r2),
-                               ia64_fr_to_floatx80(env, r3),
-                               &env->fp.fp_status);
-    }
+    left = ia64_fr_reg(env, r2);
+    right = ia64_fr_reg(env, r3);
+    /* eq and unord (and their negations) are quiet on a QNaN. */
+    order = ia64_fp_compare_checked(env, sf, &left, &right,
+                                    (cond_code & 3) == 0 ||
+                                    (cond_code & 3) == 3, false);
 
     switch (cond_code & 3) {
     case 0:
-        cond = rel == float_relation_equal;
+        cond = order == 0;
         break;
     case 1:
-        cond = rel == float_relation_less;
+        cond = order == -1;
         break;
     case 2:
-        cond = rel == float_relation_less || rel == float_relation_equal;
+        cond = order == -1 || order == 0;
         break;
     default:
-        cond = rel == float_relation_unordered;
+        cond = order == 2;
         break;
     }
 
@@ -749,49 +770,47 @@ static void ia64_do_fcmp(CPUIA64State *env, uint32_t p1, uint32_t p2,
 /* ---- FP min/max (F8 forms select f3 on equality or NaN) ---- */
 
 static void ia64_fminmax(CPUIA64State *env, uint32_t r1, uint32_t r2,
-                         uint32_t r3, bool is_max, bool is_abs)
+                         uint32_t r3, bool is_max, bool is_abs, uint32_t sf)
 {
-    floatx80 left;
-    floatx80 right;
-    FloatRelation rel;
+    IA64FPReg left;
+    IA64FPReg right;
+    int order;
     bool take_left;
 
     if (ia64_fr_write_nat_if_any2(env, r1, r2, r3)) {
         return;
     }
 
-    left = ia64_fr_to_floatx80(env, r2);
-    right = ia64_fr_to_floatx80(env, r3);
-    rel = floatx80_compare(is_abs ? floatx80_abs(left) : left,
-                           is_abs ? floatx80_abs(right) : right,
-                           &env->fp.fp_status);
-    take_left = is_max ? rel == float_relation_greater :
-                         rel == float_relation_less;
+    left = ia64_fr_reg(env, r2);
+    right = ia64_fr_reg(env, r3);
+    /* Invalid is signaled as for fcmp.lt (SDM Vol 3 fmin). */
+    order = ia64_fp_compare_checked(env, sf, &left, &right, false, is_abs);
+    take_left = is_max ? order == 1 : order == -1;
     ia64_fr_copy(env, r1, take_left ? r2 : r3, 1);
 }
 
 static void ia64_do_fmin(CPUIA64State *env, uint32_t r1, uint32_t r2,
-                         uint32_t r3)
+                         uint32_t r3, uint32_t sf)
 {
-    ia64_fminmax(env, r1, r2, r3, false, false);
+    ia64_fminmax(env, r1, r2, r3, false, false, sf);
 }
 
 static void ia64_do_fmax(CPUIA64State *env, uint32_t r1, uint32_t r2,
-                         uint32_t r3)
+                         uint32_t r3, uint32_t sf)
 {
-    ia64_fminmax(env, r1, r2, r3, true, false);
+    ia64_fminmax(env, r1, r2, r3, true, false, sf);
 }
 
 static void ia64_do_famin(CPUIA64State *env, uint32_t r1, uint32_t r2,
-                          uint32_t r3)
+                          uint32_t r3, uint32_t sf)
 {
-    ia64_fminmax(env, r1, r2, r3, false, true);
+    ia64_fminmax(env, r1, r2, r3, false, true, sf);
 }
 
 static void ia64_do_famax(CPUIA64State *env, uint32_t r1, uint32_t r2,
-                          uint32_t r3)
+                          uint32_t r3, uint32_t sf)
 {
-    ia64_fminmax(env, r1, r2, r3, true, true);
+    ia64_fminmax(env, r1, r2, r3, true, true, sf);
 }
 
 /* ---- FP reciprocal approximation (frcpa: ~1/x in table index 0) ---- */
@@ -2735,7 +2754,8 @@ void ia64_fp_fcmp(CPUIA64State *env, uint32_t p1, uint32_t p2, uint32_t r2,
                  uint32_t r3, uint32_t cond_code, uint32_t context)
 {
     ia64_fp_begin_context(env, context);
-    ia64_do_fcmp(env, p1, p2, r2, r3, cond_code);
+    ia64_do_fcmp(env, p1, p2, r2, r3, cond_code,
+                 ia64_fp_context_sf(context));
     ia64_fp_end_context(env, context);
 }
 
@@ -2744,7 +2764,7 @@ void ia64_fp_fcmp(CPUIA64State *env, uint32_t p1, uint32_t p2, uint32_t r2,
                        uint32_t r3, uint32_t context)                       \
     {                                                                       \
         ia64_fp_begin_context(env, context);                                \
-        ia64_do_##name(env, r1, r2, r3);                                   \
+        ia64_do_##name(env, r1, r2, r3, ia64_fp_context_sf(context));      \
         ia64_fp_end_context(env, context);                                  \
     }
 
