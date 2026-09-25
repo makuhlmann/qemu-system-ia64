@@ -2668,7 +2668,11 @@ test_fcvt_fxu_preserves_sig_payload = require_registers(
     ], {
         "ip": 0x40,
         "f7": ExpectedFP(0x2a, 0x1003e),
-        "ar_fpsr": DEFAULT_FPSR,
+        # A setf.sig integer below 2^63 is an unnormal: D (SDM Vol 1
+        # Table 5-2, Vol 3 fcvt.fx).
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT))),
         "exception": IA64_EXCP_NONE,
     },
     entry=0x10)
@@ -4736,6 +4740,210 @@ test_fmin_qnan_suppresses_unnormal_d = require_registers(
     }, entry=0x10)
 
 
+test_fcvt_inexact_trap_magnitude_roundup_sets_fpa = require_registers(
+    "fcvt_inexact_trap_magnitude_roundup_sets_fpa", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 5))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x3ffc000000000000)),  # +1.75
+        (0x40, 0x00, setf_d(6, 3), nop_i(), nop_i()),
+        (0x50, 0x0d, nop_m(), fcvt_fx(8, 6, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "r10": (IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) |
+                (1 << 14) | 0x2001),
+        "f8": ExpectedFP(2, 0x1003e),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 5)) |
+                    (0x20 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fcvt_inexact_trap_magnitude_rounddown_clears_fpa = require_registers(
+    "fcvt_inexact_trap_magnitude_rounddown_clears_fpa", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 5))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x3ff4000000000000)),  # +1.25
+        (0x40, 0x00, setf_d(6, 3), nop_i(), nop_i()),
+        (0x50, 0x0d, nop_m(),
+         fcvt_fxu(8, 6, trunc=False, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x2001,
+        "f8": ExpectedFP(1, 0x1003e),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 5)) |
+                    (0x20 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fcvt_wre_invalid_suppresses_d_and_oi = require_registers(
+    "fcvt_wre_invalid_suppresses_d_and_oi", [
+        # Normalizing this unnormal operand leaves exponent 0x18000.  V is
+        # therefore the only response; the enabled D fault is lower priority.
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 1))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(20, 1, 0), addl(21, 0x1803f, 0), nop_i()),
+        (0x40, 0x09, st8(3, 20), st8(4, 21), nop_i()),
+        (0x50, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x60, 0x0d, nop_m(), fcvt_fx(8, 6, sf=0), nop_i()),
+        (0x70, 0x0d, nop_m(), fcvt_fxu(9, 6, sf=0), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "f8": ExpectedFP(0x8000000000000000, 0x1003e),
+        "f9": ExpectedFP(0x8000000000000000, 0x1003e),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 1)) |
+                    (1 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fcvt_wre_tiny_reports_i_not_u = require_registers(
+    "fcvt_wre_tiny_reports_i_not_u", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(20, 0x8000, 0)),
+        (0x20, *movl_mlx(21, 0x8000000000000000)),
+        (0x30, 0x09, st8(3, 21), st8(4, 20), nop_i()),
+        (0x40, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x50, 0x0d, nop_m(), fcvt_fxu(8, 6, sf=0), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "f8": ExpectedFP(0, 0x1003e),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (0x20 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+_FCVT_WRE_RC_SHIFT = FPSR_SF0_SHIFT + 4
+_FCVT_WRE_ROUND_UP_FPSR = (
+    (DEFAULT_FPSR & ~(1 << 5) & ~(3 << _FCVT_WRE_RC_SHIFT)) |
+    (2 << _FCVT_WRE_RC_SHIFT)
+)
+
+# fcvt.fx reads the register value: a binary64 denormal from setf.d is a
+# tiny unnormal, not an integer significand (SDM Vol 3 fcvt.fx, setf).
+test_fcvt_fx_double_denormal_is_tiny_value = require_registers(
+    "fcvt_fx_double_denormal_is_tiny_value", [
+        (0x10, *movl_mlx(2, 0x8000000000000001)),
+        (0x20, *movl_mlx(3, 0x0000000000000003)),
+        (0x30, 0x09, setf_d(6, 2), setf_d(7, 3), nop_i()),
+        (0x40, 0x0d, nop_m(), fcvt_fx(8, 6, trunc=True, sf=0), nop_i()),
+        (0x50, 0x0d, nop_m(), fcvt_fxu(9, 7, trunc=True, sf=0), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "f8": ExpectedFP(0, 0x1003e),
+        "f9": ExpectedFP(0, 0x1003e),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (0x22 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fcvt_wre_tiny_round_up_traps_i_with_fpa = require_registers(
+    "fcvt_wre_tiny_round_up_traps_i_with_fpa", [
+        (0x10, *movl_mlx(2, _FCVT_WRE_ROUND_UP_FPSR)),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(20, 0x8000, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(21, 0x8000000000000000)),
+        (0x50, 0x09, st8(3, 21), st8(4, 20), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fcvt_fx(8, 6, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "r10": (IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) |
+                (1 << 14) | 0x2001),
+        "f8": ExpectedFP(1, 0x1003e),
+        "ar_fpsr": (_FCVT_WRE_ROUND_UP_FPSR |
+                    (0x20 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fcvt_unnormal_d_fault_rolls_back = require_registers(
+    "fcvt_unnormal_d_fault_rolls_back", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 1))[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x12345, 0)),
+        (0x40, 0x09, st8(3, 0), st8(4, 21), nop_i()),
+        (0x50, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x60, 0x05, *movl_mlx(5, 0x4000000000000000)[1:]),
+        (0x70, 0x01, setf_d(8, 5), nop_i(), nop_i()),
+        (0x80, 0x0d, nop_m(), fcvt_fx(8, 6, sf=0), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x10,
+                 IA64_FP_FAULT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 2,
+        "f8": ExpectedFP(*binary64_to_spill(0x4000000000000000)),
+        "ar_fpsr": DEFAULT_FPSR & ~(1 << 1),
+    }, entry=0x10)
+
+test_fcvt_unnormal_sets_d = require_registers(
+    "fcvt_unnormal_sets_d", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x12345, 0)),
+        # A raw pseudo-zero remains an unnormal input even though its value is 0.
+        (0x20, 0x09, st8(3, 0), st8(4, 21), nop_i()),
+        (0x30, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x40, 0x0d, nop_m(), fcvt_fx(8, 6, sf=0), nop_i()),
+        (0x50, 0x0d, nop_m(), fcvt_fxu(9, 6, trunc=True, sf=1), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "f8": ExpectedFP(0, 0x1003e),
+        "f9": ExpectedFP(0, 0x1003e),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT)) |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fcvt_invalid_precedes_unnormal_d = require_registers(
+    "fcvt_invalid_precedes_unnormal_d", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 1))[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x10080, 0)),
+        # Unnormal finite value which normalizes beyond the integer range.
+        (0x40, 0x05, *movl_mlx(22, 0x4000000000000000)[1:]),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fcvt_fx(8, 6, sf=0), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+        "f8": ExpectedFP(0x8000000000000000, 0x1003e),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 1)) |
+                    (1 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+
+
+
+
 def _fp_representation_case(name, value, width, model):
     if width == 32:
         value &= 0xffffffff
@@ -4821,12 +5029,21 @@ CASE_NAMES = (
     'fcmp_unnormal_d_fault_restores_predicates',
     'fcmp_unnormal_sets_d',
     'fcmp_wre1_orders_full_register_range',
+    'fcvt_fx_double_denormal_is_tiny_value',
     'fcvt_fx_signed_trunc',
     'fcvt_fxu_double_to_uint',
     'fcvt_fx_integer_form_invalid_fault',
     'fcvt_fx_out_of_range_integer_indefinite',
     'fcvt_fxu_preserves_sig_payload',
     'fcvt_fxu_rounds_sf0',
+    'fcvt_inexact_trap_magnitude_rounddown_clears_fpa',
+    'fcvt_inexact_trap_magnitude_roundup_sets_fpa',
+    'fcvt_invalid_precedes_unnormal_d',
+    'fcvt_unnormal_d_fault_rolls_back',
+    'fcvt_unnormal_sets_d',
+    'fcvt_wre_invalid_suppresses_d_and_oi',
+    'fcvt_wre_tiny_reports_i_not_u',
+    'fcvt_wre_tiny_round_up_traps_i_with_fpa',
     'fcvt_xf_extreme_signed_round_trip',
     'fcvt_xf_ignores_prior_precision',
     'fcvt_xf_natval_propagates',

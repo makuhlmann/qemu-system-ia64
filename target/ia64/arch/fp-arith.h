@@ -132,5 +132,7 @@ void ia64_fpa_round(IA64FPRounded *out, const IA64FPExact *x,
                     const IA64FPFormat *fmt);
 int ia64_fpa_compare(const IA64FPReg *a, const IA64FPReg *b,
                      bool magnitude);
+bool ia64_fpa_to_integer(const IA64FPReg *v, bool is_signed, uint32_t rc,
+                         uint64_t *result, bool *inexact, bool *fpa);
 
 #endif /* TARGET_IA64_ARCH_FP_ARITH_H */

@@ -423,3 +423,43 @@ int ia64_fpa_compare(const IA64FPReg *a, const IA64FPReg *b, bool magnitude)
     order = ia64_fpa_compare_magnitude(a, b);
     return asign ? -order : order;
 }
+
+/*
+ * Round a finite value to a 64-bit integer by rc: two's complement when
+ * is_signed, else unsigned.  Returns false when the rounded value does
+ * not fit.  fpa reports a magnitude that grew in rounding.
+ */
+bool ia64_fpa_to_integer(const IA64FPReg *v, bool is_signed, uint32_t rc,
+                         uint64_t *result, bool *inexact, bool *fpa)
+{
+    __uint128_t mag;
+    int32_t shift;
+    int lz;
+
+    *inexact = false;
+    *fpa = false;
+    if (v->sig == 0) {
+        *result = 0;
+        return true;
+    }
+    lz = clz64(v->sig);
+    /* The integer part is (sig << lz << 64) >> shift. */
+    shift = IA64_FP_BIAS + 127 + lz - ia64_fpa_value_exp(v);
+    if (shift < 64) {
+        return false;
+    }
+    mag = ia64_fpa_round_bits((__uint128_t)(v->sig << lz) << 64, false,
+                              shift, rc, v->sign, inexact, fpa);
+    if (is_signed) {
+        if (mag > (v->sign ? 1ULL << 63 : (1ULL << 63) - 1)) {
+            return false;
+        }
+        *result = v->sign ? -(uint64_t)mag : (uint64_t)mag;
+    } else {
+        if ((mag >> 64) != 0 || (v->sign && mag != 0)) {
+            return false;
+        }
+        *result = mag;
+    }
+    return true;
+}

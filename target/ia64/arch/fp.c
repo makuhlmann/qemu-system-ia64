@@ -815,14 +815,6 @@ static void ia64_do_famax(CPUIA64State *env, uint32_t r1, uint32_t r2,
 
 /* ---- FP reciprocal approximation (frcpa: ~1/x in table index 0) ---- */
 
-static bool ia64_fr_looks_like_setf_sig_payload(uint64_t value)
-{
-    uint64_t exponent = (value >> 52) & 0x7ff;
-    uint64_t fraction = value & 0x000fffffffffffffULL;
-
-    return exponent == 0 && fraction != 0;
-}
-
 static bool ia64_floatx80_rcpa_predicate(floatx80 num, floatx80 den,
                                           float_status *status)
 {
@@ -2449,11 +2441,14 @@ void ia64_fp_fcvt_xf(CPUIA64State *env, uint32_t r1, uint32_t r2)
 #define IA64_FP_INTEGER_INDEFINITE 0x8000000000000000ULL
 
 static void ia64_do_fcvt_fx(CPUIA64State *env, uint32_t r1, uint32_t r2,
-                            uint32_t is_unsigned, uint32_t is_trunc)
+                            uint32_t is_unsigned, uint32_t is_trunc,
+                            uint32_t sf)
 {
-    uint64_t value = env->fp.fr[r2];
-    floatx80 fp_value;
+    IA64FPReg value;
     uint64_t result;
+    uint32_t rc;
+    bool inexact;
+    bool fpa;
 
     if (ia64_fr_nat_get(env, r2)) {
         ia64_fr_write_nat(env, r1);
@@ -2461,40 +2456,26 @@ static void ia64_do_fcvt_fx(CPUIA64State *env, uint32_t r1, uint32_t r2,
     }
 
     /*
-     * fcvt.fx[u] writes an integer significand result.  Preserve operands
-     * that are already tracked in significand form through the conversion.
+     * A NaN, an infinity, an unsupported operand or a result that does not
+     * fit is invalid and gives the integer indefinite; that check comes
+     * before D (SDM Vol 3 fcvt.fx, Vol 1 5.4.4 and Figure 5-11).
      */
-    if (ia64_fr_sig_get(env, r2) ||
-        ia64_fr_looks_like_setf_sig_payload(value)) {
-        /* An integer-format value is positive: from 2^63 up it is too big. */
-        if (!is_unsigned && ia64_fr_sig_get(env, r2) && (int64_t)value < 0) {
-            float_raise(float_flag_invalid, &env->fp.fp_status);
-            value = IA64_FP_INTEGER_INDEFINITE;
-        }
-        ia64_fr_write_sig(env, r1, value);
+    value = ia64_fr_reg(env, r2);
+    rc = is_trunc ? 3 : (ia64_fpsr_sf_controls(env, sf) >> 4) & 3;
+    if (ia64_fpr_is_special(&value) ||
+        !ia64_fpa_to_integer(&value, !is_unsigned, rc, &result, &inexact,
+                             &fpa)) {
+        ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_V);
+        ia64_fr_write_sig(env, r1, IA64_FP_INTEGER_INDEFINITE);
         return;
     }
-
-    fp_value = ia64_fr_to_floatx80(env, r2);
-    if (is_unsigned) {
-        float128 fp128 = floatx80_to_float128(fp_value, &env->fp.fp_status);
-
-        result = is_trunc ?
-            float128_to_uint64_round_to_zero(fp128, &env->fp.fp_status) :
-            float128_to_uint64(fp128, &env->fp.fp_status);
-    } else {
-        result = is_trunc ?
-            (uint64_t)floatx80_to_int64_round_to_zero(
-                fp_value, &env->fp.fp_status) :
-            (uint64_t)floatx80_to_int64(fp_value, &env->fp.fp_status);
+    if (ia64_fpr_is_unnormal(&value)) {
+        ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_D);
     }
-    /*
-     * softfloat saturates an unrepresentable result; fcvt.fx[u] gives the
-     * integer indefinite instead (SDM Vol 3 fcvt.fx).  Flags start clear
-     * for each FP instruction, so this invalid is the conversion's own.
-     */
-    if (get_float_exception_flags(&env->fp.fp_status) & float_flag_invalid) {
-        result = IA64_FP_INTEGER_INDEFINITE;
+    if (inexact) {
+        env->fp.transaction.flags |= IA64_FP_FLAG_I;
+        env->fp.transaction.trap |= ia64_fp_inexact_trap(
+            ia64_fp_active_traps(env, sf), IA64_FP_FLAG_I, fpa);
     }
     ia64_fr_write_sig(env, r1, result);
 }
@@ -2863,7 +2844,8 @@ void ia64_fp_fcvt_fx(CPUIA64State *env, uint32_t r1, uint32_t r2,
                     uint32_t context)
 {
     ia64_fp_begin_context(env, context);
-    ia64_do_fcvt_fx(env, r1, r2, is_unsigned, is_trunc);
+    ia64_do_fcvt_fx(env, r1, r2, is_unsigned, is_trunc,
+                    ia64_fp_context_sf(context));
     ia64_fp_end_context(env, context);
 }
 
