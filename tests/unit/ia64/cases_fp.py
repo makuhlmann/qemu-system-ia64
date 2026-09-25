@@ -3769,6 +3769,37 @@ test_chk_a_clr_f_ignores_psr_dfh = require_registers(
         "psr": ExpectedBits(mask=IA64_PSR_DFH, value=IA64_PSR_DFH),
     }, entry=0x10)
 
+# ldfp checks the banks of the physical FRs, after rotation (SDM Vol 2
+# Illegal Operation fault; Vol 3 ldfp fp_reg_bank_conflict).
+test_ldfp_bank_check_uses_rotated_physical_registers = require_registers(
+    "ldfp_bank_check_uses_rotated_physical_registers", [
+        (0x10, 0x00, addl(3, 0x200, 0), mov_i_imm_ar(66, 1),
+         nop_i()),
+        # Drain one epilog stage, rotating RRB.FR from 0 to 95.
+        (0x20, 0x13, nop_m(), nop_b(), br_ctop_many(0x20, 0x20)),
+        # Logical f2/f32 are both even, but physical f32 is odd at RRB.FR=95.
+        (0x30, 0x00, ldfp8_postinc(2, 32, 3), nop_i(),
+         nop_i()),
+        (0x40, 0x09, getf_sig(4, 2), getf_sig(5, 32),
+         nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(),
+         br_cond(0x50, 0x50)),
+        (0x200, 0x00, 0x0123456789, 0x01abcdef,
+         0),
+    ], {"ip": 0x50, "r3": 0x210, "r4": LDFP8_LOW,
+        "r5": LDFP8_HIGH, "cfm_rrb_fr": 95,
+        "exception": IA64_EXCP_NONE}, entry=0x10)
+
+test_ldfp_rotated_physical_bank_conflict_illegal = require_exception(
+    "ldfp_rotated_physical_bank_conflict_illegal", [
+        (0x10, 0x00, addl(3, 0x200, 0), mov_i_imm_ar(66, 1),
+         nop_i()),
+        (0x20, 0x13, nop_m(), nop_b(), br_ctop_many(0x20, 0x20)),
+        # Logical f2/f33 are opposite, but physical f33 is even at RRB.FR=95.
+        (0x30, 0x00, ldfp8_postinc(2, 33, 3), nop_i(),
+         nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x30, entry=0x10)
+
 test_ldfp_requires_opposite_register_banks = require_exception(
     "ldfp_requires_opposite_register_banks", [
         (0x10, 0x08, ldfp8_postinc(2, 4, 3), nop_m(), nop_i()),
@@ -4078,7 +4109,9 @@ CASE_NAMES = (
     'ldfe_stfe_preserves_extended_payload',
     'ldfd_loads_double_memory_format',
     'ldfp8_postinc_decode',
+    'ldfp_bank_check_uses_rotated_physical_registers',
     'ldfp_requires_opposite_register_banks',
+    'ldfp_rotated_physical_bank_conflict_illegal',
     'ldfps_expands_both_single_values',
     'ldfs_expands_single_memory_format',
     'ldfs_preserves_single_nan_payload',
