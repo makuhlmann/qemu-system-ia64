@@ -88,11 +88,16 @@ from .encoding import (
     fmpy_s0,
     fmpy_s1,
     fmpy_s_s1,
+    fms_s0,
     fms_s3,
     fnma_d_s1,
+    fnma_s0,
     fnma_s1,
+    fnma_s_s0,
     fnmpy_s_s1,
     fnorm,
+    fnorm_d,
+    fnorm_s,
     fnorm_setf_sig,
     for_,
     fpabs,
@@ -121,6 +126,8 @@ from .encoding import (
     fselect,
     fsetc,
     fsub_d_s0,
+    fsub_s0,
+    fsub_s_s0,
     fswap,
     fswap_nl,
     fswap_nr,
@@ -3411,6 +3418,894 @@ test_fselect_natval_propagates = require_registers(
     entry=0x10)
 
 
+# The static .s and .d completers round to 24 and 53 bits in the 8- and
+# 11-bit exponent ranges when wre is 0; the dynamic form uses sf.pc in the
+# 15-bit range, and wre = 1 selects the 17-bit register range (SDM Vol 1
+# Table 5-6).  Tininess is detected after rounding; enabled O and U deliver
+# the rounded significand with the exponent modulo 2^17 and report ISR.i and
+# ISR.fpa (Vol 1 5.4.2, 5.4.3, Figure 5-12).  fma rounds once (Vol 3 fma).
+_FPSR_SF0_I = (
+    DEFAULT_FPSR |
+    (1 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT + 5))
+)
+_FPSR_SF1_FTZ_SF01_I = (
+    (DEFAULT_FPSR & ~(2 << FPSR_SF1_SHIFT)) |
+    (1 << FPSR_SF1_SHIFT) |
+    (1 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT + 5)) |
+    (1 << (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT + 5))
+)
+_FP_SIGNED_ZERO_SF3_RC_SHIFT = FPSR_SF2_SHIFT + 13 + 4
+_FP_SIGNED_ZERO_SCALAR_FPSR = (
+    (DEFAULT_FPSR & ~(3 << _FP_SIGNED_ZERO_SF3_RC_SHIFT)) |
+    (1 << _FP_SIGNED_ZERO_SF3_RC_SHIFT)
+)
+
+test_fadd_static_range_and_rounding = require_registers(
+    "fadd_static_range_and_rounding", [
+        (0x10, *movl_mlx(2, 0x7fefffffffffffff)),
+        (0x20, *movl_mlx(3, 0x3ff0000000000000)),
+        # 3 * 2^-25 is three quarters of a binary32 ulp at 1.0.
+        (0x30, *movl_mlx(4, 0x3e78000000000000)),
+        (0x40, 0x09, setf_d(6, 2), setf_d(7, 3), nop_i()),
+        (0x50, 0x00, setf_d(8, 4), nop_i(), nop_i()),
+        # Static .d must apply the binary64 exponent range.
+        (0x60, 0x0d, nop_m(), fma_d_s0(9, 6, 1, 6), nop_i()),
+        # Static .s rounds once from the exact mixed-precision sum.
+        (0x70, 0x0d, nop_m(), fma_s_s0(10, 7, 1, 8), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "f9": ExpectedFP(*binary64_to_spill(0x7ff0000000000000)),
+        "f10": ExpectedFP(*binary32_to_spill(0x3f800001)),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (0x28 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fma_static_binary32_fast_ftz_underflow = require_registers(
+    "fma_static_binary32_fast_ftz_underflow", [
+        (0x10, *movl_mlx(
+            2, _FPSR_SF0_I | (1 << FPSR_SF0_SHIFT))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x00800000)),
+        (0x40, *movl_mlx(4, 0x3f000000)),
+        (0x50, 0x09, setf_s(6, 3), setf_s(7, 4), nop_i()),
+        (0x60, 0x00, setf_s(8, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fma_s_s0(9, 6, 7, 8), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "f9": ExpectedFP(*binary32_to_spill(0)),
+        "ar_fpsr": (DEFAULT_FPSR | (1 << FPSR_SF0_SHIFT) |
+                    (0x30 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fma_static_binary32_fast_masked_overflow = require_registers(
+    "fma_static_binary32_fast_masked_overflow", [
+        (0x10, *movl_mlx(2, _FPSR_SF0_I)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x7f7fffff)),
+        (0x40, *movl_mlx(4, 0x40000000)),
+        (0x50, *movl_mlx(5, 0x3f800000)),
+        (0x60, 0x09, setf_s(6, 3), setf_s(7, 4), nop_i()),
+        (0x70, 0x00, setf_s(8, 5), nop_i(), nop_i()),
+        (0x80, 0x0d, nop_m(), fma_s_s0(9, 6, 7, 8), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "f9": ExpectedFP(*binary32_to_spill(0x7f800000)),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (0x28 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fma_static_binary32_fast_preround_underflow = require_registers(
+    "fma_static_binary32_fast_preround_underflow", [
+        # min-normal * nextdown(1) is exact at p24 with an unbounded exponent,
+        # and that result is tiny; the bounded rounding reaches min-normal
+        # inexactly, so U|I.  FTZ instead returns zero.
+        (0x10, *movl_mlx(2, _FPSR_SF1_FTZ_SF01_I)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x00800000)),
+        (0x40, *movl_mlx(4, 0x3f7fffff)),
+        (0x50, 0x09, setf_s(6, 3), setf_s(7, 4), nop_i()),
+        (0x60, 0x00, setf_s(8, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fma_s_s0(9, 6, 7, 8), nop_i()),
+        (0x80, 0x0d, nop_m(),
+         fma_s1(10, 6, 7, 8) | bitfield(1, 36, 1), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "f9": ExpectedFP(*binary32_to_spill(0x00800000)),
+        "f10": ExpectedFP(*binary32_to_spill(0)),
+        "ar_fpsr": (_FPSR_SF1_FTZ_SF01_I |
+                    (0x30 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT)) |
+                    (0x30 <<
+                     (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fma_static_binary64_fast_ftz_underflow = require_registers(
+    "fma_static_binary64_fast_ftz_underflow", [
+        # Exact 2^-1023 is tiny in the .d model.  FTZ converts it to zero
+        # and sets U|I (SDM Vol 1 5.2).
+        (0x10, *movl_mlx(
+            2, _FPSR_SF0_I | (1 << FPSR_SF0_SHIFT))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x0010000000000000)),
+        (0x40, *movl_mlx(4, 0x3fe0000000000000)),
+        (0x50, 0x09, setf_d(6, 3), setf_d(7, 4), nop_i()),
+        (0x60, 0x00, setf_d(8, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fma_d_s0(9, 6, 7, 8), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "f9": ExpectedFP(*binary64_to_spill(0)),
+        "ar_fpsr": (DEFAULT_FPSR | (1 << FPSR_SF0_SHIFT) |
+                    (0x30 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fma_static_binary64_fast_masked_overflow = require_registers(
+    "fma_static_binary64_fast_masked_overflow", [
+        # A set sf0.i must not hide a newly raised masked O flag.
+        (0x10, *movl_mlx(2, _FPSR_SF0_I)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x7fefffffffffffff)),
+        (0x40, *movl_mlx(4, 0x4000000000000000)),
+        (0x50, *movl_mlx(5, 0x3ff0000000000000)),
+        (0x60, 0x09, setf_d(6, 3), setf_d(7, 4), nop_i()),
+        (0x70, 0x00, setf_d(8, 5), nop_i(), nop_i()),
+        (0x80, 0x0d, nop_m(), fma_d_s0(9, 6, 7, 8), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "f9": ExpectedFP(*binary64_to_spill(0x7ff0000000000000)),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (0x28 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fma_static_binary64_fast_preround_underflow = require_registers(
+    "fma_static_binary64_fast_preround_underflow", [
+        (0x10, *movl_mlx(2, _FPSR_SF1_FTZ_SF01_I)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x0010000000000000)),
+        (0x40, *movl_mlx(4, 0x3fefffffffffffff)),
+        (0x50, 0x09, setf_d(6, 3), setf_d(7, 4), nop_i()),
+        (0x60, 0x00, setf_d(8, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fma_d_s0(9, 6, 7, 8), nop_i()),
+        (0x80, 0x0d, nop_m(),
+         fma_d_s0(10, 6, 7, 8) | bitfield(1, 34, 2), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "f9": ExpectedFP(*binary64_to_spill(0x0010000000000000)),
+        "f10": ExpectedFP(*binary64_to_spill(0)),
+        "ar_fpsr": (_FPSR_SF1_FTZ_SF01_I |
+                    (0x30 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT)) |
+                    (0x30 <<
+                     (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fnorm_static_masked_overflow_and_ftz = require_registers(
+    "fnorm_static_masked_overflow_and_ftz", [
+        # sf1: .s, RN, WRE=0.  sf2: .d, RN, FTZ=1, WRE=0.
+        (0x10, *movl_mlx(2, 0x0009804d0260033f)),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(5, 0x210, 0), addl(6, 0x218, 0),
+         addl(21, 0x1007f, 0)),
+        (0x40, 0x01, addl(22, 0x0fc00, 0), nop_i(), nop_i()),
+        (0x50, *movl_mlx(23, 0x8000000000000000)),
+        (0x60, 0x09, st8(3, 23), st8(4, 21), nop_i()),
+        (0x70, 0x09, st8(5, 23), st8(6, 22), nop_i()),
+        (0x80, 0x09, ldf_fill_postinc(6, 3, 0),
+         ldf_fill_postinc(7, 5, 0), nop_i()),
+        (0x90, 0x0d, nop_m(), fnorm_s(8, 0, 6, sf=1), nop_i()),
+        (0xa0, 0x0d, nop_m(), fnorm_d(9, 0, 7, sf=2), nop_i()),
+        # The same exact tiny value with FTZ clear is a denormal and raises
+        # neither U nor I while the exceptions are masked.
+        (0xb0, 0x0d, nop_m(), fnorm_d(10, 0, 7, sf=3), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+    ], {
+        "ip": 0xc0,
+        "f8": ExpectedFP(0x8000000000000000, 0x1ffff),
+        "f9": ExpectedFP(0, 0),
+        "f10": ExpectedFP(0x4000000000000000, 0x0fc01),
+        "ar_fpsr": (0x0009804d0260033f |
+                    (0x28 << (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT)) |
+                    (0x30 << (FPSR_SF2_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fsub_static_enabled_exact_underflow_wraps = require_registers(
+    "fsub_static_enabled_exact_underflow_wraps", [
+        # 2^-126 - 2^-127 is an exact tiny binary32 result.  Enabled U must
+        # trap even without I and deliver the normalized exponent response.
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 4))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x3810000000000000)),
+        (0x40, *movl_mlx(4, 0x3800000000000000)),
+        (0x50, 0x09, setf_d(6, 3), setf_d(7, 4), nop_i()),
+        (0x60, 0x0d, nop_m(), fsub_s_s0(8, 6, 7), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x1001,
+        "f8": ExpectedFP(0x8000000000000000, 0x0ff80),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 4)) |
+                    (0x10 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fma_dynamic_wre0_enabled_overflow_wraps_and_sets_fpa = (
+    require_registers(
+        "fma_dynamic_wre0_enabled_overflow_wraps_and_sets_fpa", [
+            # The p64 product rounds across the 15-bit Emax.  With O and I
+            # enabled, the register receives the 17-bit wrapped response.
+            (0x10, *movl_mlx(
+                2, DEFAULT_FPSR & ~((1 << 3) | (1 << 5)))),
+            (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+             addl(4, 0x208, 0)),
+            (0x30, 0x01, addl(5, 0x210, 0), addl(6, 0x218, 0),
+             addl(20, 0x13ffe, 0)),
+            (0x40, 0x01, addl(23, 0xffff, 0), nop_i(), nop_i()),
+            (0x50, *movl_mlx(21, 0xfffffffffffffffe)),
+            (0x60, *movl_mlx(22, 0x8000000000000001)),
+            (0x70, 0x09, st8(3, 21), st8(4, 20), nop_i()),
+            (0x80, 0x09, st8(5, 22), st8(6, 23), nop_i()),
+            (0x90, 0x09, ldf_fill_postinc(6, 3, 0),
+             ldf_fill_postinc(7, 5, 0), nop_i()),
+            (0xa0, 0x00, setf_d(8, 0), nop_i(), nop_i()),
+            (0xb0, 0x0d, nop_m(), fma_s0(9, 6, 7, 8), nop_i()),
+            (IA64_FP_TRAP_VECTOR, 0x00,
+             mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+            (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+             br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                     IA64_FP_TRAP_VECTOR + 0x10)),
+        ], {
+            "ip": IA64_FP_TRAP_VECTOR + 0x10,
+            "exception": IA64_EXCP_NONE,
+            "r10": (IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) |
+                    (1 << 14) | 0x2801),
+            "f9": ExpectedFP(0x8000000000000000, 0x13fff),
+            "ar_fpsr": ((DEFAULT_FPSR & ~((1 << 3) | (1 << 5))) |
+                        (0x28 <<
+                         (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        }, entry=0x10)
+)
+
+test_fmpy_dynamic_wre0_enabled_exact_underflow_wraps = require_registers(
+    "fmpy_dynamic_wre0_enabled_exact_underflow_wraps", [
+        # 2^-16382 * 0.5 is an exact tiny result in the dynamic 15-bit model.
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 4))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(20, 0x0c001, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(21, 0x8000000000000000)),
+        (0x50, *movl_mlx(22, 0x3fe0000000000000)),
+        (0x60, 0x09, st8(3, 21), st8(4, 20), nop_i()),
+        (0x70, 0x09, ldf_fill_postinc(6, 3, 0), setf_d(7, 22), nop_i()),
+        (0x80, 0x0d, nop_m(), fmpy_s0(8, 6, 7), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x1001,
+        "f8": ExpectedFP(0x8000000000000000, 0x0c000),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 4)) |
+                    (0x10 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fmpy_static_enabled_overflow_wraps_and_sets_fpa = require_registers(
+    "fmpy_static_enabled_overflow_wraps_and_sets_fpa", [
+        # Multiplication by f1 preserves this exact value; p24 rounding then
+        # increments it across Emax.  Enable O and I to observe the raw result.
+        (0x10, *movl_mlx(
+            2, DEFAULT_FPSR & ~((1 << 3) | (1 << 5)) &
+            ~((FPSR_SF_TD | 2) << FPSR_SF1_SHIFT))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(21, 0x1007e, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(22, 0xffffff8000000001)),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fmpy_s_s1(8, 6, 1), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": (IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) |
+                (1 << 14) | 0x2801),
+        "f8": ExpectedFP(0x8000000000000000, 0x1007f),
+        "ar_fpsr": ((DEFAULT_FPSR & ~((1 << 3) | (1 << 5)) &
+                     ~((FPSR_SF_TD | 2) << FPSR_SF1_SHIFT)) |
+                    (0x28 <<
+                     (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fnma_static_enabled_overflow_wraps_and_sets_fpa = require_registers(
+    "fnma_static_enabled_overflow_wraps_and_sets_fpa", [
+        # Negating the exact product changes only its sign.  Rounding at p=24
+        # crosses Emax and enabled O|I returns the negative wrapped result.
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~((1 << 3) | (1 << 5)))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(21, 0x1007e, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(22, 0xffffff8000000001)),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x00, setf_d(7, 0), nop_i(), nop_i()),
+        (0x80, 0x0d, nop_m(), fnma_s_s0(8, 6, 1, 7), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": (IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) |
+                (1 << 14) | 0x2801),
+        "f8": ExpectedFP(0x8000000000000000, 0x3007f),
+        "ar_fpsr": ((DEFAULT_FPSR & ~((1 << 3) | (1 << 5))) |
+                    (0x28 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fnorm_static_enabled_overflow_wraps_and_sets_fpa = require_registers(
+    "fnorm_static_enabled_overflow_wraps_and_sets_fpa", [
+        # Enable O and I.  At p=24 this significand rounds upward to 2^128,
+        # so the wrapped response reports O|I and ISR.fpa=1.
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~((1 << 3) | (1 << 5)))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(21, 0x1007e, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(22, 0xffffff8000000001)),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fnorm_s(8, 0, 6, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": (IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) |
+                (1 << 14) | 0x2801),
+        "f8": ExpectedFP(0x8000000000000000, 0x1007f),
+        "ar_fpsr": ((DEFAULT_FPSR & ~((1 << 3) | (1 << 5))) |
+                    (0x28 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fnorm_enabled_overflow_reports_masked_inexact_in_isr = require_registers(
+    "fnorm_enabled_overflow_reports_masked_inexact_in_isr", [
+        # Enable O but leave I masked.  Figure 5-12 still reports the
+        # concurrent inexact result in ISR.i for the overflow trap.
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 3))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(21, 0x1007e, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(22, 0xffffff8000000001)),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fnorm_s(8, 0, 6, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": (IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) |
+                (1 << 14) | 0x2801),
+        "f8": ExpectedFP(0x8000000000000000, 0x1007f),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 3)) |
+                    (0x28 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fnorm_enabled_underflow_reports_masked_inexact_in_isr = require_registers(
+    "fnorm_enabled_underflow_reports_masked_inexact_in_isr", [
+        # Enable U but leave I masked.  The p24 rounding is inexact and rounds
+        # upward, so ISR reports U|I and fpa with the wrapped raw response.
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 4))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(21, 0xff6a, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(22, 0x8000008000000001)),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fnorm_s(8, 0, 6, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": (IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) |
+                (1 << 14) | 0x3001),
+        "f8": ExpectedFP(0x8000010000000000, 0xff6a),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 4)) |
+                    (0x30 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fma_static_enabled_exact_underflow_wraps = require_registers(
+    "fma_static_enabled_exact_underflow_wraps", [
+        # 2^-126 * 0.5 + numeric +0 is exactly 2^-127.  Enabled U commits
+        # the normalized wide-range result before taking the trap.
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 4))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x3810000000000000)),
+        (0x40, *movl_mlx(4, 0x3fe0000000000000)),
+        (0x50, 0x09, setf_d(6, 3), setf_d(7, 4), nop_i()),
+        (0x60, 0x00, setf_d(9, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fma_s_s0(8, 6, 7, 9), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x1001,
+        "f8": ExpectedFP(0x8000000000000000, 0x0ff80),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 4)) |
+                    (0x10 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fp_muladd_wre1_enabled_overflow_wraps_and_sets_fpa = require_registers(
+    "fp_muladd_wre1_enabled_overflow_wraps_and_sets_fpa", [
+        # At p24 the exact fused sum is the midpoint above the largest
+        # significand at Emax.  Ties-to-even increments it across Emax, so
+        # enabled O returns the 17-bit exponent and reports I with fpa=1.
+        (0x10, *movl_mlx(
+            2, (DEFAULT_FPSR | (2 << FPSR_SF0_SHIFT)) &
+            ~((1 << 3) | (1 << 5)))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(5, 0x210, 0), addl(6, 0x218, 0),
+         addl(20, 0x1fffe, 0)),
+        (0x40, 0x01, addl(22, 0x1ffbf, 0), nop_i(), nop_i()),
+        (0x50, *movl_mlx(21, 0xffffff7fffffffff)),
+        (0x60, *movl_mlx(23, 0x8000000000000000)),
+        (0x70, 0x09, st8(3, 21), st8(4, 20), nop_i()),
+        (0x80, 0x09, st8(5, 23), st8(6, 22), nop_i()),
+        (0x90, 0x09, ldf_fill_postinc(6, 3, 0),
+         ldf_fill_postinc(7, 5, 0), nop_i()),
+        (0xa0, 0x0d, nop_m(), fma_s_s0(8, 6, 1, 7), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00,
+         mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": (IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) |
+                (1 << 14) | 0x2801),
+        "f8": ExpectedFP(0x8000000000000000, 0x1ffff),
+        "ar_fpsr": (((DEFAULT_FPSR | (2 << FPSR_SF0_SHIFT)) &
+                     ~((1 << 3) | (1 << 5))) |
+                    (0x28 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fma_static_rpsp_midpoint_matches_pure_multiply = require_registers(
+    "fma_static_rpsp_midpoint_matches_pure_multiply", [
+        # The exact product is just above a binary64 midpoint.  Rounding it
+        # first to a 113-bit intermediate would lose the sticky bits and
+        # then tie downward; the architectural one-step result is up.
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(5, 0x210, 0)),
+        (0x20, 0x01, addl(6, 0x218, 0), addl(20, 0xffff, 0), nop_i()),
+        (0x30, *movl_mlx(21, 0x8000000000000001)),
+        (0x40, *movl_mlx(22, 0x80000000000003ff)),
+        (0x50, 0x09, st8(3, 21), st8(4, 20), nop_i()),
+        (0x60, 0x09, st8(5, 22), st8(6, 20), nop_i()),
+        (0x70, 0x09, ldf_fill_postinc(6, 3, 0),
+         ldf_fill_postinc(7, 5, 0), nop_i()),
+        # f8 is a numeric +0 addend, while f0 selects the pure-multiply form.
+        (0x80, 0x00, setf_d(8, 0), nop_i(), nop_i()),
+        (0x90, 0x0d, nop_m(), fma_d_s0(9, 6, 7, 8), nop_i()),
+        (0xa0, 0x0d, nop_m(), fma_d_s0(10, 6, 7, 0), nop_i()),
+        (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
+    ], {
+        "ip": 0xb0,
+        "f9": ExpectedFP(0x8000000000000800, 0x0ffff),
+        "f10": ExpectedFP(0x8000000000000800, 0x0ffff),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (0x20 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fnorm_wre1_precision_and_range = require_registers(
+    "fnorm_wre1_precision_and_range", [
+        # Default sf1 has WRE=1 and pc=11.  Static .s/.d ignore that pc but
+        # retain the 17-bit range; the dynamic form uses p64.
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(20, 0x18000, 0)),
+        (0x20, *movl_mlx(21, 0x8000008000000401)),
+        (0x30, 0x09, st8(3, 21), st8(4, 20), nop_i()),
+        (0x40, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x50, 0x0d, nop_m(), fnorm_s(8, 0, 6, sf=1), nop_i()),
+        (0x60, 0x0d, nop_m(), fnorm_d(9, 0, 6, sf=1), nop_i()),
+        (0x70, 0x0d, nop_m(), fnorm(10, 0, 6, sf=1), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "f8": ExpectedFP(0x8000010000000000, 0x18000),
+        "f9": ExpectedFP(0x8000008000000800, 0x18000),
+        "f10": ExpectedFP(0x8000008000000401, 0x18000),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (0x20 <<
+                     (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fnorm_static_enabled_exact_underflow_wraps = require_registers(
+    "fnorm_static_enabled_exact_underflow_wraps", [
+        # The raw unnormal value normalizes to true biased exponent -62.
+        # D is masked; enabled U returns that exponent modulo 2^17.
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 4))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(21, 1, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(22, 1)),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), fnorm_d(8, 0, 6, sf=0), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x1001,
+        "f8": ExpectedFP(0x8000000000000000, 0x1ffc2),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 4)) |
+                    (0x12 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fp_binary_wre1_endpoint_delivery = require_registers(
+    "fp_binary_wre1_endpoint_delivery", [
+        # sf1 is WRE=1/p64.  Adding two largest-exponent values overflows;
+        # halving the smallest normal produces an exact register denormal.
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(5, 0x210, 0)),
+        (0x20, 0x01, addl(6, 0x218, 0), addl(20, 0x1fffe, 0),
+         addl(23, 1, 0)),
+        (0x30, *movl_mlx(21, 0xffffffffffffffff)),
+        (0x40, *movl_mlx(22, 0x8000000000000000)),
+        (0x50, *movl_mlx(24, 0x3fe0000000000000)),
+        (0x60, 0x09, st8(3, 21), st8(4, 20), nop_i()),
+        (0x70, 0x09, st8(5, 22), st8(6, 23), nop_i()),
+        (0x80, 0x09, ldf_fill_postinc(6, 3, 0),
+         ldf_fill_postinc(7, 5, 0), nop_i()),
+        (0x90, 0x00, setf_d(8, 24), nop_i(), nop_i()),
+        (0xa0, 0x0d, nop_m(), fma_s1(9, 6, 1, 6), nop_i()),
+        (0xb0, 0x0d, nop_m(), fmpy_s1(10, 7, 8), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+    ], {
+        "ip": 0xc0,
+        "f9": ExpectedFP(0x8000000000000000, 0x1ffff),
+        "f10": ExpectedFP(0x4000000000000000, 1),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (0x28 <<
+                     (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fp_binary_wre1_transports_17bit_range = require_registers(
+    "fp_binary_wre1_transports_17bit_range", [
+        (0x10, *movl_mlx(
+            2, DEFAULT_FPSR | (2 << FPSR_SF0_SHIFT))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(5, 0x210, 0), addl(6, 0x218, 0),
+         addl(20, 0x18000, 0)),
+        (0x40, 0x01, addl(23, 0x17fff, 0), nop_i(), nop_i()),
+        (0x50, *movl_mlx(21, 0x8000000000000000)),
+        (0x60, 0x09, st8(3, 21), st8(4, 20), nop_i()),
+        (0x70, 0x09, st8(5, 21), st8(6, 23), nop_i()),
+        (0x80, 0x09, ldf_fill_postinc(6, 3, 0),
+         ldf_fill_postinc(7, 5, 0), nop_i()),
+        (0x90, 0x0d, nop_m(), fma_s0(8, 6, 1, 6), nop_i()),
+        (0xa0, 0x0d, nop_m(), fsub_s0(9, 6, 7), nop_i()),
+        # Exact cancellation must not narrow both wide operands to infinity.
+        (0xb0, 0x0d, nop_m(), fsub_s0(10, 6, 6), nop_i()),
+        (0xc0, 0x0d, nop_m(), fmpy_s0(11, 6, 1), nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0xd0)),
+    ], {
+        "ip": 0xd0,
+        "f8": ExpectedFP(0x8000000000000000, 0x18001),
+        "f9": ExpectedFP(0x8000000000000000, 0x17fff),
+        "f10": ExpectedFP(0, 0),
+        "f11": ExpectedFP(0x8000000000000000, 0x18000),
+        "ar_fpsr": DEFAULT_FPSR | (2 << FPSR_SF0_SHIFT),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fp_muladd_wre1_enabled_exact_underflow_wraps = require_registers(
+    "fp_muladd_wre1_enabled_exact_underflow_wraps", [
+        # -(1.5 * 1.0) + 1.0 is exactly -0.5 at WRE1 Emin.  Enabled U
+        # delivers the normalized true exponent modulo 2^17 without I/FPA.
+        (0x10, *movl_mlx(
+            2, (DEFAULT_FPSR | (2 << FPSR_SF0_SHIFT)) & ~(1 << 4))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(5, 0x210, 0), addl(6, 0x218, 0),
+         addl(20, 1, 0)),
+        (0x40, *movl_mlx(21, 0xc000000000000000)),
+        (0x50, *movl_mlx(22, 0x8000000000000000)),
+        (0x60, 0x09, st8(3, 21), st8(4, 20), nop_i()),
+        (0x70, 0x09, st8(5, 22), st8(6, 20), nop_i()),
+        (0x80, 0x09, ldf_fill_postinc(6, 3, 0),
+         ldf_fill_postinc(7, 5, 0), nop_i()),
+        (0x90, 0x0d, nop_m(), fnma_s0(8, 6, 1, 7), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00,
+         mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x10,
+                 IA64_FP_TRAP_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x1001,
+        "f8": ExpectedFP(0x8000000000000000, 0x20000),
+        "ar_fpsr": (((DEFAULT_FPSR | (2 << FPSR_SF0_SHIFT)) &
+                     ~(1 << 4)) |
+                    (0x10 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fp_muladd_wre1_fused_cancellation = require_registers(
+    "fp_muladd_wre1_fused_cancellation", [
+        (0x10, *movl_mlx(
+            2, DEFAULT_FPSR | (2 << FPSR_SF0_SHIFT))),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), addl(3, 0x200, 0),
+         addl(4, 0x208, 0)),
+        (0x30, 0x01, addl(5, 0x210, 0), addl(6, 0x218, 0),
+         addl(20, 0x14000, 0)),
+        (0x40, 0x01, addl(25, 0x220, 0), addl(26, 0x228, 0),
+         addl(28, 0x230, 0)),
+        (0x50, 0x01, addl(29, 0x238, 0), addl(23, 0x18002, 0),
+         nop_i()),
+        (0x60, *movl_mlx(21, 0xc000000000000000)),
+        (0x70, *movl_mlx(22, 0x8000000000000000)),
+        (0x80, *movl_mlx(24, 0x9000000000000000)),
+        (0x90, *movl_mlx(27, 0x38002)),
+        (0xa0, 0x09, st8(3, 21), st8(4, 20), nop_i()),
+        (0xb0, 0x09, st8(5, 21), st8(6, 20), nop_i()),
+        (0xc0, 0x09, st8(25, 22), st8(26, 23), nop_i()),
+        (0xd0, 0x09, st8(28, 24), st8(29, 27), nop_i()),
+        (0xe0, 0x09, ldf_fill_postinc(6, 3, 0),
+         ldf_fill_postinc(7, 5, 0), nop_i()),
+        (0xf0, 0x09, ldf_fill_postinc(8, 25, 0),
+         ldf_fill_postinc(9, 28, 0), nop_i()),
+        (0x100, 0x0d, nop_m(), fma_s0(10, 6, 7, 9), nop_i()),
+        (0x110, 0x0d, nop_m(), fms_s0(11, 6, 7, 8), nop_i()),
+        (0x120, 0x0d, nop_m(), fnma_s0(12, 6, 7, 8), nop_i()),
+        (0x130, 0x10, nop_m(), nop_i(), br_cond(0x130, 0x130)),
+    ], {
+        "ip": 0x130,
+        "f10": ExpectedFP(0, 0),
+        "f11": ExpectedFP(0x8000000000000000, 0x17fff),
+        "f12": ExpectedFP(0x8000000000000000, 0x37fff),
+        "ar_fpsr": DEFAULT_FPSR | (2 << FPSR_SF0_SHIFT),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fadd_unnormal_d_fault_rolls_back = require_registers(
+    "fadd_unnormal_d_fault_rolls_back", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 1))[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x10000, 0)),
+        (0x40, 0x05, *movl_mlx(22, 0x4000000000000000)[1:]),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x05, *movl_mlx(5, 0x4010000000000000)[1:]),
+        (0x80, 0x01, setf_d(8, 5), nop_i(), nop_i()),
+        (0x90, 0x0d, nop_m(), fma_s0(8, 6, 1, 1), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x20,
+                 IA64_FP_FAULT_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 2,
+        "f8": ExpectedFP(*binary64_to_spill(0x4010000000000000)),
+        "ar_fpsr": DEFAULT_FPSR & ~(1 << 1),
+    }, entry=0x10)
+
+test_fnorm_ldf_fill_unnormal_sets_d = require_registers(
+    "fnorm_ldf_fill_unnormal_sets_d", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x10000, 0)),
+        (0x20, 0x05, *movl_mlx(22, 0x4000000000000000)[1:]),
+        (0x30, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x40, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x50, 0x1d, nop_m(), fnorm(8, 0, 6, sf=0), nop_b()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "f8": ExpectedFP(*binary64_to_spill(0x3ff0000000000000)),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fp_binary_unnormal_sets_d = require_registers(
+    "fp_binary_unnormal_sets_d", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x10000, 0)),
+        # Raw +1 encoded as an unnormal (integer bit clear).
+        (0x20, 0x05, *movl_mlx(22, 0x4000000000000000)[1:]),
+        (0x30, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x40, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x50, 0x0d, nop_m(), fma_s0(8, 6, 1, 1), nop_i()),
+        (0x60, 0x1d, nop_m(), fsub_d_s0(9, 6, 1), nop_b()),
+        (0x70, 0x1d, nop_m(), fmpy_s0(10, 6, 1), nop_b()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "f6": ExpectedFP(0x4000000000000000, 0x10000),
+        "f8": ExpectedFP(*binary64_to_spill(0x4000000000000000)),
+        "f9": ExpectedFP(*binary64_to_spill(0x0000000000000000)),
+        "f10": ExpectedFP(*binary64_to_spill(0x3ff0000000000000)),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fma_invalid_precedes_unnormal_d = require_registers(
+    "fma_invalid_precedes_unnormal_d", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 1))[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x10000, 0)),
+        (0x40, 0x05, *movl_mlx(22, 0x4000000000000000)[1:]),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x05, *movl_mlx(5, 0x7ff0000000000000)[1:]),
+        (0x80, 0x01, setf_d(7, 5), nop_i(), nop_i()),
+        (0x90, 0x05, *movl_mlx(5, 0xfff0000000000000)[1:]),
+        (0xa0, 0x01, setf_d(8, 5), nop_i(), nop_i()),
+        (0xb0, 0x0d, nop_m(), fma_s0(9, 6, 7, 8), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+    ], {
+        "ip": 0xc0,
+        "exception": IA64_EXCP_NONE,
+        "f9": ExpectedFP(0xc000000000000000, 0x3ffff),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 1)) |
+                    (1 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fma_unsupported_precedes_qnan = require_registers(
+    "fma_unsupported_precedes_qnan", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x1ffff, 0)),
+        (0x20, 0x09, st8(3, 0), st8(4, 21), nop_i()),
+        (0x30, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x40, 0x05, *movl_mlx(5, 0x4000000000000000)[1:]),
+        (0x50, 0x01, setf_d(7, 5), nop_i(), nop_i()),
+        (0x60, 0x05, *movl_mlx(5, 0x7ff8123456789abc)[1:]),
+        (0x70, 0x01, setf_d(8, 5), nop_i(), nop_i()),
+        (0x80, 0x0d, nop_m(), fma_s0(9, 7, 8, 6), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "exception": IA64_EXCP_NONE,
+        "f9": ExpectedFP(0xc000000000000000, 0x3ffff),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (1 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+    }, entry=0x10)
+
+test_fmpy_pseudozero_infinity_is_infinity = require_registers(
+    "fmpy_pseudozero_infinity_is_infinity", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x32345, 0)),
+        (0x20, 0x09, st8(3, 0), st8(4, 21), nop_i()),
+        (0x30, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x40, 0x05, *movl_mlx(5, 0x7ff0000000000000)[1:]),
+        (0x50, 0x01, setf_d(7, 5), nop_i(), nop_i()),
+        (0x60, 0x1d, nop_m(), fmpy_s0(8, 6, 7), nop_b()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "f6": ExpectedFP(0, 0x32345),
+        "f8": ExpectedFP(*binary64_to_spill(0xfff0000000000000)),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fp_muladd_pseudozero_infinity_is_infinity = require_registers(
+    "fp_muladd_pseudozero_infinity_is_infinity", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x32345, 0)),
+        (0x20, 0x09, st8(3, 0), st8(4, 21), nop_i()),
+        (0x30, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x40, 0x05, *movl_mlx(5, 0x7ff0000000000000)[1:]),
+        (0x50, 0x01, setf_d(7, 5), nop_i(), nop_i()),
+        (0x60, 0x0d, nop_m(), fma_s0(8, 6, 7, 1), nop_i()),
+        (0x70, 0x1d, nop_m(), fms_s3(9, 6, 7, 1), nop_b()),
+        (0x80, 0x1d, nop_m(), fnma_s1(10, 6, 7, 1), nop_b()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "f6": ExpectedFP(0, 0x32345),
+        "f8": ExpectedFP(*binary64_to_spill(0xfff0000000000000)),
+        "f9": ExpectedFP(*binary64_to_spill(0xfff0000000000000)),
+        "f10": ExpectedFP(*binary64_to_spill(0x7ff0000000000000)),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT)) |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT)) |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF2_SHIFT + 13 + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_scalar_muladd_f0_signed_zero_is_pure_multiply = require_registers(
+    "scalar_muladd_f0_signed_zero_is_pure_multiply", [
+        (0x10, *movl_mlx(2, _FP_SIGNED_ZERO_SCALAR_FPSR)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x0000000000000000)),
+        (0x40, *movl_mlx(4, 0x3ff0000000000000)),
+        (0x50, 0x09, setf_d(6, 3), setf_d(7, 4), nop_i()),
+        # FMS uses round-down in sf3: +0 * +1 remains +0, not +0 + -0.
+        (0x60, 0x0d, nop_m(), fms_s3(8, 6, 7, 0), nop_i()),
+        # FNMA uses round-nearest in sf1: -(+0 * +1) is -0.
+        (0x70, 0x0d, nop_m(), fnma_s1(9, 6, 7, 0), nop_i()),
+        (0x80, 0x00, getf_d(10, 8), nop_i(), nop_i()),
+        (0x90, 0x00, getf_d(11, 9), nop_i(), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+    ], {
+        "ip": 0xa0,
+        "r10": 0x0000000000000000,
+        "r11": 0x8000000000000000,
+        "f8": ExpectedFP(*binary64_to_spill(0x0000000000000000)),
+        "f9": ExpectedFP(*binary64_to_spill(0x8000000000000000)),
+        "ar_fpsr": _FP_SIGNED_ZERO_SCALAR_FPSR,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+
 def _fp_representation_case(name, value, width, model):
     if width == 32:
         value &= 0xffffffff
@@ -3474,6 +4369,8 @@ CASE_NAMES = (
     'disabled_fp_low_fault',
     'disabled_fp_mixed_sets_reports_both',
     'disabled_fp_store_sets_isr_w',
+    'fadd_static_range_and_rounding',
+    'fadd_unnormal_d_fault_rolls_back',
     'fand_f1_illegal_operation',
     'fchkf_branches_on_uncommitted_flag',
     'fchkf_negative_target_uses_bit36',
@@ -3502,22 +4399,47 @@ CASE_NAMES = (
     'fcvt_xf_reads_register_significand',
     'fcvt_xf_signed_sig_to_float',
     'fma_d_s0_decode',
+    'fma_dynamic_wre0_enabled_overflow_wraps_and_sets_fpa',
     'fma_f0_illegal_operation',
+    'fma_invalid_precedes_unnormal_d',
     'fma_s_s0_high_f4_decode',
     'fma_preserves_extended_precision',
+    'fma_static_binary32_fast_ftz_underflow',
+    'fma_static_binary32_fast_masked_overflow',
+    'fma_static_binary32_fast_preround_underflow',
+    'fma_static_binary64_fast_ftz_underflow',
+    'fma_static_binary64_fast_masked_overflow',
+    'fma_static_binary64_fast_preround_underflow',
+    'fma_static_enabled_exact_underflow_wraps',
+    'fma_static_rpsp_midpoint_matches_pure_multiply',
+    'fma_unsupported_precedes_qnan',
     'fmerge_forms_decode',
     'fmerge_natval_propagates',
     'fminmax_scalar_decode',
     'fminmax_scalar_tie_uses_f3',
     'fmov_preserves_integer_register_format',
+    'fmpy_dynamic_wre0_enabled_exact_underflow_wraps',
+    'fmpy_pseudozero_infinity_is_infinity',
     'fmpy_s0_decode',
     'fmpy_s_s1_decode',
+    'fmpy_static_enabled_overflow_wraps_and_sets_fpa',
     'fms_s3_decode',
     'fnma_d_s1_decode',
+    'fnma_static_enabled_overflow_wraps_and_sets_fpa',
     'fnmpy_s_s1_decode',
+    'fnorm_enabled_overflow_reports_masked_inexact_in_isr',
+    'fnorm_enabled_underflow_reports_masked_inexact_in_isr',
+    'fnorm_ldf_fill_unnormal_sets_d',
     'fnorm_normalizes_setf_sig_payload',
+    'fnorm_static_enabled_exact_underflow_wraps',
+    'fnorm_static_enabled_overflow_wraps_and_sets_fpa',
+    'fnorm_static_masked_overflow_and_ftz',
+    'fnorm_wre1_precision_and_range',
     'fp_alat_does_not_satisfy_gr_check_load',
     'fp_arithmetic_natval_propagates',
+    'fp_binary_unnormal_sets_d',
+    'fp_binary_wre1_endpoint_delivery',
+    'fp_binary_wre1_transports_17bit_range',
     'fp_divzero_fault_discards_result',
     'fp_fixed_target_predicated_off_is_nop',
     'fp_inexact_trap_commits_result',
@@ -3525,6 +4447,10 @@ CASE_NAMES = (
     'fp_logical_swap_natval_propagates',
     'fp_mix_sign_extend_decode',
     'fp_mix_sign_extend_natval_propagates',
+    'fp_muladd_pseudozero_infinity_is_infinity',
+    'fp_muladd_wre1_enabled_exact_underflow_wraps',
+    'fp_muladd_wre1_enabled_overflow_wraps_and_sets_fpa',
+    'fp_muladd_wre1_fused_cancellation',
     'fp_parallel_natval_propagates',
     'fp_unary_natval_propagates',
     'fp_writes_set_psr_mfl_mfh',
@@ -3620,6 +4546,7 @@ CASE_NAMES = (
     'fsetc_pc1_reserved_field_fault',
     'fsetc_sf0_td_reserved_field_fault',
     'fsub_d_s0_decode',
+    'fsub_static_enabled_exact_underflow_wraps',
     'getf_exact_register_format_translation',
     'getf_exp_after_fnorm_sig',
     'getf_natval_sets_gr_nat',
@@ -3644,6 +4571,7 @@ CASE_NAMES = (
     'masked_invalid_gives_negative_qnan_indefinite',
     'nop_f_decode',
     'predicated_off_disabled_fp_does_not_fault',
+    'scalar_muladd_f0_signed_zero_is_pure_multiply',
     'setf_exp_decode',
     'setf_nat_source_sets_fr_natval',
     'setf_sig_direct_scalar_operand',

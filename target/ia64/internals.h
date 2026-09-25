@@ -154,6 +154,9 @@ typedef struct IA64FPTransactionState {
     uint64_t backup_fr_mask[2];
     uint64_t backup_pr_mask;
     uint64_t backup_psr_mf;
+    /* FPSR flags and ISR.code trap bits from the register-format engine. */
+    uint32_t flags;
+    uint32_t trap;
     bool active;
 } IA64FPTransactionState;
 
