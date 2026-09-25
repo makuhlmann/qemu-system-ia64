@@ -10,6 +10,7 @@ ia64_ss.add(files(
   'arch/exception.c',
   'arch/firmware.c',
   'arch/fp.c',
+  'arch/fp-arith.c',
   'arch/interrupt.c',
   'arch/memory.c',
   'arch/mmu.c',

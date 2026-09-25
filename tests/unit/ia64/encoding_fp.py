@@ -80,6 +80,19 @@ def fnorm(f1, f2, f3, qp=0, sf=1):
         | bitfield(qp, 0, 6)
     )
 
+def fnorm_s(f1, f2, f3, qp=0, sf=1):
+    return fnorm(f1, f2, f3, qp=qp, sf=sf) | bitfield(1, 36, 1)
+
+def fnorm_d(f1, f2, f3, qp=0, sf=1):
+    return (
+        op(9)
+        | bitfield(sf, 34, 2)
+        | bitfield(1, 27, 7)
+        | bitfield(f3, 20, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
 def fmov(f1, f2, qp=0):
     # The assembler alias `mov f1=f2` is fmerge.s f1=f2,f2.
     return fmerge_s(f1, f2, f2, qp)
@@ -429,10 +442,51 @@ def fsub_d_s0(f1, f3, f2, qp=0):
         | bitfield(qp, 0, 6)
     )
 
+def fsub_s0(f1, f3, f2, qp=0):
+    return (
+        op(0xa)
+        | bitfield(1, 27, 7)
+        | bitfield(f3, 20, 7)
+        | bitfield(f2, 13, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+def fsub_s_s0(f1, f3, f2, qp=0):
+    return (
+        op(0xa)
+        | bitfield(1, 36, 1)
+        | bitfield(1, 27, 7)
+        | bitfield(f3, 20, 7)
+        | bitfield(f2, 13, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
 def fms_s3(f1, f3, f4, f2, qp=0):
     return (
         op(0xa)
         | bitfield(3, 34, 2)
+        | bitfield(f4, 27, 7)
+        | bitfield(f3, 20, 7)
+        | bitfield(f2, 13, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+def fms_s0(f1, f3, f4, f2, qp=0):
+    return (
+        op(0xa)
+        | bitfield(f4, 27, 7)
+        | bitfield(f3, 20, 7)
+        | bitfield(f2, 13, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+def fms_d_s0(f1, f3, f4, f2, qp=0):
+    return (
+        op(0xb)
         | bitfield(f4, 27, 7)
         | bitfield(f3, 20, 7)
         | bitfield(f2, 13, 7)
@@ -471,6 +525,27 @@ def fnma_s1(f1, f3, f4, f2, qp=0):
     return (
         op(0xc)
         | bitfield(1, 34, 2)
+        | bitfield(f4, 27, 7)
+        | bitfield(f3, 20, 7)
+        | bitfield(f2, 13, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+def fnma_s0(f1, f3, f4, f2, qp=0):
+    return (
+        op(0xc)
+        | bitfield(f4, 27, 7)
+        | bitfield(f3, 20, 7)
+        | bitfield(f2, 13, 7)
+        | bitfield(f1, 6, 7)
+        | bitfield(qp, 0, 6)
+    )
+
+def fnma_s_s0(f1, f3, f4, f2, qp=0):
+    return (
+        op(0xc)
+        | bitfield(1, 36, 1)
         | bitfield(f4, 27, 7)
         | bitfield(f3, 20, 7)
         | bitfield(f2, 13, 7)
@@ -559,6 +634,8 @@ __all__ = (
     'setf_d',
     'setf_s',
     'fnorm',
+    'fnorm_s',
+    'fnorm_d',
     'fmov',
     'fpabs',
     'fpneg',
@@ -613,10 +690,16 @@ __all__ = (
     'fma_s_s0',
     'fma_d_s0',
     'fsub_d_s0',
+    'fsub_s0',
+    'fsub_s_s0',
+    'fms_s0',
+    'fms_d_s0',
     'fms_s3',
     'fclass_m',
     'fcmp',
     'fnma_s1',
+    'fnma_s0',
+    'fnma_s_s0',
     'fnmpy_s_s1',
     'fnma_d_s1',
     'setf_exp',
