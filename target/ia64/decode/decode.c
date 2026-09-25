@@ -2065,8 +2065,9 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         }
     }
 
+    /* I29 ignores bit 36 (SDM Vol 3 Table 4-4). */
     if (unit == IA64_UNIT_I && ia64_b_op(raw) == 0 &&
-        ia64_bits(raw, 33, 4) == 0) {
+        ia64_bits(raw, 33, 3) == 0) {
         Ia64Opcode opcode = IA64_OP_ILLEGAL;
 
         switch (ia64_bits(raw, 27, 6)) {

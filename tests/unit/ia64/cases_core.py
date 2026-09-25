@@ -1217,6 +1217,15 @@ test_czx1_r_zero_index = require_registers("czx1_r_zero_index", [
      br_cond(0x30, 0x30)),
 ], {"ip": 0x30, "exception": IA64_EXCP_NONE, "r31": 3}, entry=0x10)
 
+# I29 ignores bit 36 (SDM Vol 3 Table 4-4).
+test_czx1_r_ignores_bit36 = require_registers("czx1_r_ignores_bit36", [
+    (0x10, *movl_mlx(3, 0x8877665500332211)),
+    (0x20, 0x00, nop_m(), czx1_r(31, 3) | (1 << 36),
+     nop_i()),
+    (0x30, 0x10, nop_m(), nop_i(),
+     br_cond(0x30, 0x30)),
+], {"ip": 0x30, "exception": IA64_EXCP_NONE, "r31": 3}, entry=0x10)
+
 test_czx1_r_no_zero = require_registers("czx1_r_no_zero", [
     (0x10, *movl_mlx(3, 0x3d6365766863616d)),
     (0x20, 0x00, nop_m(), czx1_r(31, 3),
@@ -3515,6 +3524,7 @@ CASE_NAMES = (
     'cmp_unc_same_pred_pred_false_illegal',
     'cmp_unc_self_predicate_reads_old_qp',
     'czx1_l_zero_index',
+    'czx1_r_ignores_bit36',
     'czx1_r_no_zero',
     'czx1_r_zero_index',
     'czx2_l_zero_index',

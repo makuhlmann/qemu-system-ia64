@@ -147,6 +147,7 @@ cover_saves_interrupted_cfm_to_ifs
 cpuid_merced
 czx1_l_zero_index
 czx1_r_no_zero
+czx1_r_ignores_bit36
 czx1_r_zero_index
 czx2_l_zero_index
 czx2_r_ignored_r2_decode
