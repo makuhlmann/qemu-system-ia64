@@ -1210,6 +1210,37 @@ test_lfetch_fault_natpage_isr_code = natpage_priority_probe_test(
     IA64_ISR_NA | IA64_ISR_R | 0x24)
 
 
+# ISR.code{3:0} names the non-access instruction on an Unimplemented Data
+# Address fault too (SDM Vol. 2 Table 5-1).  Bit 52 is above Merced's VA.
+def _nonaccess_unimplemented_address_test(name, insn, expected_isr):
+    return require_registers(name, [
+        (0x10, *movl_mlx(2, 1 << 52)),
+        (0x20, 0x00, ssm(IA64_PSR_IC | IA64_PSR_DT), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x00, insn, nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(14, 20), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(15, 17),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x20, IA64_GENERAL_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r14": 1 << 52,
+        "r15": expected_isr,
+    }, entry=0x10, cpu="merced")
+
+test_probe_r_fault_unimplemented_address_isr_code = (
+    _nonaccess_unimplemented_address_test(
+        "probe_r_fault_unimplemented_address_isr_code", probe_r_fault(2, 0),
+        IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_NA | IA64_ISR_R | 5))
+
+test_lfetch_fault_unimplemented_address_isr_code = (
+    _nonaccess_unimplemented_address_test(
+        "lfetch_fault_unimplemented_address_isr_code", lfetch_fault(2),
+        IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_NA | IA64_ISR_R | 4))
+
 # The faulting probe forms list Data NaT Page Consumption as well.
 test_probe_r_fault_natpage_raises_nat_consumption = require_registers(
     "probe_r_fault_natpage_raises_nat_consumption", [
@@ -6934,6 +6965,7 @@ CASE_NAMES = (
     'percpu_alt_dtlb_uses_updated_kr3_after_ptc_e',
     'probe_dt_disabled_maintenance_bits_grant',
     'lfetch_fault_natpage_isr_code',
+    'lfetch_fault_unimplemented_address_isr_code',
     'probe_fault_short_vhpt_not_present_raises_page_fault',
     'probe_natpage_outranks_access_bit',
     'probe_natpage_outranks_access_rights',
@@ -6945,6 +6977,7 @@ CASE_NAMES = (
     'probe_r_fault_ignored_fields_decode',
     'probe_r_dt_disabled_key_read_disable_returns_zero',
     'probe_r_fault_natpage_isr_code',
+    'probe_r_fault_unimplemented_address_isr_code',
     'probe_r_fault_natpage_raises_nat_consumption',
     'probe_r_insufficient_privilege_returns_zero',
     'probe_r_natpage_dtr_raises_nat_consumption',

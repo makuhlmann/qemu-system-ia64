@@ -1380,24 +1380,19 @@ static void ia64_raise_data_reference_exception_at(CPUIA64State *env,
             env, excp == IA64_EXCP_VHPT_FAULT ? env->cr_iha : va);
     }
     if (excp != IA64_EXCP_DATA_NESTED_TLB) {
+        /* Every non-access fault names the instruction (SDM Table 5-1). */
+        env->cr_isr = (is_non_access ? IA64_ISR_NA | non_access_code : 0) |
+                      (is_rw ? (IA64_ISR_R | IA64_ISR_W) :
+                       (is_write ? IA64_ISR_W : IA64_ISR_R));
         if (excp == IA64_EXCP_UNIMPL_DATA_ADDR) {
-            env->cr_isr = IA64_GENEX_UNIMPL_DATA_ADDR |
-                          (is_non_access ? IA64_ISR_NA : 0) |
-                          (is_rw ? (IA64_ISR_R | IA64_ISR_W) :
-                           (is_write ? IA64_ISR_W : IA64_ISR_R));
-        } else {
-            env->cr_isr = (is_non_access ?
-                           IA64_ISR_NA | non_access_code : 0) |
-                          (is_rw ? (IA64_ISR_R | IA64_ISR_W) :
-                           (is_write ? IA64_ISR_W : IA64_ISR_R));
-            if (excp == IA64_EXCP_NAT_CONSUMPTION) {
-                /*
-                 * Data NaT Page Consumption reports ISR.code{5:4} = 2 above
-                 * the non-access instruction code in ISR.code{3:0}, which is
-                 * zero for an ordinary access.
-                 */
-                env->cr_isr |= IA64_ISR_CODE_NAT_PAGE;
-            }
+            env->cr_isr |= IA64_GENEX_UNIMPL_DATA_ADDR;
+        } else if (excp == IA64_EXCP_NAT_CONSUMPTION) {
+            /*
+             * Data NaT Page Consumption reports ISR.code{5:4} = 2 above
+             * the non-access instruction code in ISR.code{3:0}, which is
+             * zero for an ordinary access.
+             */
+            env->cr_isr |= IA64_ISR_CODE_NAT_PAGE;
         }
         /* Data NaT Page Consumption always reports ISR.sp and ISR.ed as 0. */
         if (is_speculative && excp != IA64_EXCP_NAT_CONSUMPTION) {
