@@ -2265,35 +2265,6 @@ static void ia64_do_fnorm(CPUIA64State *env, uint32_t r1, uint32_t r2,
     }
 }
 
-/* ---- FP absolute / negate / negate-absolute ---- */
-
-void ia64_fp_fpabs(CPUIA64State *env, uint32_t r1, uint32_t r2)
-{
-    if (ia64_fr_nat_get(env, r2)) {
-        ia64_fr_write_nat(env, r1);
-        return;
-    }
-    ia64_fr_copy(env, r1, r2, 0);
-}
-
-void ia64_fp_fpneg(CPUIA64State *env, uint32_t r1, uint32_t r2)
-{
-    if (ia64_fr_nat_get(env, r2)) {
-        ia64_fr_write_nat(env, r1);
-        return;
-    }
-    ia64_fr_copy(env, r1, r2, -1);
-}
-
-void ia64_fp_fpnegabs(CPUIA64State *env, uint32_t r1, uint32_t r2)
-{
-    if (ia64_fr_nat_get(env, r2)) {
-        ia64_fr_write_nat(env, r1);
-        return;
-    }
-    ia64_fr_copy(env, r1, r2, 2);
-}
-
 void ia64_fp_fcvt_xf(CPUIA64State *env, uint32_t r1, uint32_t r2)
 {
     uint64_t value;

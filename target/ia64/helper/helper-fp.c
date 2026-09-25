@@ -232,21 +232,6 @@ void helper_fnorm(CPUIA64State *arg0, uint32_t arg1, uint32_t arg2,
     ia64_fp_fnorm(arg0, arg1, arg2, arg3, arg4);
 }
 
-void helper_fpabs(CPUIA64State *arg0, uint32_t arg1, uint32_t arg2)
-{
-    ia64_fp_fpabs(arg0, arg1, arg2);
-}
-
-void helper_fpneg(CPUIA64State *arg0, uint32_t arg1, uint32_t arg2)
-{
-    ia64_fp_fpneg(arg0, arg1, arg2);
-}
-
-void helper_fpnegabs(CPUIA64State *arg0, uint32_t arg1, uint32_t arg2)
-{
-    ia64_fp_fpnegabs(arg0, arg1, arg2);
-}
-
 void helper_fcvt_xf(CPUIA64State *arg0, uint32_t arg1, uint32_t arg2)
 {
     ia64_fp_fcvt_xf(arg0, arg1, arg2);

@@ -366,9 +366,6 @@ static bool ia64_insn_writes_fr_f1(const Ia64Instruction *insn)
     case IA64_OP_FSXT_R:
     case IA64_OP_FSXT_L:
     case IA64_OP_FPACK:
-    case IA64_OP_FPABS:
-    case IA64_OP_FPNEG:
-    case IA64_OP_FPNEGABS:
     case IA64_OP_FPMERGE:
     case IA64_OP_FPMERGE_S:
     case IA64_OP_FPMERGE_SE:
@@ -2415,9 +2412,6 @@ static uint32_t ia64_insn_fp_read_sets(const Ia64Instruction *insn)
         return ia64_fp_reg_set(insn->operands.common.source1) |
                ia64_fp_reg_set(insn->operands.common.source2);
 
-    case IA64_OP_FPABS:
-    case IA64_OP_FPNEG:
-    case IA64_OP_FPNEGABS:
     case IA64_OP_FMOV:
     case IA64_OP_FCVT_XF:
     case IA64_OP_FCVT_FX:
@@ -2517,9 +2511,6 @@ static uint32_t ia64_insn_fp_write_sets(const Ia64Instruction *insn)
     case IA64_OP_FPRCPA:
     case IA64_OP_FSELECT:
     case IA64_OP_FNORM:
-    case IA64_OP_FPABS:
-    case IA64_OP_FPNEG:
-    case IA64_OP_FPNEGABS:
     case IA64_OP_FPRSQRTA:
     case IA64_OP_FRSQRTA:
     case IA64_OP_FPACK:
