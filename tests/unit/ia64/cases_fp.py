@@ -991,6 +991,42 @@ test_fp_trap_isr_reports_concurrent_single_step = require_registers(
         "f8": ExpectedFP(3, 0x1003e),
     }, entry=0x10)
 
+# A trap saves the next slot in IPSR.ri and IIP, the trapping one in IIPA and
+# ISR.ei (SDM Vol. 2 5.5, Floating-point Trap vector).
+def _fp_trap_next_slot_case(name, bundle, iip, ri, ei):
+    return require_registers(name, [
+        (0x10, *movl_mlx(2, 0x31f)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x400c000000000000)),
+        (0x40, 0x00, setf_d(6, 3), nop_i(), nop_i()),
+        (0x50, *movl_mlx(2, IA64_PSR_IC)),
+        (0x60, *movl_mlx(3, 0xb0)),
+        *rfi_to_gr(0x70, 2, 3),
+        (0xb0, *bundle),
+        (IA64_FP_TRAP_VECTOR, 0x09, mov_m_cr_gr(10, 17),
+         mov_m_cr_gr(11, 16), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x09, mov_m_cr_gr(12, 19),
+         mov_m_cr_gr(13, 22), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x20,
+                 IA64_FP_TRAP_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r10": 0x2000 | IA64_ISR_CODE_FP | (ei << IA64_ISR_EI_SHIFT),
+        "r11": ExpectedBits(mask=3 << 41, value=ri << 41),
+        "r12": iip,
+        "r13": 0xb0,
+    }, entry=0x10)
+
+test_fp_trap_ipsr_ri_names_next_slot = _fp_trap_next_slot_case(
+    "fp_trap_ipsr_ri_names_next_slot",
+    (0x0d, nop_m(), fcvt_fxu(8, 6), nop_i()), 0xb0, 2, 1)
+
+test_fp_trap_slot2_iip_names_next_bundle = _fp_trap_next_slot_case(
+    "fp_trap_slot2_iip_names_next_bundle",
+    (0x0f, nop_m(), nop_m(), fcvt_fxu(8, 6)), 0xc0, 0, 2)
+
 test_xma_h_decode = require_registers("xma_h_decode", [
     (0x10, 0x1d, nop_m(), xma_h(8, 0, 6, 7),
      br_cond(0x10, 0x20)),
@@ -5872,6 +5908,8 @@ CASE_NAMES = (
     'fp_fixed_target_predicated_off_is_nop',
     'fp_inexact_trap_commits_result',
     'fp_trap_isr_reports_concurrent_single_step',
+    'fp_trap_ipsr_ri_names_next_slot',
+    'fp_trap_slot2_iip_names_next_bundle',
     'fp_logical_and_swap_decode',
     'fp_logical_swap_natval_propagates',
     'fp_mix_sign_extend_decode',

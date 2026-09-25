@@ -243,7 +243,7 @@ static bool ia64_exception_writes_ifa(IA64Exception excp)
 static bool ia64_exception_is_completion_trap(IA64Exception excp)
 {
     return excp == IA64_EXCP_TAKEN_BRANCH || excp == IA64_EXCP_SINGLE_STEP ||
-           excp == IA64_EXCP_LOWER_PRIV_TRANSFER;
+           excp == IA64_EXCP_LOWER_PRIV_TRANSFER || excp == IA64_EXCP_FP_TRAP;
 }
 
 static uint64_t ia64_interruption_psr(CPUIA64State *env)
@@ -393,9 +393,7 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
             cpu->env.cr_ipsr |=
                 ((uint64_t)slot & 3) << IA64_PSR_RI_SHIFT;
             cpu->env.cr_iip = ia64_ip_bundle_addr(cpu->env.ip);
-            cpu->env.cr_iipa = excp == IA64_EXCP_FP_TRAP ?
-                               cpu->env.exception_state.fault_imm :
-                               cpu->env.last_successful_bundle;
+            cpu->env.cr_iipa = cpu->env.last_successful_bundle;
         }
         if (ia64_exception_writes_ifa(excp)) {
             cpu->env.cr_ifa = fault_addr;
