@@ -995,6 +995,8 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
     env->exception_state.fault_addr = 0;
     env->exception_state.fault_imm = 0;
     env->exception_state.fault_slot = 0;
+    /* rfi takes no Single Step (0x6000) or Taken Branch (0x5f00) trap. */
+    env->exception_state.completion_trap_armed = false;
     env->instruction_group_start = true;
 
     /*
@@ -1265,6 +1267,14 @@ void ia64_rse_br_ret(CPUIA64State *env, uint32_t b_reg)
     uint64_t pfs = env->ar_pfs;
     uint64_t target = env->br[b_reg];
     uint8_t ppl = (pfs & IA64_PFS_PPL_MASK) >> IA64_PFS_PPL_SHIFT;
+
+    if ((env->psr & IA64_PSR_LP) && ia64_psr_cpl(env->psr) < ppl) {
+        /* PSR.lp: a branch that demotes the privilege level traps. */
+        ia64_completion_trap_note(env, ia64_ip_bundle_addr(env->ip),
+                                  (env->psr & IA64_PSR_RI_MASK) >>
+                                  IA64_PSR_RI_SHIFT,
+                                  IA64_ISR_CODE_LP, true);
+    }
 
     /*
      * Commit the branch target (slot 0) and demoted privilege level

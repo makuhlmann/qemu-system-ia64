@@ -82,6 +82,10 @@ void ia64_raise_pre_unaligned_data_fault(CPUIA64State *env, uint64_t va,
                                          uint8_t fault_slot);
 void ia64_cpu_do_interrupt(CPUState *cs);
 bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request);
+void ia64_completion_trap_arm(CPUIA64State *env, uint64_t iipa,
+                              uint32_t slot, uint64_t code);
+void ia64_completion_trap_note(CPUIA64State *env, uint64_t iipa,
+                               uint32_t slot, uint64_t code, bool taken);
 bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
                                          uint64_t fault_addr,
                                          uint8_t fault_slot);

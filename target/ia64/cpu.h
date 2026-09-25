@@ -127,6 +127,7 @@
 #define IA64_PSR_DI      (1ULL << 22)
 #define IA64_PSR_SI      (1ULL << 23)
 #define IA64_PSR_DB      (1ULL << 24)
+#define IA64_PSR_LP      (1ULL << 25)
 #define IA64_PSR_TB      (1ULL << 26)
 #define IA64_PSR_RT      (1ULL << 27)
 #define IA64_PSR_IS      (1ULL << 34)
@@ -388,6 +389,8 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 /* NaT Consumption ISR.code{5:4} = 2 for a NaTPage reference. */
 #define IA64_ISR_CODE_NAT_PAGE 0x20
 /* Concurrent trap conditions reported in ISR.code (SDM Vol. 2, Table 8-3). */
+#define IA64_ISR_CODE_FP       (1ULL << 0)
+#define IA64_ISR_CODE_LP       (1ULL << 1)
 #define IA64_ISR_CODE_TB       (1ULL << 2)
 #define IA64_ISR_CODE_SS       (1ULL << 3)
 #define IA64_ISR_CODE_UI       (1ULL << 4)
@@ -763,8 +766,15 @@ typedef enum IA64Exception {
     IA64_EXCP_IA32_INTERRUPT = 36,
     IA64_EXCP_TAKEN_BRANCH = 37,
     IA64_EXCP_SINGLE_STEP = 38,
+    IA64_EXCP_LOWER_PRIV_TRANSFER = 39,
     IA64_EXCP_MAX,
 } IA64Exception;
+
+/*
+ * The instruction that just completed owes a Lower-Privilege Transfer, Taken
+ * Branch or Single Step trap (IA64ExceptionState.completion_trap_*).
+ */
+#define IA64_INTERRUPT_COMPLETION_TRAP CPU_INTERRUPT_TGT_INT_0
 
 /* ---- IVT vector mapping table ---- */
 extern const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX];

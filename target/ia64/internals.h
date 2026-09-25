@@ -25,6 +25,16 @@ typedef struct IA64ExceptionState {
     bool ia32_trap;
     /* Trap raised by the IA-32 side of an ISA transition boundary. */
     bool ia32_transition_trap;
+    /*
+     * Lower-Privilege Transfer, Taken Branch and Single Step conditions of
+     * the instruction at (completion_trap_iipa, completion_trap_slot),
+     * delivered once it completes (ia64_completion_trap_note()).
+     */
+    bool completion_trap_armed;
+    bool completion_trap_taken;
+    uint8_t completion_trap_slot;
+    uint64_t completion_trap_code;
+    uint64_t completion_trap_iipa;
 
     /* Transient state spanning one serialization/fault-suppression window. */
     bool psr_ic_inflight;

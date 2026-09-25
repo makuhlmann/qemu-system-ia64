@@ -185,6 +185,12 @@ from .encoding import (
     ldfps,
     stf_spill_postinc,
     stfd,
+    IA64_EXCP_SINGLE_STEP,
+    IA64_FIRMWARE_IVT_BASE,
+    IA64_ISR_CODE_SS,
+    IA64_PSR_SS,
+    IA64_SINGLE_STEP_VECTOR,
+    extr_u,
 )
 
 
@@ -2740,6 +2746,49 @@ test_madison_speculative_model_unaligned_defers = require_registers(
     ], {"ip": 0x30, "r4_nat": 1, "exception": IA64_EXCP_NONE},
     entry=0x10, cpu="madison")
 
+# The firmware unaligned assist completes the instruction in slot 0, so the
+# Single Step trap names slot 1 as the next instruction and slot 0 as the
+# trapping one (SDM Vol. 2 7.1).
+test_firmware_unaligned_assist_retires_single_step = require_registers(
+    "firmware_unaligned_assist_retires_single_step",
+    [
+        (0x10, *movl_mlx(20, 0x1122334455667788)),
+        (0x20, 0x00, addl(3, 0x300, 0), nop_i(), nop_i()),
+        (0x30, 0x00, st8(3, 20), nop_i(), nop_i()),
+        (0x40, 0x00, nop_m(), adds(3, 4, 3), nop_i()),
+        (0x50, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
+        (0x60, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0x70, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_AC | IA64_PSR_SS)),
+        (0x80, *movl_mlx(4, 0x110)),
+        *rfi_to_gr(0x90, 2, 4),
+        (0x110, 0x00, ld8(22, 3), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR, 0x00,
+         mov_m_cr_gr(24, 19), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(25, 22), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(26, 17), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x30, 0x00,
+         mov_m_cr_gr(27, 16), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x40, 0x02,
+         nop_m(), extr_u(28, 27, 41, 2), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50,
+                 IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50)),
+    ],
+    {
+        "ip": IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_SINGLE_STEP,
+        "r22": 0x11223344,
+        "r24": 0x110,
+        "r25": 0x110,
+        "r26": IA64_ISR_CODE_SS,
+        "r28": 1,
+    },
+)
+
 test_speculative_unaligned_defers = require_registers(
     "speculative_unaligned_defers",
     [
@@ -2975,6 +3024,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'fetchadd4_nat_base_sets_read_write_isr',
     'fetchadd4_result_base_alias_invalidates_alat',
     'fetchadd4_unaligned_sets_read_write_isr',
+    'firmware_unaligned_assist_retires_single_step',
     'firmware_unaligned_load_assist',
     'firmware_unaligned_speculative_load_assist',
     'firmware_unaligned_store_assist',

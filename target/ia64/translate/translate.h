@@ -24,6 +24,8 @@
 #define IA64_TB_FLAG_BE           (1u << 6)
 #define IA64_TB_FLAG_GROUP_START  (1u << 7)
 #define IA64_TB_FLAG_PSR_AC       (1u << 8)
+#define IA64_TB_FLAG_PSR_SS       (1u << 11)
+#define IA64_TB_FLAG_PSR_TB       (1u << 12)
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)
@@ -102,6 +104,14 @@ typedef struct DisasContext {
      * branch or exception path.  Reset whenever CFM.SOF may change.
      */
     uint8_t cfm_sof_checked;
+    /*
+     * PSR.ss and PSR.tb at TB entry.  Either one makes the TB translate a
+     * single instruction, in slot trap_slot, and note its completion traps
+     * (ia64_completion_trap_note()).
+     */
+    bool psr_ss;
+    bool psr_tb;
+    uint8_t trap_slot;
 } DisasContext;
 
 typedef enum IA64GenResult {

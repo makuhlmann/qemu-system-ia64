@@ -92,6 +92,8 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 
     flags |= (psr & IA64_PSR_FAULT_SUPPRESS_MASK) != 0 ?
              IA64_TB_FLAG_PSR_SUPPRESS : 0;
+    flags |= ((psr & IA64_PSR_SS) ? IA64_TB_FLAG_PSR_SS : 0) |
+             ((psr & IA64_PSR_TB) ? IA64_TB_FLAG_PSR_TB : 0);
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,

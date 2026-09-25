@@ -1595,11 +1595,23 @@ void ia64_gen_exit_to_completed(DisasContext *ctx, uint64_t ip,
     ia64_gen_exit_to(ctx, ip);
 }
 
+/* A taken branch in a TB that notes completion traps (DisasContext.psr_tb). */
+static void ia64_gen_note_taken_branch(DisasContext *ctx,
+                                       uint64_t completed_ip)
+{
+    if (ctx->psr_ss || ctx->psr_tb) {
+        gen_helper_completion_trap_taken(
+            tcg_env, tcg_constant_i64(ia64_ip_bundle_addr(completed_ip)),
+            tcg_constant_i32(ctx->trap_slot));
+    }
+}
+
 void ia64_gen_lookup_tcg_completed(DisasContext *ctx, TCGv_i64 ip,
                                    uint64_t completed_ip,
                                    bool record_iipa,
                                    bool track_psr_suppression)
 {
+    ia64_gen_note_taken_branch(ctx, completed_ip);
     ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_store_instruction_group_start(true);
@@ -1614,6 +1626,7 @@ void ia64_gen_lookup_current_completed(DisasContext *ctx,
                                        bool record_iipa,
                                        bool track_psr_suppression)
 {
+    ia64_gen_note_taken_branch(ctx, completed_ip);
     ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_store_instruction_group_start(true);
@@ -1700,6 +1713,7 @@ void ia64_gen_goto_completed(DisasContext *ctx, uint64_t ip,
                              bool record_iipa,
                              bool track_psr_suppression)
 {
+    ia64_gen_note_taken_branch(ctx, completed_ip);
     ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_goto_tb_group(ctx, ip, true);
@@ -1830,6 +1844,7 @@ void ia64_prepare_self_counted_loop(
     ctx->branch.cloop_zero_st1_valid = false;
 
     if (ctx->restart.start_slot != 0 ||
+        ctx->psr_ss || ctx->psr_tb ||
         ctx->base.plugin_enabled ||
         (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) ||
         !ia64_analyze_self_counted_loop(
@@ -3053,6 +3068,8 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
         ctx->base.tb->flags & IA64_TB_FLAG_GROUP_START;
     ctx->restart.next_instruction_group_start =
         ctx->restart.instruction_group_start;
+    ctx->psr_ss = flags & IA64_TB_FLAG_PSR_SS;
+    ctx->psr_tb = flags & IA64_TB_FLAG_PSR_TB;
 }
 
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cs)
@@ -3246,7 +3263,8 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         if (ia64_insn_is_empty_hint(&insn) &&
             !ia64_insn_is_yielding_pause(ctx, &insn) &&
             !(record_iipa && track_iipa_for_insn) &&
-            !ctx->restart.track_psr_suppression) {
+            !ctx->restart.track_psr_suppression &&
+            !ctx->psr_ss && !ctx->psr_tb) {
             ia64_gen_advance_restart_point(ctx, bundle_ip, slot,
                                            skip_x_slot);
             ctx->restart.instruction_group_start =
@@ -3264,6 +3282,12 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
                                     psr_suppression_before_insn));
         }
         ia64_gen_set_ri_tracked(ctx, slot);
+        ctx->trap_slot = slot;
+        if (ctx->psr_ss) {
+            gen_helper_completion_trap_arm(tcg_env,
+                                           tcg_constant_i64(bundle_ip),
+                                           tcg_constant_i32(slot));
+        }
         if (ia64_gen_insn(ctx, &insn, record_iipa && track_iipa_for_insn)) {
             db->is_jmp = DISAS_NORETURN;
             return;
@@ -3281,6 +3305,18 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         }
         ctx->restart.track_psr_suppression =
             ia64_insn_may_set_fault_suppression(&insn);
+        if (ctx->psr_ss || ctx->psr_tb) {
+            /*
+             * Leave after one instruction so that its traps are taken
+             * before the next one starts.
+             */
+            ia64_gen_store_instruction_group_start(
+                ctx->restart.instruction_group_start);
+            ia64_gen_save_fault_slot_for_exit(ctx);
+            tcg_gen_exit_tb(NULL, 0);
+            db->is_jmp = DISAS_NORETURN;
+            return;
+        }
     }
 
     ctx->restart.start_slot = 0;

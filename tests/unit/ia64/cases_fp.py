@@ -187,6 +187,10 @@ from .encoding import (
     xma_hu,
     xma_l,
     xmpy_hu,
+    IA64_ISR_CODE_FP,
+    IA64_ISR_CODE_SS,
+    IA64_PSR_SS,
+    rfi_to_gr,
 )
 
 
@@ -946,6 +950,37 @@ test_fp_inexact_trap_commits_result = require_registers(
         "ip": IA64_FP_TRAP_VECTOR + 0x10,
         "exception": IA64_EXCP_NONE,
         "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x2001,
+        "f8": ExpectedFP(3, 0x1003e),
+    }, entry=0x10)
+
+# An FP trap outranks a concurrent Single Step trap, whose bit ISR.code still
+# carries (SDM Vol. 2 5.5.2 step 8, Table 8-3).
+test_fp_trap_isr_reports_concurrent_single_step = require_registers(
+    "fp_trap_isr_reports_concurrent_single_step", [
+        (0x10, *movl_mlx(2, 0x31f)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x400c000000000000)),
+        (0x40, 0x00, setf_d(6, 3), nop_i(), nop_i()),
+        (0x50, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_SS | (1 << 41))),
+        (0x60, *movl_mlx(3, 0xb0)),
+        *rfi_to_gr(0x70, 2, 3),
+        (0xb0, 0x0d, nop_m(), fcvt_fxu(8, 6), nop_i()),
+        (IA64_FP_TRAP_VECTOR, 0x00, mov_m_cr_gr(10, 19),
+         nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x10, 0x00, mov_m_cr_gr(11, 22),
+         nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x20, 0x00, mov_m_cr_gr(12, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_TRAP_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_TRAP_VECTOR + 0x30,
+                 IA64_FP_TRAP_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_FP_TRAP_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r10": 0xb0,
+        "r11": 0xb0,
+        "r12": (0x2000 | IA64_ISR_CODE_FP | IA64_ISR_CODE_SS |
+                (1 << IA64_ISR_EI_SHIFT)),
         "f8": ExpectedFP(3, 0x1003e),
     }, entry=0x10)
 
@@ -3521,6 +3556,7 @@ CASE_NAMES = (
     'fp_divzero_fault_discards_result',
     'fp_fixed_target_predicated_off_is_nop',
     'fp_inexact_trap_commits_result',
+    'fp_trap_isr_reports_concurrent_single_step',
     'fp_logical_and_swap_decode',
     'fp_logical_swap_natval_propagates',
     'fp_mix_sign_extend_decode',
