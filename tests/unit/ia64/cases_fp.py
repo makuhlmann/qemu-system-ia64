@@ -2208,21 +2208,64 @@ test_getf_natval_sets_gr_nat = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+# Alternating sticky flags expose both clearing and spurious flag additions.
+_FPACK_FLAGS = 0x15 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT)
+_FPACK_FPSR_BASE = DEFAULT_FPSR | _FPACK_FLAGS
+_FPACK_RC_SHIFT = FPSR_SF0_SHIFT + 4
+_FPACK_FPSRS = tuple(
+    (_FPACK_FPSR_BASE & ~(3 << _FPACK_RC_SHIFT)) |
+    (rc << _FPACK_RC_SHIFT)
+    for rc in range(4)
+)
+
 test_fpack_decode = require_registers("fpack_decode", [
-    (0x10, *movl_mlx(2, 0x3ff0000000000000)),
-    (0x20, *movl_mlx(3, 0xc000000000000000)),
-    (0x30, 0x00, setf_d(6, 2), nop_i(),
+    # These doubles lie three quarters of a binary32 ulp away from +/-1.
+    # getf.s and fpack must translate register bits, rather than round them.
+    (0x10, *movl_mlx(2, 0x3ff0000018000000)),
+    (0x20, *movl_mlx(3, 0xbff0000018000000)),
+    (0x30, 0x09, setf_d(6, 2), setf_d(7, 3),
      nop_i()),
-    (0x40, 0x00, setf_d(7, 3), nop_i(),
+    (0x40, 0x09, getf_s(4, 6), getf_s(5, 7),
      nop_i()),
-    (0x50, 0x0d, nop_m(), fpack(8, 6, 7),
+    (0x50, *movl_mlx(20, _FPACK_FPSRS[0])),
+    (0x60, *movl_mlx(21, _FPACK_FPSRS[1])),
+    (0x70, *movl_mlx(22, _FPACK_FPSRS[2])),
+    (0x80, *movl_mlx(23, _FPACK_FPSRS[3])),
+    (0x90, 0x01, mov_m_gr_ar(20, 40), nop_i(),
      nop_i()),
-    (0x60, 0x10, nop_m(), nop_i(),
-     br_cond(0x60, 0x60)),
+    (0xa0, 0x1d, nop_m(), fmpy_s0(20, 1, 1),
+     nop_b()),
+    (0xb0, 0x0d, nop_m(), fpack(8, 6, 7),
+     nop_i()),
+    (0xc0, 0x01, mov_m_gr_ar(21, 40), nop_i(),
+     nop_i()),
+    (0xd0, 0x1d, nop_m(), fmpy_s0(20, 1, 1),
+     nop_b()),
+    (0xe0, 0x0d, nop_m(), fpack(9, 6, 7),
+     nop_i()),
+    (0xf0, 0x01, mov_m_gr_ar(22, 40), nop_i(),
+     nop_i()),
+    (0x100, 0x1d, nop_m(), fmpy_s0(20, 1, 1),
+     nop_b()),
+    (0x110, 0x0d, nop_m(), fpack(10, 6, 7),
+     nop_i()),
+    (0x120, 0x01, mov_m_gr_ar(23, 40), nop_i(),
+     nop_i()),
+    (0x130, 0x1d, nop_m(), fmpy_s0(20, 1, 1),
+     nop_b()),
+    (0x140, 0x0d, nop_m(), fpack(11, 6, 7),
+     nop_i()),
+    (0x150, 0x10, nop_m(), nop_i(),
+     br_cond(0x150, 0x150)),
 ], {
-    "ip": 0x60,
-    "f8": ExpectedFP(0x3f800000c0000000, 0x1003e),
-    "ar_fpsr": DEFAULT_FPSR,
+    "ip": 0x150,
+    "r4": 0x3f800000,
+    "r5": 0xbf800000,
+    "f8": ExpectedFP(0x3f800000bf800000, 0x1003e),
+    "f9": ExpectedFP(0x3f800000bf800000, 0x1003e),
+    "f10": ExpectedFP(0x3f800000bf800000, 0x1003e),
+    "f11": ExpectedFP(0x3f800000bf800000, 0x1003e),
+    "ar_fpsr": _FPACK_FPSRS[3],
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
 

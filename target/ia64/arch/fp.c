@@ -2895,19 +2895,19 @@ void ia64_fp_fpswa_dispatch(CPUIA64State *env, uintptr_t ra)
 
 void ia64_fp_fpack(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3)
 {
-    float_status status = env->fp.fp_status;
-    float32 hi;
-    float32 lo;
-
     if (ia64_fr_nat_get(env, r2) || ia64_fr_nat_get(env, r3)) {
         ia64_fr_write_nat(env, r1);
         return;
     }
 
-    hi = floatx80_to_float32(ia64_fr_to_floatx80(env, r2), &status);
-    status = env->fp.fp_status;
-    lo = floatx80_to_float32(ia64_fr_to_floatx80(env, r3), &status);
-    ia64_fr_write_sig(env, r1, ((uint64_t)hi << 32) | lo);
+    /*
+     * fp_single is the register to single memory format translation of
+     * stfs (SDM Vol 3 fpack Figure 2-14, Vol 1 Figure 5-7): it moves bits
+     * and does not round.
+     */
+    ia64_fr_write_sig(env, r1,
+                      ((uint64_t)ia64_fpreg_to_binary32(env, r2) << 32) |
+                      ia64_fpreg_to_binary32(env, r3));
 }
 
 static bool ia64_probe_writeback_ram(CPUIA64State *env, uint64_t addr,
