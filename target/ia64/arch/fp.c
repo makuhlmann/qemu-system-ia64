@@ -1840,6 +1840,10 @@ static uint32_t ia64_fpcvt_lane(uint32_t value, bool is_unsigned,
     float32 f = make_float32(value);
     uint32_t result;
 
+    /* A denormal lane is an unnormal operand: D (SDM Vol 1 5.4.1.2). */
+    if (float32_is_denormal(f)) {
+        float_raise(float_flag_input_denormal_used, status);
+    }
     if (is_unsigned) {
         result = is_trunc ?
             float32_to_uint32_round_to_zero(f, status) :

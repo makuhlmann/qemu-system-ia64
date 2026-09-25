@@ -1899,6 +1899,68 @@ test_fp_parallel_natval_propagates = require_registers(
 # An unrepresentable fpcvt lane is the 32-bit integer indefinite 0x80000000
 # (SDM Vol 3 fpcvt.fx).  High lane +Inf is invalid in both forms; low lane
 # -1.0 is valid signed and invalid unsigned.
+# A denormal lane is an unnormal operand: fpcvt sets D (SDM Vol 3 fpcvt.fx
+# "FP Exceptions", Vol 1 5.4.1.2) and faults when D is enabled.
+test_fpcvt_denormal_lanes_set_d = require_registers(
+    "fpcvt_denormal_lanes_set_d", [
+        (0x10, *movl_mlx(2, 0x0000000180000001)),
+        (0x20, 0x00, setf_sig(6, 2), nop_i(), nop_i()),
+        (0x30, 0x0d, nop_m(), fpcvt_fx(8, 6), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "f8": ExpectedFP(0, 0x1003e),
+        # Both tiny lanes round to zero, setting D and I.
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (0x22 <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fpcvt_high_lane_denormal_fault_rolls_back = require_registers(
+    "fpcvt_high_lane_denormal_fault_rolls_back", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 1))[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x05, *movl_mlx(3, 0x000000013f800000)[1:]),
+        (0x40, 0x05, *movl_mlx(4, 0x4000000040400000)[1:]),
+        (0x50, 0x09, setf_sig(6, 3), setf_sig(8, 4), nop_i()),
+        (0x60, 0x0d, nop_m(), fpcvt_fx(8, 6), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x10,
+                 IA64_FP_FAULT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x02,
+        "f8": ExpectedFP(0x4000000040400000, 0x1003e),
+        "ar_fpsr": DEFAULT_FPSR & ~(1 << 1),
+    }, entry=0x10)
+
+test_fpcvt_packed_faults_keep_lane_classes = require_registers(
+    "fpcvt_packed_faults_keep_lane_classes", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~((1 << 0) | (1 << 1)))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        # High QNaN raises V while the low denormal independently raises D.
+        (0x30, *movl_mlx(3, 0x7fc0000000000001)),
+        (0x40, *movl_mlx(4, 0x4000000040400000)),
+        (0x50, 0x09, setf_sig(6, 3), setf_sig(8, 4), nop_i()),
+        (0x60, 0x0d, nop_m(), fpcvt_fx(8, 6, sf=0), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x10,
+                 IA64_FP_FAULT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x10,
+        # Table 8-3 independently reports HI V and LO D in ISR.code.
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x21,
+        "f8": ExpectedFP(0x4000000040400000, 0x1003e),
+        "ar_fpsr": DEFAULT_FPSR & ~((1 << 0) | (1 << 1)),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_fpcvt_masked_invalid_lane_indefinite = require_registers(
     "fpcvt_masked_invalid_lane_indefinite", [
         (0x10, *movl_mlx(2, 0x7f800000bf800000)),
@@ -3771,7 +3833,10 @@ CASE_NAMES = (
     'fpcmp_qnan_quiet_relations',
     'fpcmp_qnan_quiet_with_invalid_enabled',
     'fpcmp_simd_high_lane_fault_isr',
+    'fpcvt_denormal_lanes_set_d',
+    'fpcvt_high_lane_denormal_fault_rolls_back',
     'fpcvt_masked_invalid_lane_indefinite',
+    'fpcvt_packed_faults_keep_lane_classes',
     'fpcvt_parallel_decode',
     'fpcvt_parallel_natval_propagates',
     'fpcvt_simd_high_lane_fault_isr',
