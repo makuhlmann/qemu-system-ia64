@@ -2006,6 +2006,17 @@ test_brl_cond_merced_illegal_operation = require_exception(
         (0x10, *brl_cond_mlx(0x10, 0x40)),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="merced")
 
+# SDM Vol 2 §7.4: the fault is taken regardless of the qualifying predicate.
+test_brl_cond_qp_false_merced_still_illegal = require_exception(
+    "brl_cond_qp_false_merced_still_illegal", [
+        (0x10, *brl_cond_mlx(0x10, 0x40, qp=1)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="merced")
+
+test_brl_call_qp_false_merced_still_illegal = require_exception(
+    "brl_call_qp_false_merced_still_illegal", [
+        (0x10, *brl_call_mlx(6, 0x10, 0x40, qp=1)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="merced")
+
 test_brl_cond_mlx_no_stop_decode = require_registers(
     "brl_cond_mlx_no_stop_decode", [
         (0x10, *brl_cond_mlx(0x10, 0x40, template=0x04)),
@@ -2953,7 +2964,9 @@ CASE_NAMES = (
     'brl_call_mlx_negative_lslot_decode',
     'brl_call_mlx_no_stop_decode',
     'brl_call_merced_illegal_operation',
+    'brl_call_qp_false_merced_still_illegal',
     'brl_cond_merced_illegal_operation',
+    'brl_cond_qp_false_merced_still_illegal',
     'brl_cond_mlx_decode',
     'brl_cond_mlx_no_stop_decode',
     'brp_loop_imp_decode',

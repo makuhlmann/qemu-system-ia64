@@ -2739,6 +2739,22 @@ static IA64PrepareResult ia64_gen_prepare_insn(
                                   insn->raw, insn->slot);
         return IA64_PREPARE_NORETURN;
     }
+    if (ia64_insn_needs_long_branch(insn) &&
+        !(ia64_env_cpu_class(ctx->env)->cpuid_features & IA64_CPUID4_LB)) {
+        /*
+         * 245319-002 Vol. 3, brl: "This instruction is not implemented on the
+         * Intel Itanium processor, which takes an Illegal Operation fault
+         * whenever a long branch instruction is encountered, regardless of
+         * whether the branch is taken or not...  Presence of this
+         * instruction is indicated by a 1 in the lb bit of CPUID register
+         * 4."  The fault ignores the qualifying predicate (SDM Vol 2 §7.4).
+         * Windows keys KF_BRL off that bit and emulates brl from its Illegal
+         * Operation handler when it is clear.
+         */
+        ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
+                                  insn->raw, insn->slot);
+        return IA64_PREPARE_NORETURN;
+    }
     ia64_gen_clear_unc_compare_targets(insn);
     if (insn->clear_p2_before_predicate &&
         insn->operands.common.auxiliary2 != 0) {
@@ -2775,24 +2791,6 @@ static IA64PrepareResult ia64_gen_prepare_insn(
         /*
          * The encoding is reserved on a model that clears CPUID[4].ao, so
          * refuse it the same way an unimplemented opcode is refused.
-         */
-        ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
-                                  insn->raw, insn->slot);
-        if (skip == NULL) {
-            return IA64_PREPARE_NORETURN;
-        }
-        ia64_gen_predicate_end(skip);
-        return IA64_PREPARE_COMPLETE;
-    }
-    if (ia64_insn_needs_long_branch(insn) &&
-        !(ia64_env_cpu_class(ctx->env)->cpuid_features & IA64_CPUID4_LB)) {
-        /*
-         * 245319-002 Vol. 3, brl: "This instruction is not implemented on the
-         * Intel Itanium processor, which takes an Illegal Operation fault
-         * whenever a long branch instruction is encountered...  Presence of
-         * this instruction is indicated by a 1 in the lb bit of CPUID
-         * register 4."  Windows keys KF_BRL off that bit and emulates brl
-         * from its Illegal Operation handler when it is clear.
          */
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
                                   insn->raw, insn->slot);
