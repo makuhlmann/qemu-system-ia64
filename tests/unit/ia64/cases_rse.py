@@ -4548,6 +4548,56 @@ test_cover_rfi_rebases_rotating_general_registers = require_registers(
         "cfm_rrb_gr": 31,
     }, entry=0x10)
 
+# br.ctop keeps every rotating value in its physical register.  Over more
+# rotations than the region holds, a value and a NaT written inside the loop
+# and the clean values from before it must each reach their own
+# backing-store slot and RNAT bit (SDM Vol.1 4.5.3, Vol.2 6.5).
+test_rse_ctop_rotation_flushes_each_value_to_its_physical_slot = \
+    require_registers(
+        "rse_ctop_rotation_flushes_each_value_to_its_physical_slot", [
+            (0x10, *movl_mlx(3, 0x100000)),
+            (0x20, 0x01, mov_ar(3, 18), nop_i(), nop_i()),
+            (0x30, 0x00, alloc(2, 12, 12, 1, 0), nop_i(), nop_i()),
+            (0x40, *movl_mlx(9, 1 << 32)),
+            (0x50, 0x01, mov_m_gr_ar(9, 36), addl(3, 0x300, 0), nop_i()),
+            (0x60, 0x08, ld8_fill_postinc(35, 3, 0), nop_i(), nop_i()),
+            (0x70, 0x00, adds(32, 0x320, 0), adds(33, 0x330, 0),
+             adds(34, 0x340, 0)),
+            (0x80, 0x01, adds(36, 0x360, 0), adds(37, 0x370, 0),
+             adds(38, 0x380, 0)),
+            # The call and return leave the whole frame clean.
+            (0x90, 0x10, adds(39, 0x390, 0), nop_i(),
+             br_call(0, 0x90, 0x400)),
+            (0xa0, 0x01, adds(4, 0, 0), mov_i_imm_ar(65, 19),
+             mov_i_imm_ar(66, 1)),
+            # 20 rotations; iteration 3 writes physical r6, iteration 10
+            # fills physical r0 with a NaT.
+            (0xb0, 0x02, cmp_eq_imm(1, 2, 2, 4), cmp_eq_imm(5, 6, 9, 4),
+             adds(32, 0x99, 0, qp=1)),
+            (0xc0, 0x11, ld8_fill_postinc(33, 3, 0, qp=5), adds(4, 1, 4),
+             br_ctop_many(0xc0, 0xb0)),
+            (0xd0, 0x01, nop_m(), adds(8, 0, 34), adds(9, 0, 39)),
+            (0xe0, 0x11, nop_m(), adds(13, 0, 36), cover_b()),
+            (0xf0, 0x01, flushrs_enc(), nop_i(), nop_i()),
+            (0x100, 0x01, mov_m_ar_gr(10, 19), addl(5, 0x100030, 0),
+             addl(6, 0x100008, 0)),
+            (0x110, 0x09, ld8(11, 5), ld8(12, 6), addl(7, 0x100010, 0)),
+            (0x120, 0x01, ld8(14, 7), nop_i(), nop_i()),
+            (0x130, 0x10, nop_m(), nop_i(), br_cond(0x130, 0x130)),
+            (0x400, 0x11, nop_m(), nop_i(), br_ret(0)),
+        ], {
+            "ip": 0x130,
+            "exception": IA64_EXCP_NONE,
+            "r4": 20,
+            "r8": 0x99,
+            "r9_nat": 1,
+            "r13_nat": 1,
+            "r10": (1 << 3) | (1 << 0),
+            "r11": 0x99,
+            "r12": 0x330,
+            "r14": 0x340,
+        }, entry=0x10)
+
 test_cover_rfi_restores_rotating_predicates_by_physical_number = \
     require_registers(
         "cover_rfi_restores_rotating_predicates_by_physical_number", [
@@ -5253,6 +5303,7 @@ CASE_NAMES = (
     'rse_callee_alloc_stores_input_arg',
     'rse_cover_flushrs_spills_covered_frame',
     'rse_cover_skips_trailing_rnat_slot',
+    'rse_ctop_rotation_flushes_each_value_to_its_physical_slot',
     'rse_deep_call_chain_spills_parent_frames',
     'rse_evict_parent_frames_preserves_caller_local',
     'rse_exception_bspstore_restore_skips_unrelated_frame',

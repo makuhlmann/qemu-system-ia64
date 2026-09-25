@@ -1157,8 +1157,28 @@ void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb)
 
 static void ia64_rotate_loop_regs(CPUIA64State *env)
 {
+    uint32_t sor_regs = (uint32_t)env->cfm_sor << 3;
+
     ia64_rse_check(env, "ctop");
-    ia64_rse_sync_frame_out(env);
+    /*
+     * rrb.gr' = rrb.gr - 1 and the value of v moves to v + 1 (mod sor * 8),
+     * so every value keeps its physical register: rotate the dirty bits
+     * with the data instead of syncing the frame out.  A rotating region
+     * clipped by sof maps differently and takes the sync.
+     */
+    if (sor_regs > env->cfm_sof || sor_regs > IA64_STACKED_GR_COUNT) {
+        ia64_rse_sync_frame_out(env);
+    } else if (sor_regs != 0) {
+        __uint128_t dirty = ((__uint128_t)env->rse.rse_gr_dirty[1] << 64) |
+                            env->rse.rse_gr_dirty[0];
+        __uint128_t mask = ((__uint128_t)1 << sor_regs) - 1;
+        __uint128_t rot = dirty & mask;
+
+        rot = ((rot << 1) | (rot >> (sor_regs - 1))) & mask;
+        dirty = (dirty & ~mask) | rot;
+        env->rse.rse_gr_dirty[0] = dirty;
+        env->rse.rse_gr_dirty[1] = dirty >> 64;
+    }
     ia64_rotate_rotating_gr_right(env);
     ia64_rotate_predicates_right(env);
     if (env->cfm_sor != 0) {
