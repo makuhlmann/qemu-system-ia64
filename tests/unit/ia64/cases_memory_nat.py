@@ -2109,6 +2109,25 @@ test_alat_reloading_register_does_not_leave_duplicate = require_registers(
          0),
     ], {"ip": 0xa0, "r4": 0}, entry=0x10)
 
+# Bit 36 of M24-M27 is ignored (SDM Vol 3 Table 4-4): invala still clears
+# the ALAT, so chk.a branches, and flushrs executes.
+test_invala_flushrs_ignore_bit36 = require_registers(
+    "invala_flushrs_ignore_bit36", [
+        (0x10, 0x00, addl(3, 0x100, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld8_a(22, 3), nop_i(), nop_i()),
+        (0x30, 0x00, invala() | bitfield(1, 36, 1), nop_i(), nop_i()),
+        (0x40, 0x00, chk_a_nc_m(22, 0x40, 0x70), adds(4, 1, 0), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+        (0x70, 0x00, flushrs_enc() | bitfield(1, 36, 1), adds(5, 1, 0),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+        "r4": 0,
+        "r5": 1,
+    }, entry=0x10)
+
 test_invala_clears_all_alat_entries = require_registers(
     "invala_clears_all_alat_entries", [
         (0x10, 0x00, addl(3, 0x100, 0), nop_i(),
@@ -3094,6 +3113,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'integer_nat_propagates_and_clears',
     'integer_postinc_imm9_decode',
     'invala_clears_all_alat_entries',
+    'invala_flushrs_ignore_bit36',
     'invala_e_gr_invalidates_selected_register',
     'ld16_acq_hint_decode',
     'ld16_loads_gr_and_csd',

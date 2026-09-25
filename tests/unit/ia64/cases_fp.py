@@ -1252,6 +1252,39 @@ test_f_reserved_cell_respects_qualifying_predicate = require_exception(
         (0x20, 0x0d, nop_m(), bitfield(0x20, 27, 6), nop_i()),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x20)
 
+# Opcode 1 x6 = 0x1c is reserved only when its predicate is true (SDM Vol 3
+# Table 4-61), not a hint.
+test_fp_op1_reserved_cell_respects_qualifying_predicate = require_exception(
+    "fp_op1_reserved_cell_respects_qualifying_predicate", [
+        (0x10, 0x0d, nop_m(),
+         bitfield(1, 37, 4) | bitfield(0x1c, 27, 6) | 1, nop_i()),
+        (0x20, 0x0d, nop_m(), bitfield(1, 37, 4) | bitfield(0x1c, 27, 6),
+         nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x20)
+
+# Bit 36 of F8 and F10 and bits 36:34 of F9 are ignored (SDM Vol 3 Table
+# 4-4) in the parallel forms too.
+test_fp_parallel_ignored_bits_decode = require_registers(
+    "fp_parallel_ignored_bits_decode", [
+        (0x10, *movl_mlx(2, 0x3f800000c0800000)),
+        (0x20, *movl_mlx(3, 0x40000000c0400000)),
+        (0x30, 0x09, setf_sig(6, 2), setf_sig(7, 3), nop_i()),
+        (0x40, 0x0d, nop_m(), fpmerge_ns(8, 6, 7) | bitfield(7, 34, 3),
+         nop_i()),
+        (0x50, 0x0d, nop_m(), fpmin(9, 6, 7) | bitfield(1, 36, 1), nop_i()),
+        (0x60, 0x0d, nop_m(), fpcmp(1, 10, 6, 7) | bitfield(1, 36, 1),
+         nop_i()),
+        (0x70, 0x0d, nop_m(), fpcvt_fx(11, 6) | bitfield(1, 36, 1), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "f8": ExpectedFP(0xc000000040400000, 0x1003e),
+        "f9": ExpectedFP(0x3f800000c0800000, 0x1003e),
+        "f10": ExpectedFP(0xffffffffffffffff, 0x1003e),
+        "f11": ExpectedFP(0x00000001fffffffc, 0x1003e),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 # F9 leaves bits 36:34 ignored: they select neither the form nor fmov.
 test_fmerge_ignored_bits_decode = require_registers(
     "fmerge_ignored_bits_decode", [
@@ -5871,6 +5904,8 @@ CASE_NAMES = (
     'fmerge_forms_decode',
     'f_reserved_cell_respects_qualifying_predicate',
     'fmerge_ignored_bits_decode',
+    'fp_op1_reserved_cell_respects_qualifying_predicate',
+    'fp_parallel_ignored_bits_decode',
     'fmerge_natval_propagates',
     'fmin_qnan_suppresses_unnormal_d',
     'fmin_unnormal_d_fault_rolls_back',

@@ -2468,9 +2468,9 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         return insn;
     }
 
+    /* Bit 36 of M24-M27 is an ignored field (SDM Vol 3 Table 4-4). */
     if (unit == IA64_UNIT_M && ia64_b_op(raw) == 0 &&
-        ia64_bits(raw, 33, 1) == 0 && ia64_bits(raw, 34, 2) == 0 &&
-        ia64_bits(raw, 36, 1) == 0) {
+        ia64_bits(raw, 33, 1) == 0 && ia64_bits(raw, 34, 2) == 0) {
         const uint64_t x6 = ia64_bits(raw, 27, 6);
 
         if (x6 == 0x0a) {
@@ -3023,8 +3023,12 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             insn.clear_p2_before_predicate = true;
             return insn;
         }
+        /*
+         * Bit 36 of F8 and F10 and bits 36:34 of F9 are ignored fields, and
+         * the unused cells of Table 4-61 are reserved if PR[qp] is 1 (SDM
+         * Vol 3 Tables 4-4 and 4-61).
+         */
         if (ia64_b_op(raw) == 1 &&
-            ia64_bits(raw, 36, 1) == 0 &&
             ia64_bits(raw, 33, 1) == 0) {
             uint64_t form = ia64_bits(raw, 27, 6);
             Ia64Opcode opcode = IA64_OP_ILLEGAL;
@@ -3056,10 +3060,7 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             }
         }
         if (ia64_b_op(raw) == 1) {
-            Ia64Instruction insn =
-                ia64_base_insn(IA64_OP_HINT_F, unit, raw, address, slot);
-            insn.operands.decoder.imm = ia64_immu21(raw);
-            return insn;
+            return ia64_reserved_qp_insn(unit, raw, address, slot);
         }
 
         const uint64_t x = ia64_bits(raw, 36, 1);
