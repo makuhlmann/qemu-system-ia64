@@ -3029,32 +3029,6 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             insn.operands.decoder.imm = ia64_immu21(raw);
             return insn;
         }
-        if (ia64_b_op(raw) == 1 &&
-            ia64_bits(raw, 33, 1) == 0 &&
-            ia64_bits(raw, 27, 6) == 0x10 &&
-            ia64_bits(raw, 13, 7) == 0) {
-            Ia64Instruction insn =
-                ia64_base_insn(IA64_OP_FPABS, unit, raw, address, slot);
-            insn.operands.decoder.r1 = ia64_bits(raw, 6, 7);
-            insn.operands.decoder.r2 = ia64_bits(raw, 20, 7);
-            return insn;
-        }
-        if (ia64_b_op(raw) == 1 &&
-            ia64_bits(raw, 33, 1) == 0 &&
-            ia64_bits(raw, 27, 6) == 0x11) {
-            const uint64_t f2 = ia64_bits(raw, 13, 7);
-            const uint64_t f3 = ia64_bits(raw, 20, 7);
-
-            if (f2 == 0 || f2 == f3) {
-                Ia64Instruction insn =
-                    ia64_base_insn(f2 == 0 ? IA64_OP_FPNEGABS :
-                                             IA64_OP_FPNEG,
-                                   unit, raw, address, slot);
-                insn.operands.decoder.r1 = ia64_bits(raw, 6, 7);
-                insn.operands.decoder.r2 = f3;
-                return insn;
-            }
-        }
         if ((ia64_b_op(raw) == 0 || ia64_b_op(raw) == 1) &&
             ia64_bits(raw, 36, 1) == 1 &&
             ia64_bits(raw, 33, 1) == 1) {

@@ -302,19 +302,57 @@ bool ia64_insn_requires_slot2(const Ia64Instruction *insn)
     }
 }
 
-bool ia64_insn_has_invalid_fp_pair(const Ia64Instruction *insn)
+static bool ia64_insn_is_fp_load_pair(const Ia64Instruction *insn)
 {
     switch (insn->opcode) {
     case IA64_OP_LDFP8:
     case IA64_OP_LDFPD:
     case IA64_OP_LDFPS:
-        return insn->operands.common.destination <= 1 ||
-               insn->operands.common.source1 <= 1 ||
-               ((insn->operands.common.destination ^
-                 insn->operands.common.source1) & 1) == 0;
+        return true;
     default:
         return false;
     }
+}
+
+/*
+ * The bank conflict check of ldfp uses physical FR numbers (SDM Vol 2
+ * Illegal Operation fault).  A pair whose registers are both static or both
+ * rotating keeps its parity under rotation; the other pairs are checked at
+ * run time by ia64_gen_check_fp_pair_bank().
+ */
+bool ia64_insn_has_invalid_fp_pair(const Ia64Instruction *insn)
+{
+    uint8_t f1 = insn->operands.common.destination;
+    uint8_t f2 = insn->operands.common.source1;
+
+    if (!ia64_insn_is_fp_load_pair(insn)) {
+        return false;
+    }
+    return f1 <= 1 || f2 <= 1 ||
+           ((f1 < 32) == (f2 < 32) && ((f1 ^ f2) & 1) == 0);
+}
+
+/* A rotating FR has the parity of its logical number XOR CFM.rrb.fr. */
+static void ia64_gen_check_fp_pair_bank(const Ia64Instruction *insn)
+{
+    uint8_t f1 = insn->operands.common.destination;
+    uint8_t f2 = insn->operands.common.source1;
+    TCGv_i32 rrb_parity;
+    TCGLabel *valid;
+
+    if (!ia64_insn_is_fp_load_pair(insn) || (f1 < 32) == (f2 < 32)) {
+        return;
+    }
+
+    rrb_parity = tcg_temp_new_i32();
+    valid = gen_new_label();
+    tcg_gen_ld8u_i32(rrb_parity, tcg_env, offsetof(CPUIA64State, cfm_rrb_fr));
+    tcg_gen_andi_i32(rrb_parity, rrb_parity, 1);
+    tcg_gen_brcondi_i32(((f1 ^ f2) & 1) ? TCG_COND_EQ : TCG_COND_NE,
+                        rrb_parity, 0, valid);
+    ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address, insn->raw,
+                             insn->slot);
+    gen_set_label(valid);
 }
 
 static bool ia64_insn_writes_fr_f1(const Ia64Instruction *insn)
@@ -366,9 +404,6 @@ static bool ia64_insn_writes_fr_f1(const Ia64Instruction *insn)
     case IA64_OP_FSXT_R:
     case IA64_OP_FSXT_L:
     case IA64_OP_FPACK:
-    case IA64_OP_FPABS:
-    case IA64_OP_FPNEG:
-    case IA64_OP_FPNEGABS:
     case IA64_OP_FPMERGE:
     case IA64_OP_FPMERGE_S:
     case IA64_OP_FPMERGE_SE:
@@ -2493,9 +2528,6 @@ static uint32_t ia64_insn_fp_read_sets(const Ia64Instruction *insn)
         return ia64_fp_reg_set(insn->operands.common.source1) |
                ia64_fp_reg_set(insn->operands.common.source2);
 
-    case IA64_OP_FPABS:
-    case IA64_OP_FPNEG:
-    case IA64_OP_FPNEGABS:
     case IA64_OP_FMOV:
     case IA64_OP_FCVT_XF:
     case IA64_OP_FCVT_FX:
@@ -2595,9 +2627,6 @@ static uint32_t ia64_insn_fp_write_sets(const Ia64Instruction *insn)
     case IA64_OP_FPRCPA:
     case IA64_OP_FSELECT:
     case IA64_OP_FNORM:
-    case IA64_OP_FPABS:
-    case IA64_OP_FPNEG:
-    case IA64_OP_FPNEGABS:
     case IA64_OP_FPRSQRTA:
     case IA64_OP_FRSQRTA:
     case IA64_OP_FPACK:
@@ -2843,9 +2872,15 @@ static IA64PrepareResult ia64_gen_prepare_insn(
         return IA64_PREPARE_NORETURN;
     }
     ia64_gen_clear_unc_compare_targets(insn);
+    /*
+     * frcpa, frsqrta, fprcpa and fprsqrta clear p2 when PR[qp] is 0.  With
+     * PR[qp] 1 only the helper writes it, so a fault leaves it unchanged
+     * (SDM Vol 3 frcpa, frsqrta).
+     */
     if (insn->clear_p2_before_predicate &&
-        insn->operands.common.auxiliary2 != 0) {
-        tcg_gen_movi_i64(cpu_pr[insn->operands.common.auxiliary2], 0);
+        insn->operands.common.auxiliary2 != 0 && insn->qp != 0) {
+        tcg_gen_and_i64(cpu_pr[insn->operands.common.auxiliary2],
+                        cpu_pr[insn->operands.common.auxiliary2], qp_value);
     }
     skip = ia64_gen_predicate_skip(insn, qp_value);
     *predicate_skip = skip;
@@ -2873,6 +2908,7 @@ static IA64PrepareResult ia64_gen_prepare_insn(
         ia64_gen_predicate_end(skip);
         return IA64_PREPARE_COMPLETE;
     }
+    ia64_gen_check_fp_pair_bank(insn);
     if (ia64_insn_cpuid4_feature(insn) &
         ~ia64_env_cpu_class(ctx->env)->cpuid_features) {
         /*
