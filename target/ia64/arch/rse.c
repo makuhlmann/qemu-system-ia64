@@ -875,10 +875,15 @@ static void ia64_rse_return_to_frame(CPUIA64State *env, uint64_t pfm,
 
 void ia64_rse_delivery_check(CPUIA64State *env, int excp)
 {
+#ifdef CONFIG_DEBUG_TCG
     char site[32];
 
     snprintf(site, sizeof(site), "delivery excp=%d", excp);
     ia64_rse_check(env, site);
+#else
+    (void)env;
+    (void)excp;
+#endif
 }
 
 /*
