@@ -898,6 +898,101 @@ test_probe_r_insufficient_privilege_returns_zero = require_registers(
         "r9": 1,
     }, entry=0x10)
 
+# Page access rights from the architecture manual, Volume 2, Table 4-4.
+# Rows are indexed by AR, then PL; each tuple lists CPL 0 through 3.
+PAGE_ACCESS_RIGHTS = (
+    (("R", "", "", ""), ("R", "R", "", ""),
+     ("R", "R", "R", ""), ("R", "R", "R", "R")),
+    (("RX", "", "", ""), ("RX", "RX", "", ""),
+     ("RX", "RX", "RX", ""), ("RX", "RX", "RX", "RX")),
+    (("RW", "", "", ""), ("RW", "RW", "", ""),
+     ("RW", "RW", "RW", ""), ("RW", "RW", "RW", "RW")),
+    (("RWX", "", "", ""), ("RWX", "RWX", "", ""),
+     ("RWX", "RWX", "RWX", ""), ("RWX", "RWX", "RWX", "RWX")),
+    (("RW", "", "", ""), ("RW", "R", "", ""),
+     ("RW", "RW", "R", ""), ("RW", "RW", "RW", "R")),
+    (("RWX", "", "", ""), ("RWX", "RX", "", ""),
+     ("RWX", "RX", "RX", ""), ("RWX", "RX", "RX", "RX")),
+    (("RW", "", "", ""), ("RW", "RWX", "", ""),
+     ("RW", "RW", "RWX", ""), ("RW", "RW", "RW", "RWX")),
+    (("RX", "X", "X", "X"), ("RX", "X", "X", "X"),
+     ("RX", "X", "X", "X"), ("RX", "X", "X", "X")),
+)
+
+
+def test_page_access_rights_data(qemu):
+    for ar, rows in enumerate(PAGE_ACCESS_RIGHTS):
+        for pl, rights in enumerate(rows):
+            bundles = [
+                *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000,
+                                   pte_flags=0x61 | (pl << 7) | (ar << 9)),
+                (0x70, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+                (0x80, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+                (0x90, 0x00, srlz_d(), nop_i(), nop_i()),
+                (0xa0, *movl_mlx(2, HIGH_TR_BASE)),
+            ]
+            expected = {"ip": 0x130, "exception": IA64_EXCP_NONE}
+            for cpl, access in enumerate(rights):
+                address = 0xb0 + cpl * 0x20
+                bundles.extend([
+                    (address, 0x00, probe_r_imm(8 + cpl * 2, 2, cpl),
+                     nop_i(), nop_i()),
+                    (address + 0x10, 0x00,
+                     probe_w_imm(9 + cpl * 2, 2, cpl), nop_i(), nop_i()),
+                ])
+                expected[f"r{8 + cpl * 2}"] = int("R" in access)
+                expected[f"r{9 + cpl * 2}"] = int("W" in access)
+            bundles.append((0x130, 0x10, nop_m(), nop_i(),
+                            br_cond(0x130, 0x130)))
+            run_program(qemu, bundles, expected=expected,
+                        terminal_ip=0x130,
+                        name=f"page_access_data_ar{ar}_pl{pl}")
+
+
+def test_page_access_rights_instruction(qemu):
+    for ar, rows in enumerate(PAGE_ACCESS_RIGHTS):
+        for pl, rights in enumerate(rows):
+            for cpl, access in enumerate(rights):
+                terminal = (0x10440 if "X" in access else
+                            IA64_INST_ACCESS_VECTOR + 0x10)
+                run_program(qemu, [
+                    # Keep the fault handler executable at CPL 0.
+                    (0x10, *movl_mlx(18, 0x661)),
+                    (0x20, 0x00, adds(7, 16 << 2, 0),
+                     adds(5, 5, 0), nop_i()),
+                    (0x30, 0x00, mov_m_gr_cr(0, 20), nop_i(), nop_i()),
+                    (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+                    (0x50, 0x00, itr_i(5, 18), nop_i(), nop_i()),
+                    (0x60, 0x00, srlz_i(), nop_i(), nop_i()),
+                    (0x70, *movl_mlx(
+                        18, 0x4000061 | (pl << 7) | (ar << 9))),
+                    (0x80, *movl_mlx(
+                        19, IA64_PSR_IC | IA64_PSR_IT | (cpl << 32))),
+                    (0x90, 0x00, adds(7, LOW_VECTOR_ITIR, 0),
+                     nop_i(), nop_i()),
+                    (0xa0, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+                    (0xb0, *movl_mlx(31, 0x10430)),
+                    (0xc0, 0x00, mov_m_gr_cr(31, 20), nop_i(), nop_i()),
+                    (0xd0, 0x00, itc_i(18), nop_i(), nop_i()),
+                    (0xe0, 0x00, srlz_i(), nop_i(), nop_i()),
+                    *rfi_to_gr(0xf0, 19, 31),
+                    (0x4000430, 0x10, nop_m(), adds(8, 1, 0),
+                     br_cond(0x10430, 0x10440)),
+                    (0x4000440, 0x10, nop_m(), nop_i(),
+                     br_cond(0x10440, 0x10440)),
+                    (IA64_INST_ACCESS_VECTOR, 0x00, nop_m(),
+                     adds(9, 1, 0), nop_i()),
+                    (IA64_INST_ACCESS_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+                     br_cond(IA64_INST_ACCESS_VECTOR + 0x10,
+                             IA64_INST_ACCESS_VECTOR + 0x10)),
+                ], terminal_ip=terminal, expected={
+                    "ip": terminal,
+                    "exception": IA64_EXCP_NONE,
+                    "r8": int("X" in access),
+                    "r9": int("X" not in access),
+                }, name=f"page_access_instruction_ar{ar}_pl{pl}_cpl{cpl}")
+
+
 # A NaTPage translation is in tlb_grant_permission()'s checked list, so the
 # non-faulting probe raises Data NaT Page Consumption instead of granting.
 test_probe_r_natpage_dtr_raises_nat_consumption = require_registers(
@@ -6561,6 +6656,8 @@ CASE_NAMES = (
     'mov_pkr_indexed_decode',
     'mov_rr_indexed_decode',
     'no_ic_data_access_enters_vector_with_ni',
+    'page_access_rights_data',
+    'page_access_rights_instruction',
     'percpu_alt_dtlb_uses_updated_kr3_after_ptc_e',
     'probe_dt_disabled_maintenance_bits_grant',
     'lfetch_fault_natpage_isr_code',

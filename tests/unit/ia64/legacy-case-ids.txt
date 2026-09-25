@@ -649,6 +649,8 @@ nop_f_decode
 normal_load_clears_stale_nat
 normal_load_consumes_nat_base
 padd1_decode
+page_access_rights_data
+page_access_rights_instruction
 page_frame_record_address_arithmetic
 page_table_pointer_dep_cascade
 pal_brand_info_bus
