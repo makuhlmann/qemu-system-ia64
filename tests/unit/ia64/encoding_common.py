@@ -63,14 +63,22 @@ def bundle_words(template, slot0, slot1, slot2):
         slot0, slot1, slot2 = nop_m(), slot0, slot1
     if isinstance(slot0, EndGroupInsn):
         stop_after_slot0 = {
-            0x00: 0x02, 0x01: 0x03,
             0x08: 0x0a, 0x09: 0x0b,
         }
-        if template not in stop_after_slot0:
+        if template in (0x00, 0x01):
+            if slot1 != nop_i():
+                raise ValueError(
+                    "cannot change a non-NOP MII slot 1 into an MMI slot")
+            template = {0x00: 0x0a, 0x01: 0x0b}[template]
+        elif template in stop_after_slot0:
+            template = stop_after_slot0[template]
+        else:
             raise ValueError("template cannot stop after slot 0")
-        template = stop_after_slot0[template]
     elif isinstance(slot1, EndGroupInsn):
-        raise ValueError("template cannot stop after slot 1")
+        stop_after_slot1 = {0x00: 0x02, 0x01: 0x03}
+        if template not in stop_after_slot1:
+            raise ValueError("template cannot stop after slot 1")
+        template = stop_after_slot1[template]
     elif isinstance(slot2, EndGroupInsn):
         template |= 1
     raw = template | (slot0 << 5) | (slot1 << 46) | (slot2 << 87)

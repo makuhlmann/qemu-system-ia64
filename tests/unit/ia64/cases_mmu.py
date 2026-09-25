@@ -23,6 +23,7 @@ from .encoding import (
     IA64_DCR_DM,
     IA64_DTLB_VECTOR,
     IA64_EXCP_DATA_KEY_MISS,
+    IA64_EXCP_ILLEGAL,
     IA64_EXCP_NAT_CONSUMPTION,
     IA64_EXCP_NONE,
     IA64_EXCP_PAGE_NOT_PRESENT,
@@ -3099,7 +3100,7 @@ test_itc_i_m_unit_decode = require_registers("itc_i_m_unit_decode", [
      nop_i()),
     (0x50, 0x00, mov_m_gr_cr(0, 20), nop_i(),
      nop_i()),
-    (0x60, 0x00, itc_i(18), addl(31, 0x8430, 0),
+    (0x60, 0x08, itc_i(18), addl(31, 0x8430, 0),
      nop_i()),
     *rfi_to_gr(0x70, 19, 31),
     (0x4008430, 0x10, nop_m(), adds(31, 0x7b, 0),
@@ -3118,7 +3119,7 @@ test_itc_i_resumes_next_slot_after_tb_exit = require_registers(
          nop_i()),
         (0x40, 0x00, mov_m_gr_cr(0, 20), nop_i(),
          nop_i()),
-        (0x50, 0x00, itc_i(18), adds(31, 1, 0),
+        (0x50, 0x08, itc_i(18), adds(31, 1, 0),
          nop_i()),
         (0x60, 0x10, nop_m(), nop_i(),
          br_cond(0x60, 0x60)),
@@ -3707,6 +3708,33 @@ test_itc_d_madison_accepts_1gb_page = require_registers(
         *ONE_GIGABYTE_ITC_PROGRAM,
         (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0xd0)),
     ], {"ip": 0xd0, "exception": IA64_EXCP_NONE}, entry=0x10, cpu="madison")
+
+
+def _itc_d_mii_slot0_without_stop_is_illegal(name, template):
+    # int() drops the EndGroupInsn type so that bundle_words() keeps the raw
+    # template: MI;;I and MI;;I;; have no stop after slot 0 (SDM Vol 1
+    # Table 3-10), so the must-end-group itc.d there is illegal.
+    return require_registers(name, [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(2, 0x9000)),
+        (0x30, 0x00, adds(7, LOW_VECTOR_ITIR, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(2, 20), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x60, template, int(itc_d(18)), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "exception": IA64_EXCP_ILLEGAL,
+        "fault_ip": 0x60,
+    }, entry=0x10)
+
+
+test_itc_d_mii_02_slot0_without_stop_is_illegal = \
+    _itc_d_mii_slot0_without_stop_is_illegal(
+        "itc_d_mii_02_slot0_without_stop_is_illegal", 0x02)
+
+test_itc_d_mii_03_slot0_without_stop_is_illegal = \
+    _itc_d_mii_slot0_without_stop_is_illegal(
+        "itc_d_mii_03_slot0_without_stop_is_illegal", 0x03)
 
 test_itr_d_reserved_slot_faults = require_exception(
     "itr_d_reserved_slot_faults", [
@@ -6494,6 +6522,8 @@ CASE_NAMES = (
     'itc_d_evicted_refill_flushes_host_tlb',
     'itc_d_key_permission_store_raises_permission_vector',
     'itc_d_matching_pkr_allows_keyed_load',
+    'itc_d_mii_02_slot0_without_stop_is_illegal',
+    'itc_d_mii_03_slot0_without_stop_is_illegal',
     'itc_d_nat_pte_consumes',
     'itc_d_not_present_raises_page_fault',
     'itc_d_not_present_rejects_low_itir_reserved_field',
