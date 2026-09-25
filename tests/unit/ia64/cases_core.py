@@ -2341,6 +2341,31 @@ test_ia32_cpuid_leaf2_reports_madison_cache_descriptors = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
+# 245320-003 §8.4 Table 8-2, with the 4 MB L2 descriptor (0x89).
+test_ia32_cpuid_leaf2_reports_merced_cache_descriptors = require_registers(
+    "ia32_cpuid_leaf2_reports_merced_cache_descriptors", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "66 31 c0 "
+            "0f a2 "
+            "66 89 c6 "
+            "66 b8 02 00 00 00 "
+            "0f a2")),
+        ia32_bundle(0x110, bytes.fromhex("0f b8 00 02")),
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+    ], {
+        "ip": 0x200,
+        "r8": 0x00151001,
+        "r9": 0x009b9690,
+        "r10": 0xffffffff80000000,
+        "r11": 0x0000891a,
+        "r14": 2,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="merced")
+
 test_ia32_cpuid_leaf1_reports_madison_feature_word = require_registers(
     "ia32_cpuid_leaf1_reports_madison_feature_word", [
         *ia32_environment_bundles(0x700, 0x10),
@@ -2963,6 +2988,7 @@ CASE_NAMES = (
     'ia32_indirect_jump_reaches_target',
     'ia32_cpuid_leaf1_reports_madison_feature_word',
     'ia32_cpuid_leaf2_reports_madison_cache_descriptors',
+    'ia32_cpuid_leaf2_reports_merced_cache_descriptors',
     'ia32_fldenv_restores_x87_environment',
     'ia32_fnstenv_saves_x87_environment_and_masks_exceptions',
     'ia32_fxsave_records_x87_pointers_and_mxcsr_mask',

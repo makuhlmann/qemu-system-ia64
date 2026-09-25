@@ -1876,6 +1876,8 @@ struct IA64CPUClass {
      * reports a P6-class identity instead.
      */
     uint32_t ia32_cpuid_version;
+    /* IA-32 CPUID(2) cache and TLB descriptors: EAX, EBX, ECX, EDX. */
+    uint32_t ia32_cpuid_leaf2[4];
     /*
      * Translation-register file sizes.  These are asymmetric on the original
      * Itanium (8 ITR / 48 DTR, 248701-002 §2.5.6); Madison/Montecito use 64 of
