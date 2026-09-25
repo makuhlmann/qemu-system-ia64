@@ -249,15 +249,22 @@ def store_mem_postinc(x6, r3, r2, imm, qp=0):
 def st4_postinc(r3, r2, imm, qp=0):
     return store_mem_postinc(0x32, r3, r2, imm, qp)
 
-def cmpxchg4(r1, r3, r2, qp=0):
+def reserved_m_major2(qp=0):
+    return op(2) | bitfield(qp, 0, 6)
+
+def reserved_memory_selector(major, m, x, x6, qp=0):
     return (
-        op(2)
-        | bitfield(3, 29, 2)
-        | bitfield(r3, 20, 7)
-        | bitfield(r2, 13, 7)
-        | bitfield(r1, 6, 7)
+        op(major)
+        | bitfield(m, 36, 1)
+        | bitfield(x6, 30, 6)
+        | bitfield(x, 27, 1)
         | bitfield(qp, 0, 6)
     )
+
+def cmpxchg4(r1, r3, r2, qp=0):
+    # M/A major opcode 2 is reserved (SDM Vol 3 Table 4-3): every cmpxchg is
+    # M16 in major opcode 4 with an ordering completer.
+    return cmpxchg_acq(2, r1, r3, r2, qp)
 
 def cmpxchg_acq(size_log2, r1, r3, r2, qp=0, hint=0):
     return (
@@ -719,6 +726,8 @@ def fc_i(r3, qp=0):
             bitfield(qp, 0, 6))
 
 __all__ = (
+    'reserved_m_major2',
+    'reserved_memory_selector',
     'load_mem',
     'load_mem_reg_postinc',
     'load_mem_postinc',

@@ -148,6 +148,7 @@ from .encoding import (
     pshr4,
     raw_bundle,
     register_nat_consumption_test,
+    reserved_memory_selector,
     require_exception,
     require_registers,
     rfi_b,
@@ -1406,7 +1407,7 @@ test_speculative_recovery_unaligned_defers = require_registers(
         (0x30, *movl_mlx(19, (1 << 13) | (1 << 36) | (1 << 3))),
         (0x40, 0x00, adds(7, LOW_VECTOR_ITIR, 0), adds(5, 5, 0),
          nop_i()),
-        (0x50, 0x00, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
+        (0x50, 0x08, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
          nop_i()),
         (0x60, 0x00, itr_i(5, 18), nop_i(),
          nop_i()),
@@ -1433,7 +1434,7 @@ test_ws2003_cmd646_unaligned_check_load_sets_ed = require_registers(
         (0x30, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_IT | IA64_PSR_AC)),
         (0x40, 0x00, adds(7, 16 << 2, 0), adds(5, 5, 0),
          nop_i()),
-        (0x50, 0x00, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
+        (0x50, 0x08, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
          nop_i()),
         (0x60, 0x00, itr_i(5, 18), nop_i(),
          nop_i()),
@@ -2237,6 +2238,49 @@ test_store_postinc_x6_3a_reserved_illegal_operation = reserved_memory_x6_test(
     "store_postinc_x6_3a_reserved_illegal_operation",
     store_mem_postinc(0x3a, 3, 4, 8))
 
+
+# One purple cell from each integer-memory selector space of SDM Vol 3
+# Tables 4-28 and 4-30 to 4-33.  PR1 is clear at reset, so each qp=1
+# encoding executes as a nop; with qp=0 each raises Illegal Operation.
+_reserved_memory_selector_representatives = (
+    reserved_memory_selector(4, 0, 0, 0x18, qp=1),
+    reserved_memory_selector(4, 1, 0, 0x18, qp=1),
+    reserved_memory_selector(5, 0, 0, 0x18, qp=1),
+    reserved_memory_selector(4, 0, 1, 0x0c, qp=1),
+    reserved_memory_selector(4, 1, 1, 0x00, qp=1),
+)
+
+test_reserved_memory_selectors_predicated_off_are_nops = require_registers(
+    "reserved_memory_selectors_predicated_off_are_nops", [
+        (0x10 + index * 0x10, 0x00, raw, nop_i(), nop_i())
+        for index, raw in enumerate(_reserved_memory_selector_representatives)
+    ] + [
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_memory_selector_m4_m0_x0_true_illegal = reserved_memory_x6_test(
+    "reserved_memory_selector_m4_m0_x0_true_illegal",
+    _reserved_memory_selector_representatives[0] & ~0x3f)
+
+test_reserved_memory_selector_m4_m1_x0_true_illegal = reserved_memory_x6_test(
+    "reserved_memory_selector_m4_m1_x0_true_illegal",
+    _reserved_memory_selector_representatives[1] & ~0x3f)
+
+test_reserved_memory_selector_m5_true_illegal = reserved_memory_x6_test(
+    "reserved_memory_selector_m5_true_illegal",
+    _reserved_memory_selector_representatives[2] & ~0x3f)
+
+test_reserved_memory_selector_m4_m0_x1_true_illegal = reserved_memory_x6_test(
+    "reserved_memory_selector_m4_m0_x1_true_illegal",
+    _reserved_memory_selector_representatives[3] & ~0x3f)
+
+test_reserved_memory_selector_m4_m1_x1_true_illegal = reserved_memory_x6_test(
+    "reserved_memory_selector_m4_m1_x1_true_illegal",
+    _reserved_memory_selector_representatives[4] & ~0x3f)
+
 test_bsw_restores_banked_nat = require_registers(
     "bsw_restores_banked_nat", [
         (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
@@ -2432,9 +2476,11 @@ test_mov_br_nat_source_consumes = register_nat_consumption_test(
 
 test_mov_pr_nat_source_consumes = register_nat_consumption_test(
     "mov_pr_nat_source_consumes",
-    (0x00,
+    # mov pr=r is I23: in an M slot, x3 = 3 is a reserved cell (Table 4-42).
+    (0x00, nop_m(),
      bitfield(3, 33, 3) | bitfield(16, 13, 7) | bitfield(0x7f, 6, 7),
-     nop_i(), nop_i()))
+     nop_i()),
+    expected_isr=1 << IA64_ISR_EI_SHIFT)
 
 test_mov_cr_nat_source_consumes = register_nat_consumption_test(
     "mov_cr_nat_source_consumes",
@@ -3151,6 +3197,12 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'store_x6_38_reserved_illegal_operation',
     'store_x6_39_reserved_illegal_operation',
     'store_x6_3a_reserved_illegal_operation',
+    'reserved_memory_selector_m4_m0_x0_true_illegal',
+    'reserved_memory_selector_m4_m0_x1_true_illegal',
+    'reserved_memory_selector_m4_m1_x0_true_illegal',
+    'reserved_memory_selector_m4_m1_x1_true_illegal',
+    'reserved_memory_selector_m5_true_illegal',
+    'reserved_memory_selectors_predicated_off_are_nops',
     'tbit_nat_source_rules',
     'tnat_nz_and_ignored_bits_decode',
     'tnat_nz_or_decode',

@@ -1207,6 +1207,30 @@ test_fmerge_forms_decode = require_registers("fmerge_forms_decode", [
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
 
+# Table 4-60 x6 = 0x20 is reserved only when its predicate is true (SDM
+# Vol 3 §4.1); bit 36 is outside the selector.
+test_f_reserved_cell_respects_qualifying_predicate = require_exception(
+    "f_reserved_cell_respects_qualifying_predicate", [
+        (0x10, 0x0d, nop_m(),
+         bitfield(0x20, 27, 6) | bitfield(1, 36, 1) | 1, nop_i()),
+        (0x20, 0x0d, nop_m(), bitfield(0x20, 27, 6), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x20)
+
+# F9 leaves bits 36:34 ignored: they select neither the form nor fmov.
+test_fmerge_ignored_bits_decode = require_registers(
+    "fmerge_ignored_bits_decode", [
+        (0x10, 0x0d, nop_m(), fmerge_ns(8, 1, 1) | bitfield(7, 34, 3),
+         nop_i()),
+        (0x20, 0x0d, nop_m(), fmerge_s(9, 0, 1) | bitfield(1, 36, 1),
+         nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {
+        "ip": 0x30,
+        "f8": ExpectedFP(*binary64_to_spill(0xbff0000000000000)),
+        "f9": ExpectedFP(*binary64_to_spill(0x3ff0000000000000)),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_fmerge_natval_propagates = require_registers(
     "fmerge_natval_propagates", [
         (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
@@ -5809,6 +5833,8 @@ CASE_NAMES = (
     'fma_static_rpsp_midpoint_matches_pure_multiply',
     'fma_unsupported_precedes_qnan',
     'fmerge_forms_decode',
+    'f_reserved_cell_respects_qualifying_predicate',
+    'fmerge_ignored_bits_decode',
     'fmerge_natval_propagates',
     'fmin_qnan_suppresses_unnormal_d',
     'fmin_unnormal_d_fault_rolls_back',

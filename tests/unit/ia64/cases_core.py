@@ -200,6 +200,7 @@ from .encoding import (
     require_exception,
     require_registers,
     reserved_a1_x4_5_x2b_1,
+    reserved_m_major2,
     rfi_to_gr,
     rsm,
     rum,
@@ -2661,6 +2662,197 @@ test_reserved_ip_relative_branch_btype_illegal = require_exception(
     fault_ip=0x10,
 )
 
+# SDM Vol 3 §4.1: unused purple and cyan cells fault only when PR[qp] is 1,
+# brown cells always.  PR1 is clear at reset.
+test_reserved_a1_predicated_off_is_nop = require_registers(
+    "reserved_a1_predicated_off_is_nop", [
+        (0x10, 0x00, nop_m(),
+         reserved_a1_x4_5_x2b_1(1, 2, 3, qp=1), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r1": 0,
+    }, entry=0x10)
+
+test_reserved_i_selector_predicated_off_is_nop = require_registers(
+    "reserved_i_selector_predicated_off_is_nop", [
+        (0x10, 0x00, nop_m(),
+         op(5) | bitfield(2, 34, 2) | bitfield(1, 0, 6), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_i_selector_true_illegal = require_exception(
+    "reserved_i_selector_true_illegal", [
+        (0x10, 0x00, nop_m(), op(5) | bitfield(2, 34, 2), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_reserved_fp_memory_selector_predicated_off_is_nop = require_registers(
+    "reserved_fp_memory_selector_predicated_off_is_nop", [
+        (0x10, 0x00,
+         op(6) | bitfield(0x10, 30, 6) | bitfield(1, 0, 6),
+         nop_i(), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_fp_memory_selector_true_illegal = require_exception(
+    "reserved_fp_memory_selector_true_illegal", [
+        (0x10, 0x00, op(6) | bitfield(0x10, 30, 6), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# I3 mbtype4 other than 0 and 8-11 is reservedQP (Table 4-74).
+test_mux1_reserved_mbtype_predicated_off_is_nop = require_registers(
+    "mux1_reserved_mbtype_predicated_off_is_nop", [
+        (0x10, 0x00, nop_m(), adds(5, 0x44, 0), nop_i()),
+        (0x20, 0x02, nop_m(), mux1(5, 3, 1, qp=1), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {
+        "ip": 0x30,
+        "r5": 0x44,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_mux1_reserved_mbtype_true_illegal = require_exception(
+    "mux1_reserved_mbtype_true_illegal", [
+        (0x10, 0x02, nop_m(), mux1(5, 3, 1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# za = zb = 1 selects Table 4-20, where every cell but the variable shifts
+# is reserved if PR[qp] is 1.
+test_popcnt_size_selector_predicated_off_is_nop = require_registers(
+    "popcnt_size_selector_predicated_off_is_nop", [
+        (0x10, 0x00, nop_m(), adds(4, 0x55, 0), nop_i()),
+        (0x20, 0x00, nop_m(),
+         popcnt(4, 3, qp=1) | bitfield(1, 36, 1), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {
+        "ip": 0x30,
+        "r4": 0x55,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_popcnt_size_selector_true_illegal = require_exception(
+    "popcnt_size_selector_true_illegal", [
+        (0x10, 0x00, nop_m(),
+         popcnt(4, 3) | bitfield(1, 36, 1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_pmpy2_size_selector_predicated_off_is_nop = require_registers(
+    "pmpy2_size_selector_predicated_off_is_nop", [
+        (0x10, 0x00, adds(4, 0x55, 0),
+         pmpy2(4, 29, 31, qp=1) | bitfield(1, 36, 1), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "r4": 0x55,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_pmpy2_size_selector_true_illegal = require_exception(
+    "pmpy2_size_selector_true_illegal", [
+        (0x10, 0x00, nop_m(),
+         pmpy2(4, 29, 31) | bitfield(1, 36, 1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_pmpyshr2_size_selector_predicated_off_is_nop = require_registers(
+    "pmpyshr2_size_selector_predicated_off_is_nop", [
+        (0x10, 0x00, adds(4, 0x55, 0),
+         pmpyshr2(4, 29, 31, 16, qp=1) | bitfield(1, 36, 1), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "r4": 0x55,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_pmpyshr2_size_selector_true_illegal = require_exception(
+    "pmpyshr2_size_selector_true_illegal", [
+        (0x10, 0x00, nop_m(),
+         pmpyshr2(4, 29, 31, 16) | bitfield(1, 36, 1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# Table 4-42: M op 0 x3 = 1 is reserved, not an alias of Table 4-43's sum.
+test_reserved_m0_system_alias_predicated_off_is_nop = require_registers(
+    "reserved_m0_system_alias_predicated_off_is_nop", [
+        (0x10, 0x00,
+         bitfield(1, 33, 3) | bitfield(4, 27, 4) | 1,
+         nop_i(), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_m0_system_alias_true_illegal = require_exception(
+    "reserved_m0_system_alias_true_illegal", [
+        (0x10, 0x00,
+         bitfield(1, 33, 3) | bitfield(4, 27, 4),
+         nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# M/A major opcode 2 is purple in Table 4-3; it is not xchg/cmpxchg.
+test_reserved_m_major2_predicate_semantics = require_registers(
+    "reserved_m_major2_predicate_semantics", [
+        (0x10, 0x00, reserved_m_major2(qp=1), nop_i(), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_m_major2_true_illegal = require_exception(
+    "reserved_m_major2_true_illegal", [
+        (0x10, 0x00, reserved_m_major2(), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# I/A major opcode 1 is purple in Table 4-3; it is not hint.i.
+test_reserved_i_major1_predicated_off_is_nop = require_registers(
+    "reserved_i_major1_predicated_off_is_nop", [
+        (0x10, 0x00, nop_m(), op(1) | 1, nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_i_major1_true_illegal = require_exception(
+    "reserved_i_major1_true_illegal", [
+        (0x10, 0x00, nop_m(), op(1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# Table 4-48: x6 = 0x03 is cyan (reserved if PR[qp] is 1), x6 = 0x22 brown.
+test_reserved_b_cyan_true_illegal = require_exception(
+    "reserved_b_cyan_true_illegal", [
+        (0x10, 0x10, nop_m(), nop_i(), bitfield(3, 27, 6)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_reserved_b_brown_predicated_off_still_illegal = require_exception(
+    "reserved_b_brown_predicated_off_still_illegal", [
+        (0x10, 0x10, nop_m(), nop_i(), bitfield(0x22, 27, 6) | 1),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# Table 4-3: B major opcodes 3 and 6 are ignored (white) and execute as nops;
+# 8-F are brown.
+test_b_ignored_major_ops_are_nops = require_registers(
+    "b_ignored_major_ops_are_nops", [
+        (0x10, 0x12, nop_m(), op(3), op(6)),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_b_major8_predicated_off_still_illegal = require_exception(
+    "b_major8_predicated_off_still_illegal", [
+        (0x10, 0x10, nop_m(), nop_i(), op(8) | 1),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
 # B op 0 x6 = 0x01 is an ignored (white) cell of SDM Vol 3 Table 4-48 in
 # rev 2.1 and 2.3: a nop whatever the qualifying predicate.
 test_reserved_b_cyan_predicated_off_is_nop = require_registers(
@@ -3186,6 +3378,29 @@ CASE_NAMES = (
     'reserved_indirect_branch_btype_illegal',
     'reserved_ip_relative_branch_btype_illegal',
     'reserved_b_cyan_predicated_off_is_nop',
+    'reserved_a1_predicated_off_is_nop',
+    'reserved_i_selector_predicated_off_is_nop',
+    'reserved_i_selector_true_illegal',
+    'reserved_fp_memory_selector_predicated_off_is_nop',
+    'reserved_fp_memory_selector_true_illegal',
+    'mux1_reserved_mbtype_predicated_off_is_nop',
+    'mux1_reserved_mbtype_true_illegal',
+    'popcnt_size_selector_predicated_off_is_nop',
+    'popcnt_size_selector_true_illegal',
+    'pmpy2_size_selector_predicated_off_is_nop',
+    'pmpy2_size_selector_true_illegal',
+    'pmpyshr2_size_selector_predicated_off_is_nop',
+    'pmpyshr2_size_selector_true_illegal',
+    'reserved_m0_system_alias_predicated_off_is_nop',
+    'reserved_m0_system_alias_true_illegal',
+    'reserved_m_major2_predicate_semantics',
+    'reserved_m_major2_true_illegal',
+    'reserved_i_major1_predicated_off_is_nop',
+    'reserved_i_major1_true_illegal',
+    'reserved_b_cyan_true_illegal',
+    'reserved_b_brown_predicated_off_still_illegal',
+    'b_ignored_major_ops_are_nops',
+    'b_major8_predicated_off_still_illegal',
     'b_ignored_x6_01_true_predicate_is_nop',
     'rfi_to_ia32_empties_backing_store',
     'scalar_shift_count_64',
