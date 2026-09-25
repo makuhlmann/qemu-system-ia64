@@ -1644,11 +1644,43 @@ test_psub1_uuu_decode = require_registers("psub1_uuu_decode", [
 test_pshladd2_decode = require_registers("pshladd2_decode", [
     (0x10, *movl_mlx(3, 0x7fff40000001ffff)),
     (0x20, *movl_mlx(4, 0x00010001ffff0001)),
-    (0x30, 0x02, nop_m(), pshladd2(5, 3, 4, 4),
+    (0x30, 0x02, nop_m(), pshladd2(5, 3, 3, 4),
      nop_i()),
     (0x40, 0x10, nop_m(), nop_i(),
      br_cond(0x40, 0x40)),
-], {"ip": 0x40, "r5": 0x7fff7fff000ffff1}, entry=0x10)
+], {"ip": 0x40, "r5": 0x7fff7fff0007fff9}, entry=0x10)
+
+# SDM Vol 3 pshladd operation: a lane whose shift saturates keeps the
+# saturated value; y is added only to an unsaturated shift.
+test_pshladd2_shift_overflow_suppresses_add = require_registers(
+    "pshladd2_shift_overflow_suppresses_add", [
+        (0x10, *movl_mlx(3, 0xc0003fffbfff4000)),
+        (0x20, *movl_mlx(4, 0x000100010001ffff)),
+        (0x30, 0x02, nop_m(), pshladd2(5, 3, 1, 4), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "r5": 0x80017fff80007fff,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+# A10 ct2d = 3 (count 4) is reserved if PR[qp] is 1 (SDM Vol 3 Table 4-74).
+test_packed_shift_add_count4_predicated_off_is_nop = require_registers(
+    "packed_shift_add_count4_predicated_off_is_nop", [
+        (0x10, 0x02, nop_m(), pshladd2(5, 3, 4, 4, qp=1),
+         pshradd2(6, 3, 4, 4, qp=1)),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "r5": 0,
+        "r6": 0,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_packed_shift_add_count4_true_illegal = require_exception(
+    "packed_shift_add_count4_true_illegal", [
+        (0x10, 0x02, nop_m(), pshladd2(5, 3, 4, 4), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
 
 test_pshradd2_decode = require_registers("pshradd2_decode", [
     (0x10, *movl_mlx(3, 0x80007fff0004fffc)),
@@ -3100,6 +3132,8 @@ CASE_NAMES = (
     'mux1_brcst_decode',
     'mux1_rev_decode',
     'mux2_imm_decode',
+    'packed_shift_add_count4_predicated_off_is_nop',
+    'packed_shift_add_count4_true_illegal',
     'padd1_decode',
     'page_frame_record_address_arithmetic',
     'page_table_pointer_dep_cascade',
@@ -3120,6 +3154,7 @@ CASE_NAMES = (
     'pshl_decode',
     'pshl_fixed_complement_count_decode',
     'pshladd2_decode',
+    'pshladd2_shift_overflow_suppresses_add',
     'pshr_decode',
     'pshradd2_decode',
     'psr_high_mask_and_um_decode',

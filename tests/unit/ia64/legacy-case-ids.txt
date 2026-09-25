@@ -837,6 +837,8 @@ pal_vm_tr_read_rejects_first_non_tr
 past_itm_does_not_fire
 past_itm_reprogram_cancels_future_deadline
 past_rearmed_itm_does_not_interrupt
+packed_shift_add_count4_predicated_off_is_nop
+packed_shift_add_count4_true_illegal
 pavg_decode
 pcmp1_eq_decode
 pcmp1_eq_m_slot_decode
@@ -891,6 +893,7 @@ pshl_decode
 pshl_fixed_complement_count_decode
 pshl_nat_propagates
 pshladd2_decode
+pshladd2_shift_overflow_suppresses_add
 pshr_decode
 pshr_nat_propagates
 pshradd2_decode

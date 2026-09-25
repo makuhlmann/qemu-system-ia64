@@ -800,6 +800,18 @@ static Ia64Instruction ia64_invalid_insn(IA64SlotUnit unit, uint64_t raw,
 }
 
 /*
+ * A "reserved if PR[qp] is 1" encoding (purple or cyan cell of the SDM Vol 3
+ * §4.1 opcode tables) raises Illegal Operation only when PR[qp] is 1 and is
+ * a nop otherwise; ia64_invalid_insn() is a reserved (brown) cell, which
+ * always faults.
+ */
+static Ia64Instruction ia64_reserved_qp_insn(IA64SlotUnit unit, uint64_t raw,
+                                             uint64_t address, uint8_t slot)
+{
+    return ia64_base_insn(IA64_OP_ILLEGAL, unit, raw, address, slot);
+}
+
+/*
  * MLX long forms are reported at slot 1.  The paired X slot carries the
  * opcode/predicate and low immediate bits, and must not execute separately.
  */
@@ -1264,6 +1276,12 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
                 insn.operands.decoder.imm = x2b;
                 return insn;
             }
+        }
+
+        /* A10: count2 = (ct2d > 2) ? reservedQP : ct2d + 1 (Table 4-74). */
+        if (x2a == 1 && size_code == 1 && (x4 == 4 || x4 == 6) &&
+            x2b == 3) {
+            return ia64_reserved_qp_insn(unit, raw, address, slot);
         }
 
         if (x2a == 1 && size_code == 1 && x4 == 4) {
