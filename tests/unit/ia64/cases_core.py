@@ -3247,6 +3247,50 @@ test_pmc_madison_ignored_fields = require_registers(
         "r31": 0,
     }, entry=0x10, cpu="madison")
 
+# After reset PAL has set the opcode matchers, PMC[11].pt and PMC[13].ta, and
+# hardware reset has set PMV.m (245320-003 §6.2.9).
+test_pmu_merced_reset_values = require_registers(
+    "pmu_merced_reset_values", [
+        (0x10, 0x00, adds(8, 8, 0), adds(9, 11, 0), nop_i()),
+        (0x20, 0x00, adds(10, 13, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_pmcgr_indexed(28, 8), nop_i(), nop_i()),
+        (0x40, 0x00, mov_pmcgr_indexed(29, 9), nop_i(), nop_i()),
+        (0x50, 0x00, mov_pmcgr_indexed(30, 10), nop_i(), nop_i()),
+        (0x60, 0x00, mov_m_cr_gr(31, 73), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r28": 0xf00000003ffffff8,
+        "r29": 0x10000000,
+        "r30": 1,
+        "r31": 1 << 16,
+    }, entry=0x10, cpu="merced")
+
+# 251110-003 §10.3.11 and §10.3.1 (PMC4.enable is set at reset).
+test_pmu_madison_reset_values = require_registers(
+    "pmu_madison_reset_values", [
+        (0x10, 0x00, adds(8, 4, 0), adds(9, 9, 0), nop_i()),
+        (0x20, 0x00, adds(10, 13, 0), adds(11, 14, 0), nop_i()),
+        (0x30, 0x00, adds(12, 15, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_pmcgr_indexed(26, 8), nop_i(), nop_i()),
+        (0x50, 0x00, mov_pmcgr_indexed(27, 9), nop_i(), nop_i()),
+        (0x60, 0x00, mov_pmcgr_indexed(28, 10), nop_i(), nop_i()),
+        (0x70, 0x00, mov_pmcgr_indexed(29, 11), nop_i(), nop_i()),
+        (0x80, 0x00, mov_pmcgr_indexed(30, 12), nop_i(), nop_i()),
+        (0x90, 0x00, mov_m_cr_gr(31, 73), nop_i(), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+    ], {
+        "ip": 0xa0,
+        "exception": IA64_EXCP_NONE,
+        "r26": 1 << 23,
+        "r27": 0xffffffffffffffff,
+        "r28": 0x2078fefefefe,
+        "r29": 0xdb6,
+        "r30": 0xfffffff0,
+        "r31": 1 << 16,
+    }, entry=0x10, cpu="madison")
+
 test_pmc_pmd_indexed_decode = require_registers("pmc_pmd_indexed_decode", [
     (0x10, 0x00, adds(9, 1, 0), adds(10, 0x77, 0),
      nop_i()),
@@ -3541,6 +3585,8 @@ CASE_NAMES = (
     'pminmax_pack_decode',
     'pmpy2_decode',
     'pmpyshr2_decode',
+    'pmu_madison_reset_values',
+    'pmu_merced_reset_values',
     'popcnt_decode',
     'predicate_register_roundtrip',
     'predicated_off_privileged_instruction_does_not_fault',

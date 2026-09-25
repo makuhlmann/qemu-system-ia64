@@ -955,6 +955,13 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
         ia64_sapic_lid(MAX(CPU(cpu)->cpu_index, 0), 0);
     cpu->env.cr[IA64_CR_SAPIC_TPR] = 0;
     cpu->env.cr[IA64_CR_ITV] = IA64_VECTOR_MASKED;
+    /* PMV.m is set on reset (245320-003 §6.2.9, 251110-003 §10.3.11). */
+    cpu->env.cr[IA64_CR_PMV] = IA64_VECTOR_MASKED;
+    if (icc->pmu) {
+        for (int i = 0; i < IA64_PMC_COUNT; i++) {
+            cpu->env.pmc[i] = icc->pmu->pmc[i].reset;
+        }
+    }
     cpu->env.pal.pal_proc_copy_valid = false;
     cpu->env.pal.pal_proc_copy_addr = 0;
     cpu->env.pal.pal_interrupt_block_addr = IA64_LOCAL_SAPIC_PA;
@@ -1431,16 +1438,22 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
  * 245320-003 §6.2 and Table 6-24: PMC0-13 and PMD0-17 are populated and the
  * counters are 32 bits wide.
  */
+/*
+ * Reset values, 245320-003 §6.2.9: PAL sets PMC[8,9].mifb = 1111 with
+ * mask{29:3} all ones, PMC[11].pt and PMC[13].ta; the rest is undefined.
+ */
 static const IA64PmuLayout ia64_pmu_layout_merced = {
     .pmc = {
         [0] = { .mask = 0xf1 },                         /* Table 6-7 */
         [4 ... 5] = { .mask = 0x037f7f7f },             /* Figure 6-13 */
         [6 ... 7] = { .mask = 0x033f7f7f },             /* Figure 6-14 */
-        [8 ... 9] = { .mask = 0xfffffffe3ffffff8ULL },  /* Figure 6-17 */
+        [8 ... 9] = { .mask = 0xfffffffe3ffffff8ULL,    /* Figure 6-17 */
+                      .reset = 0xf00000003ffffff8ULL },
         [10] = { .mask = 0x030f00cf },                  /* Figure 6-18 */
-        [11] = { .mask = 0x130f00cf },                  /* Figure 6-20 */
+        [11] = { .mask = 0x130f00cf,                    /* Figure 6-20 */
+                 .reset = 0x10000000 },
         [12] = { .mask = 0xffcf },                      /* Figure 6-22 */
-        [13] = { .mask = 0x1 },                         /* Figure 6-16 */
+        [13] = { .mask = 0x1, .reset = 0x1 },           /* Figure 6-16 */
     },
     .pmd = {
         /* Figure 6-19 */
@@ -1467,9 +1480,19 @@ static const IA64PmuLayout ia64_pmu_layout_merced = {
  * PMC15, so they stay.
  */
 static const IA64PmuLayout ia64_pmu_layout_madison = {
+    /*
+     * Reset values, 251110-003 §10.3.11 and PMC4.enable (§10.3.1: set at
+     * reset); the rest is undefined.
+     */
     .pmc = {
         [0] = { .mask = 0xf1 },
-        [4 ... 15] = { .mask = UINT64_MAX },
+        [4] = { .mask = UINT64_MAX, .reset = 1ULL << 23 },
+        [5 ... 7] = { .mask = UINT64_MAX },
+        [8 ... 9] = { .mask = UINT64_MAX, .reset = UINT64_MAX },
+        [10 ... 12] = { .mask = UINT64_MAX },
+        [13] = { .mask = UINT64_MAX, .reset = 0x2078fefefefeULL },
+        [14] = { .mask = UINT64_MAX, .reset = 0xdb6 },
+        [15] = { .mask = UINT64_MAX, .reset = 0xfffffff0 },
     },
     .pmd = {
         [0 ... 3] = { .mask = UINT64_MAX },

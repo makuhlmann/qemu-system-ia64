@@ -1896,6 +1896,8 @@ typedef struct IA64PmuRegister {
     uint64_t mask;
     uint64_t sext_mask;
     uint8_t sext_bit;
+    /* The value after hardware reset and PAL's PMU setup. */
+    uint64_t reset;
 } IA64PmuRegister;
 
 typedef struct IA64PmuLayout {
