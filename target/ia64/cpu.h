@@ -44,6 +44,7 @@
 #define IA64_IBR_COUNT   16
 #define IA64_PMC_COUNT   64
 #define IA64_PMD_COUNT   64
+#define IA64_PMC_PM      (1ULL << 6)
 #define IA64_PKR_COUNT   16
 #define IA64_RR_COUNT    8
 #define IA64_MSR_COUNT   1024

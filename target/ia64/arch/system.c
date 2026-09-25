@@ -647,23 +647,20 @@ uint64_t ia64_system_read_pmd(CPUIA64State *env, uint32_t index)
     return env->pmd[index];
 }
 
-uint64_t ia64_system_read_pmd_checked(CPUIA64State *env, uint64_t index,
-                                 uint64_t fault_ip, uint64_t raw,
-                                 uint32_t slot)
+/*
+ * At CPL > 0, PSR.sp or the pm bit of a generic counter's PMC hides the PMD
+ * (SDM Vol. 3 mov indirect, Vol. 2 Table 7-5).  The generic counters are
+ * PMC/PMD 4-7, as PAL_PERF_MON_INFO reports.
+ */
+uint64_t ia64_system_read_pmd_checked(CPUIA64State *env, uint64_t index)
 {
     index &= 0xff;
-    if (index >= IA64_PMD_COUNT) {
-        env->cr_isr = 0x30;
-        ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
-                               fault_ip, raw, slot);
+    if (ia64_psr_cpl(env->psr) != 0 &&
+        ((env->psr & IA64_PSR_SP) ||
+         (index >= 4 && index <= 7 && (env->pmc[index] & IA64_PMC_PM)))) {
+        return 0;
     }
-    if ((env->pmc[index] & (1ULL << 6)) &&
-        ia64_psr_cpl(env->psr) != 0) {
-        env->cr_isr = 0x20;
-        ia64_raise_exception(env, IA64_EXCP_PRIVILEGED_REG,
-                               fault_ip, raw, slot);
-    }
-    return (env->psr & IA64_PSR_SP) ? 0 : env->pmd[index];
+    return ia64_system_read_pmd_indexed(env, index);
 }
 
 void ia64_system_write_pmd(CPUIA64State *env, uint32_t index, uint64_t value)

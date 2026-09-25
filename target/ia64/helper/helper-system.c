@@ -415,11 +415,9 @@ uint64_t helper_read_pmd(CPUIA64State *env, uint32_t index)
     return ia64_system_read_pmd(env, index);
 }
 
-uint64_t helper_read_pmd_checked(CPUIA64State *env, uint64_t index,
-                                 uint64_t fault_ip, uint64_t raw,
-                                 uint32_t slot)
+uint64_t helper_read_pmd_checked(CPUIA64State *env, uint64_t index)
 {
-    return ia64_system_read_pmd_checked(env, index, fault_ip, raw, slot);
+    return ia64_system_read_pmd_checked(env, index);
 }
 
 void helper_write_pmd(CPUIA64State *env, uint32_t index, uint64_t value)

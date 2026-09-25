@@ -3073,6 +3073,68 @@ test_pmc_pmd_registers_are_independent = require_registers("pmc_pmd_registers_ar
     "r31": 0x55,
 }, entry=0x10)
 
+# Unimplemented PMC/PMD reads give 0 and writes are ignored, without a fault
+# (SDM Vol. 2 7.2.1, Vol. 3 mov indirect).
+test_pmc_pmd_unimplemented_index_does_not_fault = require_registers(
+    "pmc_pmd_unimplemented_index_does_not_fault", [
+        (0x10, 0x00, adds(8, 0xff, 0), adds(20, 0x5a, 0), nop_i()),
+        (0x20, 0x00, mov_grpmc_indexed(8, 20), nop_i(), nop_i()),
+        (0x30, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, mov_pmcgr_indexed(30, 8), nop_i(), nop_i()),
+        (0x60, 0x00, mov_pmdgr_indexed(31, 8), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0,
+        "r31": 0,
+    }, entry=0x10)
+
+# PSR.sp and PMC.pm hide a PMD only at CPL > 0 (SDM Vol. 2 Table 7-5).
+test_pmd_cpl0_secure_monitor_remains_visible = require_registers(
+    "pmd_cpl0_secure_monitor_remains_visible", [
+        (0x10, 0x00, adds(8, 4, 0), adds(20, 0x44, 0), nop_i()),
+        (0x20, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0x30, 0x00, ssm(IA64_PSR_SP), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, mov_pmdgr_indexed(30, 8), nop_i(), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0x44,
+    }, entry=0x10)
+
+def _pmd_cpl3_read_case(name, psr, expected_pm, expected_plain):
+    return require_registers(name, [
+        (0x10, 0x00, adds(8, 4, 0), adds(9, 5, 0), nop_i()),
+        (0x20, 0x00, adds(20, 1 << 6, 0), adds(21, 0x44, 0), nop_i()),
+        (0x30, 0x00, mov_grpmc_indexed(8, 20), adds(22, 0, 0), nop_i()),
+        (0x40, 0x00, mov_grpmd_indexed(8, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_grpmc_indexed(9, 22), adds(23, 0x55, 0), nop_i()),
+        (0x60, 0x00, mov_grpmd_indexed(9, 23), nop_i(), nop_i()),
+        (0x70, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x80, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_CPL3 | psr)),
+        (0x90, 0x00, nop_m(), adds(31, 0xc0, 0), nop_i()),
+        *rfi_to_gr(0xa0, 19, 31),
+        (0xc0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xd0, 0x00, mov_pmdgr_indexed(30, 8), nop_i(), nop_i()),
+        (0xe0, 0x00, mov_pmdgr_indexed(29, 9), nop_i(), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+    ], {
+        "ip": 0xf0,
+        "exception": IA64_EXCP_NONE,
+        "r29": expected_plain,
+        "r30": expected_pm,
+    }, entry=0x10)
+
+test_pmd_cpl3_privileged_monitor_reads_zero = _pmd_cpl3_read_case(
+    "pmd_cpl3_privileged_monitor_reads_zero", 0, 0, 0x55)
+
+test_pmd_cpl3_secure_monitor_reads_zero = _pmd_cpl3_read_case(
+    "pmd_cpl3_secure_monitor_reads_zero", IA64_PSR_SP, 0, 0)
+
 test_pmc_pmd_indexed_decode = require_registers("pmc_pmd_indexed_decode", [
     (0x10, 0x00, adds(9, 1, 0), adds(10, 0x77, 0),
      nop_i()),
@@ -3355,6 +3417,10 @@ CASE_NAMES = (
     'pcmp1_eq_m_slot_decode',
     'pmc_pmd_indexed_decode',
     'pmc_pmd_registers_are_independent',
+    'pmc_pmd_unimplemented_index_does_not_fault',
+    'pmd_cpl0_secure_monitor_remains_visible',
+    'pmd_cpl3_privileged_monitor_reads_zero',
+    'pmd_cpl3_secure_monitor_reads_zero',
     'pminmax_pack_decode',
     'pmpy2_decode',
     'pmpyshr2_decode',
