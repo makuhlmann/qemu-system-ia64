@@ -1631,6 +1631,40 @@ test_pal_copy_pal_ap_entry_callable = require_registers(
      "r9": PAL_VERSION_VALUE, "r10": PAL_VERSION_VALUE, "r11": 0},
     entry=0x10)
 
+# The copy is memory, so a processor that has made no PAL_COPY_PAL call of its
+# own also runs PAL through it (SDM Vol 2 rev 2.1 PAL_COPY_PAL; the zx1 HP SAL
+# does this on its AP).  CPU 0 copies PAL and wakes CPU 1 with an IPI (PIB
+# 0xFEE00000 + id << 12); CPU 1, powered off at the image base 0x100000 until
+# then, calls PAL_VERSION at the copy.
+test_pal_copy_pal_entry_callable_on_other_cpu = require_registers(
+    "pal_copy_pal_entry_callable_on_other_cpu", [
+        (0x10, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
+        (0x20, *movl_mlx(28, PAL_COPY_PAL)),
+        (0x30, *movl_mlx(32, PAL_COPY_PAL)),
+        (0x40, *movl_mlx(33, PAL_COPY_TARGET | (1 << 63))),
+        (0x50, *movl_mlx(34, PAL_COPY_BUFFER_SIZE)),
+        (0x60, *movl_mlx(35, 0)),
+        (0x70, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, *movl_mlx(2, (1 << 63) | 0xfee01000)),
+        (0x90, 0x00, nop_m(), addl(3, 0xf0, 0), nop_i()),
+        (0xa0, 0x00, st8(2, 3), nop_i(), nop_i()),
+        (0xb0, 0x10, nop_m(), nop_i(),
+         br_cond(0xb0, 0xb0)),
+        (0x100000, *movl_mlx(28, PAL_VERSION)),
+        (0x100010, 0x00, nop_m(), addl(29, 0, 0), addl(30, 0, 0)),
+        (0x100020, 0x10, nop_m(), addl(31, 0, 0),
+         br_call(0, 0x100020, PAL_COPY_TARGET)),
+        (0x100030, 0x10, nop_m(), nop_i(),
+         br_cond(0x100030, 0x100030)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(),
+         br_ret(0)),
+    ],
+    {"ip": 0x100030, "r28": PAL_VERSION, "r8": 0,
+     "r9": PAL_VERSION_VALUE, "r10": PAL_VERSION_VALUE, "r11": 0},
+    entry=0x10, alat=None, smp="2", state_cpu=1)
+
 # Regression: the relocated PAL entry that pal_copy_pal writes must return via
 # a plain branch (br.many b0), not br.ret.  Real firmware reaches a static PAL
 # procedure at the relocated entry by a *plain* branch (br) without pushing a
@@ -1961,6 +1995,7 @@ CASE_NAMES = (
     'pal_copy_pal_bad_alloc',
     'pal_copy_pal_bad_processor',
     'pal_copy_pal_ap_entry_callable',
+    'pal_copy_pal_entry_callable_on_other_cpu',
     'pal_copy_pal_entry_callable',
     'pal_copy_pal_relocated_entry_plain_branch',
     'pal_debug_info',

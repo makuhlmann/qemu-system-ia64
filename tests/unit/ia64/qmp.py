@@ -100,10 +100,13 @@ class QmpClient:
                 return message
             self.events.append(message)
 
-    def hmp(self, command: str, timeout_s: float | None = None) -> str:
-        result = self.execute(
-            "human-monitor-command", {"command-line": command},
-            timeout_s=timeout_s)
+    def hmp(self, command: str, timeout_s: float | None = None,
+            cpu_index: int | None = None) -> str:
+        arguments: dict = {"command-line": command}
+        if cpu_index is not None:
+            arguments["cpu-index"] = cpu_index
+        result = self.execute("human-monitor-command", arguments,
+                              timeout_s=timeout_s)
         if not isinstance(result, str):
             raise QmpError(f"HMP returned non-string result: {result!r}")
         return result

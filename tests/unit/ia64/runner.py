@@ -62,6 +62,8 @@ class MicroProgram:
     # Further QEMU arguments, e.g. ("-global", "ia64-cpu.geographic-id=3").
     extra_args: tuple[str, ...] = ()
     expected_exit: ExpectedExit | None = None
+    # The processor whose state the expectation and terminal IP check.
+    state_cpu: int = 0
 
 
 @dataclass
@@ -240,7 +242,8 @@ def run_microprogram(qemu: str, program: MicroProgram,
                 polls += 1
                 remaining = max(0.001, deadline - time.monotonic())
                 last_registers = qmp.hmp("info registers",
-                                         timeout_s=remaining)
+                                         timeout_s=remaining,
+                                         cpu_index=program.state_cpu)
                 last_state = parse_state(last_registers)
 
                 terminal_reached = (

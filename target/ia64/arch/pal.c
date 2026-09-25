@@ -525,6 +525,7 @@ static void pal_copy_pal(CPUIA64State *env)
 
     if (processor == 0) {
         uint64_t le_words[ARRAY_SIZE(pal_proc_words)];
+        CPUState *cs;
         int i;
 
         for (i = 0; i < ARRAY_SIZE(pal_proc_words); i++) {
@@ -533,18 +534,33 @@ static void pal_copy_pal(CPUIA64State *env)
         (void)ia64_exec_physical_rw(target_pa, le_words,
                                     sizeof(le_words), true);
         ia64_exec_invalidate_phys_range(env, target_pa, PAL_COPY_CODE_SIZE);
+
+        /*
+         * The copy is memory: any processor that branches to it runs PAL,
+         * also one that has not made its own PAL_COPY_PAL call (SDM Vol. 2
+         * rev 2.1, PAL_COPY_PAL: an application-processor call does not
+         * copy).  The zx1 HP SAL calls PAL through the copy on an AP that
+         * has made no such call; a Break fault there parks that AP for good.
+         */
+        CPU_FOREACH(cs) {
+            CPUIA64State *other = cpu_env(cs);
+
+            qatomic_set(&other->pal.pal_proc_copy_addr,
+                        target_pa + PAL_COPY_PROC_OFFSET);
+            qatomic_store_release(&other->pal.pal_proc_copy_valid, true);
+        }
     }
 
     /*
      * An application-processor call does not repeat the memory copy, but it
      * still installs the relocated procedure entry in that processor (SDM
-     * Vol. 2, PAL_COPY_PAL).  Keep this state per CPU so a subsequent break
-     * in the shared PAL image is dispatched as a PAL call.  The copy also
-     * moves PAL's own PALE_PMI entry, which is not modelled; SAL's PMI
-     * entry, registered by PAL_PMI_ENTRYPOINT, stays as it was.
+     * Vol. 2, PAL_COPY_PAL).  The copy also moves PAL's own PALE_PMI entry,
+     * which is not modelled; SAL's PMI entry, registered by
+     * PAL_PMI_ENTRYPOINT, stays as it was.
      */
-    env->pal.pal_proc_copy_addr = target_pa + PAL_COPY_PROC_OFFSET;
-    env->pal.pal_proc_copy_valid = true;
+    qatomic_set(&env->pal.pal_proc_copy_addr,
+                target_pa + PAL_COPY_PROC_OFFSET);
+    qatomic_store_release(&env->pal.pal_proc_copy_valid, true);
 
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
     env->gr[IA64_PAL_GR_RESULT1] = PAL_COPY_PROC_OFFSET;

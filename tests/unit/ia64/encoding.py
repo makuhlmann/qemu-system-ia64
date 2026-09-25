@@ -55,7 +55,8 @@ def run_program(qemu, bundles, entry=0x10, alat="full",
                 terminal_ip=None, expected=None, timeout=2.0,
                 name="ia64-microprogram", poll_initial_s=0.001,
                 poll_max_s=0.020, cpu=None, smp="1", memory=None,
-                machine="ia64-vpc", icount=None, extra_args=()):
+                machine="ia64-vpc", icount=None, extra_args=(),
+                state_cpu=0):
     """Run until an explicit architectural terminal state."""
     expected = dict(expected or {})
     if terminal_ip is None:
@@ -82,6 +83,7 @@ def run_program(qemu, bundles, entry=0x10, alat="full",
         memory=memory,
         icount=icount,
         extra_args=tuple(extra_args),
+        state_cpu=state_cpu,
     )
     return run_microprogram(qemu, program)
 
@@ -155,11 +157,13 @@ def run_program_jit(qemu, bundles, entry=0x10, terminal_ip=None, memory=None):
 
 
 def require_registers(name, bundles, expected, entry=0x10, alat="full",
-                      cpu=None, smp="1", machine="ia64-vpc", extra_args=()):
+                      cpu=None, smp="1", machine="ia64-vpc", extra_args=(),
+                      state_cpu=0):
     def tc(qemu):
         run_program(qemu, bundles, entry=entry, alat=alat,
                     expected=expected, name=name, cpu=cpu, smp=smp,
-                    machine=machine, extra_args=extra_args)
+                    machine=machine, extra_args=extra_args,
+                    state_cpu=state_cpu)
     features = set()
     if alat is not None:
         features.add(f"alat:{alat}")

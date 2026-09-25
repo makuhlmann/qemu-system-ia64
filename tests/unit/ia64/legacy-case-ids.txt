@@ -839,6 +839,7 @@ pal_copy_info_bad_type
 pal_copy_info_ia32_unsupported
 pal_copy_info_platform_for_ia64
 pal_copy_pal_ap_entry_callable
+pal_copy_pal_entry_callable_on_other_cpu
 pal_copy_pal_bad_alignment
 pal_copy_pal_bad_alloc
 pal_copy_pal_bad_processor
