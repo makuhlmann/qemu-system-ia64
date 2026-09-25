@@ -815,17 +815,6 @@ static void ia64_do_famax(CPUIA64State *env, uint32_t r1, uint32_t r2,
 
 /* ---- FP reciprocal approximation (frcpa: ~1/x in table index 0) ---- */
 
-static bool ia64_floatx80_rcpa_predicate(floatx80 num, floatx80 den,
-                                          float_status *status)
-{
-    return !floatx80_is_zero(num) &&
-           !floatx80_is_infinity(num, status) &&
-           !floatx80_is_any_nan(num) &&
-           !floatx80_is_zero(den) &&
-           !floatx80_is_infinity(den, status) &&
-           !floatx80_is_any_nan(den);
-}
-
 typedef struct IA64FPRegisterFormat {
     bool sign;
     uint32_t exp;
@@ -860,15 +849,6 @@ static IA64FPRegisterFormat ia64_fr_register_format(CPUIA64State *env,
     fmt.mant = low;
     ia64_normalize_fp_register_format(&fmt);
     return fmt;
-}
-
-static bool ia64_fp_register_format_is_normal(
-    const IA64FPRegisterFormat *fmt)
-{
-    return fmt->exp != 0 &&
-           fmt->exp != IA64_FP_REG_SPECIAL_EXP &&
-           fmt->mant != 0 &&
-           (fmt->mant & IA64_FP_SIGNIFICAND_INTEGER_BIT);
 }
 
 static bool ia64_fp_register_format_is_zero(
@@ -1022,36 +1002,6 @@ static const uint16_t ia64_recip_sqrt_table[256] = {
     0x5d6, 0x5d3, 0x5d0, 0x5cd, 0x5ca, 0x5c7, 0x5c4, 0x5c1,
     0x5be, 0x5bb, 0x5b8, 0x5b5, 0x5b2, 0x5af, 0x5ac, 0x5aa,
 };
-
-static floatx80 ia64_floatx80_rcpa_approx(CPUIA64State *env,
-                                           uint32_t den_reg)
-{
-    IA64FPRegisterFormat den = ia64_fr_register_format(env, den_reg);
-
-    return ia64_register_format_to_floatx80(
-        env, den.sign, ia64_fp_register_recip_exp(den.exp),
-        (uint64_t)ia64_recip_table[ia64_recip_table_index(den.mant)] << 53);
-}
-
-static floatx80 ia64_floatx80_rsqrta_approx(CPUIA64State *env,
-                                            uint32_t reg)
-{
-    IA64FPRegisterFormat val = ia64_fr_register_format(env, reg);
-
-    return ia64_register_format_to_floatx80(
-        env, false, ia64_fp_register_rsqrt_exp(val.exp),
-        (uint64_t)ia64_recip_sqrt_table[
-            ia64_recip_sqrt_table_index(&val)] << 53);
-}
-
-static floatx80 ia64_floatx80_rcpa(floatx80 num, floatx80 den,
-                                    bool approximate, float_status *status)
-{
-    floatx80 one = ia64_make_floatx80(
-        0x3fff, IA64_FP_SIGNIFICAND_INTEGER_BIT);
-
-    return floatx80_div(approximate ? one : num, den, status);
-}
 
 typedef struct IA64FPSWAFormat {
     bool sign;
@@ -1329,18 +1279,61 @@ static void ia64_fpswa_prepare_sqrt(CPUIA64State *env, uint32_t r1,
     ia64_fpswa_cache_result(env, &raw, sf, val.unnormal);
 }
 
+static IA64FPReg ia64_fp_special_reg(bool sign, bool inf)
+{
+    return (IA64FPReg){
+        .sign = sign,
+        .exp = inf ? IA64_FP_EXP_SPECIAL : 0,
+        .sig = inf ? IA64_FP_INT_BIT : 0,
+    };
+}
+
+/*
+ * frcpa gives the IEEE quotient f2/f3 for special operands with p2 = 0,
+ * and otherwise the table approximation of 1/f3 with p2 = 1 (SDM Vol 3
+ * frcpa).  The checks follow Vol 1 Figure 5-11; zeros and pseudo-zeros
+ * give canonical zeros (Vol 1 5.1.3).
+ */
 static void ia64_do_frcpa(CPUIA64State *env, uint32_t r1, uint32_t p2,
                           uint32_t r2, uint32_t r3, uint32_t sf)
 {
-    floatx80 num;
-    floatx80 den;
-    bool predicate;
     IA64FPRegisterFormat num_fmt;
     IA64FPRegisterFormat den_fmt;
-    bool approximate;
+    IA64FPReg num;
+    IA64FPReg den;
+    IA64FPReg result;
+    bool sign;
 
     if (ia64_fr_nat_get(env, r2) || ia64_fr_nat_get(env, r3)) {
         ia64_fr_write_nat(env, r1);
+        ia64_pr_write(env, p2, false);
+        return;
+    }
+
+    num = ia64_fr_reg(env, r2);
+    den = ia64_fr_reg(env, r3);
+    sign = num.sign ^ den.sign;
+    if (ia64_fpr_is_unsupported(&num) || ia64_fpr_is_unsupported(&den) ||
+        (ia64_fpr_is_zero_value(&num) && ia64_fpr_is_zero_value(&den)) ||
+        (ia64_fpr_is_inf(&num) && ia64_fpr_is_inf(&den))) {
+        ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_V);
+        ia64_fr_write_reg(env, r1, ia64_fp_qnan_indefinite);
+        ia64_pr_write(env, p2, false);
+        return;
+    }
+    if (ia64_fpr_is_nan(&num) || ia64_fpr_is_nan(&den)) {
+        if (ia64_fpr_is_snan(&num) || ia64_fpr_is_snan(&den)) {
+            ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_V);
+        }
+        result = ia64_fpr_is_nan(&num) ? num : den;
+        result.sig |= IA64_FP_QUIET_BIT;
+        ia64_fr_write_reg(env, r1, result);
+        ia64_pr_write(env, p2, false);
+        return;
+    }
+    if (ia64_fpr_is_zero_value(&den) && !ia64_fpr_is_inf(&num)) {
+        ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_Z);
+        ia64_fr_write_reg(env, r1, ia64_fp_special_reg(sign, true));
         ia64_pr_write(env, p2, false);
         return;
     }
@@ -1351,17 +1344,23 @@ static void ia64_do_frcpa(CPUIA64State *env, uint32_t r1, uint32_t p2,
         ia64_fpswa_prepare_divide(env, r1, p2, r2, r3, sf);
         ia64_raise_fp_fault(env, IA64_FP_ISR_SWA);
     }
+    if (ia64_fpr_is_unnormal(&num) || ia64_fpr_is_unnormal(&den)) {
+        ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_D);
+    }
 
-    num = ia64_fr_to_floatx80(env, r2);
-    den = ia64_fr_to_floatx80(env, r3);
-    predicate = ia64_floatx80_rcpa_predicate(
-        num, den, &env->fp.fp_status);
-    approximate = predicate &&
-                  ia64_fp_register_format_is_normal(&den_fmt);
-    ia64_fr_write_floatx80(
-        env, r1, approximate ? ia64_floatx80_rcpa_approx(env, r3) :
-        ia64_floatx80_rcpa(num, den, predicate, &env->fp.fp_status));
-    ia64_pr_write(env, p2, predicate);
+    if (ia64_fpr_is_inf(&num) || ia64_fpr_is_inf(&den) ||
+        ia64_fpr_is_zero_value(&num)) {
+        ia64_fr_write_reg(env, r1,
+                          ia64_fp_special_reg(sign, ia64_fpr_is_inf(&num)));
+        ia64_pr_write(env, p2, false);
+        return;
+    }
+    result.sign = den_fmt.sign;
+    result.exp = ia64_fp_register_recip_exp(den_fmt.exp);
+    result.sig = (uint64_t)ia64_recip_table[
+        ia64_recip_table_index(den_fmt.mant)] << 53;
+    ia64_fr_write_reg(env, r1, result);
+    ia64_pr_write(env, p2, true);
 }
 
 static bool ia64_float32_rcpa_predicate(float32 num, float32 den)
@@ -2514,27 +2513,6 @@ void ia64_fp_fmov(CPUIA64State *env, uint32_t dst, uint32_t src)
 
 /* ---- FP reciprocal sqrt approx ---- */
 
-static bool ia64_floatx80_rsqrta_predicate(floatx80 val,
-                                            float_status *status)
-{
-    return !floatx80_is_zero(val) &&
-           !floatx80_is_neg(val) &&
-           !floatx80_is_infinity(val, status) &&
-           !floatx80_is_any_nan(val);
-}
-
-static floatx80 ia64_floatx80_rsqrta(floatx80 val, float_status *status)
-{
-    floatx80 one = ia64_make_floatx80(
-        0x3fff, IA64_FP_SIGNIFICAND_INTEGER_BIT);
-    floatx80 sqrtv = floatx80_sqrt(val, status);
-
-    if (floatx80_is_zero(sqrtv)) {
-        return floatx80_default_inf(floatx80_is_neg(val), status);
-    }
-    return floatx80_div(one, sqrtv, status);
-}
-
 static bool ia64_float32_rsqrta_predicate(float32 val)
 {
     return !float32_is_zero(val) &&
@@ -2634,15 +2612,39 @@ static void ia64_do_fprsqrta(CPUIA64State *env, uint32_t r1, uint32_t p2,
     ia64_pr_write(env, p2, hi_pred && lo_pred);
 }
 
+/*
+ * frsqrta gives the IEEE square root for special operands with p2 = 0,
+ * and otherwise the table approximation of 1/sqrt(f3) with p2 = 1 (SDM
+ * Vol 3 frsqrta).  The checks follow Vol 1 Figure 5-11.
+ */
 static void ia64_do_frsqrta(CPUIA64State *env, uint32_t r1, uint32_t p2,
                             uint32_t r3, uint32_t sf)
 {
-    floatx80 val;
     IA64FPRegisterFormat fmt;
-    bool predicate;
+    IA64FPReg val;
+    IA64FPReg result;
 
     if (ia64_fr_nat_get(env, r3)) {
         ia64_fr_write_nat(env, r1);
+        ia64_pr_write(env, p2, false);
+        return;
+    }
+
+    val = ia64_fr_reg(env, r3);
+    if (ia64_fpr_is_unsupported(&val) ||
+        (val.sign && !ia64_fpr_is_nan(&val) &&
+         !ia64_fpr_is_zero_value(&val))) {
+        ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_V);
+        ia64_fr_write_reg(env, r1, ia64_fp_qnan_indefinite);
+        ia64_pr_write(env, p2, false);
+        return;
+    }
+    if (ia64_fpr_is_nan(&val)) {
+        if (ia64_fpr_is_snan(&val)) {
+            ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_V);
+        }
+        val.sig |= IA64_FP_QUIET_BIT;
+        ia64_fr_write_reg(env, r1, val);
         ia64_pr_write(env, p2, false);
         return;
     }
@@ -2652,22 +2654,23 @@ static void ia64_do_frsqrta(CPUIA64State *env, uint32_t r1, uint32_t p2,
         ia64_fpswa_prepare_sqrt(env, r1, p2, r3, sf);
         ia64_raise_fp_fault(env, IA64_FP_ISR_SWA);
     }
+    if (ia64_fpr_is_unnormal(&val)) {
+        ia64_fp_raise_flag(env, sf, IA64_FP_FLAG_D);
+    }
 
-    val = ia64_fr_to_floatx80(env, r3);
-    if (floatx80_is_zero(val) ||
-        (!floatx80_is_neg(val) &&
-         floatx80_is_infinity(val, &env->fp.fp_status))) {
-        ia64_fr_copy(env, r1, r3, 1);
+    if (ia64_fpr_is_zero_value(&val) || ia64_fpr_is_inf(&val)) {
+        ia64_fr_write_reg(env, r1,
+                          ia64_fp_special_reg(val.sign,
+                                              ia64_fpr_is_inf(&val)));
         ia64_pr_write(env, p2, false);
         return;
     }
-
-    predicate = ia64_floatx80_rsqrta_predicate(val, &env->fp.fp_status);
-    ia64_fr_write_floatx80(
-        env, r1, predicate && ia64_fp_register_format_is_normal(&fmt) ?
-        ia64_floatx80_rsqrta_approx(env, r3) :
-        ia64_floatx80_rsqrta(val, &env->fp.fp_status));
-    ia64_pr_write(env, p2, predicate);
+    result.sign = false;
+    result.exp = ia64_fp_register_rsqrt_exp(fmt.exp);
+    result.sig = (uint64_t)ia64_recip_sqrt_table[
+        ia64_recip_sqrt_table_index(&fmt)] << 53;
+    ia64_fr_write_reg(env, r1, result);
+    ia64_pr_write(env, p2, true);
 }
 
 static uint32_t ia64_fp_context_sf(uint32_t context)

@@ -3076,7 +3076,10 @@ test_frcpa_p2_high_bits_decode = require_registers("frcpa_p2_high_bits_decode", 
     "ip": 0x50,
     "f8": ExpectedFP(0, 0x1003e),
     "pr_mask": ExpectedBits(mask=1 << 10, value=1 << 10),
-    "ar_fpsr": 0x0009804c8270033f,
+    # setf.sig 0x800 is an unnormal: frcpa records D, and truncating the
+    # non-integral approximation records I (SDM Vol 1 Table 5-2).
+    "ar_fpsr": (DEFAULT_FPSR |
+                (0x22 << (FPSR_SF1_SHIFT + FPSR_SF_FLAGS_SHIFT))),
 }, entry=0x10)
 
 test_frcpa_natval_propagates = require_registers("frcpa_natval_propagates", [
@@ -4944,6 +4947,208 @@ test_fcvt_invalid_precedes_unnormal_d = require_registers(
 
 
 
+test_frcpa_wre1_special_responses_use_raw_types = require_registers(
+    "frcpa_wre1_special_responses_use_raw_types", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x38000, 0)),
+        (0x20, *movl_mlx(22, 0x8000000000000000)),
+        (0x30, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x40, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x50, *movl_mlx(23, 0x7ff0000000000000)),
+        (0x60, 0x00, setf_d(7, 23), nop_i(), nop_i()),
+        (0x70, 0x0d, nop_m(), frcpa(10, 6, 6, 7, sf=0), nop_i()),
+        (0x80, 0x0d, nop_m(), frcpa(11, 7, 0, 6, sf=0), nop_i()),
+        (0x90, 0x0d, nop_m(), frcpa(12, 8, 6, 0, sf=0), nop_i()),
+        (0xa0, 0x0d, nop_m(), frcpa(13, 9, 7, 6, sf=0), nop_i()),
+        (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
+    ], {
+        "ip": 0xb0,
+        "f10": ExpectedFP(0, 0x20000),
+        "f11": ExpectedFP(0, 0x20000),
+        "f12": ExpectedFP(0x8000000000000000, 0x3ffff),
+        "f13": ExpectedFP(0x8000000000000000, 0x3ffff),
+        "pr_mask": ExpectedBits(mask=sum(1 << p for p in range(6, 10)),
+                                value=0),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (0x04 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_frcpa_wre1_uses_raw_exponents = require_registers(
+    "frcpa_wre1_uses_raw_exponents", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(5, 0x210, 0)),
+        (0x20, 0x01, addl(6, 0x218, 0), addl(21, 0x18000, 0),
+         addl(22, 0x8000, 0)),
+        (0x30, *movl_mlx(23, 0x8000000000000000)),
+        (0x40, 0x09, st8(3, 23), st8(4, 21), nop_i()),
+        (0x50, 0x09, st8(5, 23), st8(6, 22), nop_i()),
+        (0x60, 0x09, ldf_fill_postinc(6, 3, 0),
+         ldf_fill_postinc(7, 5, 0), nop_i()),
+        (0x70, 0x0d, nop_m(), frcpa(8, 6, 6, 6), nop_i()),
+        (0x80, 0x0d, nop_m(), frcpa(9, 7, 7, 7), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "f8": ExpectedFP(0xff80000000000000, 0x07ffd),
+        "f9": ExpectedFP(0xff80000000000000, 0x17ffd),
+        "pr_mask": ExpectedBits(mask=(1 << 6) | (1 << 7),
+                                value=(1 << 6) | (1 << 7)),
+        "ar_fpsr": DEFAULT_FPSR,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_frsqrta_wre1_negative_normal_uses_raw_type = require_registers(
+    "frsqrta_wre1_negative_normal_uses_raw_type", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x28000, 0)),
+        (0x20, *movl_mlx(22, 0x8000000000000000)),
+        (0x30, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x40, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x50, 0x0d, nop_m(), frsqrta(8, 6, 6, sf=0), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "f8": ExpectedFP(0xc000000000000000, 0x3ffff),
+        "pr_mask": ExpectedBits(mask=1 << 6, value=0),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (0x01 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_frsqrta_wre1_uses_raw_exponents = require_registers(
+    "frsqrta_wre1_uses_raw_exponents", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(5, 0x210, 0)),
+        (0x20, 0x01, addl(6, 0x218, 0), addl(21, 0x18000, 0),
+         addl(22, 0x8000, 0)),
+        (0x30, *movl_mlx(23, 0x8000000000000000)),
+        (0x40, 0x09, st8(3, 23), st8(4, 21), nop_i()),
+        (0x50, 0x09, st8(5, 23), st8(6, 22), nop_i()),
+        (0x60, 0x09, ldf_fill_postinc(6, 3, 0),
+         ldf_fill_postinc(7, 5, 0), nop_i()),
+        (0x70, 0x0d, nop_m(), frsqrta(8, 6, 6), nop_i()),
+        (0x80, 0x0d, nop_m(), frsqrta(9, 7, 7), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "f8": ExpectedFP(0xb4a0000000000000, 0x0bffe),
+        "f9": ExpectedFP(0xb4a0000000000000, 0x13ffe),
+        "pr_mask": ExpectedBits(mask=(1 << 6) | (1 << 7),
+                                value=(1 << 6) | (1 << 7)),
+        "ar_fpsr": DEFAULT_FPSR,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fp_approx_unsupported_masked_invalid = require_registers(
+    "fp_approx_unsupported_masked_invalid", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x1ffff, 0)),
+        # Positive pseudo-infinity: special exponent with integer bit clear.
+        (0x20, 0x09, st8(3, 0), st8(4, 21), nop_i()),
+        (0x30, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        # Unsupported operands produce QNaN and clear the result predicate.
+        (0x40, 0x0d, nop_m(), frcpa(8, 6, 6, 1, sf=0), nop_i()),
+        (0x50, 0x0d, nop_m(), frsqrta(9, 7, 6, sf=0), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "f6": ExpectedFP(0, 0x1ffff),
+        "f8": ExpectedFP(0xc000000000000000, 0x3ffff),
+        "f9": ExpectedFP(0xc000000000000000, 0x3ffff),
+        "pr_mask": ExpectedBits(mask=(1 << 6) | (1 << 7), value=0),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (1 << (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fp_approx_pseudozero_returns_canonical_zero = require_registers(
+    "fp_approx_pseudozero_returns_canonical_zero", [
+        (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(5, 0x210, 0)),
+        (0x20, 0x01, addl(6, 0x218, 0), addl(21, 0x12345, 0),
+         addl(22, 0x32345, 0)),
+        # Same pseudo-zero exponent, once positive and once negative.
+        (0x30, 0x09, st8(3, 0), st8(4, 21), nop_i()),
+        (0x40, 0x09, st8(5, 0), st8(6, 22), nop_i()),
+        (0x50, 0x09, ldf_fill_postinc(6, 3, 0),
+         ldf_fill_postinc(7, 5, 0), nop_i()),
+        (0x60, 0x0d, nop_m(), frsqrta(8, 6, 6, sf=0), nop_i()),
+        (0x70, 0x0d, nop_m(), frsqrta(9, 7, 7, sf=0), nop_i()),
+        (0x80, 0x0d, nop_m(), frcpa(10, 8, 6, 1, sf=0), nop_i()),
+        (0x90, 0x0d, nop_m(), frcpa(11, 9, 7, 1, sf=0), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+    ], {
+        "ip": 0xa0,
+        "f6": ExpectedFP(0, 0x12345),
+        "f7": ExpectedFP(0, 0x32345),
+        "f8": ExpectedFP(0, 0),
+        "f9": ExpectedFP(0, 0x20000),
+        "f10": ExpectedFP(0, 0),
+        "f11": ExpectedFP(0, 0x20000),
+        "pr_mask": ExpectedBits(mask=sum(1 << p for p in range(6, 10)),
+                                value=0),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+# p6 is the p2 operand; its value after the fault is not checked here.
+test_frsqrta_pseudozero_d_fault_rolls_back = require_registers(
+    "frsqrta_pseudozero_d_fault_rolls_back", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 1))[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x12345, 0)),
+        (0x40, 0x09, st8(3, 0), st8(4, 21), nop_i()),
+        (0x50, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x60, 0x05, *movl_mlx(5, 0x4000000000000000)[1:]),
+        (0x70, 0x01, setf_d(8, 5), adds(16, 1, 0), nop_i()),
+        (0x80, 0x01, nop_m(), cmp_ltu_unc(6, 7, 0, 16), nop_i()),
+        (0x90, 0x0d, nop_m(), frsqrta(8, 6, 6, sf=0), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x20,
+                 IA64_FP_FAULT_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 2,
+        "f8": ExpectedFP(*binary64_to_spill(0x4000000000000000)),
+        "ar_fpsr": DEFAULT_FPSR & ~(1 << 1),
+    }, entry=0x10)
+
+# p6 is the p2 operand; its value after the fault is not checked here.
+test_frcpa_unsupported_invalid_enabled_rolls_back = require_registers(
+    "frcpa_unsupported_invalid_enabled_rolls_back", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~1)[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x1ffff, 0)),
+        (0x40, 0x09, st8(3, 0), st8(4, 21), nop_i()),
+        (0x50, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x60, 0x05, *movl_mlx(5, 0x4000000000000000)[1:]),
+        (0x70, 0x01, setf_d(8, 5), adds(16, 1, 0), nop_i()),
+        (0x80, 0x01, nop_m(), cmp_ltu_unc(6, 7, 0, 16), nop_i()),
+        (0x90, 0x0d, nop_m(), frcpa(8, 6, 6, 1, sf=0), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x20,
+                 IA64_FP_FAULT_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 1,
+        "f8": ExpectedFP(*binary64_to_spill(0x4000000000000000)),
+        "ar_fpsr": DEFAULT_FPSR & ~1,
+    }, entry=0x10)
+
+
 def _fp_representation_case(name, value, width, model):
     if width == 32:
         value &= 0xffffffff
@@ -5091,6 +5296,8 @@ CASE_NAMES = (
     'fnorm_static_masked_overflow_and_ftz',
     'fnorm_wre1_precision_and_range',
     'fp_alat_does_not_satisfy_gr_check_load',
+    'fp_approx_pseudozero_returns_canonical_zero',
+    'fp_approx_unsupported_masked_invalid',
     'fp_arithmetic_natval_propagates',
     'fp_binary_unnormal_sets_d',
     'fp_binary_wre1_endpoint_delivery',
@@ -5198,10 +5405,16 @@ CASE_NAMES = (
     'frcpa_setf_sig_high_integer_remainder',
     'frcpa_special_quotient',
     'frcpa_swa_fault_discards_result',
+    'frcpa_unsupported_invalid_enabled_rolls_back',
+    'frcpa_wre1_special_responses_use_raw_types',
+    'frcpa_wre1_uses_raw_exponents',
     'frsqrta_decode',
     'frsqrta_pred_false_clears',
+    'frsqrta_pseudozero_d_fault_rolls_back',
     'frsqrta_special_returns_operand',
     'frsqrta_swa_fault_discards_result',
+    'frsqrta_wre1_negative_normal_uses_raw_type',
+    'frsqrta_wre1_uses_raw_exponents',
     'fselect_decode',
     'fselect_natval_propagates',
     'fsetc_fclrf_ignored_bit36_decode',
