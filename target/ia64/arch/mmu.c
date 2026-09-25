@@ -1715,10 +1715,11 @@ uint64_t ia64_mmu_tak(CPUIA64State *env, uint64_t va)
         return 1;
     }
 
+    /* SDM Vol 3 tak, tlb_access_key(): the key is returned in bits 31:8. */
     rid = ia64_region_rid(env, va);
     entry = ia64_tlb_find_cached(env, va, rid, false);
     if (entry && ia64_tlb_entry_present(entry)) {
-        return entry->key;
+        return (uint64_t)entry->key << IA64_ITIR_KEY_SHIFT;
     }
 
     if ((env->psr & IA64_PSR_DT) &&
@@ -1727,7 +1728,7 @@ uint64_t ia64_mmu_tak(CPUIA64State *env, uint64_t va)
                             &entry) &&
         (pte & IA64_PTE_PRESENT)) {
         if (entry && ia64_tlb_entry_present(entry)) {
-            return entry->key;
+            return (uint64_t)entry->key << IA64_ITIR_KEY_SHIFT;
         }
     }
 

@@ -53,6 +53,7 @@ from .encoding import (
     IA64_PKR_WD,
     IA64_PSR_AC,
     IA64_PSR_BN,
+    IA64_PSR_DB,
     IA64_PSR_CPL3,
     IA64_PSR_DT,
     IA64_PSR_ED,
@@ -106,6 +107,7 @@ from .encoding import (
     lfetch_fault,
     load_mem,
     mov_br_gr,
+    mov_dbr_indexed_write,
     mov_gr_psr_full,
     mov_m_ar_gr,
     mov_m_cr_gr,
@@ -2346,7 +2348,7 @@ test_itc_d_preserves_24bit_key = require_registers(
     ], {
         "ip": 0x80,
         "exception": IA64_EXCP_NONE,
-        "r31": 0x12345,
+        "r31": 0x12345 << 8,
     }, entry=0x10)
 
 # A 4 GiB (2**32) page is an architected insertable page size, so itc.d/itr.d
@@ -2459,6 +2461,26 @@ test_itc_d_not_present_raises_page_fault = require_registers(
         "exception": IA64_EXCP_NONE,
         "r30": 0xa000000000000430,
         "r31": IA64_ISR_R,
+    }, entry=0x10)
+
+test_tak_key_one_is_distinct_from_miss = require_registers(
+    "tak_key_one_is_distinct_from_miss", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+        (0x30, *movl_mlx(7, (1 << 8) | LOW_VECTOR_ITIR)),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
+        (0x70, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x80, 0x00, tak(30, 19), nop_i(), nop_i()),
+        (0x90, *movl_mlx(20, HIGH_TR_BASE + 0x40000)),
+        (0xa0, 0x00, tak(31, 20), nop_i(), nop_i()),
+        (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
+    ], {
+        "ip": 0xb0,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0x100,
+        "r31": 1,
     }, entry=0x10)
 
 test_tak_not_present_dtlb_returns_one = require_registers(
@@ -3927,7 +3949,7 @@ test_tpa_uses_short_vhpt_walk = require_registers(
         "ip": 0x120,
         "exception": IA64_EXCP_NONE,
         "r31": 0x4000430,
-        "r30": 5,
+        "r30": 5 << 8,
     }, entry=0x10)
 
 test_short_vhpt_walker_rejects_pending_table_purge = require_registers(
@@ -4137,7 +4159,7 @@ test_tak_uses_short_vhpt_walk = require_registers(
     ], {
         "ip": 0x110,
         "exception": IA64_EXCP_NONE,
-        "r31": 5,
+        "r31": 5 << 8,
     }, entry=0x10)
 
 test_short_vhpt_not_present_raises_page_fault = require_registers(
@@ -4598,6 +4620,47 @@ test_ifetch_page_not_present_fallthrough_records_faulting_iip = \
             "r31": IFETCH_PNP_NEXT_PAGE,
         }, entry=0x10)
 
+def _short_vhpt_dbr_setup(target_pte):
+    return [
+        (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
+        (0x20, *movl_mlx(17, 0xa000000000000000)),
+        (0x30, *movl_mlx(18, 0x539)),
+        (0x40, *movl_mlx(19, 0xbffc000000000000)),
+        (0x50, *movl_mlx(20, 0x0010000004009661)),
+        (0x60, *movl_mlx(21, target_pte)),
+        (0x70, *movl_mlx(22, 0x4008000)),
+        (0x80, 0x00, st8(22, 21), nop_i(), nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(16, 8), adds(7, 0x38, 0), nop_i()),
+        (0xa0, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0xb0, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0), nop_i()),
+        (0xd0, 0x00, itr_d(5, 20), nop_i(), nop_i()),
+        (0xe0, 0x00, nop_m(), adds(23, 0, 0), nop_i()),
+        (0xf0, *movl_mlx(24, 0xbffc000000000000)),
+        (0x100, 0x00, mov_dbr_indexed_write(23, 24), nop_i(), nop_i()),
+        (0x110, 0x00, nop_m(), adds(23, 1, 0), nop_i()),
+        (0x120, *movl_mlx(24, 0x81ffffffffffffff)),
+        (0x130, 0x00, mov_dbr_indexed_write(23, 24), nop_i(), nop_i()),
+        (0x140, *movl_mlx(2, 0xa000000000000430)),
+    ]
+
+
+# tak is the explicit exception to the VHPT DBR.r rule.  With a breakpoint
+# on the short VHPT entry active, it must consume the entry and return its
+# key.
+test_tak_vhpt_access_ignores_dbr_read_match = require_registers(
+    "tak_vhpt_access_ignores_dbr_read_match",
+    _short_vhpt_dbr_setup(0x0010000004000661) + [
+        (0x150, *movl_mlx(24, IA64_PSR_DT | IA64_PSR_DB)),
+        (0x160, 0x00, mov_gr_psr_full(24), nop_i(), nop_i()),
+        (0x170, 0x00, tak(31, 2), nop_i(), nop_i()),
+        (0x180, 0x10, nop_m(), nop_i(), br_cond(0x180, 0x180)),
+    ], {
+        "ip": 0x180,
+        "exception": IA64_EXCP_NONE,
+        "r31": 5 << 8,
+    }, entry=0x10)
+
 test_speculative_load_walks_short_vhpt_with_ic_clear = require_registers(
     "speculative_load_walks_short_vhpt_with_ic_clear", [
         (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
@@ -4638,7 +4701,7 @@ test_speculative_load_walks_short_vhpt_with_ic_clear = require_registers(
         "exception": IA64_EXCP_NONE,
         "r31": 0x123456789abcdef0,
         "r31_nat": 0,
-        "r30": 5,
+        "r30": 5 << 8,
     }, entry=0x10)
 
 test_speculative_load_defers_region6_vhpt_not_present = require_registers(
@@ -5084,7 +5147,7 @@ test_long_vhpt_walk_uses_standard_entry_layout = require_registers(
         "ip": 0x100,
         "exception": IA64_EXCP_NONE,
         "r31": 0x4000430,
-        "r30": 2,
+        "r30": 2 << 8,
     }, entry=0x10)
 
 test_long_vhpt_walk_uses_dcr_byte_order = require_registers(
@@ -5121,7 +5184,7 @@ test_long_vhpt_walk_uses_dcr_byte_order = require_registers(
         "ip": 0x120,
         "exception": IA64_EXCP_NONE,
         "r31": 0x4000430,
-        "r30": 2,
+        "r30": 2 << 8,
     }, entry=0x10)
 
 LONG_VHPT_RID1_DATA_BUNDLE = (0x4000430, 0x00, 0x1111222233334444, 0, 0)
@@ -6746,10 +6809,12 @@ CASE_NAMES = (
     'ssm_ic_inflight_dtlb_sets_ni',
     'ssm_ic_inflight_short_vhpt_entry_miss_raises_vhpt',
     'ssm_pk_invalidates_cached_keyless_access',
+    'tak_key_one_is_distinct_from_miss',
     'tak_nat_source_consumes_non_access',
     'tak_not_present_dtlb_returns_one',
     'tak_unimplemented_va_does_not_alias_short_vhpt',
     'tak_uses_short_vhpt_walk',
+    'tak_vhpt_access_ignores_dbr_read_match',
     'thash_same_reg_unimplemented_va_sets_nat',
     'thash_uses_pta_with_walker_disabled',
     'tpa_dt_disabled_miss_raises_alt_dtlb',
