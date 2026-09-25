@@ -4606,6 +4606,71 @@ test_mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates = \
             "cfm_rrb_pr": 47,
         }, entry=0x10)
 
+
+def _pr_file_after_moves(rrb, writes):
+    """Physical predicates after mov pr = r, mask writes (bit 0 stays 1)."""
+    physical = 1
+    for value, mask in writes:
+        mask = mask & ~1 & ((1 << 64) - 1)
+        physical = (physical & ~mask) | (value & mask)
+    del rrb
+    return physical | 1
+
+
+def _pr_logical(physical, rrb, logical):
+    """Logical predicate `logical` of physical file `physical`."""
+    if logical < 16:
+        return (physical >> logical) & 1
+    return (physical >> (16 + (logical - 16 + rrb) % 48)) & 1
+
+
+# mov pr = r, mask and mov r = pr address the physical predicates (as though
+# CFM.rrb.pr were 0, SDM Vol 3 mov pr); qualifying predicates name the
+# logical ones.  Five rotations leave CFM.rrb.pr at 43.  A full write, a
+# write of static predicates only, and a write of p8-p15 and all rotating
+# predicates, each read back with mov r = pr, and three rotating logical
+# predicates observed through qualified adds.
+MOV_PR_RRB_A = 0xa5a55a5af0f00f0f
+MOV_PR_RRB_B = 0x123456789abcdef0
+MOV_PR_RRB_C = 0x0ff0e1d2c3b4a596
+MOV_PR_RRB = 43
+MOV_PR_RRB_1 = _pr_file_after_moves(MOV_PR_RRB, [(MOV_PR_RRB_A, -1)])
+MOV_PR_RRB_2 = _pr_file_after_moves(
+    MOV_PR_RRB, [(MOV_PR_RRB_A, -1), (MOV_PR_RRB_B, 0xaa)])
+MOV_PR_RRB_3 = _pr_file_after_moves(
+    MOV_PR_RRB, [(MOV_PR_RRB_A, -1), (MOV_PR_RRB_B, 0xaa),
+                 (MOV_PR_RRB_C, -256)])
+
+test_mov_pr_partial_masks_with_nonzero_rrb = require_registers(
+    "mov_pr_partial_masks_with_nonzero_rrb", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), mov_i_imm_ar(66, 1),
+         mov_i_imm_ar(65, 4)),
+        (0x30, 0x13, nop_m(), nop_b(), br_ctop_many(0x30, 0x30)),
+        (0x40, *movl_mlx(3, MOV_PR_RRB_A)),
+        (0x50, *movl_mlx(4, MOV_PR_RRB_B)),
+        (0x60, *movl_mlx(5, MOV_PR_RRB_C)),
+        (0x70, 0x00, nop_m(), mov_gr_pr(3, -1), nop_i()),
+        (0x80, 0x00, nop_m(), mov_pr_gr(8), nop_i()),
+        (0x90, 0x00, nop_m(), mov_gr_pr(4, 0xaa), nop_i()),
+        (0xa0, 0x00, nop_m(), mov_pr_gr(9), nop_i()),
+        (0xb0, 0x00, nop_m(), mov_gr_pr(5, -256), nop_i()),
+        (0xc0, 0x00, nop_m(), mov_pr_gr(10), nop_i()),
+        (0xd0, 0x00, nop_m(), adds(11, 1, 0, qp=16), adds(12, 1, 0, qp=40)),
+        (0xe0, 0x00, nop_m(), adds(13, 1, 0, qp=63), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+    ], {
+        "ip": 0xf0,
+        "exception": IA64_EXCP_NONE,
+        "cfm_rrb_pr": MOV_PR_RRB,
+        "r8": MOV_PR_RRB_1,
+        "r9": MOV_PR_RRB_2,
+        "r10": MOV_PR_RRB_3,
+        "r11": _pr_logical(MOV_PR_RRB_3, MOV_PR_RRB, 16),
+        "r12": _pr_logical(MOV_PR_RRB_3, MOV_PR_RRB, 40),
+        "r13": _pr_logical(MOV_PR_RRB_3, MOV_PR_RRB, 63),
+    }, entry=0x10)
+
 # br.call and br.ret, and clrrrb.pr, change CFM.rrb.pr without rotating: the
 # physical predicates keep their values under the new rename base.
 test_br_call_ret_rebases_rotating_predicates = require_registers(
@@ -5148,6 +5213,7 @@ CASE_NAMES = (
     'loadrs_rejects_nonzero_rsc_mode',
     'mov_bspstore_rsc_mode_precedes_source_nat',
     'mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates',
+    'mov_pr_partial_masks_with_nonzero_rrb',
     'mov_rnat_rsc_mode_precedes_source_nat',
     'postincrement_base_out_of_frame',
     'predicated_off_stacked_gr_destination_does_not_fault',
