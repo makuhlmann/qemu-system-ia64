@@ -119,6 +119,19 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         }
         break;
     case IA64_OP_MOV_GRAR:
+        if (op->source == IA64_AR_BSPSTORE || op->source == IA64_AR_RNAT) {
+            /*
+             * The RSC.mode check is an Illegal Operation fault (priority
+             * 35), ahead of Register NaT Consumption (43): SDM Vol 3 mov ar,
+             * Vol 2 Table 5-6.
+             */
+            ia64_gen_validate_ar_access(insn, ia64_gr_src(op->destination),
+                                        true);
+            ia64_gen_check_nat_register(insn, op->destination);
+            gen_helper_write_ar(tcg_env, tcg_constant_i32(op->source),
+                                ia64_gr_src(op->destination));
+            break;
+        }
         ia64_gen_check_nat_register(insn, op->destination);
         if (ia64_ar_is_simple(op->source)) {
             if (op->source == 40 || op->source == 64) {

@@ -4704,6 +4704,24 @@ test_alloc_requires_group_start = require_exception(
         (0x20, 0x00, alloc_m(1, 1, 0, 0, 0), nop_i(), nop_i()),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x20)
 
+test_mov_bspstore_rsc_mode_precedes_source_nat = require_exception(
+    "mov_bspstore_rsc_mode_precedes_source_nat", [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0), nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(16, 6, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_imm_ar(16, 1), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_ar(16, 18), nop_i(), nop_i()),
+        (0x200, 0x00, 0, 0, 0),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x40)
+
+test_mov_rnat_rsc_mode_precedes_source_nat = require_exception(
+    "mov_rnat_rsc_mode_precedes_source_nat", [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0), nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(16, 6, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_imm_ar(16, 1), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_ar(16, 19), nop_i(), nop_i()),
+        (0x200, 0x00, 0, 0, 0),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x40)
+
 test_loadrs_rejects_nonzero_rsc_mode = require_exception(
     "loadrs_rejects_nonzero_rsc_mode", [
         (0x10, 0x01, nop_m(), adds(3, 1, 0), nop_i()),
@@ -5074,7 +5092,9 @@ CASE_NAMES = (
     'cover_rfi_restores_rotating_predicates_by_physical_number',
     'gcc_alloc_and_ar_lc',
     'loadrs_rejects_nonzero_rsc_mode',
+    'mov_bspstore_rsc_mode_precedes_source_nat',
     'mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates',
+    'mov_rnat_rsc_mode_precedes_source_nat',
     'postincrement_base_out_of_frame',
     'predicated_off_stacked_gr_destination_does_not_fault',
     'rsc_reserved_field_fault',
