@@ -130,7 +130,11 @@ void ia64_sapic_update_interrupt(CPUIA64State *env)
     if (sapic_find_irr(env) != IA64_SPURIOUS_VECTOR) {
         cpu_set_interrupt(cs, CPU_INTERRUPT_HARD);
         qemu_cpu_kick(cs);
-    } else {
+    } else if (cpu_test_interrupt(cs, CPU_INTERRUPT_HARD)) {
+        /*
+         * ssm, rsm and every TPR write come here: skip the locked
+         * read-modify-write when the request is already clear.
+         */
         cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
     }
 }
