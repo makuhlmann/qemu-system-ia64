@@ -242,6 +242,7 @@ fnmpy_s_s1_decode
 fnorm_normalizes_setf_sig_payload
 fp_alat_does_not_satisfy_gr_check_load
 fp_arithmetic_natval_propagates
+fp_bitops_read_architected_significand
 fp_divzero_fault_discards_result
 fp_fixed_target_predicated_off_is_nop
 fp_inexact_trap_commits_result
@@ -250,6 +251,7 @@ fp_logical_swap_natval_propagates
 fp_mix_sign_extend_decode
 fp_mix_sign_extend_natval_propagates
 fp_parallel_natval_propagates
+fp_parallel_reads_architected_significand
 fp_unary_natval_propagates
 fp_writes_set_psr_mfl_mfh
 fpabs_fpneg_decode
@@ -1188,6 +1190,7 @@ ws2003_compare_update_decode
 ws2003_vga_frcpa_integer_division
 xchg4_decode
 xchg4_result_base_alias_invalidates_alat
+xma_fcvt_xf_read_architected_significand
 xma_h_decode
 xma_hu_decode
 xma_natval_propagates

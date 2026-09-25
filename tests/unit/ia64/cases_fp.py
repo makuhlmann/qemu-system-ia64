@@ -987,6 +987,27 @@ test_xma_hu_decode = require_registers("xma_hu_decode", [
     "ar_fpsr": DEFAULT_FPSR,
 }, entry=0x10)
 
+# xma and fcvt.xf consume FR.significand: 0x8000000000000800 for the
+# setf.d value 1.0 + 2^-52, and 1 << 63 for f1.
+test_xma_fcvt_xf_read_architected_significand = require_registers(
+    "xma_fcvt_xf_read_architected_significand", [
+        (0x10, *movl_mlx(2, 0x3ff0000000000001)),
+        (0x20, 0x00, setf_d(6, 2), nop_i(), nop_i()),
+        (0x30, 0x1d, nop_m(), xmpy_hu(8, 6, 1), nop_b()),
+        (0x40, 0x0d, nop_m(), fcvt_xf(9, 6), nop_i()),
+        (0x50, 0x00, getf_sig(8, 8), nop_i(), nop_i()),
+        (0x60, 0x00, getf_sig(9, 9), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "r8": 0x4000000000000400,
+        "r9": 0xfffffffffffff000,
+        "f8": ExpectedFP(0x4000000000000400, 0x1003e),
+        "f9": ExpectedFP(0xfffffffffffff000, 0x3003d),
+        "ar_fpsr": DEFAULT_FPSR,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_xma_natval_propagates = require_registers("xma_natval_propagates", [
     (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
      nop_i()),
@@ -1274,6 +1295,48 @@ test_fp_logical_and_swap_decode = require_registers("fp_logical_and_swap_decode"
     "ar_fpsr": DEFAULT_FPSR,
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
+
+# The bitwise and data-movement forms read FR.significand, never the
+# binary64 value that setf.d or ldfd supplied (SDM Vol 3 fand, fselect).
+test_fp_bitops_read_architected_significand = require_registers(
+    "fp_bitops_read_architected_significand", [
+        (0x10, *movl_mlx(2, 0x3ff123456789abcd)),
+        (0x20, *movl_mlx(4, 0x3ffabcdef0123456)),
+        (0x30, *movl_mlx(5, 0xbfe0fedcba987654)),
+        (0x40, 0x00, addl(3, 0x300, 0), nop_i(), nop_i()),
+        (0x50, 0x00, st8(3, 5), nop_i(), nop_i()),
+        (0x60, 0x09, ldfd(7, 3), setf_d(6, 2), nop_i()),
+        (0x70, 0x00, setf_d(5, 4), nop_i(), nop_i()),
+        (0x80, 0x0d, nop_m(), fand(8, 6, 7), nop_i()),
+        (0x90, 0x0d, nop_m(), fselect(9, 6, 7, 5), nop_i()),
+        (0xa0, 0x0d, nop_m(), fswap(10, 6, 7), nop_i()),
+        (0xb0, 0x0d, nop_m(), fmix_l(11, 6, 7), nop_i()),
+        (0xc0, 0x0d, nop_m(), fsxt_r(12, 6, 7), nop_i()),
+        (0xd0, 0x0d, nop_m(), fpmerge_se(13, 6, 7), nop_i()),
+        (0xe0, 0x00, getf_sig(8, 8), nop_i(), nop_i()),
+        (0xf0, 0x00, getf_sig(9, 9), nop_i(), nop_i()),
+        (0x100, 0x00, getf_sig(10, 10), nop_i(), nop_i()),
+        (0x110, 0x00, getf_sig(11, 11), nop_i(), nop_i()),
+        (0x120, 0x00, getf_sig(12, 12), nop_i(), nop_i()),
+        (0x130, 0x00, getf_sig(13, 13), nop_i(), nop_i()),
+        (0x140, 0x10, nop_m(), nop_i(), br_cond(0x140, 0x140)),
+    ], {
+        "ip": 0x140,
+        "r8": 0x8112211441122000,
+        "r9": 0xd5f6f594d1b2b000,
+        "r10": 0xc3b2a000891a2b3c,
+        "r11": 0x891a2b3c87f6e5d4,
+        "r12": 0x00000000c3b2a000,
+        "r13": 0x8976e5d44d32a000,
+        "f8": ExpectedFP(0x8112211441122000, 0x1003e),
+        "f9": ExpectedFP(0xd5f6f594d1b2b000, 0x1003e),
+        "f10": ExpectedFP(0xc3b2a000891a2b3c, 0x1003e),
+        "f11": ExpectedFP(0x891a2b3c87f6e5d4, 0x1003e),
+        "f12": ExpectedFP(0x00000000c3b2a000, 0x1003e),
+        "f13": ExpectedFP(0x8976e5d44d32a000, 0x1003e),
+        "ar_fpsr": DEFAULT_FPSR,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
 
 test_fp_logical_swap_natval_propagates = require_registers(
     "fp_logical_swap_natval_propagates", [
@@ -1741,6 +1804,50 @@ test_fpcmp_simd_high_lane_fault_isr = require_registers(
         "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 0x1,
         "f8": ExpectedFP(0x4000000040400000, 0x1003e),
         "ar_fpsr": 0x33e,
+    }, entry=0x10)
+
+# Parallel FP lanes are the two halves of FR.significand (SDM Vol 3
+# fp_reg_read_hi/lo), also for a register that setf.d wrote.
+test_fp_parallel_reads_architected_significand = require_registers(
+    "fp_parallel_reads_architected_significand", [
+        # These binary64 encodings expand to packed significands
+        # (-1.0, 2.0), (-2.0, 3.0), and (-1.0, 4.0), respectively.
+        (0x10, *movl_mlx(2, 0x3ff7f00000080000)),
+        (0x20, *movl_mlx(3, 0x3ff8000000080800)),
+        (0x30, *movl_mlx(4, 0x3ff7f00000081000)),
+        (0x40, 0x09, setf_d(20, 2), setf_d(21, 3), nop_i()),
+        (0x50, 0x00, setf_d(22, 4), nop_i(), nop_i()),
+        (0x60, 0x0d, nop_m(), fpmin(8, 20, 21), nop_i()),
+        (0x70, 0x0d, nop_m(), fpcmp(1, 9, 20, 21), nop_i()),
+        (0x80, 0x0d, nop_m(), fpcvt_fx_trunc(10, 20), nop_i()),
+        (0x90, 0x0d, nop_m(), fpma(11, 20, 21, 22), nop_i()),
+        (0xa0, 0x0d, nop_m(), fprcpa(12, 6, 20, 22, sf=0), nop_i()),
+        (0xb0, 0x0d, nop_m(), fprsqrta(13, 7, 22, sf=0), nop_i()),
+        (0xc0, 0x00, getf_sig(8, 8), nop_i(), nop_i()),
+        (0xd0, 0x00, getf_sig(9, 9), nop_i(), nop_i()),
+        (0xe0, 0x00, getf_sig(10, 10), nop_i(), nop_i()),
+        (0xf0, 0x00, getf_sig(11, 11), nop_i(), nop_i()),
+        (0x100, 0x00, getf_sig(12, 12), nop_i(), nop_i()),
+        (0x110, 0x00, getf_sig(13, 13), nop_i(), nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+    ], {
+        "ip": 0x120,
+        "r8": 0xc000000040000000,
+        "r9": 0x00000000ffffffff,
+        "r10": 0xffffffff00000002,
+        "r11": 0x3f80000041600000,
+        "r12": 0xbf7f80003e7f8000,
+        "r13": 0xffc000003eff8000,
+        "f8": ExpectedFP(0xc000000040000000, 0x1003e),
+        "f9": ExpectedFP(0x00000000ffffffff, 0x1003e),
+        "f10": ExpectedFP(0xffffffff00000002, 0x1003e),
+        "f11": ExpectedFP(0x3f80000041600000, 0x1003e),
+        "f12": ExpectedFP(0xbf7f80003e7f8000, 0x1003e),
+        "f13": ExpectedFP(0xffc000003eff8000, 0x1003e),
+        "pr_mask": ExpectedBits(mask=(1 << 6) | (1 << 7), value=1 << 6),
+        "ar_fpsr": DEFAULT_FPSR | (1 << (FPSR_SF0_SHIFT +
+                                         FPSR_SF_FLAGS_SHIFT)),
+        "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
 test_fp_parallel_natval_propagates = require_registers(
@@ -3518,6 +3625,7 @@ CASE_NAMES = (
     'fnorm_normalizes_setf_sig_payload',
     'fp_alat_does_not_satisfy_gr_check_load',
     'fp_arithmetic_natval_propagates',
+    'fp_bitops_read_architected_significand',
     'fp_divzero_fault_discards_result',
     'fp_fixed_target_predicated_off_is_nop',
     'fp_inexact_trap_commits_result',
@@ -3526,6 +3634,7 @@ CASE_NAMES = (
     'fp_mix_sign_extend_decode',
     'fp_mix_sign_extend_natval_propagates',
     'fp_parallel_natval_propagates',
+    'fp_parallel_reads_architected_significand',
     'fp_unary_natval_propagates',
     'fp_writes_set_psr_mfl_mfh',
     'fpabs_fpneg_decode',
@@ -3664,6 +3773,7 @@ CASE_NAMES = (
     'w2k_fp_s1_pred_false_decode',
     'w2k_frcpa_capacity_calc',
     'ws2003_vga_frcpa_integer_division',
+    'xma_fcvt_xf_read_architected_significand',
     'xma_h_decode',
     'xma_hu_decode',
     'xma_natval_propagates',
