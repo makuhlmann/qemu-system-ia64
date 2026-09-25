@@ -24,6 +24,8 @@
 #define IA64_TB_FLAG_BE           (1u << 6)
 #define IA64_TB_FLAG_GROUP_START  (1u << 7)
 #define IA64_TB_FLAG_PSR_AC       (1u << 8)
+#define IA64_TB_FLAG_PSR_SS       (1u << 11)
+#define IA64_TB_FLAG_PSR_TB       (1u << 12)
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)
@@ -102,6 +104,14 @@ typedef struct DisasContext {
      * branch or exception path.  Reset whenever CFM.SOF may change.
      */
     uint8_t cfm_sof_checked;
+    /*
+     * PSR.ss and PSR.tb at TB entry.  Either one makes the TB translate a
+     * single instruction, in slot trap_slot, and note its completion traps
+     * (ia64_completion_trap_note()).
+     */
+    bool psr_ss;
+    bool psr_tb;
+    uint8_t trap_slot;
 } DisasContext;
 
 typedef enum IA64GenResult {
@@ -170,6 +180,20 @@ void ia64_gen_check_nat_consumption(const Ia64Instruction *insn,
 void ia64_gen_gr_nat_from_1_or_unimplemented_va(DisasContext *ctx,
                                                 uint8_t dst, uint8_t src);
 MemOp ia64_data_memop(DisasContext *ctx, MemOp memop);
+
+/*
+ * The window in which the model handles a misaligned reference with
+ * PSR.ac = 0 (IA64CPUClass.unaligned_windows); window 0 means that only a
+ * 4 KiB crossing faults.  span is the number of bytes the reference covers.
+ */
+typedef struct IA64UnalignedWindow {
+    uint32_t window;
+    uint32_t span;
+    bool uc_crosses_8;      /* a UC/WC target also faults across 8 bytes */
+} IA64UnalignedWindow;
+
+IA64UnalignedWindow ia64_unaligned_window(const Ia64Instruction *insn,
+                                          uint32_t size);
 void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
                                      TCGv_i64 addr, uint32_t size,
                                      bool always_fault,

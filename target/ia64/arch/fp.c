@@ -2088,7 +2088,9 @@ static void ia64_fp_end(CPUIA64State *env, uint32_t sf)
         }
         env->psr = (env->psr & ~IA64_PSR_RI_MASK) |
                    ((uint64_t)next_slot << IA64_PSR_RI_SHIFT);
-        env->cr_isr = ((enabled & 0x38) << 8) | 1;
+        /* A concurrent Single Step trap shows in ISR.code (Table 8-3). */
+        env->cr_isr = ((enabled & 0x38) << 8) | IA64_ISR_CODE_FP |
+                      ((env->psr & IA64_PSR_SS) ? IA64_ISR_CODE_SS : 0);
         ia64_raise_exception(env, IA64_EXCP_FP_TRAP, next_ip, trap_ip,
                                slot);
     }

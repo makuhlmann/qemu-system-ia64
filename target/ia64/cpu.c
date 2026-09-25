@@ -92,6 +92,8 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 
     flags |= (psr & IA64_PSR_FAULT_SUPPRESS_MASK) != 0 ?
              IA64_TB_FLAG_PSR_SUPPRESS : 0;
+    flags |= ((psr & IA64_PSR_SS) ? IA64_TB_FLAG_PSR_SS : 0) |
+             ((psr & IA64_PSR_TB) ? IA64_TB_FLAG_PSR_TB : 0);
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,
@@ -1072,11 +1074,27 @@ static const TCGCPUOps ia64_tcg_ops = {
  * ("supports WB, UC, and WC ... The UCE memory attribute is also supported"),
  * and Merced's write-coalescing buffer has a chapter of its own in
  * 245320-002 ch. 4.  This emulation implements all four identically on every
- * model, so every model reports all four.
+ * model, so every model reports all four.  NaTPage (encoding 7) is an
+ * architected attribute, not a model option (SDM Vol. 2 Table 4-11), and
+ * every model implements it.
  */
-#define IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC \
+#define IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE \
     ((1ULL << IA64_PTE_MA_WB) | (1ULL << IA64_PTE_MA_UC) | \
-     (1ULL << IA64_PTE_MA_UCE) | (1ULL << IA64_PTE_MA_WC))
+     (1ULL << IA64_PTE_MA_UCE) | (1ULL << IA64_PTE_MA_WC) | \
+     (1ULL << IA64_PTE_MA_NATPAGE))
+
+/*
+ * PAL_CACHE_INFO hint vectors of a data or unified cache.  Merced
+ * (245320-003 sec 5.9) and Itanium 2 (251110-003 sec 5.4.2) implement the
+ * t1, nt1, nt2 and nta locality hints.  Loads encode t1, nt1 and nta (bits
+ * 0, 1 and 3 of Table 11-69; nt2 is an lfetch hint), stores t1 and nta (bits
+ * 0 and 3 of Table 11-68).  Instruction caches report no hints.
+ */
+#define IA64_PAL_CACHE_LOAD_HINTS_T1_NT1_NTA  0x0b
+#define IA64_PAL_CACHE_STORE_HINTS_T1_NTA     0x09
+#define IA64_PAL_CACHE_DATA_HINTS \
+    .store_hints = IA64_PAL_CACHE_STORE_HINTS_T1_NTA, \
+    .load_hints = IA64_PAL_CACHE_LOAD_HINTS_T1_NT1_NTA
 
 /*
  * Itanium 2 (Madison) translation caches, 251110-003 sec 6.1.1 and 6.1.2:
@@ -1105,7 +1123,7 @@ static const IA64PalProfile ia64_pal_profile_madison = {
     .pal_vendor = 1,
     .pal_a_model = 2, .pal_a_revision = 0x23,
     .pal_b_model = 2, .pal_b_revision = 0x23,
-    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 4,
     .cache = {
@@ -1115,19 +1133,22 @@ static const IA64PalProfile ia64_pal_profile_madison = {
                     .load_latency = 1, .tag_lsb = 12 },
             [1] = { .size = 16 * KiB, .associativity = 4, .line_shift = 6,
                     .stride_shift = 6, .store_latency = 1,
-                    .load_latency = 1, .tag_lsb = 12 },
+                    .load_latency = 1, .tag_lsb = 12,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         /* Unified L2: reported on the data/unified type only. */
         [1] = {
             [1] = { .size = 256 * KiB, .associativity = 8, .line_shift = 7,
                     .stride_shift = 7, .attribute = 1, .store_latency = 1,
-                    .load_latency = 5, .tag_lsb = 15, .unified = true },
+                    .load_latency = 5, .tag_lsb = 15, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         [2] = {
             /* L3 load latency: 251110-003 Table 2-5 (12 is McKinley's). */
             [1] = { .size = 3 * MiB, .associativity = 12, .line_shift = 7,
                     .stride_shift = 7, .attribute = 1, .store_latency = 1,
-                    .load_latency = 14, .tag_lsb = 18, .unified = true },
+                    .load_latency = 14, .tag_lsb = 18, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
     },
     .tc_levels = 2,
@@ -1149,7 +1170,7 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     .pal_vendor = 1,
     .pal_a_model = 2, .pal_a_revision = 0x23,
     .pal_b_model = 2, .pal_b_revision = 0x23,
-    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 5,
     .cache = {
@@ -1233,7 +1254,7 @@ static const IA64PalProfile ia64_pal_profile_merced = {
     .pal_vendor = 1,
     .pal_a_model = 8, .pal_a_revision = 0x30,
     .pal_b_model = 8, .pal_b_revision = 0x30,
-    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 4,
     .cache = {
@@ -1243,17 +1264,20 @@ static const IA64PalProfile ia64_pal_profile_merced = {
                     .load_latency = 1, .tag_lsb = 12 },
             [1] = { .size = 16 * KiB, .associativity = 4, .line_shift = 5,
                     .stride_shift = 5, .store_latency = 1,
-                    .load_latency = 2, .tag_lsb = 12 },
+                    .load_latency = 2, .tag_lsb = 12,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         [1] = {
             [1] = { .size = 96 * KiB, .associativity = 6, .line_shift = 6,
                     .stride_shift = 6, .attribute = 1, .store_latency = 1,
-                    .load_latency = 6, .tag_lsb = 14, .unified = true },
+                    .load_latency = 6, .tag_lsb = 14, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         [2] = {
             [1] = { .size = 4 * MiB, .associativity = 4, .line_shift = 6,
                     .stride_shift = 6, .attribute = 1, .store_latency = 1,
-                    .load_latency = 21, .tag_lsb = 20, .unified = true },
+                    .load_latency = 21, .tag_lsb = 20, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
     },
     .tc_levels = 2,
@@ -1334,6 +1358,8 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     icc->has_native_ia32 = true;
     icc->has_virtualization = false;
     icc->is_montecito = false;
+    icc->unaligned_windows = true;
+    icc->unaligned_uc_exempt = false;
     icc->pal = &ia64_pal_profile_madison;
 }
 
@@ -1354,6 +1380,8 @@ typedef struct IA64CPUModelDef {
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
+    bool unaligned_windows;
+    bool unaligned_uc_exempt;
     const IA64PalProfile *pal;
 } IA64CPUModelDef;
 
@@ -1379,6 +1407,8 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->has_native_ia32 = model->has_native_ia32;
     icc->has_virtualization = model->has_virtualization;
     icc->is_montecito = model->is_montecito;
+    icc->unaligned_windows = model->unaligned_windows;
+    icc->unaligned_uc_exempt = model->unaligned_uc_exempt;
     icc->pal = model->pal;
 }
 
@@ -1411,6 +1441,7 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .vhpt_hash_folds_hpn = true,
     .has_native_ia32 = true,
     .has_virtualization = false,
+    .unaligned_windows = true,
     .pal = &ia64_pal_profile_madison,
 };
 
@@ -1489,6 +1520,7 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
     .has_native_ia32 = true,
     .has_virtualization = false,
     .is_montecito = false,
+    .unaligned_uc_exempt = true,
     .pal = &ia64_pal_profile_merced,
 };
 

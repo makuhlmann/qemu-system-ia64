@@ -1047,7 +1047,7 @@ void ia64_gen_fr_set_nat(uint8_t reg)
 typedef enum IA64AlignAcMode {
     IA64_ALIGN_AC_RUNTIME,  /* PSR.ac unknown: test it at run time */
     IA64_ALIGN_AC_SET,      /* PSR.ac statically 1: any misalignment faults */
-    IA64_ALIGN_AC_CLEAR,    /* PSR.ac statically 0: only a page cross faults */
+    IA64_ALIGN_AC_CLEAR,    /* PSR.ac statically 0: the model's rule applies */
 } IA64AlignAcMode;
 
 static IA64AlignAcMode ia64_align_ac_mode(const Ia64Instruction *insn)
@@ -1065,9 +1065,56 @@ static IA64AlignAcMode ia64_align_ac_mode(const Ia64Instruction *insn)
     return ctx->memory.psr_ac ? IA64_ALIGN_AC_SET : IA64_ALIGN_AC_CLEAR;
 }
 
-static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
+/*
+ * 251110-003 sec 5.5: with PSR.ac = 0 an Itanium 2 handles an integer
+ * reference inside an 8-byte window and an FP reference inside a 16-byte
+ * window (ldfe and stfe cover 10 bytes of it); FP pairs and spill/fill must
+ * be naturally aligned, and a UC or WC reference faults when it crosses an
+ * 8-byte boundary.
+ */
+IA64UnalignedWindow ia64_unaligned_window(const Ia64Instruction *insn,
+                                          uint32_t size)
+{
+    const DisasContext *ctx = insn->ctx;
+    IA64UnalignedWindow w = { .window = 0, .span = size };
+
+    if (!ctx || !ia64_env_cpu_class(ctx->env)->unaligned_windows) {
+        return w;
+    }
+
+    switch (insn->opcode) {
+    case IA64_OP_LDFPS:
+    case IA64_OP_LDFPD:
+    case IA64_OP_LDFP8:
+    case IA64_OP_LDF_FILL:
+    case IA64_OP_STF_SPILL:
+        w.window = size;
+        break;
+    case IA64_OP_LDFE:
+    case IA64_OP_STFE:
+        w.window = 16;
+        w.span = 10;
+        w.uc_crosses_8 = true;
+        break;
+    case IA64_OP_LDFS:
+    case IA64_OP_LDFD:
+    case IA64_OP_LDF8:
+    case IA64_OP_STFS:
+    case IA64_OP_STFD:
+    case IA64_OP_STF8:
+        w.window = 16;
+        w.uc_crosses_8 = true;
+        break;
+    default:
+        w.window = 8;
+        break;
+    }
+    return w;
+}
+
+static void ia64_gen_branch_if_alignment_fault(const Ia64Instruction *insn,
+                                               TCGv_i64 addr, uint32_t size,
                                                bool always_fault,
-                                               IA64AlignAcMode ac_mode,
                                                bool is_write,
                                                TCGLabel *fault)
 {
@@ -1090,18 +1137,17 @@ static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
          */
         tcg_gen_br(fault);
     } else {
+        const DisasContext *ctx = insn->ctx;
+        IA64AlignAcMode ac_mode = ia64_align_ac_mode(insn);
+        IA64UnalignedWindow w = ia64_unaligned_window(insn, size);
+        bool uc_exempt =
+            ctx && ia64_env_cpu_class(ctx->env)->unaligned_uc_exempt;
         /*
-         * A misaligned ordinary reference faults when PSR.ac is set, or (with
-         * PSR.ac clear) when it crosses a 4 KiB page boundary (SDM Vol.2 5.5.4).
-         * But unaligned references to the I/O port space -- and more generally
-         * to any non-writeback-cacheable (UC/MMIO) target the platform
-         * decomposes -- are NOT detected as alignment faults, even with PSR.ac
-         * set (SDM Vol.2, "I/O port space"; PSR.ac == EFLAG.ac).  So gather the
-         * fault conditions and, only when one holds, consult the runtime
-         * exemption before actually faulting -- keeping the aligned and
-         * PSR.ac-clear-in-page fast paths free of the probing helper.
+         * The exemption is consulted only once a fault condition holds, so
+         * the aligned and PSR.ac-clear-in-page fast paths stay free of the
+         * probing helper.
          */
-        TCGLabel *maybe_fault = gen_new_label();
+        TCGLabel *maybe_fault = uc_exempt ? gen_new_label() : fault;
 
         if (ac_mode == IA64_ALIGN_AC_SET) {
             tcg_gen_br(maybe_fault);
@@ -1110,17 +1156,35 @@ static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
                 tcg_gen_andi_i64(tmp, cpu_psr, IA64_PSR_AC);
                 tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, maybe_fault);
             }
-            tcg_gen_andi_i64(tmp, addr, 0xfff);
-            tcg_gen_addi_i64(tmp, tmp, size - 1);
-            tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, 0xfff, maybe_fault);
+            if (w.window != 0) {
+                tcg_gen_andi_i64(tmp, addr, w.window - 1);
+                tcg_gen_addi_i64(tmp, tmp, w.span);
+                tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, w.window, maybe_fault);
+                if (w.uc_crosses_8) {
+                    tcg_gen_andi_i64(tmp, addr, 7);
+                    tcg_gen_addi_i64(tmp, tmp, w.span);
+                    tcg_gen_brcondi_i64(TCG_COND_LEU, tmp, 8, ok);
+                    gen_helper_ia64_unaligned_uncacheable(
+                        tmp, tcg_env, addr, tcg_constant_i32(w.span),
+                        tcg_constant_i32(is_write));
+                    tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, maybe_fault);
+                }
+            } else {
+                /* Every model faults a datum spanning 4 KiB (SDM Vol.2 4.5). */
+                tcg_gen_andi_i64(tmp, addr, 0xfff);
+                tcg_gen_addi_i64(tmp, tmp, size - 1);
+                tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, 0xfff, maybe_fault);
+            }
             tcg_gen_br(ok);
         }
 
-        gen_set_label(maybe_fault);
-        gen_helper_ia64_alignment_exempt(tmp, tcg_env, addr,
-                                         tcg_constant_i32(size),
-                                         tcg_constant_i32(is_write));
-        tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, fault);
+        if (uc_exempt) {
+            gen_set_label(maybe_fault);
+            gen_helper_ia64_alignment_exempt(tmp, tcg_env, addr,
+                                             tcg_constant_i32(size),
+                                             tcg_constant_i32(is_write));
+            tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, fault);
+        }
     }
 
     gen_set_label(ok);
@@ -1140,8 +1204,7 @@ void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
 
     fault = gen_new_label();
     ok = gen_new_label();
-    ia64_gen_branch_if_alignment_fault(addr, size, always_fault,
-                                       ia64_align_ac_mode(insn),
+    ia64_gen_branch_if_alignment_fault(insn, addr, size, always_fault,
                                        (isr_access & IA64_ISR_W) != 0, fault);
     tcg_gen_br(ok);
 
@@ -1532,11 +1595,23 @@ void ia64_gen_exit_to_completed(DisasContext *ctx, uint64_t ip,
     ia64_gen_exit_to(ctx, ip);
 }
 
+/* A taken branch in a TB that notes completion traps (DisasContext.psr_tb). */
+static void ia64_gen_note_taken_branch(DisasContext *ctx,
+                                       uint64_t completed_ip)
+{
+    if (ctx->psr_ss || ctx->psr_tb) {
+        gen_helper_completion_trap_taken(
+            tcg_env, tcg_constant_i64(ia64_ip_bundle_addr(completed_ip)),
+            tcg_constant_i32(ctx->trap_slot));
+    }
+}
+
 void ia64_gen_lookup_tcg_completed(DisasContext *ctx, TCGv_i64 ip,
                                    uint64_t completed_ip,
                                    bool record_iipa,
                                    bool track_psr_suppression)
 {
+    ia64_gen_note_taken_branch(ctx, completed_ip);
     ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_store_instruction_group_start(true);
@@ -1551,6 +1626,7 @@ void ia64_gen_lookup_current_completed(DisasContext *ctx,
                                        bool record_iipa,
                                        bool track_psr_suppression)
 {
+    ia64_gen_note_taken_branch(ctx, completed_ip);
     ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_store_instruction_group_start(true);
@@ -1637,6 +1713,7 @@ void ia64_gen_goto_completed(DisasContext *ctx, uint64_t ip,
                              bool record_iipa,
                              bool track_psr_suppression)
 {
+    ia64_gen_note_taken_branch(ctx, completed_ip);
     ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_goto_tb_group(ctx, ip, true);
@@ -1767,6 +1844,7 @@ void ia64_prepare_self_counted_loop(
     ctx->branch.cloop_zero_st1_valid = false;
 
     if (ctx->restart.start_slot != 0 ||
+        ctx->psr_ss || ctx->psr_tb ||
         ctx->base.plugin_enabled ||
         (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) ||
         !ia64_analyze_self_counted_loop(
@@ -2998,6 +3076,8 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
         ctx->base.tb->flags & IA64_TB_FLAG_GROUP_START;
     ctx->restart.next_instruction_group_start =
         ctx->restart.instruction_group_start;
+    ctx->psr_ss = flags & IA64_TB_FLAG_PSR_SS;
+    ctx->psr_tb = flags & IA64_TB_FLAG_PSR_TB;
 }
 
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cs)
@@ -3191,7 +3271,8 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         if (ia64_insn_is_empty_hint(&insn) &&
             !ia64_insn_is_yielding_pause(ctx, &insn) &&
             !(record_iipa && track_iipa_for_insn) &&
-            !ctx->restart.track_psr_suppression) {
+            !ctx->restart.track_psr_suppression &&
+            !ctx->psr_ss && !ctx->psr_tb) {
             ia64_gen_advance_restart_point(ctx, bundle_ip, slot,
                                            skip_x_slot);
             ctx->restart.instruction_group_start =
@@ -3209,6 +3290,12 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
                                     psr_suppression_before_insn));
         }
         ia64_gen_set_ri_tracked(ctx, slot);
+        ctx->trap_slot = slot;
+        if (ctx->psr_ss) {
+            gen_helper_completion_trap_arm(tcg_env,
+                                           tcg_constant_i64(bundle_ip),
+                                           tcg_constant_i32(slot));
+        }
         if (ia64_gen_insn(ctx, &insn, record_iipa && track_iipa_for_insn)) {
             db->is_jmp = DISAS_NORETURN;
             return;
@@ -3226,6 +3313,18 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         }
         ctx->restart.track_psr_suppression =
             ia64_insn_may_set_fault_suppression(&insn);
+        if (ctx->psr_ss || ctx->psr_tb) {
+            /*
+             * Leave after one instruction so that its traps are taken
+             * before the next one starts.
+             */
+            ia64_gen_store_instruction_group_start(
+                ctx->restart.instruction_group_start);
+            ia64_gen_save_fault_slot_for_exit(ctx);
+            tcg_gen_exit_tb(NULL, 0);
+            db->is_jmp = DISAS_NORETURN;
+            return;
+        }
     }
 
     ctx->restart.start_slot = 0;

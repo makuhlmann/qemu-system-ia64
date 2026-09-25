@@ -321,13 +321,20 @@ static bool pal_halt(CPUIA64State *env)
 
 static void pal_prefetch_vis(CPUIA64State *env)
 {
-    if (pal_reserved_args_are_zero(env)) {
+    uint64_t trans_type = env->gr[IA64_PAL_GR_ARG1];
+
+    /*
+     * trans_type 0 transitions virtual attributes only and 1 physical or
+     * mixed ones; the three returns after status are reserved (SDM Vol. 2,
+     * PAL_PREFETCH_VISIBILITY).
+     */
+    if (trans_type <= 1 && env->gr[IA64_PAL_GR_ARG2] == 0 &&
+        env->gr[IA64_PAL_GR_ARG3] == 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->gr[IA64_PAL_GR_RESULT1] = (1ULL << 0) | (1ULL << 1);
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
-        env->gr[IA64_PAL_GR_RESULT1] = 0;
     }
+    env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
@@ -530,13 +537,14 @@ static void pal_copy_pal(CPUIA64State *env)
 
     /*
      * An application-processor call does not repeat the memory copy, but it
-     * still installs the relocated procedure and PMI entry points in that
-     * processor (SDM Vol. 2, PAL_COPY_PAL).  Keep this state per CPU so a
-     * subsequent break in the shared PAL image is dispatched as a PAL call.
+     * still installs the relocated procedure entry in that processor (SDM
+     * Vol. 2, PAL_COPY_PAL).  Keep this state per CPU so a subsequent break
+     * in the shared PAL image is dispatched as a PAL call.  The copy also
+     * moves PAL's own PALE_PMI entry, which is not modelled; SAL's PMI
+     * entry, registered by PAL_PMI_ENTRYPOINT, stays as it was.
      */
     env->pal.pal_proc_copy_addr = target_pa + PAL_COPY_PROC_OFFSET;
     env->pal.pal_proc_copy_valid = true;
-    env->pal.pal_pmi_entry = target_pa + PAL_COPY_PROC_OFFSET;
 
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
     env->gr[IA64_PAL_GR_RESULT1] = PAL_COPY_PROC_OFFSET;
@@ -1057,7 +1065,9 @@ static void pal_cache_info(CPUIA64State *env)
                  ((uint64_t)info->line_shift << 16) |
                  ((uint64_t)info->stride_shift << 24) |
                  ((uint64_t)info->store_latency << 32) |
-                 ((uint64_t)info->load_latency << 40);
+                 ((uint64_t)info->load_latency << 40) |
+                 ((uint64_t)info->store_hints << 48) |
+                 ((uint64_t)info->load_hints << 56);
     /*
      * config_info_2{39:32} is alias_boundary: the binary log of the minimum
      * separation of aliased addresses for best performance (SDM Vol.2

@@ -178,6 +178,19 @@ from .encoding import (
     tnat_z_unc,
     xchg,
     xchg4,
+    ldf8_a,
+    ldf_fill_postinc,
+    ldfd,
+    ldfe,
+    ldfps,
+    stf_spill_postinc,
+    stfd,
+    IA64_EXCP_SINGLE_STEP,
+    IA64_FIRMWARE_IVT_BASE,
+    IA64_ISR_CODE_SS,
+    IA64_PSR_SS,
+    IA64_SINGLE_STEP_VECTOR,
+    extr_u,
 )
 
 
@@ -2643,6 +2656,153 @@ test_firmware_unaligned_virtual_load_assist = require_registers(
     },
 )
 
+# Itanium 2 faults every unaligned reference with PSR.ac = 1, also on a UC
+# target (SDM Vol. 2 4.5; 251110-003 sec 5.5).
+test_integer_advanced_non_speculative_unaligned_faults = require_exception(
+    "integer_advanced_non_speculative_unaligned_faults", [
+        (0x10, *movl_mlx(2, IA64_PHYS_UC_BIT | 0x101)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_AC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, ld8_a(4, 2), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x40)
+
+test_fp_advanced_non_speculative_unaligned_faults = require_exception(
+    "fp_advanced_non_speculative_unaligned_faults", [
+        (0x10, *movl_mlx(2, IA64_PHYS_UC_BIT | 0x101)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_AC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, ldf8_a(7, 2), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x40)
+
+# Madison with PSR.ac = 0 (251110-003 sec 5.5): integer references stay in
+# an 8-byte window, FP references in a 16-byte window (ldfe covers 10 bytes
+# of it), FP pairs and spill/fill are naturally aligned, and a UC reference
+# faults when it crosses 8 bytes.
+test_madison_integer_load_within_8byte_window = require_registers(
+    "madison_integer_load_within_8byte_window", [
+        (0x10, 0x00, addl(3, 0x101, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld4(4, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="madison")
+
+test_madison_integer_load_crossing_8byte_window_faults = require_exception(
+    "madison_integer_load_crossing_8byte_window_faults", [
+        (0x10, 0x00, addl(3, 0x106, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld4(4, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_fp_load_within_16byte_window = require_registers(
+    "madison_fp_load_within_16byte_window", [
+        (0x10, 0x00, addl(3, 0x102, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfd(6, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="madison")
+
+test_madison_fp_load_crossing_16byte_window_faults = require_exception(
+    "madison_fp_load_crossing_16byte_window_faults", [
+        (0x10, 0x00, addl(3, 0x10c, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfd(6, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_fp_pair_requires_natural_alignment = require_exception(
+    "madison_fp_pair_requires_natural_alignment", [
+        (0x10, 0x00, addl(3, 0x104, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfps(6, 7, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_fp_fill_requires_natural_alignment = require_exception(
+    "madison_fp_fill_requires_natural_alignment", [
+        (0x10, 0x00, addl(3, 0x108, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_fp_spill_requires_natural_alignment = require_exception(
+    "madison_fp_spill_requires_natural_alignment", [
+        (0x10, 0x00, addl(3, 0x108, 0), nop_i(), nop_i()),
+        (0x20, 0x00, stf_spill_postinc(3, 1, 0), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_ldfe_within_16byte_window = require_registers(
+    "madison_ldfe_within_16byte_window", [
+        (0x10, 0x00, addl(3, 0x106, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfe(6, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="madison")
+
+test_madison_ldfe_crossing_16byte_window_faults = require_exception(
+    "madison_ldfe_crossing_16byte_window_faults", [
+        (0x10, 0x00, addl(3, 0x107, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfe(6, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_wb_fp_store_crossing_8byte_boundary_completes = require_registers(
+    "madison_wb_fp_store_crossing_8byte_boundary_completes", [
+        (0x10, 0x00, addl(3, 0x106, 0), nop_i(), nop_i()),
+        (0x20, 0x00, stfd(3, 1), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="madison")
+
+test_madison_uc_fp_store_crossing_8byte_boundary_faults = require_exception(
+    "madison_uc_fp_store_crossing_8byte_boundary_faults", [
+        (0x10, *movl_mlx(3, IA64_PHYS_UC_BIT | 0x106)),
+        (0x20, 0x00, stfd(3, 1), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_speculative_model_unaligned_defers = require_registers(
+    "madison_speculative_model_unaligned_defers", [
+        (0x10, 0x00, addl(3, 0x106, 0), nop_i(), nop_i()),
+        (0x20, 0x00, load_mem(0x06, 4, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "r4_nat": 1, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="madison")
+
+# The firmware unaligned assist completes the instruction in slot 0, so the
+# Single Step trap names slot 1 as the next instruction and slot 0 as the
+# trapping one (SDM Vol. 2 7.1).
+test_firmware_unaligned_assist_retires_single_step = require_registers(
+    "firmware_unaligned_assist_retires_single_step",
+    [
+        (0x10, *movl_mlx(20, 0x1122334455667788)),
+        (0x20, 0x00, addl(3, 0x300, 0), nop_i(), nop_i()),
+        (0x30, 0x00, st8(3, 20), nop_i(), nop_i()),
+        (0x40, 0x00, nop_m(), adds(3, 4, 3), nop_i()),
+        (0x50, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
+        (0x60, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0x70, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_AC | IA64_PSR_SS)),
+        (0x80, *movl_mlx(4, 0x110)),
+        *rfi_to_gr(0x90, 2, 4),
+        (0x110, 0x00, ld8(22, 3), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR, 0x00,
+         mov_m_cr_gr(24, 19), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(25, 22), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(26, 17), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x30, 0x00,
+         mov_m_cr_gr(27, 16), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x40, 0x02,
+         nop_m(), extr_u(28, 27, 41, 2), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50,
+                 IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50)),
+    ],
+    {
+        "ip": IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_SINGLE_STEP,
+        "r22": 0x11223344,
+        "r24": 0x110,
+        "r25": 0x110,
+        "r26": IA64_ISR_CODE_SS,
+        "r28": 1,
+    },
+)
+
 test_speculative_unaligned_defers = require_registers(
     "speculative_unaligned_defers",
     [
@@ -2879,6 +3039,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'fetchadd4_nat_base_sets_read_write_isr',
     'fetchadd4_result_base_alias_invalidates_alat',
     'fetchadd4_unaligned_sets_read_write_isr',
+    'firmware_unaligned_assist_retires_single_step',
     'firmware_unaligned_load_assist',
     'firmware_unaligned_speculative_load_assist',
     'firmware_unaligned_store_assist',
@@ -2958,6 +3119,20 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'speculative_recovery_unaligned_defers',
     'speculative_unimplemented_physical_unaligned_defers',
     'speculative_unaligned_defers',
+    'fp_advanced_non_speculative_unaligned_faults',
+    'integer_advanced_non_speculative_unaligned_faults',
+    'madison_fp_fill_requires_natural_alignment',
+    'madison_fp_load_crossing_16byte_window_faults',
+    'madison_fp_load_within_16byte_window',
+    'madison_fp_pair_requires_natural_alignment',
+    'madison_fp_spill_requires_natural_alignment',
+    'madison_integer_load_crossing_8byte_window_faults',
+    'madison_integer_load_within_8byte_window',
+    'madison_ldfe_crossing_16byte_window_faults',
+    'madison_ldfe_within_16byte_window',
+    'madison_speculative_model_unaligned_defers',
+    'madison_uc_fp_store_crossing_8byte_boundary_faults',
+    'madison_wb_fp_store_crossing_8byte_boundary_completes',
     'speculative_stacked_nat_survives_backing_store_switch',
     'speculative_unaligned_no_recovery_faults',
     'st16_madison_illegal_operation',

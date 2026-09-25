@@ -23,6 +23,7 @@ from .encoding import (
     PAL_BUS_SET_FEATURES,
     PAL_CACHE_FLUSH,
     PAL_CACHE_INFO,
+    PAL_CACHE_INFO_DATA_HINTS,
     PAL_CACHE_INFO_L0_2,
     PAL_CACHE_INFO_L0_D_1,
     PAL_CACHE_INFO_L0_I_1,
@@ -70,7 +71,7 @@ from .encoding import (
     PAL_MC_REGISTER_MEM,
     PAL_MC_RESUME,
     PAL_MEM_ATTRIB,
-    PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     PAL_MERCED_INSERTABLE_PAGE_SIZE_MASK,
     PAL_MERCED_PURGE_PAGE_SIZE_MASK,
     PAL_CACHE_INFO_MERCED_L0_D_1,
@@ -144,6 +145,7 @@ from .encoding import (
     br_ret,
     bundle_words,
     cmp_ltu_unc,
+    extr_u,
     itr_d,
     itr_i,
     ld8,
@@ -428,8 +430,48 @@ test_pal_cache_info_l2_unified_madison = require_registers(
     pal_call_program(PAL_CACHE_INFO, [(29, 2), (30, 2), (31, 0)]),
     {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
      "r9": (1 | (1 << 1) | (12 << 8) | (7 << 16) | (7 << 24) | (1 << 32) |
-            (14 << 40))},
+            (14 << 40) | PAL_CACHE_INFO_DATA_HINTS)},
     entry=0x10, cpu="madison")
+
+
+# config_info_1{63:48}: the load and store hint vectors (SDM Vol. 2 Tables
+# 11-68 and 11-69).  Data and unified caches report the t1/nt1/nta loads and
+# t1/nta stores that 245320-003 sec 5.9 and 251110-003 sec 5.4.2 list;
+# instruction caches report none.
+def _pal_cache_info_hints_program(level, cache_type):
+    return [
+        (0x10, 0x00, nop_m(), addl(28, PAL_CACHE_INFO, 0), nop_i()),
+        (0x20, 0x00, nop_m(), addl(29, level, 0), addl(30, cache_type, 0)),
+        (0x30, 0x00, nop_m(), addl(31, 0, 0), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, PAL_PROC_ENTRY)),
+        (0x50, 0x00, nop_m(), extr_u(12, 9, 48, 16), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ]
+
+
+test_pal_cache_info_hints_madison_l1_data = require_registers(
+    "pal_cache_info_hints_madison_l1_data",
+    _pal_cache_info_hints_program(0, 2),
+    {"ip": 0x60, "r8": 0, "r12": PAL_CACHE_INFO_DATA_HINTS >> 48},
+    entry=0x10, cpu="madison")
+
+test_pal_cache_info_hints_madison_l2_unified = require_registers(
+    "pal_cache_info_hints_madison_l2_unified",
+    _pal_cache_info_hints_program(1, 2),
+    {"ip": 0x60, "r8": 0, "r12": PAL_CACHE_INFO_DATA_HINTS >> 48},
+    entry=0x10, cpu="madison")
+
+test_pal_cache_info_hints_madison_l1_instruction = require_registers(
+    "pal_cache_info_hints_madison_l1_instruction",
+    _pal_cache_info_hints_program(0, 1),
+    {"ip": 0x60, "r8": 0, "r12": 0}, entry=0x10, cpu="madison")
+
+test_pal_cache_info_hints_merced_l1_instruction = require_registers(
+    "pal_cache_info_hints_merced_l1_instruction",
+    _pal_cache_info_hints_program(0, 1),
+    {"ip": 0x60, "r8": 0, "r12": 0}, entry=0x10, cpu="merced")
 
 test_pal_cache_info_invalid = require_registers("pal_cache_info_invalid",
     pal_call_program(PAL_CACHE_INFO, [(29, 3), (30, 1), (31, 0)]),
@@ -852,7 +894,14 @@ test_pal_proc_entry_virtual_itr = require_registers(
 test_pal_prefetch_vis = require_registers("pal_prefetch_vis",
     pal_call_program(PAL_PREFETCH_VIS),
     {"ip": 0x30, "r28": PAL_PREFETCH_VIS, "r8": 0,
-     "r9": ((1 << 0) | (1 << 1)), "r10": 0}, entry=0x10)
+     "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+
+# trans_type 1 (physical or mixed attributes) is defined as well.
+test_pal_prefetch_vis_physical = require_registers(
+    "pal_prefetch_vis_physical",
+    pal_call_program(PAL_PREFETCH_VIS, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PREFETCH_VIS, "r8": 0,
+     "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
 
 test_pal_prefetch_vis_reserved_arg = require_registers(
     "pal_prefetch_vis_reserved_arg",
@@ -920,7 +969,29 @@ test_pal_cache_prot_info_unified_bad_type = require_registers(
 test_pal_mem_attrib = require_registers("pal_mem_attrib",
     pal_call_program(PAL_MEM_ATTRIB),
     {"ip": 0x30, "r28": PAL_MEM_ATTRIB, "r8": 0,
-     "r9": PAL_MEM_ATTRIB_WB_UC_UCE_WC, "r10": 0, "r11": 0}, entry=0x10)
+     "r9": PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE, "r10": 0, "r11": 0},
+    entry=0x10)
+
+# NaTPage (ma 7) is architected (SDM Vol. 2 Table 4-11), so PAL_MEM_ATTRIB
+# reports bit 7 on every model.
+def _pal_mem_attrib_natpage_program():
+    return [
+        (0x10, 0x00, nop_m(), addl(28, PAL_MEM_ATTRIB, 0), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_call(0, 0x20, PAL_PROC_ENTRY)),
+        (0x30, 0x00, nop_m(), extr_u(12, 9, 7, 1), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ]
+
+
+test_pal_mem_attrib_natpage_madison = require_registers(
+    "pal_mem_attrib_natpage_madison", _pal_mem_attrib_natpage_program(),
+    {"ip": 0x40, "r8": 0, "r12": 1}, entry=0x10, cpu="madison")
+
+test_pal_mem_attrib_natpage_merced = require_registers(
+    "pal_mem_attrib_natpage_merced", _pal_mem_attrib_natpage_program(),
+    {"ip": 0x40, "r8": 0, "r12": 1}, entry=0x10, cpu="merced")
 
 test_pal_mem_attrib_reserved_arg = require_registers(
     "pal_mem_attrib_reserved_arg",
@@ -1858,6 +1929,10 @@ CASE_NAMES = (
     'pal_cache_info_l1_instruction',
     'pal_cache_info_l2_unified',
     'pal_cache_info_l2_unified_madison',
+    'pal_cache_info_hints_madison_l1_data',
+    'pal_cache_info_hints_madison_l2_unified',
+    'pal_cache_info_hints_madison_l1_instruction',
+    'pal_cache_info_hints_merced_l1_instruction',
     'pal_cache_info_l2_unified_bad_type',
     'pal_cache_init',
     'pal_cache_init_invalid',
@@ -1948,6 +2023,8 @@ CASE_NAMES = (
     'pal_mc_resume_no_context',
     'pal_mc_resume_uc_save_ptr_no_context',
     'pal_mem_attrib',
+    'pal_mem_attrib_natpage_madison',
+    'pal_mem_attrib_natpage_merced',
     'pal_mem_attrib_reserved_arg',
     'pal_mem_for_test',
     'pal_perf_mon_info',
@@ -1963,6 +2040,7 @@ CASE_NAMES = (
     'pal_platform_addr_unmapped',
     'pal_pmi_entrypoint',
     'pal_prefetch_vis',
+    'pal_prefetch_vis_physical',
     'pal_prefetch_vis_reserved_arg',
     'pal_proc_entry_virtual_itr',
     'pal_impl_proc_response_timeout',

@@ -152,6 +152,11 @@ from .encoding import (
     st2,
     st8,
     st8_postinc,
+    IA64_EXCP_LOWER_PRIV_TRANSFER,
+    IA64_EXCP_SINGLE_STEP,
+    IA64_EXCP_TAKEN_BRANCH,
+    IA64_ISR_CODE_LP,
+    IA64_PSR_LP,
 )
 
 FOUR_K_ITIR = 12 << 2
@@ -4618,6 +4623,173 @@ test_br_ia_taken_branch_trap_precedes_single_step = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
+def _native_completion_trap_handler(vector):
+    """Capture IIP, IIPA, ISR and the IPSR ri and cpl fields of a trap."""
+    return [
+        (vector, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (vector + 0x10, 0x00, mov_m_cr_gr(9, 22), nop_i(), nop_i()),
+        (vector + 0x20, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (vector + 0x30, 0x00, mov_m_cr_gr(11, 16), nop_i(), nop_i()),
+        (vector + 0x40, 0x02, nop_m(), extr_u(12, 11, 41, 2),
+         extr_u(13, 11, 32, 2)),
+        (vector + 0x50, 0x10, nop_m(), nop_i(),
+         br_cond(vector + 0x50, vector + 0x50)),
+    ]
+
+
+# Single Step traps after every instruction that completes, a nullified one
+# included (SDM Vol. 2 Table 5-6: the trap is not shaded).  IIP and IPSR.ri
+# name the next instruction, IIPA and ISR.ei the trapping one (7.1).
+test_native_single_step_traps_predicated_off_instruction = require_registers(
+    "native_single_step_traps_predicated_off_instruction", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_SS)),
+        (0x20, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x30, 2, 3),
+        # PR1 is zero.
+        (0x80, 0x00, nop_m() | 1, nop_i(), nop_i()),
+        *_native_completion_trap_handler(IA64_SINGLE_STEP_VECTOR),
+    ], {
+        "ip": IA64_SINGLE_STEP_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_SINGLE_STEP,
+        "r8": 0x80,
+        "r9": 0x80,
+        "r10": IA64_ISR_CODE_SS,
+        "r12": 1,
+        "r13": 0,
+    }, entry=0x10)
+
+# Concurrent traps: the highest one is taken and ISR.code has a bit for each
+# (SDM Vol. 2 5.5.2 step 8, Table 8-3).
+test_native_taken_branch_precedes_single_step = require_registers(
+    "native_taken_branch_precedes_single_step", [
+        (0x10, *movl_mlx(
+            2, IA64_PSR_IC | IA64_PSR_TB | IA64_PSR_SS | (2 << 41))),
+        (0x20, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x30, 2, 3),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x100)),
+        *_native_completion_trap_handler(IA64_TAKEN_BRANCH_VECTOR),
+    ], {
+        "ip": IA64_TAKEN_BRANCH_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_TAKEN_BRANCH,
+        "r8": 0x100,
+        "r9": 0x80,
+        "r10": (IA64_ISR_CODE_TB | IA64_ISR_CODE_SS |
+                (2 << IA64_ISR_EI_SHIFT)),
+        "r12": 0,
+        "r13": 0,
+    }, entry=0x10)
+
+# A not-taken branch raises no Taken Branch trap; the next taken one does,
+# without the ss bit when PSR.ss is 0.
+test_native_taken_branch_trap_skips_not_taken_branch = require_registers(
+    "native_taken_branch_trap_skips_not_taken_branch", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_TB)),
+        (0x20, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x30, 2, 3),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x200, qp=1)),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x100)),
+        *_native_completion_trap_handler(IA64_TAKEN_BRANCH_VECTOR),
+    ], {
+        "ip": IA64_TAKEN_BRANCH_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_TAKEN_BRANCH,
+        "r8": 0x100,
+        "r9": 0x90,
+        "r10": IA64_ISR_CODE_TB | (2 << IA64_ISR_EI_SHIFT),
+        "r12": 0,
+        "r13": 0,
+    }, entry=0x10)
+
+# This model reports an unimplemented instruction address with a fault on
+# the fetch, so the traps of the branch come first and ISR.code has no ui
+# bit (SDM Vol. 2 4.3.3 and the Lower-Privilege Transfer Trap vector notes).
+test_native_taken_branch_to_unimplemented_address_precedes_uia_fault = \
+    require_registers(
+        "native_taken_branch_to_unimplemented_address_precedes_uia_fault", [
+            (0x10, *movl_mlx(4, (1 << IA64_IMPL_PA_BITS) | 0x100)),
+            (0x20, 0x00, nop_m(), mov_br_gr(7, 4), nop_i()),
+            (0x30, *movl_mlx(
+                2, IA64_PSR_IC | IA64_PSR_TB | IA64_PSR_SS | (2 << 41))),
+            (0x40, *movl_mlx(3, 0x80)),
+            *rfi_to_gr(0x50, 2, 3),
+            (0x80, 0x10, nop_m(), nop_i(), br_indirect(7)),
+            *_native_completion_trap_handler(IA64_TAKEN_BRANCH_VECTOR),
+        ], {
+            "ip": IA64_TAKEN_BRANCH_VECTOR + 0x50,
+            "exception": IA64_EXCP_NONE,
+            "fault_code": IA64_EXCP_TAKEN_BRANCH,
+            "r9": 0x80,
+            "r10": (IA64_ISR_CODE_TB | IA64_ISR_CODE_SS |
+                    (2 << IA64_ISR_EI_SHIFT)),
+            "r12": 0,
+            "r13": 0,
+        }, entry=0x10)
+
+# A br.ret that lowers the privilege level with PSR.lp = 1 takes a
+# Lower-Privilege Transfer trap at the target (SDM Vol. 2 7.1, vector 0x5e00).
+test_br_ret_lower_privilege_transfer_trap = require_registers(
+    "br_ret_lower_privilege_transfer_trap", [
+        (0x10, *movl_mlx(4, 3 << 62)),
+        (0x20, *movl_mlx(5, 0x100)),
+        (0x30, 0x00, nop_m(), mov_m_gr_ar(4, 64), mov_br_gr(7, 5)),
+        (0x40, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_LP | (2 << 41))),
+        (0x50, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x60, 2, 3),
+        (0x80, 0x10, nop_m(), nop_i(), br_ret(7)),
+        *_native_completion_trap_handler(IA64_LOWER_PRIV_TRANSFER_VECTOR),
+    ], {
+        "ip": IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_LOWER_PRIV_TRANSFER,
+        "r8": 0x100,
+        "r9": 0x80,
+        "r10": IA64_ISR_CODE_LP | (2 << IA64_ISR_EI_SHIFT),
+        "r12": 0,
+        "r13": 3,
+    }, entry=0x10)
+
+test_br_ret_lower_privilege_precedes_taken_branch_and_single_step = \
+    require_registers(
+        "br_ret_lower_privilege_precedes_taken_branch_and_single_step", [
+            (0x10, *movl_mlx(4, 3 << 62)),
+            (0x20, *movl_mlx(5, 0x100)),
+            (0x30, 0x00, nop_m(), mov_m_gr_ar(4, 64),
+             mov_br_gr(7, 5)),
+            (0x40, *movl_mlx(
+                2, IA64_PSR_IC | IA64_PSR_LP | IA64_PSR_TB |
+                   IA64_PSR_SS | (2 << 41))),
+            (0x50, *movl_mlx(3, 0x80)),
+            *rfi_to_gr(0x60, 2, 3),
+            (0x80, 0x10, nop_m(), nop_i(), br_ret(7)),
+            *_native_completion_trap_handler(
+                IA64_LOWER_PRIV_TRANSFER_VECTOR),
+        ], {
+            "ip": IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x50,
+            "exception": IA64_EXCP_NONE,
+            "fault_code": IA64_EXCP_LOWER_PRIV_TRANSFER,
+            "r8": 0x100,
+            "r9": 0x80,
+            "r10": (IA64_ISR_CODE_LP | IA64_ISR_CODE_TB |
+                    IA64_ISR_CODE_SS | (2 << IA64_ISR_EI_SHIFT)),
+            "r12": 0,
+            "r13": 3,
+        }, entry=0x10)
+
+# rfi raises no Single Step trap (Single Step Trap vector description): the
+# rfi in slot 2 of 0x80 returns to itself with PSR.ss set and never traps.
+test_native_single_step_not_taken_on_rfi = require_registers(
+    "native_single_step_not_taken_on_rfi", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_SS | (2 << 41))),
+        (0x20, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x30, 2, 3),
+        (0x80, 0x11, nop_m(), nop_i(), rfi_b()),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_br_ia_single_step_trap = require_registers(
     "br_ia_single_step_trap", [
         *ia32_environment_bundles(0x700, 0x10),
@@ -5085,6 +5257,13 @@ CASE_NAMES = (
     'br_ia_single_step_trap',
     'br_ia_taken_branch_trap_precedes_single_step',
     'br_ia_unimplemented_target_preserves_64bit_iip',
+    'br_ret_lower_privilege_precedes_taken_branch_and_single_step',
+    'br_ret_lower_privilege_transfer_trap',
+    'native_single_step_not_taken_on_rfi',
+    'native_single_step_traps_predicated_off_instruction',
+    'native_taken_branch_precedes_single_step',
+    'native_taken_branch_to_unimplemented_address_precedes_uia_fault',
+    'native_taken_branch_trap_skips_not_taken_branch',
     'break_preserves_ifa_and_records_iim_isr',
     'cloop_zero_st1_timer_interrupts_batched_loop',
     'counted_self_loop_fault_has_slot1_ri',

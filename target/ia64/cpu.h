@@ -129,6 +129,7 @@
 #define IA64_PSR_DI      (1ULL << 22)
 #define IA64_PSR_SI      (1ULL << 23)
 #define IA64_PSR_DB      (1ULL << 24)
+#define IA64_PSR_LP      (1ULL << 25)
 #define IA64_PSR_TB      (1ULL << 26)
 #define IA64_PSR_RT      (1ULL << 27)
 #define IA64_PSR_IS      (1ULL << 34)
@@ -390,6 +391,8 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 /* NaT Consumption ISR.code{5:4} = 2 for a NaTPage reference. */
 #define IA64_ISR_CODE_NAT_PAGE 0x20
 /* Concurrent trap conditions reported in ISR.code (SDM Vol. 2, Table 8-3). */
+#define IA64_ISR_CODE_FP       (1ULL << 0)
+#define IA64_ISR_CODE_LP       (1ULL << 1)
 #define IA64_ISR_CODE_TB       (1ULL << 2)
 #define IA64_ISR_CODE_SS       (1ULL << 3)
 #define IA64_ISR_CODE_UI       (1ULL << 4)
@@ -765,8 +768,15 @@ typedef enum IA64Exception {
     IA64_EXCP_IA32_INTERRUPT = 36,
     IA64_EXCP_TAKEN_BRANCH = 37,
     IA64_EXCP_SINGLE_STEP = 38,
+    IA64_EXCP_LOWER_PRIV_TRANSFER = 39,
     IA64_EXCP_MAX,
 } IA64Exception;
+
+/*
+ * The instruction that just completed owes a Lower-Privilege Transfer, Taken
+ * Branch or Single Step trap (IA64ExceptionState.completion_trap_*).
+ */
+#define IA64_INTERRUPT_COMPLETION_TRAP CPU_INTERRUPT_TGT_INT_0
 
 /* ---- IVT vector mapping table ---- */
 extern const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX];
@@ -1790,6 +1800,8 @@ typedef struct IA64PalCacheLevel {
     uint8_t  store_latency;
     uint8_t  load_latency;
     uint8_t  tag_lsb;
+    uint8_t  store_hints;     /* SDM Vol. 2 Table 11-68 */
+    uint8_t  load_hints;      /* SDM Vol. 2 Table 11-69 */
     bool     unified;
 } IA64PalCacheLevel;
 
@@ -1903,6 +1915,23 @@ struct IA64CPUClass {
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
+    /*
+     * With PSR.ac = 0 the model decides which unaligned references fault
+     * (SDM Vol. 2 4.5).  unaligned_windows: an integer reference must stay
+     * in an 8-byte window, an FP one in a 16-byte window, FP pairs and
+     * spill/fill are naturally aligned, and a UC or WC reference faults when
+     * it crosses 8 bytes (251110-003 sec 5.5).  Otherwise only a 4 KiB
+     * crossing faults.
+     */
+    bool unaligned_windows;
+    /*
+     * No Unaligned Data Reference fault on a non-writeback target, even with
+     * PSR.ac = 1.  The SDM exempts only IA-32 port references (Vol. 2
+     * 10.7.1); the SDV firmware issues an unaligned 4-byte store to a port
+     * with PSR.ac = 1 during POST (82c8344), so Merced keeps the exemption
+     * until that firmware runs against the SDM rule.
+     */
+    bool unaligned_uc_exempt;
     const IA64PalProfile *pal;
 };
 
