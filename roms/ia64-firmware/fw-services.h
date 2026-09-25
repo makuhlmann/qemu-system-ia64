@@ -16,7 +16,6 @@
 #define IA64_PSR_DFL    (1ULL << 18)
 #define IA64_PSR_DFH    (1ULL << 19)
 #define IA64_PSR_RT     (1ULL << 27)
-#define IA64_PSR_CPL_MASK (3ULL << 32)
 #define IA64_PSR_IT     (1ULL << 36)
 #define IA64_PSR_BN     (1ULL << 44)
 

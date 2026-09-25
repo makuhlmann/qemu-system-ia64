@@ -1751,10 +1751,6 @@ static BOOLEAN sal_runtime_state_valid(void)
     UINT64 psr = fw_read_psr();
     UINT64 translation = psr & (IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT);
 
-    if ((psr & IA64_PSR_CPL_MASK) != 0) {
-        return 0;
-    }
-
     return translation == 0 ||
            translation == (IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT);
 }
