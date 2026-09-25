@@ -1112,11 +1112,13 @@ IA64UnalignedWindow ia64_unaligned_window(const Ia64Instruction *insn,
                                           uint32_t size)
 {
     const DisasContext *ctx = insn->ctx;
+    const IA64CPUClass *icc;
     IA64UnalignedWindow w = { .window = 0, .span = size };
 
-    if (!ctx || !ia64_env_cpu_class(ctx->env)->unaligned_windows) {
+    if (!ctx) {
         return w;
     }
+    icc = ia64_env_cpu_class(ctx->env);
 
     switch (insn->opcode) {
     case IA64_OP_LDFPS:
@@ -1142,8 +1144,12 @@ IA64UnalignedWindow ia64_unaligned_window(const Ia64Instruction *insn,
         w.uc_crosses_8 = true;
         break;
     default:
-        w.window = 8;
-        break;
+        w.window = icc->unaligned_windows ? 8 : icc->unaligned_int_block;
+        return w;
+    }
+    if (!icc->unaligned_windows) {
+        /* FP references: only the 4 KiB rule. */
+        w = (IA64UnalignedWindow){ .window = 0, .span = size };
     }
     return w;
 }

@@ -1958,6 +1958,14 @@ struct IA64CPUClass {
      */
     bool unaligned_windows;
     /*
+     * Without unaligned_windows: an integer reference faults when it leaves
+     * its naturally aligned block of this many bytes; 0 leaves only the 4 KiB
+     * rule.  The Itanium processor handles misaligned integer accesses
+     * within 16-byte blocks (251110-003 sec 2.4.2); no document here gives
+     * its FP rule.
+     */
+    uint8_t unaligned_int_block;
+    /*
      * No Unaligned Data Reference fault on a non-writeback target, even with
      * PSR.ac = 1.  The SDM exempts only IA-32 port references (Vol. 2
      * 10.7.1); the SDV firmware issues an unaligned 4-byte store to a port

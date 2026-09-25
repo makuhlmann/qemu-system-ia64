@@ -2797,6 +2797,30 @@ test_madison_ldfe_crossing_16byte_window_faults = require_exception(
         (0x20, 0x00, ldfe(6, 3), nop_i(), nop_i()),
     ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
 
+# Merced with PSR.ac = 0: an integer reference stays in its 16-byte block
+# (251110-003 sec 2.4.2); an FP reference faults only across 4 KiB.
+test_merced_integer_load_within_16byte_block = require_registers(
+    "merced_integer_load_within_16byte_block", [
+        (0x10, 0x00, addl(3, 0x104, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="merced")
+
+test_merced_integer_load_crossing_16byte_block_faults = require_exception(
+    "merced_integer_load_crossing_16byte_block_faults", [
+        (0x10, 0x00, addl(3, 0x10c, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld8(4, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="merced")
+
+test_merced_fp_load_crossing_16byte_block_completes = require_registers(
+    "merced_fp_load_crossing_16byte_block_completes", [
+        (0x10, 0x00, addl(3, 0x10c, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfd(6, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="merced")
+
 test_madison_wb_fp_store_crossing_8byte_boundary_completes = require_registers(
     "madison_wb_fp_store_crossing_8byte_boundary_completes", [
         (0x10, 0x00, addl(3, 0x106, 0), nop_i(), nop_i()),
@@ -3193,6 +3217,9 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'madison_speculative_model_unaligned_defers',
     'madison_uc_fp_store_crossing_8byte_boundary_faults',
     'madison_wb_fp_store_crossing_8byte_boundary_completes',
+    'merced_fp_load_crossing_16byte_block_completes',
+    'merced_integer_load_crossing_16byte_block_faults',
+    'merced_integer_load_within_16byte_block',
     'speculative_stacked_nat_survives_backing_store_switch',
     'speculative_unaligned_no_recovery_faults',
     'st16_madison_illegal_operation',

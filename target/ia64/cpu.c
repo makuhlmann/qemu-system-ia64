@@ -1397,6 +1397,7 @@ typedef struct IA64CPUModelDef {
     bool has_virtualization;
     bool is_montecito;
     bool unaligned_windows;
+    uint8_t unaligned_int_block;
     bool unaligned_uc_exempt;
     const IA64PalProfile *pal;
     const IA64PmuLayout *pmu;
@@ -1425,6 +1426,7 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->has_virtualization = model->has_virtualization;
     icc->is_montecito = model->is_montecito;
     icc->unaligned_windows = model->unaligned_windows;
+    icc->unaligned_int_block = model->unaligned_int_block;
     icc->unaligned_uc_exempt = model->unaligned_uc_exempt;
     icc->pal = model->pal;
     icc->pmu = model->pmu;
@@ -1611,6 +1613,7 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
     .has_native_ia32 = true,
     .has_virtualization = false,
     .is_montecito = false,
+    .unaligned_int_block = 16,
     .unaligned_uc_exempt = true,
     .pal = &ia64_pal_profile_merced,
     .pmu = &ia64_pmu_layout_merced,
