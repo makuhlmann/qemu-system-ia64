@@ -203,48 +203,6 @@ static floatx80 ia64_register_format_to_floatx80(CPUIA64State *env,
     return floatx80_default_inf(sign, &env->fp.fp_status);
 }
 
-static floatx80 ia64_sig_to_floatx80(CPUIA64State *env, uint64_t mant)
-{
-    return ia64_register_format_to_floatx80(
-        env, false, IA64_FP_REG_INTEGER_EXP, mant);
-}
-
-static floatx80 ia64_fr_to_floatx80(CPUIA64State *env, uint32_t reg)
-{
-    bool sign;
-    uint32_t exp;
-    uint64_t mant;
-
-    if (reg == IA64_FR_ZERO_INDEX) {
-        return ia64_make_floatx80(0, 0);
-    }
-    if (reg == IA64_FR_ONE_INDEX) {
-        return ia64_make_floatx80(0x3fff,
-                                  IA64_FP_SIGNIFICAND_INTEGER_BIT);
-    }
-    if (ia64_fr_sig_get(env, reg)) {
-        return ia64_sig_to_floatx80(env, env->fp.fr[reg]);
-    }
-    if (!ia64_fr_ext_get(env, reg, &sign, &exp, &mant)) {
-        return float64_to_floatx80(env->fp.fr[reg], &env->fp.fp_status);
-    }
-
-    return ia64_register_format_to_floatx80(env, sign, exp, mant);
-}
-
-static void ia64_fr_write_floatx80(CPUIA64State *env, uint32_t reg,
-                                   floatx80 value)
-{
-    uint32_t exp = value.high & 0x7fff;
-
-    if (exp == 0x7fff) {
-        exp = IA64_FP_REG_SPECIAL_EXP;
-    } else if (exp != 0) {
-        exp += 0xc000;
-    }
-    ia64_fr_write_ext(env, reg, value.high >> 15, exp, value.low);
-}
-
 static void ia64_fr_copy(CPUIA64State *env, uint32_t dst, uint32_t src,
                          int sign_mode)
 {
@@ -631,17 +589,6 @@ static void ia64_fp_muladd(CPUIA64State *env, uint32_t r1, uint32_t f3,
     ia64_fr_write_reg(env, r1, result);
 }
 
-static floatx80 ia64_floatx80_muladd(CPUIA64State *env, floatx80 a,
-                                     floatx80 b, floatx80 c, int flags)
-{
-    float128 result = float128_muladd(
-        floatx80_to_float128(a, &env->fp.fp_status),
-        floatx80_to_float128(b, &env->fp.fp_status),
-        floatx80_to_float128(c, &env->fp.fp_status), flags, &env->fp.fp_status);
-
-    return float128_to_floatx80(result, &env->fp.fp_status);
-}
-
 /*
  * FR.significand of the architected register (SDM Vol 1 Figure 5-1).
  * fp.fr[] holds it only for the integer form; for a setf.d or ldfd value it
@@ -657,19 +604,6 @@ static uint64_t ia64_fr_significand(const CPUIA64State *env, uint32_t reg)
     }
     ia64_fpreg_to_spill(env, reg, &low, &high);
     return low;
-}
-
-void ia64_fp_fma(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3)
-{
-    floatx80 zero = ia64_make_floatx80(0, 0);
-
-    if (ia64_fr_write_nat_if_any2(env, r1, r2, r3)) {
-        return;
-    }
-    ia64_fr_write_floatx80(
-        env, r1, ia64_floatx80_muladd(
-            env, ia64_fr_to_floatx80(env, r2),
-            ia64_fr_to_floatx80(env, r3), zero, 0));
 }
 
 void ia64_fp_xma(CPUIA64State *env, uint32_t r1, uint32_t r2,
@@ -2410,20 +2344,6 @@ uint64_t ia64_fp_fchkf(CPUIA64State *env, uint32_t sf)
     uint64_t flags = ia64_fpsr_sf_flags(env, sf);
 
     return (flags & ~traps) || (flags & ~sf0_flags);
-}
-
-void ia64_fp_fnma(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3)
-{
-    floatx80 zero = ia64_make_floatx80(0, 0);
-
-    if (ia64_fr_write_nat_if_any2(env, r1, r2, r3)) {
-        return;
-    }
-    ia64_fr_write_floatx80(
-        env, r1, ia64_floatx80_muladd(
-            env, ia64_fr_to_floatx80(env, r2),
-            ia64_fr_to_floatx80(env, r3), zero,
-            float_muladd_negate_product));
 }
 
 /* ---- FP bitwise select ---- */
