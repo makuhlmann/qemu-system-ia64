@@ -1393,9 +1393,12 @@ static bool ia64_float32_fprcpa_predicate(const IA64FPRegisterFormat *num,
      float_flag_input_denormal_flushed | float_flag_input_denormal_used)
 
 /*
- * A denormal numerator is normalized and sets D; the result is still the
+ * A denormal operand is normalized and sets D; the result is still the
  * approximation of the denominator's reciprocal (SDM Vol 3 fprcpa,
- * fp_ieee_recip).
+ * fp_ieee_recip).  Outside the denominator limits (limits_check.hi_fr3 and
+ * lo_fr3) the lane is infinity for eb <= emin - 1 and zero for
+ * eb >= emax - 2, with the sign of the denominator, and p2 is cleared
+ * (245415-001 §5.1).
  */
 static float32 ia64_fprcpa_lane(CPUIA64State *env, float32 num, float32 den,
                                 bool *pred, float_status *status)
@@ -1405,9 +1408,16 @@ static float32 ia64_fprcpa_lane(CPUIA64State *env, float32 num, float32 den,
     bool finite = ia64_float32_rcpa_predicate(num, den);
 
     if (finite && ia64_float32_normalized_register_format(num, &num_fmt) &&
-        ia64_float32_register_format(den, &den_fmt)) {
-        if (float32_is_denormal(num)) {
+        ia64_float32_normalized_register_format(den, &den_fmt)) {
+        if (float32_is_denormal(num) || float32_is_denormal(den)) {
             float_raise(float_flag_input_denormal_used, status);
+        }
+        *pred = false;
+        if (den_fmt.exp <= IA64_FP_WRE_BIAS - IA64_FP_SINGLE_BIAS) {
+            return float32_set_sign(float32_infinity, den_fmt.sign);
+        }
+        if (den_fmt.exp >= IA64_FP_WRE_BIAS + IA64_FP_SINGLE_BIAS - 2) {
+            return float32_set_sign(float32_zero, den_fmt.sign);
         }
         *pred = ia64_float32_fprcpa_predicate(&num_fmt, &den_fmt);
         return ia64_float32_rcpa_approx(env, &den_fmt);

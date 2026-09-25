@@ -3687,6 +3687,43 @@ test_fprcpa_denormal_numerator_uses_table = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+# Outside the denominator limits an fprcpa lane is zero (eb >= emax - 2) or
+# infinity (eb <= emin - 1) with the sign of the denominator, and p2 is
+# cleared (245415-001 5.1): 2^100 / -2^126 and 1.0 / -2^-127.
+test_fprcpa_denominator_limits = require_registers(
+    "fprcpa_denominator_limits", [
+        (0x10, *movl_mlx(3, 0x718000003f800000)),
+        (0x20, *movl_mlx(4, 0xfe80000080400000)),
+        (0x30, 0x09, setf_sig(6, 3), setf_sig(7, 4), nop_i()),
+        (0x40, 0x0d, nop_m(), fprcpa(8, 6, 6, 7, sf=0), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "f8": ExpectedFP(0x80000000ff800000, 0x1003e),
+        "pr_mask": ExpectedBits(mask=1 << 6, value=0),
+        "ar_fpsr": (DEFAULT_FPSR |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+# The high lane alone is outside the limits (2^100 / 2^126); the low lane
+# 1.0 / 1.0 is inside them, and p2 is still cleared.
+test_fprcpa_one_lane_limit_clears_p2 = require_registers(
+    "fprcpa_one_lane_limit_clears_p2", [
+        (0x10, *movl_mlx(3, 0x718000003f800000)),
+        (0x20, *movl_mlx(4, 0x7e8000003f800000)),
+        (0x30, 0x09, setf_sig(6, 3), setf_sig(7, 4), nop_i()),
+        (0x40, 0x0d, nop_m(), fprcpa(8, 6, 6, 7, sf=0), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "f8": ExpectedFP(0x000000003f7f8000, 0x1003e),
+        "pr_mask": ExpectedBits(mask=1 << 6, value=0),
+        "ar_fpsr": DEFAULT_FPSR,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_fprcpa_simd_high_lane_fault_isr = require_registers(
     "fprcpa_simd_high_lane_fault_isr", [
         (0x10, *movl_mlx(2, 0x33b)),
@@ -6041,9 +6078,11 @@ CASE_NAMES = (
     'fpms_fpnma_qnan_preserves_sign',
     'fpms_fpnma_snan_quiets_without_sign_flip',
     'fprcpa_decode',
+    'fprcpa_denominator_limits',
     'fprcpa_denormal_numerator_uses_table',
     'fprcpa_denormal_overflow_does_not_leak_oi',
     'fprcpa_disabled_fault_keeps_p2',
+    'fprcpa_one_lane_limit_clears_p2',
     'fprcpa_simd_high_lane_fault_isr',
     'fprcpa_simd_low_lane_fault_isr',
     'fprsqrta_decode',
