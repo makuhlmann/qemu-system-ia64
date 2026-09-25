@@ -2731,9 +2731,15 @@ static IA64PrepareResult ia64_gen_prepare_insn(
         return IA64_PREPARE_NORETURN;
     }
     ia64_gen_clear_unc_compare_targets(insn);
+    /*
+     * frcpa, frsqrta, fprcpa and fprsqrta clear p2 when PR[qp] is 0.  With
+     * PR[qp] 1 only the helper writes it, so a fault leaves it unchanged
+     * (SDM Vol 3 frcpa, frsqrta).
+     */
     if (insn->clear_p2_before_predicate &&
-        insn->operands.common.auxiliary2 != 0) {
-        tcg_gen_movi_i64(cpu_pr[insn->operands.common.auxiliary2], 0);
+        insn->operands.common.auxiliary2 != 0 && insn->qp != 0) {
+        tcg_gen_and_i64(cpu_pr[insn->operands.common.auxiliary2],
+                        cpu_pr[insn->operands.common.auxiliary2], qp_value);
     }
     skip = ia64_gen_predicate_skip(insn, qp_value);
     *predicate_skip = skip;

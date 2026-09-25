@@ -3321,6 +3321,137 @@ test_frcpa_p2_high_bits_decode = require_registers("frcpa_p2_high_bits_decode", 
     "ar_fpsr": 0x0009804c8270033f,
 }, entry=0x10)
 
+# frcpa and frsqrta clear p2 only when PR[qp] is 0; a fault leaves p2 and
+# f1 unchanged (SDM Vol 3 frcpa, frsqrta).  p6 starts at 1.
+test_frcpa_pseudozero_z_precedes_d = require_registers(
+    "frcpa_pseudozero_z_precedes_d", [
+        (0x10, 0x05,
+         *movl_mlx(2, DEFAULT_FPSR & ~((1 << 1) | (1 << 2)))[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x12345, 0)),
+        (0x40, 0x09, st8(3, 0), st8(4, 21), nop_i()),
+        (0x50, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x60, 0x05, *movl_mlx(5, 0x4000000000000000)[1:]),
+        (0x70, 0x01, setf_d(8, 5), adds(16, 1, 0), nop_i()),
+        (0x80, 0x01, nop_m(), cmp_ltu_unc(6, 7, 0, 16), nop_i()),
+        (0x90, 0x0d, nop_m(), frcpa(8, 6, 1, 6, sf=0), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x20,
+                 IA64_FP_FAULT_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 4,
+        "f8": ExpectedFP(*binary64_to_spill(0x4000000000000000)),
+        "pr_mask": ExpectedBits(mask=1 << 6, value=1 << 6),
+        "ar_fpsr": DEFAULT_FPSR & ~((1 << 1) | (1 << 2)),
+    }, entry=0x10)
+
+test_frcpa_swa_precedes_unnormal_d = require_registers(
+    "frcpa_swa_precedes_unnormal_d", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 1))[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 65, 0)),
+        (0x40, 0x05, *movl_mlx(22, 0x4000000000000000)[1:]),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x05, *movl_mlx(5, 0x4000000000000000)[1:]),
+        (0x80, 0x01, setf_d(8, 5), adds(16, 1, 0), nop_i()),
+        (0x90, 0x01, nop_m(), cmp_ltu_unc(6, 7, 0, 16), nop_i()),
+        (0xa0, 0x0d, nop_m(), frcpa(8, 6, 6, 1, sf=0), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x20,
+                 IA64_FP_FAULT_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 8,
+        "f8": ExpectedFP(*binary64_to_spill(0x4000000000000000)),
+        "pr_mask": ExpectedBits(mask=1 << 6, value=1 << 6),
+        "ar_fpsr": DEFAULT_FPSR & ~(1 << 1),
+    }, entry=0x10)
+
+test_frsqrta_negative_unnormal_v_precedes_d = require_registers(
+    "frsqrta_negative_unnormal_v_precedes_d", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~3)[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x30000, 0)),
+        (0x40, 0x05, *movl_mlx(22, 0x4000000000000000)[1:]),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x05, *movl_mlx(5, 0x4000000000000000)[1:]),
+        (0x80, 0x01, setf_d(8, 5), adds(16, 1, 0), nop_i()),
+        (0x90, 0x01, nop_m(), cmp_ltu_unc(6, 7, 0, 16), nop_i()),
+        (0xa0, 0x0d, nop_m(), frsqrta(8, 6, 6, sf=0), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x20,
+                 IA64_FP_FAULT_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 1,
+        "f8": ExpectedFP(*binary64_to_spill(0x4000000000000000)),
+        "pr_mask": ExpectedBits(mask=1 << 6, value=1 << 6),
+        "ar_fpsr": DEFAULT_FPSR & ~3,
+    }, entry=0x10)
+
+test_frsqrta_swa_precedes_unnormal_d = require_registers(
+    "frsqrta_swa_precedes_unnormal_d", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 1))[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 65, 0)),
+        (0x40, 0x05, *movl_mlx(22, 0x4000000000000000)[1:]),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x05, *movl_mlx(5, 0x4000000000000000)[1:]),
+        (0x80, 0x01, setf_d(8, 5), adds(16, 1, 0), nop_i()),
+        (0x90, 0x01, nop_m(), cmp_ltu_unc(6, 7, 0, 16), nop_i()),
+        (0xa0, 0x0d, nop_m(), frsqrta(8, 6, 6, sf=0), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x20,
+                 IA64_FP_FAULT_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 8,
+        "f8": ExpectedFP(*binary64_to_spill(0x4000000000000000)),
+        "pr_mask": ExpectedBits(mask=1 << 6, value=1 << 6),
+        "ar_fpsr": DEFAULT_FPSR & ~(1 << 1),
+    }, entry=0x10)
+
+# With PR[qp] 1, a Disabled FP-Register fault also leaves p2 unchanged.
+test_fprcpa_disabled_fault_keeps_p2 = require_registers(
+    "fprcpa_disabled_fault_keeps_p2", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DFL)),
+        (0x20, 0x01, adds(16, 1, 0), nop_i(), nop_i()),
+        (0x30, 0x01, nop_m(), cmp_ltu_unc(6, 7, 0, 16), nop_i()),
+        (0x40, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x50, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x60, 0x0d, nop_m(), fprcpa(8, 6, 1, 1, sf=0), nop_i()),
+        (IA64_DISABLED_FP_VECTOR, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR, IA64_DISABLED_FP_VECTOR)),
+    ], {
+        "ip": IA64_DISABLED_FP_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "pr_mask": ExpectedBits(mask=1 << 6, value=1 << 6),
+    }, entry=0x10)
+
 test_frcpa_natval_propagates = require_registers("frcpa_natval_propagates", [
     (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0),
      nop_i()),
@@ -3900,6 +4031,7 @@ CASE_NAMES = (
     'fprcpa_decode',
     'fprcpa_denormal_numerator_uses_table',
     'fprcpa_denormal_overflow_does_not_leak_oi',
+    'fprcpa_disabled_fault_keeps_p2',
     'fprcpa_simd_high_lane_fault_isr',
     'fprcpa_simd_low_lane_fault_isr',
     'fprsqrta_decode',
@@ -3912,13 +4044,17 @@ CASE_NAMES = (
     'frcpa_natval_propagates',
     'frcpa_p2_high_bits_decode',
     'frcpa_pred_false_clears',
+    'frcpa_pseudozero_z_precedes_d',
     'frcpa_setf_sig_high_integer_remainder',
     'frcpa_special_quotient',
     'frcpa_swa_fault_discards_result',
+    'frcpa_swa_precedes_unnormal_d',
     'frsqrta_decode',
+    'frsqrta_negative_unnormal_v_precedes_d',
     'frsqrta_pred_false_clears',
     'frsqrta_special_returns_operand',
     'frsqrta_swa_fault_discards_result',
+    'frsqrta_swa_precedes_unnormal_d',
     'fselect_decode',
     'fselect_natval_propagates',
     'fsetc_fclrf_ignored_bit36_decode',
