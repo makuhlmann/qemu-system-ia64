@@ -1132,8 +1132,13 @@ static void ia64_rotate_predicates_right(CPUIA64State *env)
  */
 void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb)
 {
-    uint32_t shift = (new_rrb % 48 + 48 - env->cfm_rrb_pr % 48) % 48;
+    uint32_t shift;
 
+    /* Every br.call, br.ret, cover and rfi comes here, nearly always 0 -> 0. */
+    if (new_rrb == env->cfm_rrb_pr) {
+        return;
+    }
+    shift = (new_rrb % 48 + 48 - env->cfm_rrb_pr % 48) % 48;
     if (shift != 0) {
         uint64_t old[48];
 
