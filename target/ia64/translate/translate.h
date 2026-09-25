@@ -170,6 +170,20 @@ void ia64_gen_check_nat_consumption(const Ia64Instruction *insn,
 void ia64_gen_gr_nat_from_1_or_unimplemented_va(DisasContext *ctx,
                                                 uint8_t dst, uint8_t src);
 MemOp ia64_data_memop(DisasContext *ctx, MemOp memop);
+
+/*
+ * The window in which the model handles a misaligned reference with
+ * PSR.ac = 0 (IA64CPUClass.unaligned_windows); window 0 means that only a
+ * 4 KiB crossing faults.  span is the number of bytes the reference covers.
+ */
+typedef struct IA64UnalignedWindow {
+    uint32_t window;
+    uint32_t span;
+    bool uc_crosses_8;      /* a UC/WC target also faults across 8 bytes */
+} IA64UnalignedWindow;
+
+IA64UnalignedWindow ia64_unaligned_window(const Ia64Instruction *insn,
+                                          uint32_t size);
 void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
                                      TCGv_i64 addr, uint32_t size,
                                      bool always_fault,

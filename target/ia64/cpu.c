@@ -1346,6 +1346,8 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     icc->has_native_ia32 = true;
     icc->has_virtualization = false;
     icc->is_montecito = false;
+    icc->unaligned_windows = true;
+    icc->unaligned_uc_exempt = false;
     icc->pal = &ia64_pal_profile_madison;
 }
 
@@ -1365,6 +1367,8 @@ typedef struct IA64CPUModelDef {
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
+    bool unaligned_windows;
+    bool unaligned_uc_exempt;
     const IA64PalProfile *pal;
 } IA64CPUModelDef;
 
@@ -1388,6 +1392,8 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->has_native_ia32 = model->has_native_ia32;
     icc->has_virtualization = model->has_virtualization;
     icc->is_montecito = model->is_montecito;
+    icc->unaligned_windows = model->unaligned_windows;
+    icc->unaligned_uc_exempt = model->unaligned_uc_exempt;
     icc->pal = model->pal;
 }
 
@@ -1419,6 +1425,7 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .vhpt_hash_folds_hpn = true,
     .has_native_ia32 = true,
     .has_virtualization = false,
+    .unaligned_windows = true,
     .pal = &ia64_pal_profile_madison,
 };
 
@@ -1491,6 +1498,7 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
     .has_native_ia32 = true,
     .has_virtualization = false,
     .is_montecito = false,
+    .unaligned_uc_exempt = true,
     .pal = &ia64_pal_profile_merced,
 };
 

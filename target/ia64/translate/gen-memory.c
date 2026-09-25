@@ -268,6 +268,18 @@ static void ia64_gen_ld_fill_nat(uint8_t reg, TCGv_i64 addr)
     ia64_gen_gr_nat_assign(reg, natbit);
 }
 
+static void ia64_gen_speculative_probe(const Ia64Instruction *insn,
+                                       TCGv_i64 ok, TCGv_i64 addr,
+                                       uint32_t size)
+{
+    IA64UnalignedWindow w = ia64_unaligned_window(insn, size);
+
+    gen_helper_speculative_probe(ok, tcg_env, addr, tcg_constant_i32(0),
+                                 tcg_constant_i32(0), tcg_constant_i32(size),
+                                 tcg_constant_i32(w.window),
+                                 tcg_constant_i32(w.span));
+}
+
 static void ia64_gen_speculative_load(DisasContext *ctx,
                                       const Ia64Instruction *insn,
                                       bool advanced)
@@ -305,9 +317,7 @@ static void ia64_gen_speculative_load(DisasContext *ctx,
         tcg_gen_brcondi_i64(TCG_COND_NE, addr_nat, 0, l_fail);
     }
     ia64_gen_sync_ip_for_helper(insn);
-    gen_helper_speculative_probe(ok, tcg_env, addr, tcg_constant_i32(0),
-                                 tcg_constant_i32(0),
-                                 tcg_constant_i32(ia64_memop_size(mop)));
+    ia64_gen_speculative_probe(insn, ok, addr, ia64_memop_size(mop));
     tcg_gen_brcondi_i64(TCG_COND_EQ, ok, 0, l_fail);
 
     tcg_gen_qemu_ld_i64(cpu_gr[op->destination], addr,
@@ -466,9 +476,7 @@ static void ia64_gen_fp_load(DisasContext *ctx, const Ia64Instruction *insn)
             tcg_gen_brcondi_i64(TCG_COND_NE, addr_nat, 0, l_fail);
         }
         ia64_gen_sync_ip_for_helper(insn);
-        gen_helper_speculative_probe(ok, tcg_env, addr, tcg_constant_i32(0),
-                                     tcg_constant_i32(0),
-                                     tcg_constant_i32(size));
+        ia64_gen_speculative_probe(insn, ok, addr, size);
         tcg_gen_brcondi_i64(TCG_COND_EQ, ok, 0, l_fail);
 
         ia64_gen_fp_load_value(ctx, insn, addr);
@@ -665,9 +673,7 @@ static void ia64_gen_fp_load_pair(DisasContext *ctx,
             tcg_gen_brcondi_i64(TCG_COND_NE, addr_nat, 0, l_fail);
         }
         ia64_gen_sync_ip_for_helper(insn);
-        gen_helper_speculative_probe(ok, tcg_env, addr, tcg_constant_i32(0),
-                                     tcg_constant_i32(0),
-                                     tcg_constant_i32(size));
+        ia64_gen_speculative_probe(insn, ok, addr, size);
         tcg_gen_brcondi_i64(TCG_COND_EQ, ok, 0, l_fail);
 
         ia64_gen_fp_load_pair_value(ctx, insn, addr);

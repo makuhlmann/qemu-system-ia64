@@ -477,13 +477,13 @@ test_unaligned_store_reports_unaligned_when_mapped = require_registers(
         "r15": IA64_ISR_W,
     }, entry=0x10)
 
-# The I/O-port / MMIO exemption: SDM Vol.2 ("I/O port space") states that
-# unaligned references to non-writeback (UC) space are NOT detected as
-# Unaligned Data Reference faults, even with PSR.ac set -- PSR.ac is the
-# architectural alias of EFLAG.ac, and the SDV firmware deliberately runs POST
-# with PSR.ac set while issuing an unaligned 32-bit OUT to a sparse I/O port.
-# Both a misaligned store to and load from a UC page must complete silently and
-# round-trip, reaching the non-fault terminal rather than the Unaligned vector.
+# The merced model exempts non-writeback (UC) targets from the PSR.ac
+# alignment fault: the SDV firmware runs POST with PSR.ac set while issuing an
+# unaligned 32-bit store to a sparse I/O port.  The SDM exempts only IA-32
+# port references (Vol. 2 10.7.1), and the Itanium 2 models fault
+# (integer_advanced_non_speculative_unaligned_faults).  Both a misaligned
+# store to and load from a UC page must complete silently and round-trip,
+# reaching the non-fault terminal rather than the Unaligned vector.
 test_unaligned_uc_reference_exempt_from_ac_fault = require_registers(
     "unaligned_uc_reference_exempt_from_ac_fault", [
         *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000,
@@ -500,7 +500,7 @@ test_unaligned_uc_reference_exempt_from_ac_fault = require_registers(
         "ip": 0xe0,
         "exception": IA64_EXCP_NONE,
         "r6": 0x1122334455667788,
-    }, entry=0x10)
+    }, entry=0x10, cpu="merced")
 
 # A control-speculative load defers instead of faulting, and the deferred
 # exception indicator is written to the target register.

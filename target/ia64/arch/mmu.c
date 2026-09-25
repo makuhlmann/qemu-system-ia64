@@ -1321,15 +1321,21 @@ static bool ia64_speculative_exception_deferrable(CPUIA64State *env,
     return dcr_mask != 0 && (env->cr_dcr & dcr_mask);
 }
 
+/* window and span as in IA64UnalignedWindow (translate/translate.h). */
 static bool ia64_speculative_alignment_fault(CPUIA64State *env,
-                                             uint64_t va, uint32_t size)
+                                             uint64_t va, uint32_t size,
+                                             uint32_t window, uint32_t span)
 {
     if (size <= 1 || (va & (size - 1)) == 0) {
         return false;
     }
-
-    return (env->psr & IA64_PSR_AC) ||
-           ((va & 0xfff) + size - 1 > 0xfff);
+    if (env->psr & IA64_PSR_AC) {
+        return true;
+    }
+    if (window != 0) {
+        return (va & (window - 1)) + span > window;
+    }
+    return (va & 0xfff) + size - 1 > 0xfff;
 }
 
 static void ia64_raise_data_reference_exception_at(CPUIA64State *env,
@@ -1629,7 +1635,8 @@ void ia64_mmu_check_montecito_16byte_access(CPUIA64State *env, uint64_t va,
 
 uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
                                   uint32_t is_write, uint32_t is_ifetch,
-                                  uint32_t size)
+                                  uint32_t size, uint32_t window,
+                                  uint32_t span)
 {
     bool alignment_fault;
     bool itlb_ed;
@@ -1642,7 +1649,8 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
     }
 
     itlb_ed = ia64_code_tlb_ed_lookup(env, &itlb_ed_known);
-    alignment_fault = ia64_speculative_alignment_fault(env, va, size);
+    alignment_fault = ia64_speculative_alignment_fault(env, va, size,
+                                                       window, span);
     if (is_ifetch) {
         if (alignment_fault) {
             excp = IA64_EXCP_UNALIGNED;

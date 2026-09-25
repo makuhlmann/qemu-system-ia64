@@ -1901,6 +1901,23 @@ struct IA64CPUClass {
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
+    /*
+     * With PSR.ac = 0 the model decides which unaligned references fault
+     * (SDM Vol. 2 4.5).  unaligned_windows: an integer reference must stay
+     * in an 8-byte window, an FP one in a 16-byte window, FP pairs and
+     * spill/fill are naturally aligned, and a UC or WC reference faults when
+     * it crosses 8 bytes (251110-003 sec 5.5).  Otherwise only a 4 KiB
+     * crossing faults.
+     */
+    bool unaligned_windows;
+    /*
+     * No Unaligned Data Reference fault on a non-writeback target, even with
+     * PSR.ac = 1.  The SDM exempts only IA-32 port references (Vol. 2
+     * 10.7.1); the SDV firmware issues an unaligned 4-byte store to a port
+     * with PSR.ac = 1 during POST (82c8344), so Merced keeps the exemption
+     * until that firmware runs against the SDM rule.
+     */
+    bool unaligned_uc_exempt;
     const IA64PalProfile *pal;
 };
 
