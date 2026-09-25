@@ -3778,6 +3778,12 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         return insn;
     }
 
+    if (unit == IA64_UNIT_B && ia64_b_op(raw) == 0 &&
+        ia64_bits(raw, 27, 6) == 0x01) {
+        /* An ignored (white) cell of SDM Vol 3 Table 4-48: a nop. */
+        return ia64_base_insn(IA64_OP_NOP, unit, raw, address, slot);
+    }
+
     if (unit == IA64_UNIT_B && ia64_b_op(raw) == 0) {
         Ia64Opcode opcode = IA64_OP_ILLEGAL;
 

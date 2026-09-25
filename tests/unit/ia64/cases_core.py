@@ -2661,6 +2661,26 @@ test_reserved_ip_relative_branch_btype_illegal = require_exception(
     fault_ip=0x10,
 )
 
+# B op 0 x6 = 0x01 is an ignored (white) cell of SDM Vol 3 Table 4-48 in
+# rev 2.1 and 2.3: a nop whatever the qualifying predicate.
+test_reserved_b_cyan_predicated_off_is_nop = require_registers(
+    "reserved_b_cyan_predicated_off_is_nop", [
+        (0x10, 0x10, nop_m(), nop_i(), bitfield(1, 27, 6) | 1),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_b_ignored_x6_01_true_predicate_is_nop = require_registers(
+    "b_ignored_x6_01_true_predicate_is_nop", [
+        (0x10, 0x10, nop_m(), nop_i(), bitfield(1, 27, 6)),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_br_cloop_decrements_lc = require_registers("br_cloop_decrements_lc", [
     (0x10, 0x00, nop_m(), adds(4, 0, 0), nop_i()),
     (0x20, 0x02, nop_m(), mov_lc_imm(2), nop_i()),
@@ -3165,6 +3185,8 @@ CASE_NAMES = (
     'reserved_application_register_is_illegal',
     'reserved_indirect_branch_btype_illegal',
     'reserved_ip_relative_branch_btype_illegal',
+    'reserved_b_cyan_predicated_off_is_nop',
+    'b_ignored_x6_01_true_predicate_is_nop',
     'rfi_to_ia32_empties_backing_store',
     'scalar_shift_count_64',
     'shl_var_ignored_bit_decode',
