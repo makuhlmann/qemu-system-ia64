@@ -537,13 +537,14 @@ static void pal_copy_pal(CPUIA64State *env)
 
     /*
      * An application-processor call does not repeat the memory copy, but it
-     * still installs the relocated procedure and PMI entry points in that
-     * processor (SDM Vol. 2, PAL_COPY_PAL).  Keep this state per CPU so a
-     * subsequent break in the shared PAL image is dispatched as a PAL call.
+     * still installs the relocated procedure entry in that processor (SDM
+     * Vol. 2, PAL_COPY_PAL).  Keep this state per CPU so a subsequent break
+     * in the shared PAL image is dispatched as a PAL call.  The copy also
+     * moves PAL's own PALE_PMI entry, which is not modelled; SAL's PMI
+     * entry, registered by PAL_PMI_ENTRYPOINT, stays as it was.
      */
     env->pal.pal_proc_copy_addr = target_pa + PAL_COPY_PROC_OFFSET;
     env->pal.pal_proc_copy_valid = true;
-    env->pal.pal_pmi_entry = target_pa + PAL_COPY_PROC_OFFSET;
 
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
     env->gr[IA64_PAL_GR_RESULT1] = PAL_COPY_PROC_OFFSET;

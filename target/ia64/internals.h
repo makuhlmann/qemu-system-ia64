@@ -91,6 +91,7 @@ typedef struct IA64PalState {
     /* Architected PAL registration and machine-check state. */
     bool pal_mc_expected;
     uint64_t pal_mc_save_addr;
+    /* SAL's PMI entry, from PAL_PMI_ENTRYPOINT (not PAL's own PALE_PMI). */
     uint64_t pal_pmi_entry;
     /*
      * PAL_PROC entries this processor recognises: the one PAL handed over at
