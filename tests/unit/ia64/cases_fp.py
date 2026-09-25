@@ -2381,6 +2381,26 @@ test_fprsqrta_decode = require_registers("fprsqrta_decode", [
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
 
+# A denormal lane is normalized and takes the table approximation, D set
+# and no I (SDM Vol 3 fprsqrta, fp_ieee_recip_sqrt); +Inf gives +0.
+test_fprsqrta_denormal_does_not_leak_inexact = require_registers(
+    "fprsqrta_denormal_does_not_leak_inexact", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 5))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x000000017f800000)),
+        (0x40, 0x00, setf_sig(6, 3), nop_i(), nop_i()),
+        (0x50, 0x0d, nop_m(), fprsqrta(8, 6, 6, sf=0), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "f8": ExpectedFP(0x64b4a00000000000, 0x1003e),
+        "pr_mask": ExpectedBits(mask=1 << 6, value=0),
+        "ar_fpsr": ((DEFAULT_FPSR & ~(1 << 5)) |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_fprsqrta_simd_high_lane_fault_isr = require_registers(
     "fprsqrta_simd_high_lane_fault_isr", [
         (0x10, *movl_mlx(2, 0x33e)),
@@ -3282,6 +3302,50 @@ test_fprcpa_decode = require_registers("fprcpa_decode", [
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
 
+# fprcpa and fprsqrta raise only V, Z, D (fprcpa) and V, D (fprsqrta)
+# (SDM Vol 3 fprcpa, fprsqrta): a denormal lane must not trap on the enabled
+# O and I of an exact division or square root.
+test_fprcpa_denormal_overflow_does_not_leak_oi = require_registers(
+    "fprcpa_denormal_overflow_does_not_leak_oi", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~((1 << 3) | (1 << 5)))),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x3f80000000000000)),
+        (0x40, *movl_mlx(4, 0x000000013f800000)),
+        (0x50, 0x09, setf_sig(6, 3), setf_sig(7, 4), nop_i()),
+        (0x60, 0x0d, nop_m(), fprcpa(8, 6, 6, 7, sf=0), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "f8": ExpectedFP(0x7f80000000000000, 0x1003e),
+        "pr_mask": ExpectedBits(mask=1 << 6, value=0),
+        "ar_fpsr": ((DEFAULT_FPSR & ~((1 << 3) | (1 << 5))) |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+# A denormal numerator is normalized and sets D; the lane result is the
+# table approximation of the denominator's reciprocal (SDM Vol 3 fprcpa,
+# fp_ieee_recip): 0x3eff8000 for 2.0 and 0x3eaa8000 for 3.0.
+test_fprcpa_denormal_numerator_uses_table = require_registers(
+    "fprcpa_denormal_numerator_uses_table", [
+        (0x10, *movl_mlx(2, DEFAULT_FPSR & ~0x38)),
+        (0x20, 0x00, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, *movl_mlx(3, 0x3f80000000000001)),
+        (0x40, *movl_mlx(4, 0x4000000040400000)),
+        (0x50, 0x09, setf_sig(6, 3), setf_sig(7, 4), nop_i()),
+        (0x60, 0x0d, nop_m(), fprcpa(8, 6, 6, 7, sf=0), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "f8": ExpectedFP(0x3eff80003eaa8000, 0x1003e),
+        "pr_mask": ExpectedBits(mask=1 << 6, value=0),
+        "ar_fpsr": ((DEFAULT_FPSR & ~0x38) |
+                    (FPSR_SF_D_FLAG <<
+                     (FPSR_SF0_SHIFT + FPSR_SF_FLAGS_SHIFT))),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_fprcpa_simd_high_lane_fault_isr = require_registers(
     "fprcpa_simd_high_lane_fault_isr", [
         (0x10, *movl_mlx(2, 0x33b)),
@@ -3769,9 +3833,12 @@ CASE_NAMES = (
     'fpms_fpnma_qnan_preserves_sign',
     'fpms_fpnma_snan_quiets_without_sign_flip',
     'fprcpa_decode',
+    'fprcpa_denormal_numerator_uses_table',
+    'fprcpa_denormal_overflow_does_not_leak_oi',
     'fprcpa_simd_high_lane_fault_isr',
     'fprcpa_simd_low_lane_fault_isr',
     'fprsqrta_decode',
+    'fprsqrta_denormal_does_not_leak_inexact',
     'fprsqrta_simd_high_lane_fault_isr',
     'fpsr_status_field_controls',
     'fpsr_td_suppresses_fp_fault',
