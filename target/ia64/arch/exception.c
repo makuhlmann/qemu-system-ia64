@@ -508,6 +508,37 @@ static bool ia64_fetch_fault_yields_to_completion_trap(CPUIA64State *env,
     }
 }
 
+/*
+ * A mandatory RSE load that restores the frame of a br.ret delivers its fault
+ * on the target instruction with ISR.ir (SDM Vol. 2 6.6, Table 6-6), so the
+ * traps of the br.ret come first; the load faults again when the handler's
+ * rfi resumes the frame.  rfi discards its own traps before its loads.
+ */
+static bool ia64_frame_restore_fault_yields_to_completion_trap(
+    CPUIA64State *env, int excp)
+{
+    if (!env->exception_state.completion_trap_armed ||
+        (env->cr_isr & (IA64_ISR_RS | IA64_ISR_IR | IA64_ISR_X)) !=
+        (IA64_ISR_RS | IA64_ISR_IR)) {
+        return false;
+    }
+    switch (excp) {
+    case IA64_EXCP_UNIMPL_DATA_ADDR:
+    case IA64_EXCP_ALT_DTLB:
+    case IA64_EXCP_VHPT_FAULT:
+    case IA64_EXCP_DTLB_FAULT:
+    case IA64_EXCP_PAGE_NOT_PRESENT:
+    case IA64_EXCP_NAT_CONSUMPTION:
+    case IA64_EXCP_DATA_KEY_MISS:
+    case IA64_EXCP_KEY_PERMISSION:
+    case IA64_EXCP_DATA_ACCESS:
+    case IA64_EXCP_DATA_ACCESS_BIT:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void ia64_cpu_do_interrupt(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
@@ -519,7 +550,9 @@ void ia64_cpu_do_interrupt(CPUState *cs)
     if (excp == IA64_EXCP_NONE) {
         return;
     }
-    if (ia64_fetch_fault_yields_to_completion_trap(&cpu->env, excp) &&
+    if ((ia64_fetch_fault_yields_to_completion_trap(&cpu->env, excp) ||
+         ia64_frame_restore_fault_yields_to_completion_trap(&cpu->env,
+                                                            excp)) &&
         ia64_take_completion_trap(cs)) {
         return;
     }
@@ -708,6 +741,10 @@ static bool ia64_take_completion_trap(CPUState *cs)
         excp = IA64_EXCP_SINGLE_STEP;
     }
     env->cr_isr = code;
+    if (env->rse.rse_dirty < 0 || env->rse.rse_dirty_nat < 0) {
+        /* The frame restore of a br.ret faulted (SDM Vol. 2 6.8). */
+        env->cr_isr |= IA64_ISR_IR;
+    }
     es->fault_ip = env->ip;
     es->fault_imm = es->completion_trap_iipa;
     es->fault_slot = es->completion_trap_slot;

@@ -119,6 +119,7 @@ from .encoding import (
     mov_ar,
     mov_ar_lc,
     mov_br_gr,
+    mov_pfs_gr,
     mov_gr_psr_full,
     mov_lc_gr,
     mov_m_ar_gr,
@@ -193,6 +194,43 @@ test_rfi_target_rse_fill_fault_uses_restored_psr = require_registers(
         "r29": 0,
         "r30": HIGH_TR_BASE + 0xfff8,
         "r31": IA64_ISR_R | IA64_ISR_RS | IA64_ISR_IR,
+    }, entry=0x10)
+
+# A br.ret whose frame restore faults: the fault belongs to the target
+# instruction, so the Taken Branch trap of the br.ret comes first, with ISR.ir
+# for the incomplete frame (SDM Vol. 2 6.6, 6.8).
+test_br_ret_taken_branch_trap_precedes_frame_restore_fault = require_registers(
+    "br_ret_taken_branch_trap_precedes_frame_restore_fault", [
+        (0x10, *movl_mlx(3, HIGH_TR_BASE + 0x10000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x30, 0x00, nop_m(), addl(20, 0x81, 0), nop_i()),
+        (0x40, 0x00, nop_m(), mov_pfs_gr(20), nop_i()),
+        (0x50, 0x00, nop_m(), addl(21, 0x300, 0), nop_i()),
+        (0x60, 0x00, nop_m(), mov_br_gr(0, 21), nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(0, 23), nop_i(), nop_i()),
+        (0x80, *movl_mlx(20, 0x200)),
+        (0x90, 0x00, mov_m_gr_cr(20, 19), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(20, IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_RT |
+                         IA64_PSR_TB)),
+        (0xb0, 0x00, mov_m_gr_cr(20, 16), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), rfi_b()),
+        (0x200, 0x11, nop_m(), nop_i(), br_ret(0)),
+        (IA64_TAKEN_BRANCH_VECTOR, 0x00, mov_m_cr_gr(31, 17), nop_i(),
+         nop_i()),
+        (IA64_TAKEN_BRANCH_VECTOR + 0x10, 0x00, mov_m_cr_gr(30, 19),
+         nop_i(), nop_i()),
+        (IA64_TAKEN_BRANCH_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_TAKEN_BRANCH_VECTOR + 0x20,
+                 IA64_TAKEN_BRANCH_VECTOR + 0x20)),
+        (IA64_ALT_DTLB_VECTOR, 0x10, nop_m(), adds(29, 1, 0),
+         br_cond(IA64_ALT_DTLB_VECTOR, IA64_ALT_DTLB_VECTOR)),
+    ], {
+        "ip": IA64_TAKEN_BRANCH_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0,
+        "r30": 0x300,
+        # ISR.ei = 2: the slot of the br.ret.
+        "r31": IA64_ISR_CODE_TB | IA64_ISR_IR | (2 << 41),
     }, entry=0x10)
 
 test_rfi_retries_interrupted_current_frame_fill = require_registers(
@@ -5279,6 +5317,7 @@ CASE_NAMES = (
     'br_ia_unimplemented_target_preserves_64bit_iip',
     'br_ret_lower_privilege_precedes_taken_branch_and_single_step',
     'br_ret_lower_privilege_transfer_trap',
+    'br_ret_taken_branch_trap_precedes_frame_restore_fault',
     'native_single_step_not_taken_on_rfi',
     'native_single_step_traps_predicated_off_instruction',
     'native_taken_branch_precedes_single_step',
@@ -5439,6 +5478,7 @@ CASE_METADATA = {
     'masked_itv_discards_due_timer': CaseMetadata(nonterminal_effect_loop=True),
     'masking_itv_preserves_pended_timer_irr': CaseMetadata(nonterminal_effect_loop=True),
     'past_itm_does_not_fire': CaseMetadata(nonterminal_effect_loop=True),
+    'br_ret_taken_branch_trap_precedes_frame_restore_fault': CaseMetadata(nonterminal_effect_loop=True),
     'rfi_target_rse_fill_fault_uses_restored_psr': CaseMetadata(nonterminal_effect_loop=True),
 }
 

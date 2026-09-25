@@ -171,6 +171,10 @@ def mov_i_ar_gr(r1, ar_num, qp=0):
     return (bitfield(0x32, 27, 6) | bitfield(ar_num, 20, 7) |
             bitfield(r1, 6, 7) | bitfield(qp, 0, 6))
 
+def mov_pfs_gr(r2, qp=0):
+    return (bitfield(0x2a, 27, 6) | bitfield(64, 20, 7) |
+            bitfield(r2, 13, 7) | bitfield(qp, 0, 6))
+
 def mov_lc_gr(r2, qp=0):
     return (bitfield(0x2a, 27, 6) | bitfield(65, 20, 7) |
             bitfield(r2, 13, 7) | bitfield(qp, 0, 6))
@@ -664,6 +668,7 @@ __all__ = (
     'mov_ar_lc',
     'mov_i_ar_gr',
     'mov_lc_gr',
+    'mov_pfs_gr',
     'mov_lc_imm',
     'mov_pr_rot_imm',
     'mov_m_imm_ar',

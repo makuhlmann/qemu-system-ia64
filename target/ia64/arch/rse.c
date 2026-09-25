@@ -1295,6 +1295,16 @@ void ia64_rse_br_ret(CPUIA64State *env, uint32_t b_reg)
                                   IA64_PSR_RI_SHIFT,
                                   IA64_ISR_CODE_LP, true);
     }
+    if (env->psr & IA64_PSR_TB) {
+        /*
+         * Noted before the frame restore, whose fault belongs to the target
+         * instruction and so ranks below this trap (SDM Vol.2 6.6).
+         */
+        ia64_completion_trap_note(env, ia64_ip_bundle_addr(env->ip),
+                                  (env->psr & IA64_PSR_RI_MASK) >>
+                                  IA64_PSR_RI_SHIFT,
+                                  IA64_ISR_CODE_TB, true);
+    }
 
     /*
      * Commit the branch target (slot 0) and demoted privilege level
