@@ -270,11 +270,17 @@ IA64GenResult ia64_gen_simd(DisasContext *ctx,
             TCGv_i64 lane_b = ia64_simd_extract_lane(
                 ia64_gr_src(op->source2), &plan, i, true);
             TCGv_i64 lane_res = tcg_temp_new_i64();
+            TCGv_i64 shifted = tcg_temp_new_i64();
+            TCGv_i64 shift_sat = tcg_temp_new_i64();
 
-            tcg_gen_shli_i64(lane_res, lane_a, op->immediate);
+            tcg_gen_shli_i64(shifted, lane_a, op->immediate);
+            tcg_gen_mov_i64(shift_sat, shifted);
+            ia64_gen_saturate_signed_i64(shift_sat, 16);
+            tcg_gen_add_i64(lane_res, shifted, lane_b);
             ia64_gen_saturate_signed_i64(lane_res, 16);
-            tcg_gen_add_i64(lane_res, lane_res, lane_b);
-            ia64_gen_saturate_signed_i64(lane_res, 16);
+            /* SDM Vol 3 pshladd: a saturated shift is not added to y. */
+            tcg_gen_movcond_i64(TCG_COND_NE, lane_res, shift_sat, shifted,
+                                shift_sat, lane_res);
             ia64_simd_insert_lane(result, lane_res, &plan, i);
         }
         tcg_gen_mov_i64(cpu_gr[op->destination], result);

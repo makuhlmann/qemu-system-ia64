@@ -127,6 +127,7 @@ static const char *test_template_stops(void)
 {
     const IA64TemplateInfo *t00 = ia64_template_info(0x00);
     const IA64TemplateInfo *t01 = ia64_template_info(0x01);
+    const IA64TemplateInfo *t02 = ia64_template_info(0x02);
     const IA64TemplateInfo *t03 = ia64_template_info(0x03);
     const IA64TemplateInfo *t0a = ia64_template_info(0x0a);
     const IA64TemplateInfo *t0b = ia64_template_info(0x0b);
@@ -137,7 +138,11 @@ static const char *test_template_stops(void)
     if (!t01->stop_after[2]) {
         return failf("template 0x01 end stop");
     }
-    if (!t03->stop_after[0] || !t03->stop_after[2]) {
+    /* SDM Vol 1 Table 3-10: MI;;I and MI;;I;; stop after slot 1. */
+    if (t02->stop_after[0] || !t02->stop_after[1] || t02->stop_after[2]) {
+        return failf("template 0x02 stop map");
+    }
+    if (t03->stop_after[0] || !t03->stop_after[1] || !t03->stop_after[2]) {
         return failf("template 0x03 stop map");
     }
     if (!t0a->stop_after[0] || t0a->stop_after[1] || t0a->stop_after[2]) {

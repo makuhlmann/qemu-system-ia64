@@ -75,10 +75,10 @@
 #define PAL_SELF_TEST_STATE_TESTED (1ULL << 2)
 #define PAL_MEM_ATTR_WB            (1ULL << 0)
 #define PAL_MEM_ATTR_VALID_MASK    0xffffULL
-#define PAL_PERF_MON_INFO_VALUE    0x08123004ULL
+#define PAL_PERF_MON_INFO_VALUE    0x08120004ULL
 #define PAL_PERF_PMC_MASK          0x3fffULL
 #define PAL_PERF_PMD_MASK          0x3ffffULL
-#define PAL_PERF_GENERIC_MASK      0xf0ULL
+#define PAL_PERF_CYCLES_MASK       0xf0ULL
 
 #define PAL_CACHE_FLUSH_OPERATION_MASK 0x3ULL
 #define PAL_HALT_STATE_COUNT       8
@@ -321,13 +321,20 @@ static bool pal_halt(CPUIA64State *env)
 
 static void pal_prefetch_vis(CPUIA64State *env)
 {
-    if (pal_reserved_args_are_zero(env)) {
+    uint64_t trans_type = env->gr[IA64_PAL_GR_ARG1];
+
+    /*
+     * trans_type 0 transitions virtual attributes only and 1 physical or
+     * mixed ones; the three returns after status are reserved (SDM Vol. 2,
+     * PAL_PREFETCH_VISIBILITY).
+     */
+    if (trans_type <= 1 && env->gr[IA64_PAL_GR_ARG2] == 0 &&
+        env->gr[IA64_PAL_GR_ARG3] == 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->gr[IA64_PAL_GR_RESULT1] = (1ULL << 0) | (1ULL << 1);
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
-        env->gr[IA64_PAL_GR_RESULT1] = 0;
     }
+    env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
@@ -518,6 +525,7 @@ static void pal_copy_pal(CPUIA64State *env)
 
     if (processor == 0) {
         uint64_t le_words[ARRAY_SIZE(pal_proc_words)];
+        CPUState *cs;
         int i;
 
         for (i = 0; i < ARRAY_SIZE(pal_proc_words); i++) {
@@ -526,17 +534,33 @@ static void pal_copy_pal(CPUIA64State *env)
         (void)ia64_exec_physical_rw(target_pa, le_words,
                                     sizeof(le_words), true);
         ia64_exec_invalidate_phys_range(env, target_pa, PAL_COPY_CODE_SIZE);
+
+        /*
+         * The copy is memory: any processor that branches to it runs PAL,
+         * also one that has not made its own PAL_COPY_PAL call (SDM Vol. 2
+         * rev 2.1, PAL_COPY_PAL: an application-processor call does not
+         * copy).  The zx1 HP SAL calls PAL through the copy on an AP that
+         * has made no such call; a Break fault there parks that AP for good.
+         */
+        CPU_FOREACH(cs) {
+            CPUIA64State *other = cpu_env(cs);
+
+            qatomic_set(&other->pal.pal_proc_copy_addr,
+                        target_pa + PAL_COPY_PROC_OFFSET);
+            qatomic_store_release(&other->pal.pal_proc_copy_valid, true);
+        }
     }
 
     /*
      * An application-processor call does not repeat the memory copy, but it
-     * still installs the relocated procedure and PMI entry points in that
-     * processor (SDM Vol. 2, PAL_COPY_PAL).  Keep this state per CPU so a
-     * subsequent break in the shared PAL image is dispatched as a PAL call.
+     * still installs the relocated procedure entry in that processor (SDM
+     * Vol. 2, PAL_COPY_PAL).  The copy also moves PAL's own PALE_PMI entry,
+     * which is not modelled; SAL's PMI entry, registered by
+     * PAL_PMI_ENTRYPOINT, stays as it was.
      */
-    env->pal.pal_proc_copy_addr = target_pa + PAL_COPY_PROC_OFFSET;
-    env->pal.pal_proc_copy_valid = true;
-    env->pal.pal_pmi_entry = target_pa + PAL_COPY_PROC_OFFSET;
+    qatomic_set(&env->pal.pal_proc_copy_addr,
+                target_pa + PAL_COPY_PROC_OFFSET);
+    qatomic_store_release(&env->pal.pal_proc_copy_valid, true);
 
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
     env->gr[IA64_PAL_GR_RESULT1] = PAL_COPY_PROC_OFFSET;
@@ -850,8 +874,12 @@ static void pal_mc_resume(CPUIA64State *env)
     uint64_t save_ptr = env->gr[IA64_PAL_GR_ARG2];
     uint64_t new_context = env->gr[IA64_PAL_GR_ARG3];
 
+    /*
+     * save_ptr has the rules of the PAL_MC_REGISTER_MEM address (SDM Vol.2
+     * PAL_MC_RESUME), so the uncacheable bit 63 is allowed there too.
+     */
     if (set_cmci > 1 || new_context > 1 ||
-        (save_ptr >> 63) != 0 || (save_ptr & 0x1ff) != 0) {
+        (save_ptr & 0x1ff) != 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_ERROR;
@@ -1053,7 +1081,9 @@ static void pal_cache_info(CPUIA64State *env)
                  ((uint64_t)info->line_shift << 16) |
                  ((uint64_t)info->stride_shift << 24) |
                  ((uint64_t)info->store_latency << 32) |
-                 ((uint64_t)info->load_latency << 40);
+                 ((uint64_t)info->load_latency << 40) |
+                 ((uint64_t)info->store_hints << 48) |
+                 ((uint64_t)info->load_hints << 56);
     /*
      * config_info_2{39:32} is alias_boundary: the binary log of the minimum
      * separation of aliased addresses for best performance (SDM Vol.2
@@ -1311,6 +1341,7 @@ static void pal_register_info(CPUIA64State *env)
 
 static void pal_perf_mon_info(CPUIA64State *env, uintptr_t ra)
 {
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
     uint64_t pm_buffer = env->gr[IA64_PAL_GR_ARG1];
     int i;
 
@@ -1328,21 +1359,21 @@ static void pal_perf_mon_info(CPUIA64State *env, uintptr_t ra)
     }
 
     /*
-     * The architecture requires at least four generic PMC/PMD pairs.
-     * Model the baseline processor monitor layout used by this CPU model:
-     * four 48-bit generic counters at indices 4 through 7, with event
-     * selectors 0x12 for cycles and 0x08 for retired bundles.
+     * Four generic counters at PMC/PMD 4-7, with event selectors 0x12 for
+     * cycles and 0x08 for retired instructions (245320-003 Table 6-24,
+     * 251110-003 Table 10-28).
      */
     ia64_exec_store_data(env, pm_buffer, PAL_PERF_PMC_MASK, 8, false, ra);
     ia64_exec_store_data(env, pm_buffer + 0x20, PAL_PERF_PMD_MASK,
                          8, false, ra);
-    ia64_exec_store_data(env, pm_buffer + 0x40, PAL_PERF_GENERIC_MASK,
+    ia64_exec_store_data(env, pm_buffer + 0x40, PAL_PERF_CYCLES_MASK,
                          8, false, ra);
-    ia64_exec_store_data(env, pm_buffer + 0x60, PAL_PERF_GENERIC_MASK,
+    ia64_exec_store_data(env, pm_buffer + 0x60, pal->perf_retired_mask,
                          8, false, ra);
 
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-    env->gr[IA64_PAL_GR_RESULT1] = PAL_PERF_MON_INFO_VALUE;
+    env->gr[IA64_PAL_GR_RESULT1] = PAL_PERF_MON_INFO_VALUE |
+                                   (uint64_t)pal->perf_counter_width << 8;
     env->gr[IA64_PAL_GR_RESULT2] = 0;
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }

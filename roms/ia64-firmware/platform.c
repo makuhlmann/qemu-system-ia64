@@ -1751,10 +1751,6 @@ static BOOLEAN sal_runtime_state_valid(void)
     UINT64 psr = fw_read_psr();
     UINT64 translation = psr & (IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT);
 
-    if ((psr & IA64_PSR_CPL_MASK) != 0) {
-        return 0;
-    }
-
     return translation == 0 ||
            translation == (IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT);
 }
@@ -2225,7 +2221,8 @@ void prepare_sal_loader_handoff(void)
 
 BOOLEAN __attribute__((noinline)) sal_loader_handoff_selftest(void)
 {
-    UINT64 expected_psr = sal_loader_psr_low() | IA64_PSR_BN;
+    /* mov r=psr cannot show the bank-1 entry: PSR.bn reads as 0. */
+    UINT64 expected_psr = sal_loader_psr_low();
     UINTN i;
 
     fw_set_mem(&mSalHandoffProbe, sizeof(mSalHandoffProbe), 0xff);

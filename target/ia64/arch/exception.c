@@ -57,6 +57,7 @@ const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX] = {
     [IA64_EXCP_IA32_INTERRUPT]  = 0x6b00,
     [IA64_EXCP_TAKEN_BRANCH]    = 0x5f00,
     [IA64_EXCP_SINGLE_STEP]     = 0x6000,
+    [IA64_EXCP_LOWER_PRIV_TRANSFER] = 0x5e00,
 };
 
 G_NORETURN void ia64_raise_exception(CPUIA64State *env, uint32_t exception,
@@ -238,6 +239,13 @@ static bool ia64_exception_writes_ifa(IA64Exception excp)
     (IA64_PSR_UP | IA64_PSR_MFL | IA64_PSR_MFH | IA64_PSR_PK | \
      IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_MC | IA64_PSR_IT)
 
+/* Traps of the native instruction set taken once an instruction completes. */
+static bool ia64_exception_is_completion_trap(IA64Exception excp)
+{
+    return excp == IA64_EXCP_TAKEN_BRANCH || excp == IA64_EXCP_SINGLE_STEP ||
+           excp == IA64_EXCP_LOWER_PRIV_TRANSFER || excp == IA64_EXCP_FP_TRAP;
+}
+
 static uint64_t ia64_interruption_psr(CPUIA64State *env)
 {
     uint64_t psr = env->psr & IA64_PSR_INTERRUPTION_PRESERVED_MASK;
@@ -270,6 +278,8 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     if (excp >= IA64_EXCP_MAX || excp == IA64_EXCP_NONE) {
         return;
     }
+    /* A higher-priority interruption discards a pending completion trap. */
+    cpu->env.exception_state.completion_trap_armed = false;
 
     ia32 = cpu->env.psr & IA64_PSR_IS;
     ia32_transition_trap = cpu->env.exception_state.ia32_transition_trap;
@@ -337,6 +347,7 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     case IA64_EXCP_IA32_INTERRUPT:
     case IA64_EXCP_TAKEN_BRANCH:
     case IA64_EXCP_SINGLE_STEP:
+    case IA64_EXCP_LOWER_PRIV_TRANSFER:
         isr_status = cpu->env.cr_isr;
         break;
     default:
@@ -370,13 +381,19 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
         } else if (ia32 || ia32_transition_trap) {
             cpu->env.cr_iip = ia32_next_ip;
             cpu->env.cr_iipa = ia32_fault_ip;
+        } else if (ia64_exception_is_completion_trap(excp)) {
+            /*
+             * IIP and IPSR.ri name the next instruction, IIPA and ISR.ei the
+             * trapping one (SDM Vol. 2 7.1).
+             */
+            cpu->env.cr_ipsr = cpu->env.psr;
+            cpu->env.cr_iip = ia64_ip_bundle_addr(cpu->env.ip);
+            cpu->env.cr_iipa = cpu->env.exception_state.fault_imm;
         } else {
             cpu->env.cr_ipsr |=
                 ((uint64_t)slot & 3) << IA64_PSR_RI_SHIFT;
             cpu->env.cr_iip = ia64_ip_bundle_addr(cpu->env.ip);
-            cpu->env.cr_iipa = excp == IA64_EXCP_FP_TRAP ?
-                               cpu->env.exception_state.fault_imm :
-                               cpu->env.last_successful_bundle;
+            cpu->env.cr_iipa = cpu->env.last_successful_bundle;
         }
         if (ia64_exception_writes_ifa(excp)) {
             cpu->env.cr_ifa = fault_addr;
@@ -459,6 +476,69 @@ static bool ia64_exception_uses_psr_ri_slot(IA64Exception excp, uint64_t isr)
     }
 }
 
+static bool ia64_take_completion_trap(CPUState *cs);
+
+/*
+ * A fault on the fetch of the next instruction ranks below the traps of the
+ * instruction that completed before it (SDM Vol. 2 5.5.2).  TCG can look up
+ * a branch target, and so fault on its fetch, before the traps of the branch
+ * are delivered; the fetch faults again once the trap handler returns.
+ */
+static bool ia64_fetch_fault_yields_to_completion_trap(CPUIA64State *env,
+                                                       int excp)
+{
+    if (!env->exception_state.completion_trap_armed ||
+        !(env->cr_isr & IA64_ISR_X)) {
+        return false;
+    }
+    switch (excp) {
+    case IA64_EXCP_VHPT_FAULT:
+    case IA64_EXCP_ITLB_FAULT:
+    case IA64_EXCP_ALT_ITLB:
+    case IA64_EXCP_INST_ACCESS:
+    case IA64_EXCP_INST_ACCESS_BIT:
+    case IA64_EXCP_INST_KEY_MISS:
+    case IA64_EXCP_KEY_PERMISSION:
+    case IA64_EXCP_PAGE_NOT_PRESENT:
+    case IA64_EXCP_NAT_CONSUMPTION:
+    case IA64_EXCP_UNIMPL_INST_ADDR:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * A mandatory RSE load that restores the frame of a br.ret delivers its fault
+ * on the target instruction with ISR.ir (SDM Vol. 2 6.6, Table 6-6), so the
+ * traps of the br.ret come first; the load faults again when the handler's
+ * rfi resumes the frame.  rfi discards its own traps before its loads.
+ */
+static bool ia64_frame_restore_fault_yields_to_completion_trap(
+    CPUIA64State *env, int excp)
+{
+    if (!env->exception_state.completion_trap_armed ||
+        (env->cr_isr & (IA64_ISR_RS | IA64_ISR_IR | IA64_ISR_X)) !=
+        (IA64_ISR_RS | IA64_ISR_IR)) {
+        return false;
+    }
+    switch (excp) {
+    case IA64_EXCP_UNIMPL_DATA_ADDR:
+    case IA64_EXCP_ALT_DTLB:
+    case IA64_EXCP_VHPT_FAULT:
+    case IA64_EXCP_DTLB_FAULT:
+    case IA64_EXCP_PAGE_NOT_PRESENT:
+    case IA64_EXCP_NAT_CONSUMPTION:
+    case IA64_EXCP_DATA_KEY_MISS:
+    case IA64_EXCP_KEY_PERMISSION:
+    case IA64_EXCP_DATA_ACCESS:
+    case IA64_EXCP_DATA_ACCESS_BIT:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void ia64_cpu_do_interrupt(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
@@ -468,6 +548,12 @@ void ia64_cpu_do_interrupt(CPUState *cs)
     bool ia32_entry_trap;
 
     if (excp == IA64_EXCP_NONE) {
+        return;
+    }
+    if ((ia64_fetch_fault_yields_to_completion_trap(&cpu->env, excp) ||
+         ia64_frame_restore_fault_yields_to_completion_trap(&cpu->env,
+                                                            excp)) &&
+        ia64_take_completion_trap(cs)) {
         return;
     }
     cpu->env.exception_state.fault_exception = excp;
@@ -517,6 +603,7 @@ void ia64_cpu_do_interrupt(CPUState *cs)
     case IA64_EXCP_IA32_INTERRUPT:
     case IA64_EXCP_TAKEN_BRANCH:
     case IA64_EXCP_SINGLE_STEP:
+    case IA64_EXCP_LOWER_PRIV_TRANSFER:
         fault_addr = cpu->env.exception_state.fault_ip;
         break;
     case IA64_EXCP_UNIMPL_INST_ADDR:
@@ -586,6 +673,88 @@ void ia64_cpu_do_interrupt(CPUState *cs)
     cs->exception_index = IA64_EXCP_NONE;
 }
 
+/*
+ * Lower-Privilege Transfer, Taken Branch and Single Step traps are taken
+ * after the instruction completes (SDM Vol. 2 5.5.2, step 8).  The
+ * instruction notes its conditions here and ia64_cpu_exec_interrupt()
+ * delivers them before the next instruction starts; any interruption the
+ * instruction raises instead discards them.  code holds ISR.code trap bits.
+ */
+void ia64_completion_trap_arm(CPUIA64State *env, uint64_t iipa,
+                              uint32_t slot, uint64_t code)
+{
+    env->exception_state.completion_trap_armed = false;
+    ia64_completion_trap_note(env, iipa, slot, code, false);
+}
+
+void ia64_completion_trap_note(CPUIA64State *env, uint64_t iipa,
+                               uint32_t slot, uint64_t code, bool taken)
+{
+    IA64ExceptionState *es = &env->exception_state;
+    CPUState *cs = env_cpu(env);
+
+    if (!es->completion_trap_armed) {
+        es->completion_trap_armed = true;
+        es->completion_trap_taken = false;
+        es->completion_trap_code = 0;
+        es->completion_trap_iipa = iipa;
+        es->completion_trap_slot = slot;
+    }
+    es->completion_trap_code |= code;
+    es->completion_trap_taken |= taken;
+    cpu_set_interrupt(cs, IA64_INTERRUPT_COMPLETION_TRAP);
+    /* Leave the TB chain before the next instruction, as a kick would. */
+    qatomic_set(&cs->neg.icount_decr.u16.high, -1);
+}
+
+static bool ia64_take_completion_trap(CPUState *cs)
+{
+    CPUIA64State *env = cpu_env(cs);
+    IA64ExceptionState *es = &env->exception_state;
+    uint64_t code = es->completion_trap_code;
+    uint32_t ri = (env->psr & IA64_PSR_RI_MASK) >> IA64_PSR_RI_SHIFT;
+    IA64Exception excp;
+
+    cpu_reset_interrupt(cs, IA64_INTERRUPT_COMPLETION_TRAP);
+    if (!es->completion_trap_armed) {
+        return false;
+    }
+    es->completion_trap_armed = false;
+    /*
+     * IP and RI still naming the instruction mean it has not completed: its
+     * TB was restarted and it will note its traps again.  A taken branch
+     * may target its own slot, so it is recorded explicitly.
+     */
+    if (code == 0 || (env->psr & IA64_PSR_IS) ||
+        (!es->completion_trap_taken &&
+         ia64_ip_bundle_addr(env->ip) == es->completion_trap_iipa &&
+         ri == es->completion_trap_slot)) {
+        return false;
+    }
+
+    /* Priority order of SDM Vol. 2 Table 5-6; ISR.code keeps every bit. */
+    if (code & IA64_ISR_CODE_LP) {
+        excp = IA64_EXCP_LOWER_PRIV_TRANSFER;
+    } else if (code & IA64_ISR_CODE_TB) {
+        excp = IA64_EXCP_TAKEN_BRANCH;
+    } else {
+        excp = IA64_EXCP_SINGLE_STEP;
+    }
+    env->cr_isr = code;
+    if (env->rse.rse_dirty < 0 || env->rse.rse_dirty_nat < 0) {
+        /* The frame restore of a br.ret faulted (SDM Vol. 2 6.8). */
+        env->cr_isr |= IA64_ISR_IR;
+    }
+    es->fault_ip = env->ip;
+    es->fault_imm = es->completion_trap_iipa;
+    es->fault_slot = es->completion_trap_slot;
+    es->fault_exception = excp;
+    es->exception = excp;
+    cs->exception_index = excp;
+    ia64_cpu_do_interrupt(cs);
+    return true;
+}
+
 bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
@@ -618,6 +787,11 @@ bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
         interrupt_enabled = (cpu->env.psr & IA64_PSR_I) && virtual_if &&
                             !(cpu->env.ia32.hflags & HF_INHIBIT_IRQ_MASK);
+    }
+
+    if ((interrupt_request & IA64_INTERRUPT_COMPLETION_TRAP) &&
+        ia64_take_completion_trap(cs)) {
+        return true;
     }
 
     if ((interrupt_request & CPU_INTERRUPT_HARD) &&

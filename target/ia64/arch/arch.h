@@ -37,7 +37,8 @@ void ia64_mmu_check_montecito_16byte_access(CPUIA64State *env, uint64_t va,
                                             uint32_t is_write);
 uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
                                     uint32_t is_write, uint32_t is_ifetch,
-                                    uint32_t size);
+                                    uint32_t size, uint32_t window,
+                                    uint32_t span);
 uint64_t ia64_mmu_advanced_load_allowed(CPUIA64State *env, uint64_t va);
 uint64_t ia64_mmu_tak(CPUIA64State *env, uint64_t va);
 uint64_t ia64_mmu_thash(CPUIA64State *env, uint64_t va);
@@ -81,6 +82,10 @@ void ia64_raise_pre_unaligned_data_fault(CPUIA64State *env, uint64_t va,
                                          uint8_t fault_slot);
 void ia64_cpu_do_interrupt(CPUState *cs);
 bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request);
+void ia64_completion_trap_arm(CPUIA64State *env, uint64_t iipa,
+                              uint32_t slot, uint64_t code);
+void ia64_completion_trap_note(CPUIA64State *env, uint64_t iipa,
+                               uint32_t slot, uint64_t code, bool taken);
 bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
                                          uint64_t fault_addr,
                                          uint8_t fault_slot);
@@ -125,12 +130,10 @@ void ia64_rse_cover(CPUIA64State *env);
 void ia64_rse_flush(CPUIA64State *env, uintptr_t ra);
 void ia64_rse_load(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
                    uint32_t slot, uintptr_t ra);
-uint64_t ia64_rse_br_cexit(CPUIA64State *env, uint64_t target,
-                           uint32_t b_reg);
-uint64_t ia64_rse_br_ctop(CPUIA64State *env, uint64_t target,
-                          uint32_t b_reg);
-uint64_t ia64_rse_br_wexit(CPUIA64State *env, uint64_t target, uint32_t qp);
-uint64_t ia64_rse_br_wtop(CPUIA64State *env, uint64_t target, uint32_t qp);
+bool ia64_rse_br_cexit(CPUIA64State *env);
+bool ia64_rse_br_ctop(CPUIA64State *env);
+bool ia64_rse_br_wexit(CPUIA64State *env, uint32_t qp);
+bool ia64_rse_br_wtop(CPUIA64State *env, uint32_t qp);
 void ia64_rse_clrrrb(CPUIA64State *env, uint32_t predicate_only);
 uint64_t ia64_rse_cloop_zero_st1(CPUIA64State *env, uint32_t base_reg,
                                  uint32_t mmu_idx, uint32_t max_stores,

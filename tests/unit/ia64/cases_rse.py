@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .case import (CaseMetadata, CaseObservation, bind_cases)
 from .encoding import (
     CHECK_LOAD_DATA,
@@ -17,7 +19,12 @@ from .encoding import (
     IA64_EXCP_ILLEGAL,
     IA64_EXCP_NONE,
     IA64_EXCP_RESERVED_REG_FIELD,
+    IA64_GENERAL_VECTOR,
+    IA64_GENEX_UNIMPL_DATA_ADDR,
+    IA64_IMPL_PA_BITS,
+    IA64_ISR_IR,
     IA64_ISR_NI,
+    IA64_ISR_R,
     IA64_ISR_RS,
     IA64_ISR_W,
     IA64_PSR_CPL3,
@@ -50,6 +57,7 @@ from .encoding import (
     bundle_words,
     chk_s_i,
     clrrrb_b,
+    clrrrb_pr_b,
     cmp4_eq_imm,
     cmp_eq_imm,
     cover_b,
@@ -77,6 +85,7 @@ from .encoding import (
     mov_b_gr,
     mov_gr_b,
     mov_gr_psr_full,
+    mov_gr_pr,
     mov_i_imm_ar,
     mov_lc_gr,
     mov_m_ar_gr,
@@ -86,6 +95,7 @@ from .encoding import (
     mov_m_gr_cr,
     mov_m_imm_ar,
     mov_m_psr_gr,
+    mov_pr_gr,
     mov_pr_rot_imm,
     movl_mlx,
     nop_b,
@@ -108,6 +118,7 @@ from .encoding import (
     st8,
     st8_postinc,
 )
+from .runner import read_reset_state
 
 # ── RSE tests ──
 
@@ -1716,6 +1727,51 @@ test_rse_loadrs_zero_sol_return_keeps_bsp_without_cover = require_registers(
         "cfm_sof": 8,
         "cfm_sol": 0,
     }, entry=0x10)
+def _empty_frame_prologue(address, target):
+    """Enter at address with an empty frame, then continue at target.
+
+    Cases that expect an empty caller frame set it themselves: reset leaves
+    CFM.sof = 96 (SDM Vol 2 6.12).
+    """
+    return [
+        (address, 0x00, alloc_m(2, 0, 0, 0, 0), nop_i(), nop_i()),
+        (address + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(address + 0x10, target)),
+    ]
+
+
+def _require_reset_frame(qemu, machine, cfm, partitions):
+    result = read_reset_state(qemu, machine=machine, cpu="madison")
+    fields = ("sof", "sol", "sor", "rrb_gr", "rrb_fr", "rrb_pr")
+    observed_cfm = tuple(result.state.cfm[field] for field in fields)
+    match = re.search(r"RSE: bol=(\d+) dirty=(-?\d+)/(-?\d+) "
+                      r"clean=(-?\d+)/(-?\d+) invalid=(-?\d+)",
+                      result.register_output)
+    if match is None:
+        raise RuntimeError("info registers has no RSE line:\n" +
+                           result.register_output)
+    observed_partitions = tuple(int(value) for value in match.groups())
+    if (observed_cfm, observed_partitions) != (cfm, partitions):
+        raise RuntimeError(
+            f"{machine} reset: expected CFM {cfm!r} and RSE {partitions!r}, "
+            f"got {observed_cfm!r} and {observed_partitions!r}\n"
+            f"{result.register_output}")
+
+
+# SDM Vol 2 6.12: at reset CFM.sof = 96, the other CFM fields are 0 and
+# BOF is GR32 (RSE line: bol, dirty/NaT, clean/NaT, invalid).
+def test_rse_architectural_reset_exposes_full_frame(qemu):
+    _require_reset_frame(qemu, "none", (96, 0, 0, 0, 0, 0),
+                         (0, 0, 0, 0, 0, 0))
+
+
+# The flat-image entry of a board without firmware is a handoff, not a
+# reset: it keeps an empty frame with all 96 stacked registers invalid.
+def test_rse_boot_handoff_preserves_empty_frame(qemu):
+    _require_reset_frame(qemu, "ia64-vpc,fw-relocate=off",
+                         (0, 0, 0, 0, 0, 0), (0, 0, 0, 0, 0, 96))
+
+
 HIGH_TR_TARGET = HIGH_TR_BASE + 0x8430
 HIGH_TR_PSR = ((1 << 13) | (1 << 17) | (1 << 27) |
                (1 << 36) | (1 << 44))
@@ -1854,6 +1910,55 @@ test_rse_spill_fault_sets_isr_rs = require_registers(
         "r29": 0,
         "r30": HIGH_TR_BASE + 0x10000,
         "r31": IA64_ISR_W | IA64_ISR_RS | IA64_ISR_NI,
+    }, entry=0x10)
+
+test_rse_physical_spill_fault_sets_isr_rs = require_registers(
+    "rse_physical_spill_fault_sets_isr_rs", [
+        (0x10, *movl_mlx(3, 1 << IA64_IMPL_PA_BITS)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x60, 0x00, nop_m(), alloc(1, 1, 0, 0, 0), nop_i()),
+        (0x70, *movl_mlx(32, 0x123456789abcdef0)),
+        (0x80, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x90, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x20,
+                 IA64_GENERAL_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r30": 1 << IA64_IMPL_PA_BITS,
+        "r31": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_W | IA64_ISR_RS,
+    }, entry=0x10)
+
+test_rse_physical_target_fill_fault_sets_isr_rs_ir = require_registers(
+    "rse_physical_target_fill_fault_sets_isr_rs_ir", [
+        (0x10, *movl_mlx(3, (1 << IA64_IMPL_PA_BITS) + 8)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x30, *movl_mlx(20, (1 << 63) | 1)),
+        (0x40, 0x00, mov_m_gr_cr(20, 23), nop_i(), nop_i()),
+        (0x50, *movl_mlx(20, 0x200)),
+        (0x60, 0x00, mov_m_gr_cr(20, 19), nop_i(), nop_i()),
+        (0x70, *movl_mlx(20, IA64_PSR_IC)),
+        (0x80, 0x00, mov_m_gr_cr(20, 16), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), rfi_b()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x20,
+                 IA64_GENERAL_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r30": 1 << IA64_IMPL_PA_BITS,
+        "r31": (IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R |
+                IA64_ISR_RS | IA64_ISR_IR),
     }, entry=0x10)
 
 test_rse_rfi_bspstore_rebase_preserves_interrupted_call = require_registers(
@@ -2278,6 +2383,7 @@ test_rse_rfi_advanced_iip_bspstore_switch_loads_external_frame = \
 
 test_rse_rfi_advanced_iip_preserves_nested_call_locals = require_registers(
     "rse_rfi_advanced_iip_preserves_nested_call_locals", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, *movl_mlx(2, 1 << 13)),
         (0x20, 0x10, mov_gr_psr_full(2), nop_i(),
          br_cond(0x20, 0x40)),
@@ -2338,10 +2444,11 @@ test_rse_rfi_advanced_iip_preserves_nested_call_locals = require_registers(
         "r8": 0x123456789abcdef0,
         "cfm_sof": 0,
         "cfm_sol": 0,
-    }, entry=0x10)
+    }, entry=0x800)
 
 test_rse_rfi_bypassed_call_drops_returned_frame = require_registers(
     "rse_rfi_bypassed_call_drops_returned_frame", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, *movl_mlx(2, 1 << 13)),
         (0x20, 0x10, mov_gr_psr_full(2), nop_i(),
          br_cond(0x20, 0x40)),
@@ -2390,7 +2497,7 @@ test_rse_rfi_bypassed_call_drops_returned_frame = require_registers(
         "r8": 0x123456789abcdef0,
         "cfm_sof": 0,
         "cfm_sol": 0,
-    }, entry=0x10)
+    }, entry=0x800)
 
 test_rse_manual_rfi_loadrs_restores_current_frame_base = require_registers(
     "rse_manual_rfi_loadrs_restores_current_frame_base", [
@@ -3148,7 +3255,7 @@ test_rse_br_ret_fill_dtlb_miss_retries_atomically = require_registers(
          adds(7, EIGHT_K_ITIR, 0), nop_i(), nop_i()),
         (IA64_ALT_DTLB_VECTOR + 0x20, 0x00,
          mov_m_gr_cr(7, 21), nop_i(), nop_i()),
-        (IA64_ALT_DTLB_VECTOR + 0x30, 0x00,
+        (IA64_ALT_DTLB_VECTOR + 0x30, 0x08,
          itc_d(18), adds(29, 0x77, 0),
          nop_i()),
         (IA64_ALT_DTLB_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
@@ -3889,7 +3996,8 @@ test_rse_loadrs_clamps_stacked_grs = require_registers(
     ], {
         "ip": HIGH_TR_BASE + 0x84a0,
         "exception": IA64_EXCP_NONE,
-        "r31": HIGH_TR_PSR,
+        # mov r=psr does not return PSR.bn (SDM Vol 2 3.3.2).
+        "r31": HIGH_TR_PSR & ~(1 << 44),
     }, entry=0x10)
 
 test_rse_loadrs_sets_tear_point = require_registers(
@@ -3928,6 +4036,7 @@ test_rse_loadrs_sets_tear_point = require_registers(
 
 test_rse_loadrs_preserves_clean_partial_rnat_collection = require_registers(
     "rse_loadrs_preserves_clean_partial_rnat_collection", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, *movl_mlx(3, 0x1001d8)),
         (0x20, *movl_mlx(4, 0xe000000012345678)),
         (0x30, 0x00, st8(3, 4), nop_i(),
@@ -3967,7 +4076,7 @@ test_rse_loadrs_preserves_clean_partial_rnat_collection = require_registers(
         "r40_nat": 0,
         "cfm_sof": 16,
         "cfm_sol": 16,
-    }, entry=0x10)
+    }, entry=0x800)
 
 # Mandatory loads after loadrs take NaT bits for slots whose collection
 # word was never read from the AR.RNAT contents software established
@@ -3977,6 +4086,7 @@ test_rse_loadrs_preserves_clean_partial_rnat_collection = require_registers(
 # and Windows' KiFlushRse depends on the accumulation surviving).
 test_rse_loadrs_reloads_same_collection_rnat = require_registers(
     "rse_loadrs_reloads_same_collection_rnat", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, *movl_mlx(3, 0x100120)),
         (0x20, *movl_mlx(4, 0xe000000087654321)),
         (0x30, 0x00, st8(3, 4), nop_i(),
@@ -4016,7 +4126,7 @@ test_rse_loadrs_reloads_same_collection_rnat = require_registers(
         "r35_nat": 1,
         "cfm_sof": 16,
         "cfm_sol": 16,
-    }, entry=0x10)
+    }, entry=0x800)
 
 test_rse_return_growth_keeps_dirty_bsp_distance = require_registers(
     "rse_return_growth_keeps_dirty_bsp_distance", [
@@ -4438,6 +4548,100 @@ test_cover_rfi_rebases_rotating_general_registers = require_registers(
         "cfm_rrb_gr": 31,
     }, entry=0x10)
 
+test_cover_rfi_restores_rotating_predicates_by_physical_number = \
+    require_registers(
+        "cover_rfi_restores_rotating_predicates_by_physical_number", [
+            (0x10, *movl_mlx(2, IA64_PSR_IC)),
+            (0x20, 0x00, mov_gr_psr_full(2), mov_i_imm_ar(66, 1),
+             nop_i()),
+            (0x30, 0x01, nop_m(), mov_pr_rot_imm(1 << 16), nop_i()),
+            # One rotation leaves physical p16 set, but exposes it as the
+            # logical p17 while CFM.rrb.pr is 47.
+            (0x40, 0x13, nop_m(), nop_b(),
+             br_ctop_many(0x40, 0x40)),
+            (0x50, 0x00, nop_m(), mov_pr_gr(8), nop_i()),
+            (0x60, 0x00, break_m(0x42), nop_i(), nop_i()),
+            (0x70, 0x00, nop_m(), adds(9, 1, 9, qp=17),
+             mov_pr_gr(11)),
+            (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+
+            # Linux saves PR before cover and restores it before rfi.  mov
+            # r=pr and mov pr=r both address the physical PR file as though
+            # RRB.PR were zero; cover/rfi rebase the logical view around it.
+            (IA64_BREAK_VECTOR, 0x10, nop_m(), mov_pr_gr(31), cover_b()),
+            (IA64_BREAK_VECTOR + 0x10, 0x00, nop_m(),
+             adds(10, 1, 10, qp=16), mov_gr_pr(31, -2)),
+            (IA64_BREAK_VECTOR + 0x20, *movl_mlx(20, 0x70)),
+            (IA64_BREAK_VECTOR + 0x30, 0x00,
+             mov_m_gr_cr(20, 19), nop_i(), nop_i()),
+            (IA64_BREAK_VECTOR + 0x40, 0x10,
+             nop_m(), nop_i(), rfi_b()),
+        ], {
+            "ip": 0x80,
+            "exception": IA64_EXCP_NONE,
+            "r8": (1 << 16) | 1,
+            "r9": 1,
+            "r10": 1,
+            "r11": (1 << 16) | 1,
+            "cfm_rrb_pr": 47,
+        }, entry=0x10)
+
+test_mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates = \
+    require_registers(
+        "mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates", [
+            (0x10, *movl_mlx(2, IA64_PSR_IC)),
+            (0x20, 0x00, mov_gr_psr_full(2), mov_i_imm_ar(66, 1),
+             nop_i()),
+            (0x30, 0x13, nop_m(), nop_b(), br_ctop_many(0x30, 0x30)),
+            # Physical p16 is logical p17 while CFM.rrb.pr is 47.
+            (0x40, 0x01, nop_m(), mov_pr_rot_imm(1 << 16), nop_i()),
+            (0x50, 0x00, nop_m(), adds(8, 1, 8, qp=17),
+             adds(9, 1, 9, qp=16)),
+            (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+        ], {
+            "ip": 0x60,
+            "exception": IA64_EXCP_NONE,
+            "r8": 1,
+            "r9": 0,
+            "cfm_rrb_pr": 47,
+        }, entry=0x10)
+
+# br.call and br.ret, and clrrrb.pr, change CFM.rrb.pr without rotating: the
+# physical predicates keep their values under the new rename base.
+test_br_call_ret_rebases_rotating_predicates = require_registers(
+    "br_call_ret_rebases_rotating_predicates", [
+        (0x10, 0x00, nop_m(), mov_i_imm_ar(66, 1), nop_i()),
+        (0x20, 0x01, nop_m(), mov_pr_rot_imm(1 << 16), nop_i()),
+        # Physical p16 is logical p17 while CFM.rrb.pr is 47.
+        (0x30, 0x13, nop_m(), nop_b(), br_ctop_many(0x30, 0x30)),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, 0x100)),
+        (0x50, 0x00, nop_m(), adds(9, 1, 9, qp=17), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+        (0x100, 0x00, nop_m(), adds(10, 1, 10, qp=16), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x60,
+        "exception": IA64_EXCP_NONE,
+        "r9": 1,
+        "r10": 1,
+        "cfm_rrb_pr": 47,
+    }, entry=0x10)
+
+test_clrrrb_pr_rebases_rotating_predicates = require_registers(
+    "clrrrb_pr_rebases_rotating_predicates", [
+        (0x10, 0x00, nop_m(), mov_i_imm_ar(66, 1), nop_i()),
+        (0x20, 0x01, nop_m(), mov_pr_rot_imm(1 << 16), nop_i()),
+        (0x30, 0x13, nop_m(), nop_b(), br_ctop_many(0x30, 0x30)),
+        (0x40, 0x13, nop_m(), nop_b(), clrrrb_pr_b()),
+        (0x50, 0x00, nop_m(), adds(10, 1, 10, qp=16), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "exception": IA64_EXCP_NONE,
+        "r10": 1,
+        "cfm_rrb_pr": 0,
+    }, entry=0x10)
+
 test_br_call_ret_rebases_rotating_floating_registers = require_registers(
     "br_call_ret_rebases_rotating_floating_registers", [
         (0x10, *movl_mlx(3, 0x12345678)),
@@ -4474,6 +4678,7 @@ test_clrrrb_rebases_rotating_floating_registers = require_registers(
 
 test_rse_rfi_selects_matching_outer_exception_frame = require_registers(
     "rse_rfi_selects_matching_outer_exception_frame", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, *movl_mlx(2, IA64_PSR_IC)),
         (0x20, *movl_mlx(3, 0x100000)),
         (0x30, 0x00, mov_ar(3, 18), nop_i(),
@@ -4540,7 +4745,7 @@ test_rse_rfi_selects_matching_outer_exception_frame = require_registers(
         "r10": 0,
         "cfm_sof": 0,
         "cfm_sol": 0,
-    }, entry=0x10)
+    }, entry=0x800)
 
 test_cover_requires_group_stop = require_exception(
     "cover_requires_group_stop", [
@@ -4552,6 +4757,24 @@ test_alloc_requires_group_start = require_exception(
         (0x10, 0x00, nop_m(), nop_i(), nop_i()),
         (0x20, 0x00, alloc_m(1, 1, 0, 0, 0), nop_i(), nop_i()),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x20)
+
+test_mov_bspstore_rsc_mode_precedes_source_nat = require_exception(
+    "mov_bspstore_rsc_mode_precedes_source_nat", [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0), nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(16, 6, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_imm_ar(16, 1), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_ar(16, 18), nop_i(), nop_i()),
+        (0x200, 0x00, 0, 0, 0),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x40)
+
+test_mov_rnat_rsc_mode_precedes_source_nat = require_exception(
+    "mov_rnat_rsc_mode_precedes_source_nat", [
+        (0x10, 0x00, mov_m_imm_ar(36, 1), addl(6, 0x200, 0), nop_i()),
+        (0x20, 0x08, ld8_fill_postinc(16, 6, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_imm_ar(16, 1), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_ar(16, 19), nop_i(), nop_i()),
+        (0x200, 0x00, 0, 0, 0),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x40)
 
 test_loadrs_rejects_nonzero_rsc_mode = require_exception(
     "loadrs_rejects_nonzero_rsc_mode", [
@@ -4568,8 +4791,9 @@ test_rsc_reserved_field_fault = require_exception(
 
 test_stacked_gr_destination_out_of_frame = require_exception(
     "stacked_gr_destination_out_of_frame", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, 0x00, nop_m(), adds(32, 1, 0), nop_i()),
-    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, entry=0x800)
 
 test_predicated_off_stacked_gr_destination_does_not_fault = require_registers(
     "predicated_off_stacked_gr_destination_does_not_fault", [
@@ -4583,8 +4807,9 @@ test_predicated_off_stacked_gr_destination_does_not_fault = require_registers(
 
 test_postincrement_base_out_of_frame = require_exception(
     "postincrement_base_out_of_frame", [
+        *_empty_frame_prologue(0x800, 0x10),
         (0x10, 0x08, lfetch_postinc(32, 8), nop_m(), nop_i()),
-    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, entry=0x800)
 
 test_br_ia_bspstore_mismatch_illegal = require_exception(
     "br_ia_bspstore_mismatch_illegal", [
@@ -4909,24 +5134,32 @@ CASE_NAMES = (
     'alloc_predicated_illegal',
     'alloc_requires_group_start',
     'br_call_ret_rebases_rotating_floating_registers',
+    'br_call_ret_rebases_rotating_predicates',
     'br_ctop_strcpy_pipeline_survives_cover_rfi',
     'br_ia_bspstore_mismatch_illegal',
+    'clrrrb_pr_rebases_rotating_predicates',
     'clrrrb_rebases_rotating_floating_registers',
     'cover_b_ignored_fields_decode',
     'cover_requires_group_stop',
     'cover_rfi_rebases_rotating_floating_registers',
     'cover_rfi_rebases_rotating_general_registers',
+    'cover_rfi_restores_rotating_predicates_by_physical_number',
     'gcc_alloc_and_ar_lc',
     'loadrs_rejects_nonzero_rsc_mode',
+    'mov_bspstore_rsc_mode_precedes_source_nat',
+    'mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates',
+    'mov_rnat_rsc_mode_precedes_source_nat',
     'postincrement_base_out_of_frame',
     'predicated_off_stacked_gr_destination_does_not_fault',
     'rsc_reserved_field_fault',
     'rsc_write_clips_pl_to_cpl',
     'rse_alloc_call_ret',
     'rse_alloc_preserves_ar_pfs',
+    'rse_architectural_reset_exposes_full_frame',
     'rse_big_endian_backing_store',
     'rse_big_endian_partial_rnat_store_preserves_backed_prefix',
     'rse_big_endian_rnat_collection',
+    'rse_boot_handoff_preserves_empty_frame',
     'rse_br_ret_ec_restored_before_target_fill_fault',
     'rse_br_ret_fill_dtlb_miss_retries_atomically',
     'rse_br_ret_fill_ignores_rsc_mode',
@@ -5020,6 +5253,8 @@ CASE_NAMES = (
     'rse_rfi_user_context_preserves_loadrs_dirty_partition',
     'rse_rt_enables_protection_key_checks',
     'rse_rt_translates_with_dt_disabled',
+    'rse_physical_spill_fault_sets_isr_rs',
+    'rse_physical_target_fill_fault_sets_isr_rs_ir',
     'rse_spill_fault_sets_isr_rs',
     'rse_tracked_return_redirties_reused_frame',
     'rse_untracked_return_redirties_restored_frame',

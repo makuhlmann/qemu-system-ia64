@@ -89,6 +89,7 @@ from .encoding import (
     br_cond,
     br_indirect,
     br_ret,
+    break_b,
     break_f,
     break_m,
     break_x_mlx,
@@ -118,6 +119,7 @@ from .encoding import (
     mov_ar,
     mov_ar_lc,
     mov_br_gr,
+    mov_pfs_gr,
     mov_gr_psr_full,
     mov_lc_gr,
     mov_m_ar_gr,
@@ -152,6 +154,11 @@ from .encoding import (
     st2,
     st8,
     st8_postinc,
+    IA64_EXCP_LOWER_PRIV_TRANSFER,
+    IA64_EXCP_SINGLE_STEP,
+    IA64_EXCP_TAKEN_BRANCH,
+    IA64_ISR_CODE_LP,
+    IA64_PSR_LP,
 )
 
 FOUR_K_ITIR = 12 << 2
@@ -187,6 +194,70 @@ test_rfi_target_rse_fill_fault_uses_restored_psr = require_registers(
         "r29": 0,
         "r30": HIGH_TR_BASE + 0xfff8,
         "r31": IA64_ISR_R | IA64_ISR_RS | IA64_ISR_IR,
+    }, entry=0x10)
+
+# An rfi with IPSR.ri = 2 into an MLX bundle: Illegal Operation, with IPSR.ri
+# and ISR.ei 2 (SDM Vol. 2 p. 2:192).
+test_rfi_to_mlx_slot2_illegal_operation = require_registers(
+    "rfi_to_mlx_slot2_illegal_operation", [
+        (0x10, *movl_mlx(20, 0x200)),
+        (0x20, 0x00, mov_m_gr_cr(20, 19), nop_i(), nop_i()),
+        (0x30, *movl_mlx(20, IA64_PSR_IC | (2 << 41))),
+        (0x40, 0x00, mov_m_gr_cr(20, 16), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(0, 23), nop_i(), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), rfi_b()),
+        (0x200, *break_x_mlx(0x1234)),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(30, 16), nop_i(),
+         nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00, mov_m_cr_gr(29, 19), nop_i(),
+         nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30, IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0x200,
+        "r30": IA64_PSR_IC | (2 << 41),
+        # ISR.code 0 (Illegal Operation) and ISR.ei 2.
+        "r31": 2 << 41,
+    }, entry=0x10)
+
+# A br.ret whose frame restore faults: the fault belongs to the target
+# instruction, so the Taken Branch trap of the br.ret comes first, with ISR.ir
+# for the incomplete frame (SDM Vol. 2 6.6, 6.8).
+test_br_ret_taken_branch_trap_precedes_frame_restore_fault = require_registers(
+    "br_ret_taken_branch_trap_precedes_frame_restore_fault", [
+        (0x10, *movl_mlx(3, HIGH_TR_BASE + 0x10000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x30, 0x00, nop_m(), addl(20, 0x81, 0), nop_i()),
+        (0x40, 0x00, nop_m(), mov_pfs_gr(20), nop_i()),
+        (0x50, 0x00, nop_m(), addl(21, 0x300, 0), nop_i()),
+        (0x60, 0x00, nop_m(), mov_br_gr(0, 21), nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(0, 23), nop_i(), nop_i()),
+        (0x80, *movl_mlx(20, 0x200)),
+        (0x90, 0x00, mov_m_gr_cr(20, 19), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(20, IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_RT |
+                         IA64_PSR_TB)),
+        (0xb0, 0x00, mov_m_gr_cr(20, 16), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), rfi_b()),
+        (0x200, 0x11, nop_m(), nop_i(), br_ret(0)),
+        (IA64_TAKEN_BRANCH_VECTOR, 0x00, mov_m_cr_gr(31, 17), nop_i(),
+         nop_i()),
+        (IA64_TAKEN_BRANCH_VECTOR + 0x10, 0x00, mov_m_cr_gr(30, 19),
+         nop_i(), nop_i()),
+        (IA64_TAKEN_BRANCH_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_TAKEN_BRANCH_VECTOR + 0x20,
+                 IA64_TAKEN_BRANCH_VECTOR + 0x20)),
+        (IA64_ALT_DTLB_VECTOR, 0x10, nop_m(), adds(29, 1, 0),
+         br_cond(IA64_ALT_DTLB_VECTOR, IA64_ALT_DTLB_VECTOR)),
+    ], {
+        "ip": IA64_TAKEN_BRANCH_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0,
+        "r30": 0x300,
+        # ISR.ei = 2: the slot of the br.ret.
+        "r31": IA64_ISR_CODE_TB | IA64_ISR_IR | (2 << 41),
     }, entry=0x10)
 
 test_rfi_retries_interrupted_current_frame_fill = require_registers(
@@ -1757,12 +1828,13 @@ test_exception_break_f = require_exception("exception_break_f", [
     (0x10, 0x0d, nop_m(), break_f(0x42), nop_i()),
 ], IA64_EXCP_BREAK, fault_ip=0x10, fault_imm=0x42)
 
+# break.x places only the low 21 bits of imm62 in IIM (SDM Vol 3 break).
 test_exception_break_x = require_registers("exception_break_x", [
     (0x100000, *movl_mlx(2, 1 << 13)),
     (0x100010, 0x10, mov_gr_psr_full(2), nop_i(),
      br_cond(0x100010, 0x10)),
     (0x10, *break_x_mlx(0x34b630b4b820032b)),
-    (IA64_BREAK_VECTOR, 0x00, nop_m(), nop_i(), nop_i()),
+    (IA64_BREAK_VECTOR, 0x00, mov_m_cr_gr(8, 24), nop_i(), nop_i()),
     (IA64_BREAK_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
     (IA64_BREAK_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
      br_cond(IA64_BREAK_VECTOR + 0x20, IA64_BREAK_VECTOR + 0x20)),
@@ -1770,8 +1842,28 @@ test_exception_break_x = require_registers("exception_break_x", [
     "ip": IA64_BREAK_VECTOR + 0x20,
     "exception": IA64_EXCP_NONE,
     "fault_ip": 0x10,
-    "fault_imm": 0x34b630b4b820032b,
+    "fault_imm": 0x32b,
+    "r8": 0x32b,
 }, entry=0x100000)
+
+# break.b ignores imm21 and places 0 in IIM (SDM Vol 3 break).
+test_exception_break_b_iim_zero = require_registers(
+    "exception_break_b_iim_zero", [
+        (0x100000, *movl_mlx(2, 1 << 13)),
+        (0x100010, 0x10, mov_gr_psr_full(2), nop_i(),
+         br_cond(0x100010, 0x10)),
+        (0x10, 0x11, nop_m(), nop_i(), break_b(0x1abcde)),
+        (IA64_BREAK_VECTOR, 0x00, mov_m_cr_gr(8, 24), nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x10, 0x00, nop_m(), nop_i(), nop_i()),
+        (IA64_BREAK_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_BREAK_VECTOR + 0x20, IA64_BREAK_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_BREAK_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "fault_ip": 0x10,
+        "fault_imm": 0,
+        "r8": 0,
+    }, entry=0x100000)
 
 test_exception_records_slot_ri = require_registers(
     "exception_records_slot_ri", [
@@ -4616,6 +4708,173 @@ test_br_ia_taken_branch_trap_precedes_single_step = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
+def _native_completion_trap_handler(vector):
+    """Capture IIP, IIPA, ISR and the IPSR ri and cpl fields of a trap."""
+    return [
+        (vector, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (vector + 0x10, 0x00, mov_m_cr_gr(9, 22), nop_i(), nop_i()),
+        (vector + 0x20, 0x00, mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (vector + 0x30, 0x00, mov_m_cr_gr(11, 16), nop_i(), nop_i()),
+        (vector + 0x40, 0x02, nop_m(), extr_u(12, 11, 41, 2),
+         extr_u(13, 11, 32, 2)),
+        (vector + 0x50, 0x10, nop_m(), nop_i(),
+         br_cond(vector + 0x50, vector + 0x50)),
+    ]
+
+
+# Single Step traps after every instruction that completes, a nullified one
+# included (SDM Vol. 2 Table 5-6: the trap is not shaded).  IIP and IPSR.ri
+# name the next instruction, IIPA and ISR.ei the trapping one (7.1).
+test_native_single_step_traps_predicated_off_instruction = require_registers(
+    "native_single_step_traps_predicated_off_instruction", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_SS)),
+        (0x20, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x30, 2, 3),
+        # PR1 is zero.
+        (0x80, 0x00, nop_m() | 1, nop_i(), nop_i()),
+        *_native_completion_trap_handler(IA64_SINGLE_STEP_VECTOR),
+    ], {
+        "ip": IA64_SINGLE_STEP_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_SINGLE_STEP,
+        "r8": 0x80,
+        "r9": 0x80,
+        "r10": IA64_ISR_CODE_SS,
+        "r12": 1,
+        "r13": 0,
+    }, entry=0x10)
+
+# Concurrent traps: the highest one is taken and ISR.code has a bit for each
+# (SDM Vol. 2 5.5.2 step 8, Table 8-3).
+test_native_taken_branch_precedes_single_step = require_registers(
+    "native_taken_branch_precedes_single_step", [
+        (0x10, *movl_mlx(
+            2, IA64_PSR_IC | IA64_PSR_TB | IA64_PSR_SS | (2 << 41))),
+        (0x20, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x30, 2, 3),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x100)),
+        *_native_completion_trap_handler(IA64_TAKEN_BRANCH_VECTOR),
+    ], {
+        "ip": IA64_TAKEN_BRANCH_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_TAKEN_BRANCH,
+        "r8": 0x100,
+        "r9": 0x80,
+        "r10": (IA64_ISR_CODE_TB | IA64_ISR_CODE_SS |
+                (2 << IA64_ISR_EI_SHIFT)),
+        "r12": 0,
+        "r13": 0,
+    }, entry=0x10)
+
+# A not-taken branch raises no Taken Branch trap; the next taken one does,
+# without the ss bit when PSR.ss is 0.
+test_native_taken_branch_trap_skips_not_taken_branch = require_registers(
+    "native_taken_branch_trap_skips_not_taken_branch", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_TB)),
+        (0x20, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x30, 2, 3),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x200, qp=1)),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x100)),
+        *_native_completion_trap_handler(IA64_TAKEN_BRANCH_VECTOR),
+    ], {
+        "ip": IA64_TAKEN_BRANCH_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_TAKEN_BRANCH,
+        "r8": 0x100,
+        "r9": 0x90,
+        "r10": IA64_ISR_CODE_TB | (2 << IA64_ISR_EI_SHIFT),
+        "r12": 0,
+        "r13": 0,
+    }, entry=0x10)
+
+# This model reports an unimplemented instruction address with a fault on
+# the fetch, so the traps of the branch come first and ISR.code has no ui
+# bit (SDM Vol. 2 4.3.3 and the Lower-Privilege Transfer Trap vector notes).
+test_native_taken_branch_to_unimplemented_address_precedes_uia_fault = \
+    require_registers(
+        "native_taken_branch_to_unimplemented_address_precedes_uia_fault", [
+            (0x10, *movl_mlx(4, (1 << IA64_IMPL_PA_BITS) | 0x100)),
+            (0x20, 0x00, nop_m(), mov_br_gr(7, 4), nop_i()),
+            (0x30, *movl_mlx(
+                2, IA64_PSR_IC | IA64_PSR_TB | IA64_PSR_SS | (2 << 41))),
+            (0x40, *movl_mlx(3, 0x80)),
+            *rfi_to_gr(0x50, 2, 3),
+            (0x80, 0x10, nop_m(), nop_i(), br_indirect(7)),
+            *_native_completion_trap_handler(IA64_TAKEN_BRANCH_VECTOR),
+        ], {
+            "ip": IA64_TAKEN_BRANCH_VECTOR + 0x50,
+            "exception": IA64_EXCP_NONE,
+            "fault_code": IA64_EXCP_TAKEN_BRANCH,
+            "r9": 0x80,
+            "r10": (IA64_ISR_CODE_TB | IA64_ISR_CODE_SS |
+                    (2 << IA64_ISR_EI_SHIFT)),
+            "r12": 0,
+            "r13": 0,
+        }, entry=0x10)
+
+# A br.ret that lowers the privilege level with PSR.lp = 1 takes a
+# Lower-Privilege Transfer trap at the target (SDM Vol. 2 7.1, vector 0x5e00).
+test_br_ret_lower_privilege_transfer_trap = require_registers(
+    "br_ret_lower_privilege_transfer_trap", [
+        (0x10, *movl_mlx(4, 3 << 62)),
+        (0x20, *movl_mlx(5, 0x100)),
+        (0x30, 0x00, nop_m(), mov_m_gr_ar(4, 64), mov_br_gr(7, 5)),
+        (0x40, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_LP | (2 << 41))),
+        (0x50, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x60, 2, 3),
+        (0x80, 0x10, nop_m(), nop_i(), br_ret(7)),
+        *_native_completion_trap_handler(IA64_LOWER_PRIV_TRANSFER_VECTOR),
+    ], {
+        "ip": IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_LOWER_PRIV_TRANSFER,
+        "r8": 0x100,
+        "r9": 0x80,
+        "r10": IA64_ISR_CODE_LP | (2 << IA64_ISR_EI_SHIFT),
+        "r12": 0,
+        "r13": 3,
+    }, entry=0x10)
+
+test_br_ret_lower_privilege_precedes_taken_branch_and_single_step = \
+    require_registers(
+        "br_ret_lower_privilege_precedes_taken_branch_and_single_step", [
+            (0x10, *movl_mlx(4, 3 << 62)),
+            (0x20, *movl_mlx(5, 0x100)),
+            (0x30, 0x00, nop_m(), mov_m_gr_ar(4, 64),
+             mov_br_gr(7, 5)),
+            (0x40, *movl_mlx(
+                2, IA64_PSR_IC | IA64_PSR_LP | IA64_PSR_TB |
+                   IA64_PSR_SS | (2 << 41))),
+            (0x50, *movl_mlx(3, 0x80)),
+            *rfi_to_gr(0x60, 2, 3),
+            (0x80, 0x10, nop_m(), nop_i(), br_ret(7)),
+            *_native_completion_trap_handler(
+                IA64_LOWER_PRIV_TRANSFER_VECTOR),
+        ], {
+            "ip": IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x50,
+            "exception": IA64_EXCP_NONE,
+            "fault_code": IA64_EXCP_LOWER_PRIV_TRANSFER,
+            "r8": 0x100,
+            "r9": 0x80,
+            "r10": (IA64_ISR_CODE_LP | IA64_ISR_CODE_TB |
+                    IA64_ISR_CODE_SS | (2 << IA64_ISR_EI_SHIFT)),
+            "r12": 0,
+            "r13": 3,
+        }, entry=0x10)
+
+# rfi raises no Single Step trap (Single Step Trap vector description): the
+# rfi in slot 2 of 0x80 returns to itself with PSR.ss set and never traps.
+test_native_single_step_not_taken_on_rfi = require_registers(
+    "native_single_step_not_taken_on_rfi", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_SS | (2 << 41))),
+        (0x20, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x30, 2, 3),
+        (0x80, 0x11, nop_m(), nop_i(), rfi_b()),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_br_ia_single_step_trap = require_registers(
     "br_ia_single_step_trap", [
         *ia32_environment_bundles(0x700, 0x10),
@@ -5083,12 +5342,21 @@ CASE_NAMES = (
     'br_ia_single_step_trap',
     'br_ia_taken_branch_trap_precedes_single_step',
     'br_ia_unimplemented_target_preserves_64bit_iip',
+    'br_ret_lower_privilege_precedes_taken_branch_and_single_step',
+    'br_ret_lower_privilege_transfer_trap',
+    'br_ret_taken_branch_trap_precedes_frame_restore_fault',
+    'native_single_step_not_taken_on_rfi',
+    'native_single_step_traps_predicated_off_instruction',
+    'native_taken_branch_precedes_single_step',
+    'native_taken_branch_to_unimplemented_address_precedes_uia_fault',
+    'native_taken_branch_trap_skips_not_taken_branch',
     'break_preserves_ifa_and_records_iim_isr',
     'cloop_zero_st1_timer_interrupts_batched_loop',
     'counted_self_loop_fault_has_slot1_ri',
     'cover_saves_interrupted_cfm_to_ifs',
     'exception_break',
     'exception_break_f',
+    'exception_break_b_iim_zero',
     'exception_break_x',
     'exception_clears_ifs_keeps_cfm',
     'exception_entry_initializes_psr',
@@ -5195,6 +5463,7 @@ CASE_NAMES = (
     'rfi_resumes_at_ipsr_ri_slot',
     'rfi_retries_interrupted_current_frame_fill',
     'rfi_target_rse_fill_fault_uses_restored_psr',
+    'rfi_to_mlx_slot2_illegal_operation',
     'rfi_montecito_native_ia32_disabled_fault',
     'rfi_montecito_uncollected_transition_preserves_target',
     'rfi_to_ia32_clears_fault_suppression_but_preserves_psr_id',
@@ -5237,6 +5506,7 @@ CASE_METADATA = {
     'masked_itv_discards_due_timer': CaseMetadata(nonterminal_effect_loop=True),
     'masking_itv_preserves_pended_timer_irr': CaseMetadata(nonterminal_effect_loop=True),
     'past_itm_does_not_fire': CaseMetadata(nonterminal_effect_loop=True),
+    'br_ret_taken_branch_trap_precedes_frame_restore_fault': CaseMetadata(nonterminal_effect_loop=True),
     'rfi_target_rse_fill_fault_uses_restored_psr': CaseMetadata(nonterminal_effect_loop=True),
 }
 

@@ -22,7 +22,9 @@
 #define MMU_IDX_VIRT_CPL2  3
 #define MMU_IDX_VIRT_CPL3  4
 #define MMU_IDX_RSE        5
-#define NB_MMU_MODES       6
+/* PSR.rt = 0 RSE references: physical, but faults still set ISR.rs. */
+#define MMU_IDX_RSE_PHYS   6
+#define NB_MMU_MODES       7
 
 #define MMU_IDX_VIRT_CPL(cpl) (MMU_IDX_VIRT_CPL0 + (cpl))
 #define MMU_IDX_VIRT_MASK \
@@ -42,6 +44,7 @@
 #define IA64_IBR_COUNT   16
 #define IA64_PMC_COUNT   64
 #define IA64_PMD_COUNT   64
+#define IA64_PMC_PM      (1ULL << 6)
 #define IA64_PKR_COUNT   16
 #define IA64_RR_COUNT    8
 #define IA64_MSR_COUNT   1024
@@ -57,6 +60,8 @@
 #define IA64_CPUID4_LB   (1ULL << 0)  /* brl, long branch */
 #define IA64_CPUID4_SD   (1ULL << 1)  /* spontaneous deferral */
 #define IA64_CPUID4_AO   (1ULL << 2)  /* ld16/st16/cmp8xchg16 atomics */
+#define IA64_CPUID4_CZ   (1ULL << 32) /* clz */
+#define IA64_CPUID4_X2   (1ULL << 33) /* mpy4, mpyshl4 */
 
 /*
  * Direct-mapped lookup for modeled TR/TC entries.  IA-64's minimum page is
@@ -127,6 +132,7 @@
 #define IA64_PSR_DI      (1ULL << 22)
 #define IA64_PSR_SI      (1ULL << 23)
 #define IA64_PSR_DB      (1ULL << 24)
+#define IA64_PSR_LP      (1ULL << 25)
 #define IA64_PSR_TB      (1ULL << 26)
 #define IA64_PSR_RT      (1ULL << 27)
 #define IA64_PSR_IS      (1ULL << 34)
@@ -388,6 +394,8 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 /* NaT Consumption ISR.code{5:4} = 2 for a NaTPage reference. */
 #define IA64_ISR_CODE_NAT_PAGE 0x20
 /* Concurrent trap conditions reported in ISR.code (SDM Vol. 2, Table 8-3). */
+#define IA64_ISR_CODE_FP       (1ULL << 0)
+#define IA64_ISR_CODE_LP       (1ULL << 1)
 #define IA64_ISR_CODE_TB       (1ULL << 2)
 #define IA64_ISR_CODE_SS       (1ULL << 3)
 #define IA64_ISR_CODE_UI       (1ULL << 4)
@@ -426,9 +434,13 @@ static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 #define IA64_MERCED_PURGEABLE_PAGE_SIZE_MASK \
     (IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK | (1ULL << 32))
 
-/* ---- General exception codes ---- */
-#define IA64_GENEX_UNIMPL_DATA_ADDR 43
-#define IA64_GENEX_UNIMPL_INST_ADDR 69
+/*
+ * ISR.code of the unimplemented-address faults: code{7:4} = 3 on the General
+ * Exception vector; the ui bit (4) on the Lower-Privilege Transfer Trap
+ * vector (SDM Vol 2 chapter 8).
+ */
+#define IA64_GENEX_UNIMPL_DATA_ADDR (3 << 4)
+#define IA64_GENEX_UNIMPL_INST_ADDR (1 << 4)
 
 /* ---- Protection Key Register fields ---- */
 #define IA64_PKR_VALID       (1ULL << 0)
@@ -685,21 +697,27 @@ static inline uint8_t ia64_tlb_effective_perm(uint8_t ar, uint8_t pl,
         return access_level <= pl ? (IA64_TLB_R | IA64_TLB_W) : 0;
     case 3:
         return access_level <= pl ? IA64_TLB_ALL : 0;
+    /*
+     * SDM Vol 2 Table 4-4: AR 4-6 give level 0 its own rights (RW, RWX, RW)
+     * whatever the PL; AR 6 adds X only at CPL == PL != 0.
+     */
     case 4:
         if (access_level > pl) {
             return 0;
         }
-        return access_level < pl ? (IA64_TLB_R | IA64_TLB_W) : IA64_TLB_R;
+        return access_level == pl && pl != 0 ?
+               IA64_TLB_R : (IA64_TLB_R | IA64_TLB_W);
     case 5:
         if (access_level > pl) {
             return 0;
         }
-        return access_level < pl ? IA64_TLB_ALL : (IA64_TLB_R | IA64_TLB_X);
+        return access_level == 0 ? IA64_TLB_ALL : (IA64_TLB_R | IA64_TLB_X);
     case 6:
         if (access_level > pl) {
             return 0;
         }
-        return access_level < pl ? IA64_TLB_ALL : (IA64_TLB_R | IA64_TLB_W);
+        return access_level == pl && pl != 0 ?
+               IA64_TLB_ALL : (IA64_TLB_R | IA64_TLB_W);
     case 7:
         return access_level == 0 ? (IA64_TLB_R | IA64_TLB_X) : IA64_TLB_X;
     default:
@@ -759,8 +777,15 @@ typedef enum IA64Exception {
     IA64_EXCP_IA32_INTERRUPT = 36,
     IA64_EXCP_TAKEN_BRANCH = 37,
     IA64_EXCP_SINGLE_STEP = 38,
+    IA64_EXCP_LOWER_PRIV_TRANSFER = 39,
     IA64_EXCP_MAX,
 } IA64Exception;
+
+/*
+ * The instruction that just completed owes a Lower-Privilege Transfer, Taken
+ * Branch or Single Step trap (IA64ExceptionState.completion_trap_*).
+ */
+#define IA64_INTERRUPT_COMPLETION_TRAP CPU_INTERRUPT_TGT_INT_0
 
 /* ---- IVT vector mapping table ---- */
 extern const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX];
@@ -1136,6 +1161,7 @@ static inline void ia64_rse_mark_gr_dirty(CPUIA64State *env, uint32_t reg)
 }
 
 void ia64_set_cfm_rrb_fr(CPUIA64State *env, uint32_t new_rrb);
+void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb);
 void ia64_flush_suppressed_tlb(CPUIA64State *env);
 void ia64_firmware_debug_capture(CPUIA64State *env, uint16_t vector,
                                  bool collected);
@@ -1784,6 +1810,8 @@ typedef struct IA64PalCacheLevel {
     uint8_t  store_latency;
     uint8_t  load_latency;
     uint8_t  tag_lsb;
+    uint8_t  store_hints;     /* SDM Vol. 2 Table 11-68 */
+    uint8_t  load_hints;      /* SDM Vol. 2 Table 11-69 */
     bool     unified;
 } IA64PalCacheLevel;
 
@@ -1852,7 +1880,30 @@ typedef struct IA64PalProfile {
     IA64PalTcLevel tc[IA64_PAL_CACHE_LEVELS][IA64_PAL_CACHE_TYPES];
     uint8_t tc_levels;
     uint8_t unique_tcs;
+
+    /* PAL_PERF_MON_INFO: PAL_WIDTH and the low word of PAL_RETIRED_MASK. */
+    uint8_t perf_counter_width;
+    uint64_t perf_retired_mask;
 } IA64PalProfile;
+
+/*
+ * One PMC or PMD of a model's PMU.  Bits outside mask are ignored: writes
+ * drop them and reads return 0 (SDM Vol. 1 3.1.1), so a register with no
+ * mask reads 0 like an unimplemented one.  Reads return bit sext_bit in the
+ * bits of sext_mask.
+ */
+typedef struct IA64PmuRegister {
+    uint64_t mask;
+    uint64_t sext_mask;
+    uint8_t sext_bit;
+    /* The value after hardware reset and PAL's PMU setup. */
+    uint64_t reset;
+} IA64PmuRegister;
+
+typedef struct IA64PmuLayout {
+    IA64PmuRegister pmc[IA64_PMC_COUNT];
+    IA64PmuRegister pmd[IA64_PMD_COUNT];
+} IA64PmuLayout;
 
 struct IA64CPUClass {
     CPUClass parent_class;
@@ -1870,6 +1921,8 @@ struct IA64CPUClass {
      * reports a P6-class identity instead.
      */
     uint32_t ia32_cpuid_version;
+    /* IA-32 CPUID(2) cache and TLB descriptors: EAX, EBX, ECX, EDX. */
+    uint32_t ia32_cpuid_leaf2[4];
     /*
      * Translation-register file sizes.  These are asymmetric on the original
      * Itanium (8 ITR / 48 DTR, 248701-002 §2.5.6); Madison/Montecito use 64 of
@@ -1895,7 +1948,34 @@ struct IA64CPUClass {
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
+    /*
+     * With PSR.ac = 0 the model decides which unaligned references fault
+     * (SDM Vol. 2 4.5).  unaligned_windows: an integer reference must stay
+     * in an 8-byte window, an FP one in a 16-byte window, FP pairs and
+     * spill/fill are naturally aligned, and a UC or WC reference faults when
+     * it crosses 8 bytes (251110-003 sec 5.5).  Otherwise only a 4 KiB
+     * crossing faults.
+     */
+    bool unaligned_windows;
+    /*
+     * Without unaligned_windows: an integer reference faults when it leaves
+     * its naturally aligned block of this many bytes; 0 leaves only the 4 KiB
+     * rule.  The Itanium processor handles misaligned integer accesses
+     * within 16-byte blocks (251110-003 sec 2.4.2); no document here gives
+     * its FP rule.
+     */
+    uint8_t unaligned_int_block;
+    /*
+     * No Unaligned Data Reference fault on a non-writeback target, even with
+     * PSR.ac = 1.  The SDM exempts only IA-32 port references (Vol. 2
+     * 10.7.1); the SDV firmware issues an unaligned 4-byte store to a port
+     * with PSR.ac = 1 during POST (82c8344), so Merced keeps the exemption
+     * until that firmware runs against the SDM rule.
+     */
+    bool unaligned_uc_exempt;
     const IA64PalProfile *pal;
+    /* NULL keeps all IA64_PMC_COUNT/IA64_PMD_COUNT registers as storage. */
+    const IA64PmuLayout *pmu;
 };
 
 static inline IA64CPU *ia64_cpu_from_cpu_state(CPUState *cs)

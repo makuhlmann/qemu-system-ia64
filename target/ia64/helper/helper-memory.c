@@ -35,6 +35,20 @@ uint64_t helper_ia64_alignment_exempt(CPUIA64State *env, uint64_t addr,
                                           &direct, GETPC());
 }
 
+/*
+ * An Itanium 2 unaligned reference inside its window still faults when it
+ * crosses an 8-byte boundary on a UC or WC target (251110-003 sec 5.5).  The
+ * probe raises any higher-priority fault of the reference first.
+ */
+uint64_t helper_ia64_unaligned_uncacheable(CPUIA64State *env, uint64_t addr,
+                                           uint32_t size, uint32_t is_write)
+{
+    return !ia64_exec_probe_writeback(env, addr, size,
+                                      is_write ? MMU_DATA_STORE :
+                                                 MMU_DATA_LOAD,
+                                      GETPC());
+}
+
 uint64_t helper_cmpxchg(CPUIA64State *env, uint64_t addr, uint64_t cmp,
                         uint64_t val, uint32_t size)
 {

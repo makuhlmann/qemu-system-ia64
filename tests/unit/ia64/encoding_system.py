@@ -53,8 +53,12 @@ def hint_x_mlx(imm62, qp=0):
     )
     return (0x04, nop_m(), l_slot, x_slot)
 
-def break_b():
-    return 0
+def break_b(imm=0, qp=0):
+    return (
+        bitfield(imm & 0xfffff, 6, 20)
+        | bitfield((imm >> 20) & 1, 36, 1)
+        | bitfield(qp, 0, 6)
+    )
 
 def break_f(imm=0, qp=0):
     return (
@@ -166,6 +170,10 @@ def mov_ar_lc(r1, qp=0):
 def mov_i_ar_gr(r1, ar_num, qp=0):
     return (bitfield(0x32, 27, 6) | bitfield(ar_num, 20, 7) |
             bitfield(r1, 6, 7) | bitfield(qp, 0, 6))
+
+def mov_pfs_gr(r2, qp=0):
+    return (bitfield(0x2a, 27, 6) | bitfield(64, 20, 7) |
+            bitfield(r2, 13, 7) | bitfield(qp, 0, 6))
 
 def mov_lc_gr(r2, qp=0):
     return (bitfield(0x2a, 27, 6) | bitfield(65, 20, 7) |
@@ -329,9 +337,10 @@ def mov_rr_read(dest_reg, addr_reg, qp=0, ignored36=0):
             | bitfield(addr_reg, 20, 7) | bitfield(dest_reg, 6, 7)
             | bitfield(qp, 0, 6))
 
-def mov_cpuid(r1, index_reg, qp=0, bit36=0):
+def mov_cpuid(r1, index_reg, qp=0, bit36=0, ignored=0):
     return (op(1) | bitfield(bit36, 36, 1) | bitfield(0x17, 27, 6)
-            | bitfield(index_reg, 20, 7) | bitfield(r1, 6, 7)
+            | bitfield(index_reg, 20, 7) | bitfield(ignored, 13, 7)
+            | bitfield(r1, 6, 7)
             | bitfield(qp, 0, 6))
 
 def mov_dahr_read(r1, index_reg, qp=0, bit36=0, ignored=0):
@@ -373,6 +382,12 @@ def ptc_l(addr_reg, size_reg, qp=0):
     return (op(1) | bitfield(0x09, 27, 6) |
             bitfield(addr_reg, 20, 7) | bitfield(size_reg, 13, 7) |
             bitfield(qp, 0, 6))
+
+def ptc_g(addr_reg, size_reg, qp=0):
+    return EndGroupInsn(
+        op(1) | bitfield(0x0a, 27, 6) |
+        bitfield(addr_reg, 20, 7) | bitfield(size_reg, 13, 7) |
+        bitfield(qp, 0, 6))
 
 def ptc_e(addr_reg, qp=0):
     return (op(1) | bitfield(0x34, 27, 6) |
@@ -504,11 +519,23 @@ def fchkf(sf, source, target, qp=0, ignored26=0):
         | bitfield(qp, 0, 6)
     )
 
-def hint_m(qp=0):
-    return bitfield(1, 27, 6) | bitfield(64, 20, 7) | bitfield(qp, 0, 6)
+def hint_m(imm=0, qp=0):
+    return (
+        bitfield(1, 27, 6)
+        | bitfield(1, 26, 1)
+        | bitfield(imm & 0xfffff, 6, 20)
+        | bitfield((imm >> 20) & 1, 36, 1)
+        | bitfield(qp, 0, 6)
+    )
 
-def hint_i(qp=0):
-    return bitfield(1, 27, 6) | bitfield(64, 20, 7) | bitfield(qp, 0, 6)
+def hint_i(imm=0, qp=0):
+    return (
+        bitfield(1, 27, 6)
+        | bitfield(1, 26, 1)
+        | bitfield(imm & 0xfffff, 6, 20)
+        | bitfield((imm >> 20) & 1, 36, 1)
+        | bitfield(qp, 0, 6)
+    )
 
 def hint_b(imm=0):
     """hint.b (B9): op 2, x6 1."""
@@ -641,6 +668,7 @@ __all__ = (
     'mov_ar_lc',
     'mov_i_ar_gr',
     'mov_lc_gr',
+    'mov_pfs_gr',
     'mov_lc_imm',
     'mov_pr_rot_imm',
     'mov_m_imm_ar',
@@ -671,6 +699,7 @@ __all__ = (
     'itc_d',
     'itc_i',
     'ptc_l',
+    'ptc_g',
     'ptc_e',
     'ptr_op',
     'ptr_d',

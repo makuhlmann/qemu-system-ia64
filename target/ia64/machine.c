@@ -130,7 +130,7 @@ static void ia64_migration_reset_fp_status(CPUIA64State *env)
     set_float_3nan_prop_rule(float_3nan_prop_abc, &env->fp.fp_status);
     set_float_infzeronan_rule(float_infzeronan_dnan_never,
                               &env->fp.fp_status);
-    set_float_default_nan_pattern(0b01000000, &env->fp.fp_status);
+    set_float_default_nan_pattern(0b11000000, &env->fp.fp_status);
     set_float_rounding_mode(float_round_nearest_even, &env->fp.fp_status);
 
     /*
@@ -236,7 +236,7 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
-    .version_id = 6,
+    .version_id = 7,
     .minimum_version_id = 1,
     .pre_save = ia64_cpu_pre_save,
     .post_load = ia64_cpu_post_load,
@@ -264,6 +264,11 @@ const VMStateDescription vmstate_ia64_cpu = {
         VMSTATE_UINT32(env.exception_state.fault_slot, IA64CPU),
         VMSTATE_BOOL(env.exception_state.ia32_trap, IA64CPU),
         VMSTATE_BOOL(env.exception_state.ia32_transition_trap, IA64CPU),
+        VMSTATE_BOOL_V(env.exception_state.completion_trap_armed, IA64CPU, 7),
+        VMSTATE_BOOL_V(env.exception_state.completion_trap_taken, IA64CPU, 7),
+        VMSTATE_UINT8_V(env.exception_state.completion_trap_slot, IA64CPU, 7),
+        VMSTATE_UINT64_V(env.exception_state.completion_trap_code, IA64CPU, 7),
+        VMSTATE_UINT64_V(env.exception_state.completion_trap_iipa, IA64CPU, 7),
         VMSTATE_BOOL(env.exception_state.psr_ic_inflight, IA64CPU),
         VMSTATE_UINT64(env.exception_state.psr_suppression_before_insn,
                        IA64CPU),

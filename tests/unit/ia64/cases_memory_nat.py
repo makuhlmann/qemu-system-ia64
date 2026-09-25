@@ -148,6 +148,7 @@ from .encoding import (
     pshr4,
     raw_bundle,
     register_nat_consumption_test,
+    reserved_memory_selector,
     require_exception,
     require_registers,
     rfi_b,
@@ -178,6 +179,19 @@ from .encoding import (
     tnat_z_unc,
     xchg,
     xchg4,
+    ldf8_a,
+    ldf_fill_postinc,
+    ldfd,
+    ldfe,
+    ldfps,
+    stf_spill_postinc,
+    stfd,
+    IA64_EXCP_SINGLE_STEP,
+    IA64_FIRMWARE_IVT_BASE,
+    IA64_ISR_CODE_SS,
+    IA64_PSR_SS,
+    IA64_SINGLE_STEP_VECTOR,
+    extr_u,
 )
 
 
@@ -441,8 +455,23 @@ test_ld8_c_clr_address_mismatch_reloads = require_registers(
          0),
     ], {"ip": 0x50, "r4": CHECK_LOAD_MISMATCH_DATA}, entry=0x10)
 
+# An unaligned ld16 or st16 is an Unaligned Data Reference fault whatever
+# PSR.ac is (SDM Vol 2 4.5); PSR.ac is 0 here.
+test_ld16_unaligned_always_faults = require_exception(
+    "ld16_unaligned_always_faults", [
+        (0x10, 0x00, addl(3, 0x108, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld16(8, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="montecito")
+
+test_st16_unaligned_always_faults = require_exception(
+    "st16_unaligned_always_faults", [
+        (0x10, 0x00, addl(3, 0x208, 0), nop_i(), nop_i()),
+        (0x20, *movl_mlx(4, 0x1122334455667788)),
+        (0x30, 0x00, st16(3, 4), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x30, cpu="montecito")
+
 test_ld16_loads_gr_and_csd = require_registers("ld16_loads_gr_and_csd", [
-    (0x10, 0x00, addl(3, 0x104, 0), addl(4, 0x10c, 0),
+    (0x10, 0x00, addl(3, 0x100, 0), addl(4, 0x108, 0),
      nop_i()),
     (0x20, *movl_mlx(16, 0x0123456789abcdef)),
     (0x30, *movl_mlx(17, 0xfedcba9876543210)),
@@ -486,7 +515,7 @@ test_ld16_acq_hint_decode = require_registers("ld16_acq_hint_decode", [
 }, entry=0x10)
 
 test_st16_stores_gr_and_csd = require_registers("st16_stores_gr_and_csd", [
-    (0x10, 0x00, addl(3, 0x204, 0), addl(4, 0x20c, 0),
+    (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x208, 0),
      nop_i()),
     (0x20, *movl_mlx(15, 0x0123456789abcdef)),
     (0x30, *movl_mlx(5, 0xfedcba9876543210)),
@@ -1202,6 +1231,8 @@ test_speculative_load_no_recovery_tlb_miss_faults = require_registers(
         "r31": IA64_ISR_R | IA64_ISR_SP,
     }, entry=0x10)
 
+# mov r=psr reads PSR{36:35,31:0} only, so the final PSR shows that the retried
+# load cleared PSR.ed.
 test_speculative_load_handler_psr_ed_defers_retry = require_registers(
     "speculative_load_handler_psr_ed_defers_retry", [
         (0x10, *movl_mlx(2, 0xa000000100020000)),
@@ -1212,15 +1243,8 @@ test_speculative_load_handler_psr_ed_defers_retry = require_registers(
          nop_i()),
         (0x50, 0x00, ld8_s_postinc(4, 2, 8), nop_i(),
          nop_i()),
-        (0x60, 0x00, mov_m_psr_gr(8), nop_i(),
-         nop_i()),
-        (0x70, 0x00, nop_m(), nop_i(), nop_i()),
-        (0x80, 0x00, nop_m(), tbit_z(3, 4, 8, 43),
-         nop_i()),
-        (0x90, 0x00, nop_m(), addl(9, 1, 0, qp=3),
-         addl(10, 1, 0, qp=4)),
-        (0xa0, 0x10, nop_m(), nop_i(),
-         br_cond(0xa0, 0xa0)),
+        (0x60, 0x10, nop_m(), nop_i(),
+         br_cond(0x60, 0x60)),
         (IA64_ALT_DTLB_VECTOR, 0x00, mov_m_cr_gr(20, 16),
          nop_i(), nop_i()),
         (IA64_ALT_DTLB_VECTOR + 0x10, *movl_mlx(21, IA64_PSR_ED)),
@@ -1231,12 +1255,11 @@ test_speculative_load_handler_psr_ed_defers_retry = require_registers(
         (IA64_ALT_DTLB_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
          rfi_b()),
     ], {
-        "ip": 0xa0,
+        "ip": 0x60,
         "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_IC | IA64_PSR_DT,
         "r2": 0xa000000100020008,
         "r4_nat": 1,
-        "r9": 1,
-        "r10": 0,
     }, entry=0x10)
 
 test_speculative_unaligned_no_recovery_faults = require_registers(
@@ -1301,7 +1324,7 @@ test_unimplemented_physical_load_faults = require_registers(
 # 245320-002 sec 3.2: Merced implements 54 virtual address bits, so
 # VA{60:51} must sign-extend VA{50}.  A region-0 address with bit 51 set and
 # bit 50 clear is unimplemented there and takes a General Exception with
-# ISR.code 43, while Itanium 2 implements the full VA{60:0} and merely misses
+# ISR.code 0x30, while Itanium 2 implements the full VA{60:0} and merely misses
 # in the TLB.
 MERCED_UNIMPLEMENTED_VA = 1 << 51
 
@@ -1378,7 +1401,7 @@ test_speculative_recovery_unaligned_defers = require_registers(
         (0x30, *movl_mlx(19, (1 << 13) | (1 << 36) | (1 << 3))),
         (0x40, 0x00, adds(7, LOW_VECTOR_ITIR, 0), adds(5, 5, 0),
          nop_i()),
-        (0x50, 0x00, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
+        (0x50, 0x08, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
          nop_i()),
         (0x60, 0x00, itr_i(5, 18), nop_i(),
          nop_i()),
@@ -1405,7 +1428,7 @@ test_ws2003_cmd646_unaligned_check_load_sets_ed = require_registers(
         (0x30, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_IT | IA64_PSR_AC)),
         (0x40, 0x00, adds(7, 16 << 2, 0), adds(5, 5, 0),
          nop_i()),
-        (0x50, 0x00, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
+        (0x50, 0x08, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20),
          nop_i()),
         (0x60, 0x00, itr_i(5, 18), nop_i(),
          nop_i()),
@@ -1989,6 +2012,20 @@ test_chk_a_m_branches_on_miss = require_registers(
          br_cond(0x30, 0x30)),
     ], {"ip": 0x30, "r4": 0}, entry=0x10)
 
+# A displacement of 0x60000 puts x6 = 1 in bits 32:27 and 1 in bit 26: the
+# shape of hint.m (M48), whose x3 is 0.  chk.a has x3 = 4 and must branch.
+test_chk_a_m_hint_shaped_displacement_branches = require_registers(
+    "chk_a_m_hint_shaped_displacement_branches", [
+        (0x10, 0x00, chk_a_nc_m(27, 0x10, 0x60010), nop_i(),
+         nop_i()),
+        (0x20, 0x00, adds(4, 1, 0), nop_i(),
+         nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(),
+         br_cond(0x30, 0x30)),
+        (0x60010, 0x10, nop_m(), nop_i(),
+         br_cond(0x60010, 0x60010)),
+    ], {"ip": 0x60010, "r4": 0}, entry=0x10)
+
 test_chk_a_clr_removes_entry = require_registers(
     "chk_a_clr_removes_entry", [
         (0x10, 0x00, addl(3, 0x100, 0), nop_i(),
@@ -2065,6 +2102,25 @@ test_alat_reloading_register_does_not_leave_duplicate = require_registers(
         (0x120, 0x00, 0x3333333333333333, 0,
          0),
     ], {"ip": 0xa0, "r4": 0}, entry=0x10)
+
+# Bit 36 of M24-M27 is ignored (SDM Vol 3 Table 4-4): invala still clears
+# the ALAT, so chk.a branches, and flushrs executes.
+test_invala_flushrs_ignore_bit36 = require_registers(
+    "invala_flushrs_ignore_bit36", [
+        (0x10, 0x00, addl(3, 0x100, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld8_a(22, 3), nop_i(), nop_i()),
+        (0x30, 0x00, invala() | bitfield(1, 36, 1), nop_i(), nop_i()),
+        (0x40, 0x00, chk_a_nc_m(22, 0x40, 0x70), adds(4, 1, 0), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+        (0x70, 0x00, flushrs_enc() | bitfield(1, 36, 1), adds(5, 1, 0),
+         nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "exception": IA64_EXCP_NONE,
+        "r4": 0,
+        "r5": 1,
+    }, entry=0x10)
 
 test_invala_clears_all_alat_entries = require_registers(
     "invala_clears_all_alat_entries", [
@@ -2194,6 +2250,49 @@ test_store_postinc_x6_39_reserved_illegal_operation = reserved_memory_x6_test(
 test_store_postinc_x6_3a_reserved_illegal_operation = reserved_memory_x6_test(
     "store_postinc_x6_3a_reserved_illegal_operation",
     store_mem_postinc(0x3a, 3, 4, 8))
+
+
+# One purple cell from each integer-memory selector space of SDM Vol 3
+# Tables 4-28 and 4-30 to 4-33.  PR1 is clear at reset, so each qp=1
+# encoding executes as a nop; with qp=0 each raises Illegal Operation.
+_reserved_memory_selector_representatives = (
+    reserved_memory_selector(4, 0, 0, 0x18, qp=1),
+    reserved_memory_selector(4, 1, 0, 0x18, qp=1),
+    reserved_memory_selector(5, 0, 0, 0x18, qp=1),
+    reserved_memory_selector(4, 0, 1, 0x0c, qp=1),
+    reserved_memory_selector(4, 1, 1, 0x00, qp=1),
+)
+
+test_reserved_memory_selectors_predicated_off_are_nops = require_registers(
+    "reserved_memory_selectors_predicated_off_are_nops", [
+        (0x10 + index * 0x10, 0x00, raw, nop_i(), nop_i())
+        for index, raw in enumerate(_reserved_memory_selector_representatives)
+    ] + [
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_memory_selector_m4_m0_x0_true_illegal = reserved_memory_x6_test(
+    "reserved_memory_selector_m4_m0_x0_true_illegal",
+    _reserved_memory_selector_representatives[0] & ~0x3f)
+
+test_reserved_memory_selector_m4_m1_x0_true_illegal = reserved_memory_x6_test(
+    "reserved_memory_selector_m4_m1_x0_true_illegal",
+    _reserved_memory_selector_representatives[1] & ~0x3f)
+
+test_reserved_memory_selector_m5_true_illegal = reserved_memory_x6_test(
+    "reserved_memory_selector_m5_true_illegal",
+    _reserved_memory_selector_representatives[2] & ~0x3f)
+
+test_reserved_memory_selector_m4_m0_x1_true_illegal = reserved_memory_x6_test(
+    "reserved_memory_selector_m4_m0_x1_true_illegal",
+    _reserved_memory_selector_representatives[3] & ~0x3f)
+
+test_reserved_memory_selector_m4_m1_x1_true_illegal = reserved_memory_x6_test(
+    "reserved_memory_selector_m4_m1_x1_true_illegal",
+    _reserved_memory_selector_representatives[4] & ~0x3f)
 
 test_bsw_restores_banked_nat = require_registers(
     "bsw_restores_banked_nat", [
@@ -2390,9 +2489,11 @@ test_mov_br_nat_source_consumes = register_nat_consumption_test(
 
 test_mov_pr_nat_source_consumes = register_nat_consumption_test(
     "mov_pr_nat_source_consumes",
-    (0x00,
+    # mov pr=r is I23: in an M slot, x3 = 3 is a reserved cell (Table 4-42).
+    (0x00, nop_m(),
      bitfield(3, 33, 3) | bitfield(16, 13, 7) | bitfield(0x7f, 6, 7),
-     nop_i(), nop_i()))
+     nop_i()),
+    expected_isr=1 << IA64_ISR_EI_SHIFT)
 
 test_mov_cr_nat_source_consumes = register_nat_consumption_test(
     "mov_cr_nat_source_consumes",
@@ -2614,6 +2715,177 @@ test_firmware_unaligned_virtual_load_assist = require_registers(
     },
 )
 
+# Itanium 2 faults every unaligned reference with PSR.ac = 1, also on a UC
+# target (SDM Vol. 2 4.5; 251110-003 sec 5.5).
+test_integer_advanced_non_speculative_unaligned_faults = require_exception(
+    "integer_advanced_non_speculative_unaligned_faults", [
+        (0x10, *movl_mlx(2, IA64_PHYS_UC_BIT | 0x101)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_AC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, ld8_a(4, 2), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x40)
+
+test_fp_advanced_non_speculative_unaligned_faults = require_exception(
+    "fp_advanced_non_speculative_unaligned_faults", [
+        (0x10, *movl_mlx(2, IA64_PHYS_UC_BIT | 0x101)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_AC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, ldf8_a(7, 2), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x40)
+
+# Madison with PSR.ac = 0 (251110-003 sec 5.5): integer references stay in
+# an 8-byte window, FP references in a 16-byte window (ldfe covers 10 bytes
+# of it), FP pairs and spill/fill are naturally aligned, and a UC reference
+# faults when it crosses 8 bytes.
+test_madison_integer_load_within_8byte_window = require_registers(
+    "madison_integer_load_within_8byte_window", [
+        (0x10, 0x00, addl(3, 0x101, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld4(4, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="madison")
+
+test_madison_integer_load_crossing_8byte_window_faults = require_exception(
+    "madison_integer_load_crossing_8byte_window_faults", [
+        (0x10, 0x00, addl(3, 0x106, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld4(4, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_fp_load_within_16byte_window = require_registers(
+    "madison_fp_load_within_16byte_window", [
+        (0x10, 0x00, addl(3, 0x102, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfd(6, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="madison")
+
+test_madison_fp_load_crossing_16byte_window_faults = require_exception(
+    "madison_fp_load_crossing_16byte_window_faults", [
+        (0x10, 0x00, addl(3, 0x10c, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfd(6, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_fp_pair_requires_natural_alignment = require_exception(
+    "madison_fp_pair_requires_natural_alignment", [
+        (0x10, 0x00, addl(3, 0x104, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfps(6, 7, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_fp_fill_requires_natural_alignment = require_exception(
+    "madison_fp_fill_requires_natural_alignment", [
+        (0x10, 0x00, addl(3, 0x108, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_fp_spill_requires_natural_alignment = require_exception(
+    "madison_fp_spill_requires_natural_alignment", [
+        (0x10, 0x00, addl(3, 0x108, 0), nop_i(), nop_i()),
+        (0x20, 0x00, stf_spill_postinc(3, 1, 0), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_ldfe_within_16byte_window = require_registers(
+    "madison_ldfe_within_16byte_window", [
+        (0x10, 0x00, addl(3, 0x106, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfe(6, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="madison")
+
+test_madison_ldfe_crossing_16byte_window_faults = require_exception(
+    "madison_ldfe_crossing_16byte_window_faults", [
+        (0x10, 0x00, addl(3, 0x107, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfe(6, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+# Merced with PSR.ac = 0: an integer reference stays in its 16-byte block
+# (251110-003 sec 2.4.2); an FP reference faults only across 4 KiB.
+test_merced_integer_load_within_16byte_block = require_registers(
+    "merced_integer_load_within_16byte_block", [
+        (0x10, 0x00, addl(3, 0x104, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="merced")
+
+test_merced_integer_load_crossing_16byte_block_faults = require_exception(
+    "merced_integer_load_crossing_16byte_block_faults", [
+        (0x10, 0x00, addl(3, 0x10c, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ld8(4, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="merced")
+
+test_merced_fp_load_crossing_16byte_block_completes = require_registers(
+    "merced_fp_load_crossing_16byte_block_completes", [
+        (0x10, 0x00, addl(3, 0x10c, 0), nop_i(), nop_i()),
+        (0x20, 0x00, ldfd(6, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="merced")
+
+test_madison_wb_fp_store_crossing_8byte_boundary_completes = require_registers(
+    "madison_wb_fp_store_crossing_8byte_boundary_completes", [
+        (0x10, 0x00, addl(3, 0x106, 0), nop_i(), nop_i()),
+        (0x20, 0x00, stfd(3, 1), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="madison")
+
+test_madison_uc_fp_store_crossing_8byte_boundary_faults = require_exception(
+    "madison_uc_fp_store_crossing_8byte_boundary_faults", [
+        (0x10, *movl_mlx(3, IA64_PHYS_UC_BIT | 0x106)),
+        (0x20, 0x00, stfd(3, 1), nop_i(), nop_i()),
+    ], IA64_EXCP_UNALIGNED, fault_ip=0x20, cpu="madison")
+
+test_madison_speculative_model_unaligned_defers = require_registers(
+    "madison_speculative_model_unaligned_defers", [
+        (0x10, 0x00, addl(3, 0x106, 0), nop_i(), nop_i()),
+        (0x20, 0x00, load_mem(0x06, 4, 3), nop_i(), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {"ip": 0x30, "r4_nat": 1, "exception": IA64_EXCP_NONE},
+    entry=0x10, cpu="madison")
+
+# The firmware unaligned assist completes the instruction in slot 0, so the
+# Single Step trap names slot 1 as the next instruction and slot 0 as the
+# trapping one (SDM Vol. 2 7.1).
+test_firmware_unaligned_assist_retires_single_step = require_registers(
+    "firmware_unaligned_assist_retires_single_step",
+    [
+        (0x10, *movl_mlx(20, 0x1122334455667788)),
+        (0x20, 0x00, addl(3, 0x300, 0), nop_i(), nop_i()),
+        (0x30, 0x00, st8(3, 20), nop_i(), nop_i()),
+        (0x40, 0x00, nop_m(), adds(3, 4, 3), nop_i()),
+        (0x50, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
+        (0x60, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0x70, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_AC | IA64_PSR_SS)),
+        (0x80, *movl_mlx(4, 0x110)),
+        *rfi_to_gr(0x90, 2, 4),
+        (0x110, 0x00, ld8(22, 3), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR, 0x00,
+         mov_m_cr_gr(24, 19), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(25, 22), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(26, 17), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x30, 0x00,
+         mov_m_cr_gr(27, 16), nop_i(), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x40, 0x02,
+         nop_m(), extr_u(28, 27, 41, 2), nop_i()),
+        (IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50,
+                 IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50)),
+    ],
+    {
+        "ip": IA64_FIRMWARE_IVT_BASE + IA64_SINGLE_STEP_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_SINGLE_STEP,
+        "r22": 0x11223344,
+        "r24": 0x110,
+        "r25": 0x110,
+        "r26": IA64_ISR_CODE_SS,
+        "r28": 1,
+    },
+)
+
 test_speculative_unaligned_defers = require_registers(
     "speculative_unaligned_defers",
     [
@@ -2826,6 +3098,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'bsw_restores_banked_nat',
     'chk_a_clr_removes_entry',
     'chk_a_m_branches_on_miss',
+    'chk_a_m_hint_shaped_displacement_branches',
     'chk_a_nc_m_decode',
     'chk_s_i_long_branch_on_stacked_nat',
     'chk_s_m_branches_on_nat',
@@ -2849,6 +3122,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'fetchadd4_nat_base_sets_read_write_isr',
     'fetchadd4_result_base_alias_invalidates_alat',
     'fetchadd4_unaligned_sets_read_write_isr',
+    'firmware_unaligned_assist_retires_single_step',
     'firmware_unaligned_load_assist',
     'firmware_unaligned_speculative_load_assist',
     'firmware_unaligned_store_assist',
@@ -2857,11 +3131,13 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'integer_nat_propagates_and_clears',
     'integer_postinc_imm9_decode',
     'invala_clears_all_alat_entries',
+    'invala_flushrs_ignore_bit36',
     'invala_e_gr_invalidates_selected_register',
     'ld16_acq_hint_decode',
     'ld16_loads_gr_and_csd',
     'ld16_madison_illegal_operation',
     'ld16_uc_unsupported_data_reference',
+    'ld16_unaligned_always_faults',
     'ld1_acq_decode',
     'ld1_postinc_decode',
     'ld1_reg_postinc_decode',
@@ -2927,12 +3203,30 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'speculative_recovery_unaligned_defers',
     'speculative_unimplemented_physical_unaligned_defers',
     'speculative_unaligned_defers',
+    'fp_advanced_non_speculative_unaligned_faults',
+    'integer_advanced_non_speculative_unaligned_faults',
+    'madison_fp_fill_requires_natural_alignment',
+    'madison_fp_load_crossing_16byte_window_faults',
+    'madison_fp_load_within_16byte_window',
+    'madison_fp_pair_requires_natural_alignment',
+    'madison_fp_spill_requires_natural_alignment',
+    'madison_integer_load_crossing_8byte_window_faults',
+    'madison_integer_load_within_8byte_window',
+    'madison_ldfe_crossing_16byte_window_faults',
+    'madison_ldfe_within_16byte_window',
+    'madison_speculative_model_unaligned_defers',
+    'madison_uc_fp_store_crossing_8byte_boundary_faults',
+    'madison_wb_fp_store_crossing_8byte_boundary_completes',
+    'merced_fp_load_crossing_16byte_block_completes',
+    'merced_integer_load_crossing_16byte_block_faults',
+    'merced_integer_load_within_16byte_block',
     'speculative_stacked_nat_survives_backing_store_switch',
     'speculative_unaligned_no_recovery_faults',
     'st16_madison_illegal_operation',
     'st16_rel_stores_gr_and_csd',
     'st16_stores_gr_and_csd',
     'st16_uc_unsupported_data_reference',
+    'st16_unaligned_always_faults',
     'st1_postinc_decode',
     'st4_variants_preserve_adjacent_halfword',
     'st8_postinc_same_base_value_uses_old_base',
@@ -2944,6 +3238,12 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'store_x6_38_reserved_illegal_operation',
     'store_x6_39_reserved_illegal_operation',
     'store_x6_3a_reserved_illegal_operation',
+    'reserved_memory_selector_m4_m0_x0_true_illegal',
+    'reserved_memory_selector_m4_m0_x1_true_illegal',
+    'reserved_memory_selector_m4_m1_x0_true_illegal',
+    'reserved_memory_selector_m4_m1_x1_true_illegal',
+    'reserved_memory_selector_m5_true_illegal',
+    'reserved_memory_selectors_predicated_off_are_nops',
     'tbit_nat_source_rules',
     'tnat_nz_and_ignored_bits_decode',
     'tnat_nz_or_decode',

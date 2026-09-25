@@ -70,9 +70,11 @@ void helper_check_montecito_16byte_access(CPUIA64State *env, uint64_t va,
 
 uint64_t helper_speculative_probe(CPUIA64State *env, uint64_t va,
                                   uint32_t is_write, uint32_t is_ifetch,
-                                  uint32_t size)
+                                  uint32_t size, uint32_t window,
+                                  uint32_t span)
 {
-    return ia64_mmu_speculative_probe(env, va, is_write, is_ifetch, size);
+    return ia64_mmu_speculative_probe(env, va, is_write, is_ifetch, size,
+                                      window, span);
 }
 
 uint64_t helper_advanced_load_allowed(CPUIA64State *env, uint64_t va)

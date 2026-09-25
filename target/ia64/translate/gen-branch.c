@@ -128,45 +128,29 @@ IA64GenResult ia64_gen_branch(DisasContext *ctx,
     case IA64_OP_BR_WTOP:
     case IA64_OP_BR_CEXIT:
     case IA64_OP_BR_CTOP: {
-        TCGv_i64 tgt = tcg_temp_new_i64();
+        /* These branches exist only in the IP-relative form B1. */
+        TCGv_i32 taken = tcg_temp_new_i32();
         TCGLabel *l_nobr = gen_new_label();
-        uint64_t static_target = insn->address + op->displacement;
-        bool target_is_static = insn->opcode == IA64_OP_BR_WEXIT ||
-                                insn->opcode == IA64_OP_BR_WTOP ||
-                                op->target == 0;
+        uint64_t target = insn->address + op->displacement;
 
         if (insn->opcode == IA64_OP_BR_WEXIT) {
-            gen_helper_br_wexit(tgt, tcg_env,
-                tcg_constant_i64(static_target),
-                tcg_constant_i32(insn->qp));
+            gen_helper_br_wexit(taken, tcg_env, tcg_constant_i32(insn->qp));
         } else if (insn->opcode == IA64_OP_BR_WTOP) {
-            gen_helper_br_wtop(tgt, tcg_env,
-                tcg_constant_i64(static_target),
-                tcg_constant_i32(insn->qp));
+            gen_helper_br_wtop(taken, tcg_env, tcg_constant_i32(insn->qp));
         } else if (insn->opcode == IA64_OP_BR_CEXIT) {
-            gen_helper_br_cexit(tgt, tcg_env,
-                tcg_constant_i64(static_target),
-                tcg_constant_i32(op->target));
+            gen_helper_br_cexit(taken, tcg_env);
         } else {
-            gen_helper_br_ctop(tgt, tcg_env,
-                tcg_constant_i64(static_target),
-                tcg_constant_i32(op->target));
+            gen_helper_br_ctop(taken, tcg_env);
         }
-        tcg_gen_brcondi_i64(TCG_COND_EQ, tgt, 0, l_nobr);
-        if (target_is_static) {
-            if (insn->opcode == IA64_OP_BR_CTOP &&
-                ia64_gen_self_counted_loop(ctx, static_target, insn->address,
-                                           record_iipa,
-                                           track_psr_suppression)) {
-                gen_set_label(l_nobr);
-                break;
-            }
-            ia64_gen_goto_completed(ctx, static_target, insn->address,
-                                    record_iipa, track_psr_suppression);
-        } else {
-            ia64_gen_lookup_tcg_completed(ctx, tgt, insn->address,
-                                          record_iipa, track_psr_suppression);
+        tcg_gen_brcondi_i32(TCG_COND_EQ, taken, 0, l_nobr);
+        if (insn->opcode == IA64_OP_BR_CTOP &&
+            ia64_gen_self_counted_loop(ctx, target, insn->address,
+                                       record_iipa, track_psr_suppression)) {
+            gen_set_label(l_nobr);
+            break;
         }
+        ia64_gen_goto_completed(ctx, target, insn->address, record_iipa,
+                                track_psr_suppression);
         gen_set_label(l_nobr);
         break;
     }

@@ -13,11 +13,14 @@ from .encoding import (
     IA64_EXCP_VIRTUALIZATION,
     IA64_GENERAL_VECTOR,
     IA64_ISR_EI_SHIFT,
+    IA64_PSR_AC,
+    IA64_PSR_BN,
     IA64_PSR_CPL3,
     IA64_PSR_DI,
     IA64_PSR_I,
     IA64_PSR_IC,
     IA64_PSR_IS,
+    IA64_PSR_MC,
     IA64_PSR_SP,
     IA64_PSR_UP,
     UINT64_MAX,
@@ -197,6 +200,7 @@ from .encoding import (
     require_exception,
     require_registers,
     reserved_a1_x4_5_x2b_1,
+    reserved_m_major2,
     rfi_to_gr,
     rsm,
     rum,
@@ -283,26 +287,30 @@ test_mov_cr_lid_ignored_high_bits_read_zero = require_registers(
 
 test_popcnt_decode = require_registers("popcnt_decode", [
     (0x10, *movl_mlx(3, 0xf0f0f0f0f0f0f0f0)),
-    (0x20, 0x00, nop_m(), popcnt(4, 3),
+    (0x20, 0x00, nop_m(), popcnt(4, 3, ignored=1),
      nop_i()),
     (0x30, 0x10, nop_m(), nop_i(),
      br_cond(0x30, 0x30)),
 ], {"ip": 0x30, "r4": 32, "exception": IA64_EXCP_NONE}, entry=0x10)
 
+# No modelled processor sets CPUID[4].cz or .x2 (251110-003 Table 12-3:
+# bits 63:3 reserved), so clz, mpy4 and mpyshl4 execute only as nops with a
+# false predicate and raise Illegal Operation with a true one.
 test_clz_decode = require_registers("clz_decode", [
-    (0x10, *movl_mlx(3, 0x0000f00000000000)),
-    (0x20, 0x00, nop_m(), clz(4, 3),
-     nop_i()),
-    (0x30, 0x00, nop_m(), clz(5, 0),
-     nop_i()),
-    (0x40, 0x10, nop_m(), nop_i(),
-     br_cond(0x40, 0x40)),
+    (0x10, 0x00, nop_m(), addl(31, 4, 0), adds(4, 0x55, 0)),
+    (0x20, 0x00, mov_cpuid(29, 31), clz(4, 0, qp=1, ignored=1), nop_i()),
+    (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
 ], {
-    "ip": 0x40,
-    "r4": 16,
-    "r5": 64,
+    "ip": 0x30,
+    "r4": 0x55,
+    "r29": 0,
     "exception": IA64_EXCP_NONE,
-}, entry=0x10)
+}, entry=0x10, cpu="merced")
+
+test_clz_unsupported_true_illegal = require_exception(
+    "clz_unsupported_true_illegal", [
+        (0x10, 0x00, nop_m(), clz(4, 0), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="merced")
 
 test_pmpy2_decode = require_registers("pmpy2_decode", [
     (0x10, *movl_mlx(29, 0xffff800000020003)),
@@ -372,7 +380,8 @@ test_pmpyshr2_decode = require_registers("pmpyshr2_decode", [
     (0x20, *movl_mlx(31, 0x0002000300040005)),
     (0x30, 0x02, nop_m(), pmpyshr2(4, 29, 31, 16),
      nop_i()),
-    (0x40, 0x02, nop_m(), pmpyshr2(5, 29, 31, 16, signed=True),
+    (0x40, 0x02, nop_m(),
+     pmpyshr2(5, 29, 31, 16, signed=True, ignored=1),
      nop_i()),
     (0x50, 0x10, nop_m(), nop_i(),
      br_cond(0x50, 0x50)),
@@ -399,14 +408,14 @@ test_andcm_imm_negative_mask_round_trip = require_registers(
     }, entry=0x10)
 
 test_hint_m_decode = require_registers("hint_m_decode", [
-    (0x10, 0x00, hint_m(), adds(31, 0x66, 0),
+    (0x10, 0x00, hint_m(0x145678), adds(31, 0x66, 0),
      nop_i()),
     (0x20, 0x10, nop_m(), nop_i(),
      br_cond(0x20, 0x20)),
 ], {"ip": 0x20, "exception": IA64_EXCP_NONE, "r31": 0x66}, entry=0x10)
 
 test_hint_i_decode = require_registers("hint_i_decode", [
-    (0x10, 0x00, nop_m(), hint_i(),
+    (0x10, 0x00, nop_m(), hint_i(0x145678),
      adds(31, 0x66, 0)),
     (0x20, 0x10, nop_m(), nop_i(),
      br_cond(0x20, 0x20)),
@@ -1095,6 +1104,18 @@ test_bsw0_in_b_slot_falls_through = require_registers("bsw0_in_b_slot_falls_thro
      br_cond(0x50, 0x50)),
 ], {"ip": 0x50, "psr": 0, "r2": 0x33}, entry=0x10)
 
+# mov r=psr returns only PSR{36:35,31:0}; the other bits read as 0 (SDM
+# Vol 2 3.3.2), so PSR.bn must not show while PSR.mc and PSR.ac do.
+test_mov_psr_read_omits_bn = require_registers("mov_psr_read_omits_bn", [
+    (0x10, *movl_mlx(18, IA64_PSR_BN | IA64_PSR_MC | IA64_PSR_AC)),
+    (0x20, *movl_mlx(19, 0x80)),
+    *rfi_to_gr(0x30, 18, 19),
+    (0x80, 0x01, mov_m_psr_gr(8), nop_i(), nop_i()),
+    (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+], {"ip": 0x90, "exception": IA64_EXCP_NONE,
+    "r8": IA64_PSR_MC | IA64_PSR_AC,
+    "psr": IA64_PSR_BN | IA64_PSR_MC | IA64_PSR_AC}, entry=0x10)
+
 test_bsw1_sets_bn_bit = require_registers("bsw1_sets_bn_bit", [
     (0x10, 0x10, nop_m(), nop_i(),
      bsw1()),
@@ -1196,6 +1217,15 @@ test_czx1_r_zero_index = require_registers("czx1_r_zero_index", [
      br_cond(0x30, 0x30)),
 ], {"ip": 0x30, "exception": IA64_EXCP_NONE, "r31": 3}, entry=0x10)
 
+# I29 ignores bit 36 (SDM Vol 3 Table 4-4).
+test_czx1_r_ignores_bit36 = require_registers("czx1_r_ignores_bit36", [
+    (0x10, *movl_mlx(3, 0x8877665500332211)),
+    (0x20, 0x00, nop_m(), czx1_r(31, 3) | (1 << 36),
+     nop_i()),
+    (0x30, 0x10, nop_m(), nop_i(),
+     br_cond(0x30, 0x30)),
+], {"ip": 0x30, "exception": IA64_EXCP_NONE, "r31": 3}, entry=0x10)
+
 test_czx1_r_no_zero = require_registers("czx1_r_no_zero", [
     (0x10, *movl_mlx(3, 0x3d6365766863616d)),
     (0x20, 0x00, nop_m(), czx1_r(31, 3),
@@ -1239,7 +1269,7 @@ test_czx2_l_zero_index = require_registers("czx2_l_zero_index", [
 test_mov_cpuid_indexed_decode = require_registers("mov_cpuid_indexed_decode", [
     (0x10, 0x00, nop_m(), addl(31, 3, 0),
      nop_i()),
-    (0x20, 0x00, mov_cpuid(29, 31, bit36=1), nop_i(),
+    (0x20, 0x00, mov_cpuid(29, 31, bit36=1, ignored=0x55), nop_i(),
      nop_i()),
     (0x30, 0x00, nop_m(), addl(31, 4, 0),
      nop_i()),
@@ -1625,11 +1655,43 @@ test_psub1_uuu_decode = require_registers("psub1_uuu_decode", [
 test_pshladd2_decode = require_registers("pshladd2_decode", [
     (0x10, *movl_mlx(3, 0x7fff40000001ffff)),
     (0x20, *movl_mlx(4, 0x00010001ffff0001)),
-    (0x30, 0x02, nop_m(), pshladd2(5, 3, 4, 4),
+    (0x30, 0x02, nop_m(), pshladd2(5, 3, 3, 4),
      nop_i()),
     (0x40, 0x10, nop_m(), nop_i(),
      br_cond(0x40, 0x40)),
-], {"ip": 0x40, "r5": 0x7fff7fff000ffff1}, entry=0x10)
+], {"ip": 0x40, "r5": 0x7fff7fff0007fff9}, entry=0x10)
+
+# SDM Vol 3 pshladd operation: a lane whose shift saturates keeps the
+# saturated value; y is added only to an unsaturated shift.
+test_pshladd2_shift_overflow_suppresses_add = require_registers(
+    "pshladd2_shift_overflow_suppresses_add", [
+        (0x10, *movl_mlx(3, 0xc0003fffbfff4000)),
+        (0x20, *movl_mlx(4, 0x000100010001ffff)),
+        (0x30, 0x02, nop_m(), pshladd2(5, 3, 1, 4), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "r5": 0x80017fff80007fff,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+# A10 ct2d = 3 (count 4) is reserved if PR[qp] is 1 (SDM Vol 3 Table 4-74).
+test_packed_shift_add_count4_predicated_off_is_nop = require_registers(
+    "packed_shift_add_count4_predicated_off_is_nop", [
+        (0x10, 0x02, nop_m(), pshladd2(5, 3, 4, 4, qp=1),
+         pshradd2(6, 3, 4, 4, qp=1)),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "r5": 0,
+        "r6": 0,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_packed_shift_add_count4_true_illegal = require_exception(
+    "packed_shift_add_count4_true_illegal", [
+        (0x10, 0x02, nop_m(), pshladd2(5, 3, 4, 4), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
 
 test_pshradd2_decode = require_registers("pshradd2_decode", [
     (0x10, *movl_mlx(3, 0x80007fff0004fffc)),
@@ -1651,23 +1713,38 @@ test_shl_var_ignored_bit_decode = require_registers(
     ], {"ip": 0x30, "r10": 0x120}, entry=0x10)
 
 test_mpy4_decode = require_registers("mpy4_decode", [
-    (0x10, *movl_mlx(8, 0x00000000ffffffff)),
-    (0x20, 0x00, nop_m(), addl(9, 2, 0),
-     nop_i()),
-    (0x30, 0x00, nop_m(), nop_i(),
-     mpy4(10, 8, 9, ignored=1)),
-    (0x40, 0x10, nop_m(), nop_i(),
-     br_cond(0x40, 0x40)),
-], {"ip": 0x40, "r10": 0x00000001fffffffe}, entry=0x10)
+    (0x10, 0x00, nop_m(), addl(31, 4, 0), adds(10, 0x55, 0)),
+    (0x20, 0x00, mov_cpuid(29, 31), nop_i(),
+     mpy4(10, 0, 0, ignored=1, qp=1)),
+    (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+], {
+    "ip": 0x30,
+    "r10": 0x55,
+    "r29": 1,
+    "exception": IA64_EXCP_NONE,
+}, entry=0x10, cpu="madison")
+
+test_mpy4_unsupported_true_illegal = require_exception(
+    "mpy4_unsupported_true_illegal", [
+        (0x10, 0x00, nop_m(), nop_i(), mpy4(10, 0, 0)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="madison")
 
 test_mpyshl4_decode = require_registers("mpyshl4_decode", [
-    (0x10, *movl_mlx(8, 0x00000002000000ff)),
-    (0x20, *movl_mlx(9, 0xffff000000000003)),
-    (0x30, 0x00, nop_m(), nop_i(),
-     mpyshl4(10, 8, 9, ignored=1)),
-    (0x40, 0x10, nop_m(), nop_i(),
-     br_cond(0x40, 0x40)),
-], {"ip": 0x40, "r10": 0x0000000600000000}, entry=0x10)
+    (0x10, 0x00, nop_m(), addl(31, 4, 0), adds(10, 0x55, 0)),
+    (0x20, 0x00, mov_cpuid(29, 31), nop_i(),
+     mpyshl4(10, 0, 0, ignored=1, qp=1)),
+    (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+], {
+    "ip": 0x30,
+    "r10": 0x55,
+    "r29": 5,
+    "exception": IA64_EXCP_NONE,
+}, entry=0x10, cpu="montecito")
+
+test_mpyshl4_unsupported_true_illegal = require_exception(
+    "mpyshl4_unsupported_true_illegal", [
+        (0x10, 0x00, nop_m(), nop_i(), mpyshl4(10, 0, 0)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="montecito")
 
 test_pshr_decode = require_registers("pshr_decode", [
     (0x10, *movl_mlx(24, 0x800000007fffffff)),
@@ -1711,8 +1788,8 @@ test_pshl_fixed_complement_count_decode = require_registers(
     "pshl_fixed_complement_count_decode", [
         (0x10, *movl_mlx(8, 0x0000000000000080)),
         (0x20, *movl_mlx(9, 0x0000000000000080)),
-        (0x30, 0x01, nop_m(), pshl4_fixed(8, 8, 24),
-         pshl2_fixed(9, 9, 8)),
+        (0x30, 0x01, nop_m(), pshl4_fixed(8, 8, 24, ignored=7),
+         pshl2_fixed(9, 9, 8, ignored=7)),
         (0x40, 0x10, nop_m(), nop_i(),
          br_cond(0x40, 0x40)),
     ], {
@@ -1989,6 +2066,17 @@ test_brl_call_merced_illegal_operation = require_exception(
 test_brl_cond_merced_illegal_operation = require_exception(
     "brl_cond_merced_illegal_operation", [
         (0x10, *brl_cond_mlx(0x10, 0x40)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="merced")
+
+# SDM Vol 2 §7.4: the fault is taken regardless of the qualifying predicate.
+test_brl_cond_qp_false_merced_still_illegal = require_exception(
+    "brl_cond_qp_false_merced_still_illegal", [
+        (0x10, *brl_cond_mlx(0x10, 0x40, qp=1)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="merced")
+
+test_brl_call_qp_false_merced_still_illegal = require_exception(
+    "brl_call_qp_false_merced_still_illegal", [
+        (0x10, *brl_call_mlx(6, 0x10, 0x40, qp=1)),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x10, cpu="merced")
 
 test_brl_cond_mlx_no_stop_decode = require_registers(
@@ -2296,6 +2384,31 @@ test_ia32_cpuid_leaf2_reports_madison_cache_descriptors = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
+# 245320-003 §8.4 Table 8-2, with the 4 MB L2 descriptor (0x89).
+test_ia32_cpuid_leaf2_reports_merced_cache_descriptors = require_registers(
+    "ia32_cpuid_leaf2_reports_merced_cache_descriptors", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "66 31 c0 "
+            "0f a2 "
+            "66 89 c6 "
+            "66 b8 02 00 00 00 "
+            "0f a2")),
+        ia32_bundle(0x110, bytes.fromhex("0f b8 00 02")),
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+    ], {
+        "ip": 0x200,
+        "r8": 0x00151001,
+        "r9": 0x009b9690,
+        "r10": 0xffffffff80000000,
+        "r11": 0x0000891a,
+        "r14": 2,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="merced")
+
 test_ia32_cpuid_leaf1_reports_madison_feature_word = require_registers(
     "ia32_cpuid_leaf1_reports_madison_feature_word", [
         *ia32_environment_bundles(0x700, 0x10),
@@ -2558,6 +2671,217 @@ test_reserved_ip_relative_branch_btype_illegal = require_exception(
     fault_ip=0x10,
 )
 
+# SDM Vol 3 §4.1: unused purple and cyan cells fault only when PR[qp] is 1,
+# brown cells always.  PR1 is clear at reset.
+test_reserved_a1_predicated_off_is_nop = require_registers(
+    "reserved_a1_predicated_off_is_nop", [
+        (0x10, 0x00, nop_m(),
+         reserved_a1_x4_5_x2b_1(1, 2, 3, qp=1), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r1": 0,
+    }, entry=0x10)
+
+test_reserved_i_selector_predicated_off_is_nop = require_registers(
+    "reserved_i_selector_predicated_off_is_nop", [
+        (0x10, 0x00, nop_m(),
+         op(5) | bitfield(2, 34, 2) | bitfield(1, 0, 6), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_i_selector_true_illegal = require_exception(
+    "reserved_i_selector_true_illegal", [
+        (0x10, 0x00, nop_m(), op(5) | bitfield(2, 34, 2), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_reserved_fp_memory_selector_predicated_off_is_nop = require_registers(
+    "reserved_fp_memory_selector_predicated_off_is_nop", [
+        (0x10, 0x00,
+         op(6) | bitfield(0x10, 30, 6) | bitfield(1, 0, 6),
+         nop_i(), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_fp_memory_selector_true_illegal = require_exception(
+    "reserved_fp_memory_selector_true_illegal", [
+        (0x10, 0x00, op(6) | bitfield(0x10, 30, 6), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# I3 mbtype4 other than 0 and 8-11 is reservedQP (Table 4-74).
+test_mux1_reserved_mbtype_predicated_off_is_nop = require_registers(
+    "mux1_reserved_mbtype_predicated_off_is_nop", [
+        (0x10, 0x00, nop_m(), adds(5, 0x44, 0), nop_i()),
+        (0x20, 0x02, nop_m(), mux1(5, 3, 1, qp=1), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {
+        "ip": 0x30,
+        "r5": 0x44,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_mux1_reserved_mbtype_true_illegal = require_exception(
+    "mux1_reserved_mbtype_true_illegal", [
+        (0x10, 0x02, nop_m(), mux1(5, 3, 1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# za = zb = 1 selects Table 4-20, where every cell but the variable shifts
+# is reserved if PR[qp] is 1.
+test_popcnt_size_selector_predicated_off_is_nop = require_registers(
+    "popcnt_size_selector_predicated_off_is_nop", [
+        (0x10, 0x00, nop_m(), adds(4, 0x55, 0), nop_i()),
+        (0x20, 0x00, nop_m(),
+         popcnt(4, 3, qp=1) | bitfield(1, 36, 1), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], {
+        "ip": 0x30,
+        "r4": 0x55,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_popcnt_size_selector_true_illegal = require_exception(
+    "popcnt_size_selector_true_illegal", [
+        (0x10, 0x00, nop_m(),
+         popcnt(4, 3) | bitfield(1, 36, 1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_pmpy2_size_selector_predicated_off_is_nop = require_registers(
+    "pmpy2_size_selector_predicated_off_is_nop", [
+        (0x10, 0x00, adds(4, 0x55, 0),
+         pmpy2(4, 29, 31, qp=1) | bitfield(1, 36, 1), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "r4": 0x55,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_pmpy2_size_selector_true_illegal = require_exception(
+    "pmpy2_size_selector_true_illegal", [
+        (0x10, 0x00, nop_m(),
+         pmpy2(4, 29, 31) | bitfield(1, 36, 1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_pmpyshr2_size_selector_predicated_off_is_nop = require_registers(
+    "pmpyshr2_size_selector_predicated_off_is_nop", [
+        (0x10, 0x00, adds(4, 0x55, 0),
+         pmpyshr2(4, 29, 31, 16, qp=1) | bitfield(1, 36, 1), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "r4": 0x55,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_pmpyshr2_size_selector_true_illegal = require_exception(
+    "pmpyshr2_size_selector_true_illegal", [
+        (0x10, 0x00, nop_m(),
+         pmpyshr2(4, 29, 31, 16) | bitfield(1, 36, 1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# Table 4-42: M op 0 x3 = 1 is reserved, not an alias of Table 4-43's sum.
+test_reserved_m0_system_alias_predicated_off_is_nop = require_registers(
+    "reserved_m0_system_alias_predicated_off_is_nop", [
+        (0x10, 0x00,
+         bitfield(1, 33, 3) | bitfield(4, 27, 4) | 1,
+         nop_i(), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_m0_system_alias_true_illegal = require_exception(
+    "reserved_m0_system_alias_true_illegal", [
+        (0x10, 0x00,
+         bitfield(1, 33, 3) | bitfield(4, 27, 4),
+         nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# M/A major opcode 2 is purple in Table 4-3; it is not xchg/cmpxchg.
+test_reserved_m_major2_predicate_semantics = require_registers(
+    "reserved_m_major2_predicate_semantics", [
+        (0x10, 0x00, reserved_m_major2(qp=1), nop_i(), nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_m_major2_true_illegal = require_exception(
+    "reserved_m_major2_true_illegal", [
+        (0x10, 0x00, reserved_m_major2(), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# I/A major opcode 1 is purple in Table 4-3; it is not hint.i.
+test_reserved_i_major1_predicated_off_is_nop = require_registers(
+    "reserved_i_major1_predicated_off_is_nop", [
+        (0x10, 0x00, nop_m(), op(1) | 1, nop_i()),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_reserved_i_major1_true_illegal = require_exception(
+    "reserved_i_major1_true_illegal", [
+        (0x10, 0x00, nop_m(), op(1), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# Table 4-48: x6 = 0x03 is cyan (reserved if PR[qp] is 1), x6 = 0x22 brown.
+test_reserved_b_cyan_true_illegal = require_exception(
+    "reserved_b_cyan_true_illegal", [
+        (0x10, 0x10, nop_m(), nop_i(), bitfield(3, 27, 6)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+test_reserved_b_brown_predicated_off_still_illegal = require_exception(
+    "reserved_b_brown_predicated_off_still_illegal", [
+        (0x10, 0x10, nop_m(), nop_i(), bitfield(0x22, 27, 6) | 1),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# Table 4-3: B major opcodes 3 and 6 are ignored (white) and execute as nops;
+# 8-F are brown.
+test_b_ignored_major_ops_are_nops = require_registers(
+    "b_ignored_major_ops_are_nops", [
+        (0x10, 0x12, nop_m(), op(3), op(6)),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_b_major8_predicated_off_still_illegal = require_exception(
+    "b_major8_predicated_off_still_illegal", [
+        (0x10, 0x10, nop_m(), nop_i(), op(8) | 1),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# B op 0 x6 = 0x01 is an ignored (white) cell of SDM Vol 3 Table 4-48 in
+# rev 2.1 and 2.3: a nop whatever the qualifying predicate.
+test_reserved_b_cyan_predicated_off_is_nop = require_registers(
+    "reserved_b_cyan_predicated_off_is_nop", [
+        (0x10, 0x10, nop_m(), nop_i(), bitfield(1, 27, 6) | 1),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_b_ignored_x6_01_true_predicate_is_nop = require_registers(
+    "b_ignored_x6_01_true_predicate_is_nop", [
+        (0x10, 0x10, nop_m(), nop_i(), bitfield(1, 27, 6)),
+        (0x20, 0x10, nop_m(), nop_i(), br_cond(0x20, 0x20)),
+    ], {
+        "ip": 0x20,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
 test_br_cloop_decrements_lc = require_registers("br_cloop_decrements_lc", [
     (0x10, 0x00, nop_m(), adds(4, 0, 0), nop_i()),
     (0x20, 0x02, nop_m(), mov_lc_imm(2), nop_i()),
@@ -2700,6 +3024,44 @@ test_br_wexit_false_predicate_drains_epilog = require_registers(
         (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
     ], {"ip": 0x80, "r4": 1, "r5": 0, "r6": 0}, entry=0x10)
 
+# A taken modulo-scheduled loop branch to address 0 must branch; bundle 0
+# sets r8 = 1, the fall-through path r8 = 2.
+test_br_ctop_taken_target_zero = require_registers(
+    "br_ctop_taken_target_zero", [
+        (0x00, 0x10, nop_m(), adds(8, 1, 0), br_cond(0x00, 0x60)),
+        (0x10, 0x01, nop_m(), nop_i(), mov_lc_imm(1)),
+        (0x20, 0x13, nop_m(), nop_b(), br_ctop_many(0x20, 0x00)),
+        (0x30, 0x10, nop_m(), adds(8, 2, 0), br_cond(0x30, 0x60)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {"ip": 0x60, "exception": IA64_EXCP_NONE, "r8": 1}, entry=0x10)
+
+test_br_cexit_taken_target_zero = require_registers(
+    "br_cexit_taken_target_zero", [
+        (0x00, 0x10, nop_m(), adds(8, 1, 0), br_cond(0x00, 0x60)),
+        (0x10, 0x01, nop_m(), mov_lc_imm(0), mov_i_imm_ar(66, 1)),
+        (0x20, 0x13, nop_m(), nop_b(),
+         ip_relative_branch_btype(6, 0x20, 0x00)),
+        (0x30, 0x10, nop_m(), adds(8, 2, 0), br_cond(0x30, 0x60)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {"ip": 0x60, "exception": IA64_EXCP_NONE, "r8": 1}, entry=0x10)
+
+test_br_wtop_taken_target_zero = require_registers(
+    "br_wtop_taken_target_zero", [
+        (0x00, 0x10, nop_m(), adds(8, 1, 0), br_cond(0x00, 0x60)),
+        (0x10, 0x13, nop_m(), nop_b(), br_wtop(0x10, 0x00, qp=0)),
+        (0x20, 0x10, nop_m(), adds(8, 2, 0), br_cond(0x20, 0x60)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {"ip": 0x60, "exception": IA64_EXCP_NONE, "r8": 1}, entry=0x10)
+
+test_br_wexit_taken_target_zero = require_registers(
+    "br_wexit_taken_target_zero", [
+        (0x00, 0x10, nop_m(), adds(8, 1, 0), br_cond(0x00, 0x60)),
+        (0x10, 0x01, nop_m(), mov_i_imm_ar(66, 0), nop_i()),
+        (0x20, 0x13, nop_m(), nop_b(), br_wexit(0x20, 0x00, qp=1)),
+        (0x30, 0x10, nop_m(), adds(8, 2, 0), br_cond(0x30, 0x60)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {"ip": 0x60, "exception": IA64_EXCP_NONE, "r8": 1}, entry=0x10)
+
 test_pmc_pmd_registers_are_independent = require_registers("pmc_pmd_registers_are_independent", [
     (0x10, 0x00, adds(9, 1, 0), adds(20, 0x77, 0),
      nop_i()),
@@ -2719,6 +3081,224 @@ test_pmc_pmd_registers_are_independent = require_registers("pmc_pmd_registers_ar
     "r30": 0x77,
     "r31": 0x55,
 }, entry=0x10)
+
+# Unimplemented PMC/PMD reads give 0 and writes are ignored, without a fault
+# (SDM Vol. 2 7.2.1, Vol. 3 mov indirect).
+test_pmc_pmd_unimplemented_index_does_not_fault = require_registers(
+    "pmc_pmd_unimplemented_index_does_not_fault", [
+        (0x10, 0x00, adds(8, 0xff, 0), adds(20, 0x5a, 0), nop_i()),
+        (0x20, 0x00, mov_grpmc_indexed(8, 20), nop_i(), nop_i()),
+        (0x30, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, mov_pmcgr_indexed(30, 8), nop_i(), nop_i()),
+        (0x60, 0x00, mov_pmdgr_indexed(31, 8), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0,
+        "r31": 0,
+    }, entry=0x10)
+
+# PSR.sp and PMC.pm hide a PMD only at CPL > 0 (SDM Vol. 2 Table 7-5).
+test_pmd_cpl0_secure_monitor_remains_visible = require_registers(
+    "pmd_cpl0_secure_monitor_remains_visible", [
+        (0x10, 0x00, adds(8, 4, 0), adds(20, 0x44, 0), nop_i()),
+        (0x20, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0x30, 0x00, ssm(IA64_PSR_SP), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, mov_pmdgr_indexed(30, 8), nop_i(), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0x44,
+    }, entry=0x10)
+
+def _pmd_cpl3_read_case(name, psr, expected_pm, expected_plain):
+    return require_registers(name, [
+        (0x10, 0x00, adds(8, 4, 0), adds(9, 5, 0), nop_i()),
+        (0x20, 0x00, adds(20, 1 << 6, 0), adds(21, 0x44, 0), nop_i()),
+        (0x30, 0x00, mov_grpmc_indexed(8, 20), adds(22, 0, 0), nop_i()),
+        (0x40, 0x00, mov_grpmd_indexed(8, 21), nop_i(), nop_i()),
+        (0x50, 0x00, mov_grpmc_indexed(9, 22), adds(23, 0x55, 0), nop_i()),
+        (0x60, 0x00, mov_grpmd_indexed(9, 23), nop_i(), nop_i()),
+        (0x70, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x80, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_CPL3 | psr)),
+        (0x90, 0x00, nop_m(), adds(31, 0xc0, 0), nop_i()),
+        *rfi_to_gr(0xa0, 19, 31),
+        (0xc0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xd0, 0x00, mov_pmdgr_indexed(30, 8), nop_i(), nop_i()),
+        (0xe0, 0x00, mov_pmdgr_indexed(29, 9), nop_i(), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+    ], {
+        "ip": 0xf0,
+        "exception": IA64_EXCP_NONE,
+        "r29": expected_plain,
+        "r30": expected_pm,
+    }, entry=0x10)
+
+test_pmd_cpl3_privileged_monitor_reads_zero = _pmd_cpl3_read_case(
+    "pmd_cpl3_privileged_monitor_reads_zero", 0, 0, 0x55)
+
+test_pmd_cpl3_secure_monitor_reads_zero = _pmd_cpl3_read_case(
+    "pmd_cpl3_secure_monitor_reads_zero", IA64_PSR_SP, 0, 0)
+
+# 245320-003 §6.2: ignored PMC fields read 0; PMC14 is not populated.
+test_pmc_merced_ignored_fields_and_unimplemented_register = require_registers(
+    "pmc_merced_ignored_fields_and_unimplemented_register", [
+        (0x10, *movl_mlx(20, UINT64_MAX)),
+        (0x20, 0x00, nop_m(), adds(8, 0, 0), adds(9, 4, 0)),
+        (0x30, 0x00, nop_m(), adds(10, 6, 0), adds(11, 8, 0)),
+        (0x40, 0x00, nop_m(), adds(12, 10, 0), adds(13, 11, 0)),
+        (0x50, 0x00, nop_m(), adds(14, 12, 0), adds(15, 13, 0)),
+        (0x60, 0x00, nop_m(), adds(16, 14, 0), nop_i()),
+        (0x70, 0x00, mov_grpmc_indexed(8, 20), nop_i(), nop_i()),
+        (0x80, 0x00, mov_pmcgr_indexed(30, 8), nop_i(), nop_i()),
+        (0x90, 0x00, mov_grpmc_indexed(9, 20), nop_i(), nop_i()),
+        (0xa0, 0x00, mov_pmcgr_indexed(31, 9), nop_i(), nop_i()),
+        (0xb0, 0x00, mov_grpmc_indexed(10, 20), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_pmcgr_indexed(29, 10), nop_i(), nop_i()),
+        (0xd0, 0x00, mov_grpmc_indexed(11, 20), nop_i(), nop_i()),
+        (0xe0, 0x00, mov_pmcgr_indexed(28, 11), nop_i(), nop_i()),
+        (0xf0, 0x00, mov_grpmc_indexed(12, 20), nop_i(), nop_i()),
+        (0x100, 0x00, mov_pmcgr_indexed(27, 12), nop_i(), nop_i()),
+        (0x110, 0x00, mov_grpmc_indexed(13, 20), nop_i(), nop_i()),
+        (0x120, 0x00, mov_pmcgr_indexed(26, 13), nop_i(), nop_i()),
+        (0x130, 0x00, mov_grpmc_indexed(14, 20), nop_i(), nop_i()),
+        (0x140, 0x00, mov_pmcgr_indexed(25, 14), nop_i(), nop_i()),
+        (0x150, 0x00, mov_grpmc_indexed(15, 20), nop_i(), nop_i()),
+        (0x160, 0x00, mov_pmcgr_indexed(24, 15), nop_i(), nop_i()),
+        (0x170, 0x00, mov_grpmc_indexed(16, 20), nop_i(), nop_i()),
+        (0x180, 0x00, mov_pmcgr_indexed(23, 16), nop_i(), nop_i()),
+        (0x190, 0x10, nop_m(), nop_i(), br_cond(0x190, 0x190)),
+    ], {
+        "ip": 0x190,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0xf1,
+        "r31": 0x037f7f7f,
+        "r29": 0x033f7f7f,
+        "r28": 0xfffffffe3ffffff8,
+        "r27": 0x030f00cf,
+        "r26": 0x130f00cf,
+        "r25": 0x0000ffcf,
+        "r24": 1,
+        "r23": 0,
+    }, entry=0x10, cpu="merced")
+
+# Bits 60:51 of an EAR address read as bit 50; PMD18 is not populated.
+test_pmd_merced_address_fields_and_unimplemented_register = require_registers(
+    "pmd_merced_address_fields_and_unimplemented_register", [
+        (0x10, *movl_mlx(20, 0x1ff800000000001f)),
+        (0x20, 0x00, adds(8, 0, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0x40, 0x00, mov_pmdgr_indexed(30, 8), nop_i(), nop_i()),
+        (0x50, *movl_mlx(20, 0xe004000000000123)),
+        (0x60, 0x00, adds(8, 2, 0), nop_i(), nop_i()),
+        (0x70, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0x80, 0x00, mov_pmdgr_indexed(31, 8), nop_i(), nop_i()),
+        (0x90, *movl_mlx(20, 0x3ff800000000000f)),
+        (0xa0, 0x00, adds(8, 17, 0), nop_i(), nop_i()),
+        (0xb0, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_pmdgr_indexed(29, 8), nop_i(), nop_i()),
+        (0xd0, *movl_mlx(20, UINT64_MAX)),
+        (0xe0, 0x00, adds(8, 18, 0), nop_i(), nop_i()),
+        (0xf0, 0x00, mov_grpmd_indexed(8, 20), nop_i(), nop_i()),
+        (0x100, 0x00, mov_pmdgr_indexed(28, 8), nop_i(), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0x110)),
+    ], {
+        "ip": 0x110,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0x3,
+        "r31": 0xfffc000000000123,
+        "r29": 0x200000000000000d,
+        "r28": 0,
+    }, entry=0x10, cpu="merced")
+
+def _pmd_counter_sign_extension_case(name, cpu, value, expected):
+    return require_registers(name, [
+        (0x10, *movl_mlx(20, value)),
+        (0x20, 0x00, adds(9, 4, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_grpmd_indexed(9, 20), nop_i(), nop_i()),
+        (0x40, 0x00, mov_pmdgr_indexed(30, 9), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], {
+        "ip": 0x50,
+        "exception": IA64_EXCP_NONE,
+        "r30": expected,
+    }, entry=0x10, cpu=cpu)
+
+# 245320-003 Figure 6-12 and 251110-003 Table 10-7.
+test_pmd_merced_counter_is_32_bit_sign_extended = (
+    _pmd_counter_sign_extension_case(
+        "pmd_merced_counter_is_32_bit_sign_extended", "merced",
+        0x1234567880000001, 0xffffffff80000001))
+
+test_pmd_madison_counter_sign_extends_overflow_bit = (
+    _pmd_counter_sign_extension_case(
+        "pmd_madison_counter_sign_extends_overflow_bit", "madison",
+        0x1234800000000001, 0xffff800000000001))
+
+# 251110-003 Table 10-8: only PMC0{7:4,0} are populated.
+test_pmc_madison_ignored_fields = require_registers(
+    "pmc_madison_ignored_fields", [
+        (0x10, *movl_mlx(20, UINT64_MAX)),
+        (0x20, 0x00, adds(8, 0, 0), adds(9, 1, 0), nop_i()),
+        (0x30, 0x00, mov_grpmc_indexed(8, 20), nop_i(), nop_i()),
+        (0x40, 0x00, mov_grpmc_indexed(9, 20), nop_i(), nop_i()),
+        (0x50, 0x00, mov_pmcgr_indexed(30, 8), nop_i(), nop_i()),
+        (0x60, 0x00, mov_pmcgr_indexed(31, 9), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r30": 0xf1,
+        "r31": 0,
+    }, entry=0x10, cpu="madison")
+
+# After reset PAL has set the opcode matchers, PMC[11].pt and PMC[13].ta, and
+# hardware reset has set PMV.m (245320-003 §6.2.9).
+test_pmu_merced_reset_values = require_registers(
+    "pmu_merced_reset_values", [
+        (0x10, 0x00, adds(8, 8, 0), adds(9, 11, 0), nop_i()),
+        (0x20, 0x00, adds(10, 13, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_pmcgr_indexed(28, 8), nop_i(), nop_i()),
+        (0x40, 0x00, mov_pmcgr_indexed(29, 9), nop_i(), nop_i()),
+        (0x50, 0x00, mov_pmcgr_indexed(30, 10), nop_i(), nop_i()),
+        (0x60, 0x00, mov_m_cr_gr(31, 73), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r28": 0xf00000003ffffff8,
+        "r29": 0x10000000,
+        "r30": 1,
+        "r31": 1 << 16,
+    }, entry=0x10, cpu="merced")
+
+# 251110-003 §10.3.11 and §10.3.1 (PMC4.enable is set at reset).
+test_pmu_madison_reset_values = require_registers(
+    "pmu_madison_reset_values", [
+        (0x10, 0x00, adds(8, 4, 0), adds(9, 9, 0), nop_i()),
+        (0x20, 0x00, adds(10, 13, 0), adds(11, 14, 0), nop_i()),
+        (0x30, 0x00, adds(12, 15, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_pmcgr_indexed(26, 8), nop_i(), nop_i()),
+        (0x50, 0x00, mov_pmcgr_indexed(27, 9), nop_i(), nop_i()),
+        (0x60, 0x00, mov_pmcgr_indexed(28, 10), nop_i(), nop_i()),
+        (0x70, 0x00, mov_pmcgr_indexed(29, 11), nop_i(), nop_i()),
+        (0x80, 0x00, mov_pmcgr_indexed(30, 12), nop_i(), nop_i()),
+        (0x90, 0x00, mov_m_cr_gr(31, 73), nop_i(), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+    ], {
+        "ip": 0xa0,
+        "exception": IA64_EXCP_NONE,
+        "r26": 1 << 23,
+        "r27": 0xffffffffffffffff,
+        "r28": 0x2078fefefefe,
+        "r29": 0xdb6,
+        "r30": 0xfffffff0,
+        "r31": 1 << 16,
+    }, entry=0x10, cpu="madison")
 
 test_pmc_pmd_indexed_decode = require_registers("pmc_pmd_indexed_decode", [
     (0x10, 0x00, adds(9, 1, 0), adds(10, 0x77, 0),
@@ -2869,6 +3449,8 @@ CASE_NAMES = (
     'br_ctop_rotating_pipeline',
     'br_ctop_self_loop_budgeted',
     'br_ctop_strcpy_pipeline_stops_on_first_zero_word',
+    'br_ctop_taken_target_zero',
+    'br_cexit_taken_target_zero',
     'br_ia_executes_ia32_and_jmpe_returns_to_ia64',
     'br_ia_invalidates_global_alat_entries',
     'br_ia_montecito_native_ia32_disabled_fault',
@@ -2878,6 +3460,7 @@ CASE_NAMES = (
     'ia32_indirect_jump_reaches_target',
     'ia32_cpuid_leaf1_reports_madison_feature_word',
     'ia32_cpuid_leaf2_reports_madison_cache_descriptors',
+    'ia32_cpuid_leaf2_reports_merced_cache_descriptors',
     'ia32_fldenv_restores_x87_environment',
     'ia32_fnstenv_saves_x87_environment_and_masks_exceptions',
     'ia32_fxsave_records_x87_pointers_and_mxcsr_mask',
@@ -2892,11 +3475,15 @@ CASE_NAMES = (
     'br_indirect_predicate_false_falls_through',
     'br_wexit_false_predicate_drains_epilog',
     'br_wtop_false_predicate_drains_epilog',
+    'br_wexit_taken_target_zero',
+    'br_wtop_taken_target_zero',
     'brl_call_mlx_decode',
     'brl_call_mlx_negative_lslot_decode',
     'brl_call_mlx_no_stop_decode',
     'brl_call_merced_illegal_operation',
+    'brl_call_qp_false_merced_still_illegal',
     'brl_cond_merced_illegal_operation',
+    'brl_cond_qp_false_merced_still_illegal',
     'brl_cond_mlx_decode',
     'brl_cond_mlx_no_stop_decode',
     'brp_loop_imp_decode',
@@ -2905,10 +3492,12 @@ CASE_NAMES = (
     'bsw0_in_b_slot_falls_through',
     'bsw1_sets_bn_bit',
     'bsw_switches_r16_r31_bank',
+    'mov_psr_read_omits_bn',
     'cdboot_word_add_cloop_decode',
     'clrrrb_b_decode',
     'clrrrb_pr_b_decode',
     'clz_decode',
+    'clz_unsupported_true_illegal',
     'cmp4_eq_imm_decode',
     'cmp4_eq_ne_or_decode',
     'cmp4_eq_unc_imm_p0_decode',
@@ -2935,6 +3524,7 @@ CASE_NAMES = (
     'cmp_unc_same_pred_pred_false_illegal',
     'cmp_unc_self_predicate_reads_old_qp',
     'czx1_l_zero_index',
+    'czx1_r_ignores_bit36',
     'czx1_r_no_zero',
     'czx1_r_zero_index',
     'czx2_l_zero_index',
@@ -2977,21 +3567,36 @@ CASE_NAMES = (
     'mov_pr_rot_imm_sign_extends',
     'mov_psr_um_reserved_bit_fault',
     'mpy4_decode',
+    'mpy4_unsupported_true_illegal',
     'mpyshl4_decode',
+    'mpyshl4_unsupported_true_illegal',
     'mux1_brcst_decode',
     'mux1_rev_decode',
     'mux2_imm_decode',
+    'packed_shift_add_count4_predicated_off_is_nop',
+    'packed_shift_add_count4_true_illegal',
     'padd1_decode',
     'page_frame_record_address_arithmetic',
     'page_table_pointer_dep_cascade',
     'pavg_decode',
     'pcmp1_eq_decode',
     'pcmp1_eq_m_slot_decode',
+    'pmc_madison_ignored_fields',
+    'pmc_merced_ignored_fields_and_unimplemented_register',
     'pmc_pmd_indexed_decode',
     'pmc_pmd_registers_are_independent',
+    'pmc_pmd_unimplemented_index_does_not_fault',
+    'pmd_cpl0_secure_monitor_remains_visible',
+    'pmd_cpl3_privileged_monitor_reads_zero',
+    'pmd_cpl3_secure_monitor_reads_zero',
+    'pmd_madison_counter_sign_extends_overflow_bit',
+    'pmd_merced_address_fields_and_unimplemented_register',
+    'pmd_merced_counter_is_32_bit_sign_extended',
     'pminmax_pack_decode',
     'pmpy2_decode',
     'pmpyshr2_decode',
+    'pmu_madison_reset_values',
+    'pmu_merced_reset_values',
     'popcnt_decode',
     'predicate_register_roundtrip',
     'predicated_off_privileged_instruction_does_not_fault',
@@ -3001,6 +3606,7 @@ CASE_NAMES = (
     'pshl_decode',
     'pshl_fixed_complement_count_decode',
     'pshladd2_decode',
+    'pshladd2_shift_overflow_suppresses_add',
     'pshr_decode',
     'pshradd2_decode',
     'psr_high_mask_and_um_decode',
@@ -3010,6 +3616,31 @@ CASE_NAMES = (
     'reserved_application_register_is_illegal',
     'reserved_indirect_branch_btype_illegal',
     'reserved_ip_relative_branch_btype_illegal',
+    'reserved_b_cyan_predicated_off_is_nop',
+    'reserved_a1_predicated_off_is_nop',
+    'reserved_i_selector_predicated_off_is_nop',
+    'reserved_i_selector_true_illegal',
+    'reserved_fp_memory_selector_predicated_off_is_nop',
+    'reserved_fp_memory_selector_true_illegal',
+    'mux1_reserved_mbtype_predicated_off_is_nop',
+    'mux1_reserved_mbtype_true_illegal',
+    'popcnt_size_selector_predicated_off_is_nop',
+    'popcnt_size_selector_true_illegal',
+    'pmpy2_size_selector_predicated_off_is_nop',
+    'pmpy2_size_selector_true_illegal',
+    'pmpyshr2_size_selector_predicated_off_is_nop',
+    'pmpyshr2_size_selector_true_illegal',
+    'reserved_m0_system_alias_predicated_off_is_nop',
+    'reserved_m0_system_alias_true_illegal',
+    'reserved_m_major2_predicate_semantics',
+    'reserved_m_major2_true_illegal',
+    'reserved_i_major1_predicated_off_is_nop',
+    'reserved_i_major1_true_illegal',
+    'reserved_b_cyan_true_illegal',
+    'reserved_b_brown_predicated_off_still_illegal',
+    'b_ignored_major_ops_are_nops',
+    'b_major8_predicated_off_still_illegal',
+    'b_ignored_x6_01_true_predicate_is_nop',
     'rfi_to_ia32_empties_backing_store',
     'scalar_shift_count_64',
     'shl_var_ignored_bit_decode',

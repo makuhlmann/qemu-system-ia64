@@ -6531,6 +6531,52 @@ static void test_savevm_restores_platform_state(void)
 }
 
 /*
+ * The 460GX keeps its ACPI block in the 82468GX IFB, so the machine's
+ * stand-in ACPI fields must stay out of its snapshot.
+ */
+static void test_savevm_460gx_restores_ram(void)
+{
+    const uint64_t ram_addr = 0x00300000;
+    const uint64_t saved_ram = 0x0123456789abcdefULL;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *disk_path = NULL;
+    g_autofree char *quoted_disk_path = NULL;
+    g_autofree char *response = NULL;
+    g_autoptr(GError) error = NULL;
+    QTestState *qts;
+
+    if (!have_qemu_img()) {
+        g_test_skip("qemu-img is required for internal snapshot testing");
+        return;
+    }
+
+    tmpdir = g_dir_make_tmp("ia64-460gx-savevm-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    disk_path = g_build_filename(tmpdir, "snapshot.qcow2", NULL);
+    g_assert_true(mkimg(disk_path, "qcow2", 64));
+    quoted_disk_path = g_shell_quote(disk_path);
+
+    qts = qtest_initf("-machine 460gx -m 256M -smp 2 -S "
+                      "-drive file=%s,format=qcow2,if=none,id=snap",
+                      quoted_disk_path);
+    qtest_writeq(qts, ram_addr, saved_ram);
+
+    response = qtest_hmp(qts, "savevm platform-state");
+    g_assert_cmpstr(response, ==, "");
+    g_clear_pointer(&response, g_free);
+
+    qtest_writeq(qts, ram_addr, ~saved_ram);
+    response = qtest_hmp(qts, "loadvm platform-state");
+    g_assert_cmpstr(response, ==, "");
+    g_assert_cmphex(qtest_readq(qts, ram_addr), ==, saved_ram);
+
+    qtest_quit(qts);
+    g_assert_cmpint(g_unlink(disk_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+/*
  * ATI RAGE 128 (Rage 128 Pro, 1002:5046) device-model regression tests.
  *
  * These drive the emulated adapter directly over its PCI BARs and lock in the
@@ -8428,6 +8474,8 @@ int main(int argc, char **argv)
                    test_sparse_io_pm_register);
     qtest_add_func("/ia64-vpc/savevm/platform-state",
                    test_savevm_restores_platform_state);
+    qtest_add_func("/ia64-vpc/savevm/460gx",
+                   test_savevm_460gx_restores_ram);
     qtest_add_func("/ia64-vpc/agp/gxb", test_agp_gxb);
     qtest_add_func("/ia64-vpc/realfw/flash-window", test_realfw_flash_window);
     qtest_add_func("/ia64-vpc/realfw/ifb-acpi-block",

@@ -119,6 +119,19 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         }
         break;
     case IA64_OP_MOV_GRAR:
+        if (op->source == IA64_AR_BSPSTORE || op->source == IA64_AR_RNAT) {
+            /*
+             * The RSC.mode check is an Illegal Operation fault (priority
+             * 35), ahead of Register NaT Consumption (43): SDM Vol 3 mov ar,
+             * Vol 2 Table 5-6.
+             */
+            ia64_gen_validate_ar_access(insn, ia64_gr_src(op->destination),
+                                        true);
+            ia64_gen_check_nat_register(insn, op->destination);
+            gen_helper_write_ar(tcg_env, tcg_constant_i32(op->source),
+                                ia64_gr_src(op->destination));
+            break;
+        }
         ia64_gen_check_nat_register(insn, op->destination);
         if (ia64_ar_is_simple(op->source)) {
             if (op->source == 40 || op->source == 64) {
@@ -381,8 +394,6 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
     case IA64_OP_MOV_PMCGR_INDEXED: {
         TCGv_i64 val = tcg_temp_new_i64();
         ia64_gen_check_nat_register(insn, op->register_index);
-        ia64_gen_check_register_index(insn, ia64_gr_src(op->register_index),
-                                      IA64_PMC_COUNT);
         gen_helper_read_pmc_indexed(
             val, tcg_env, ia64_gr_src(op->register_index));
         ia64_gen_gr_write_nat_clear(op->destination, val);
@@ -391,18 +402,13 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
     case IA64_OP_MOV_GRPMC_INDEXED:
         ia64_gen_check_nat_register(insn, op->register_index);
         ia64_gen_check_nat_register(insn, op->destination);
-        ia64_gen_check_register_index(insn, ia64_gr_src(op->register_index),
-                                      IA64_PMC_COUNT);
         gen_helper_write_pmc_indexed(tcg_env, ia64_gr_src(op->register_index),
                                      ia64_gr_src(op->destination));
         break;
     case IA64_OP_MOV_PMDGR: {
         TCGv_i64 val = tcg_temp_new_i64();
         gen_helper_read_pmd_checked(
-            val, tcg_env, tcg_constant_i64(op->source - 64),
-            tcg_constant_i64(insn->address),
-            tcg_constant_i64(insn->raw),
-            tcg_constant_i32(insn->slot));
+            val, tcg_env, tcg_constant_i64(op->source - 64));
         ia64_gen_gr_write_nat_clear(op->destination, val);
         break;
     }
@@ -414,21 +420,14 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
     case IA64_OP_MOV_PMDGR_INDEXED: {
         TCGv_i64 val = tcg_temp_new_i64();
         ia64_gen_check_nat_register(insn, op->register_index);
-        ia64_gen_check_register_index(insn, ia64_gr_src(op->register_index),
-                                      IA64_PMD_COUNT);
         gen_helper_read_pmd_checked(
-            val, tcg_env, ia64_gr_src(op->register_index),
-            tcg_constant_i64(insn->address),
-            tcg_constant_i64(insn->raw),
-            tcg_constant_i32(insn->slot));
+            val, tcg_env, ia64_gr_src(op->register_index));
         ia64_gen_gr_write_nat_clear(op->destination, val);
         break;
     }
     case IA64_OP_MOV_GRPMD_INDEXED:
         ia64_gen_check_nat_register(insn, op->register_index);
         ia64_gen_check_nat_register(insn, op->destination);
-        ia64_gen_check_register_index(insn, ia64_gr_src(op->register_index),
-                                      IA64_PMD_COUNT);
         gen_helper_write_pmd_indexed(tcg_env, ia64_gr_src(op->register_index),
                                      ia64_gr_src(op->destination));
         break;

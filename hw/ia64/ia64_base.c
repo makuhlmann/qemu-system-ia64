@@ -2165,6 +2165,17 @@ static const VMStateDescription vmstate_ia64_int10_registers = {
 };
 #endif
 
+/*
+ * The stand-in ACPI block exists only on a board without a south bridge
+ * (ia64_vpc_init_acpi_pm()); the 460GX keeps its own in the 82468GX IFB.
+ */
+static bool ia64_vpc_acpi_pm_present(void *opaque, int version_id)
+{
+    IA64VpcMachineState *s = opaque;
+
+    return !IA64_VPC_MACHINE_GET_CLASS(s)->has_south_bridge;
+}
+
 static int ia64_vpc_post_load(void *opaque, int version_id)
 {
     IA64VpcMachineState *s = opaque;
@@ -2178,6 +2189,9 @@ static int ia64_vpc_post_load(void *opaque, int version_id)
     }
 #endif
 
+    if (!ia64_vpc_acpi_pm_present(s, version_id)) {
+        return 0;
+    }
     qemu_system_wakeup_enable(
         QEMU_WAKEUP_REASON_RTC,
         (pm_enable & ACPI_BITMASK_RT_CLOCK_ENABLE) != 0);
@@ -2195,15 +2209,34 @@ static const VMStateDescription vmstate_ia64_vpc = {
     .post_load = ia64_vpc_post_load,
     .fields = (const VMStateField[]) {
 
-        VMSTATE_UINT16(acpi_regs.pm1.evt.sts, IA64VpcMachineState),
-        VMSTATE_UINT16(acpi_regs.pm1.evt.en, IA64VpcMachineState),
-        VMSTATE_UINT16(acpi_regs.pm1.cnt.cnt, IA64VpcMachineState),
-        VMSTATE_TIMER_PTR(acpi_regs.tmr.timer, IA64VpcMachineState),
-        VMSTATE_INT64(acpi_regs.tmr.overflow_time, IA64VpcMachineState),
-        VMSTATE_BUFFER_POINTER_UNSAFE(acpi_regs.gpe.sts,
-                                      IA64VpcMachineState, 1, 2),
-        VMSTATE_BUFFER_POINTER_UNSAFE(acpi_regs.gpe.en,
-                                      IA64VpcMachineState, 1, 2),
+        VMSTATE_UINT16_TEST(acpi_regs.pm1.evt.sts, IA64VpcMachineState,
+                            ia64_vpc_acpi_pm_present),
+        VMSTATE_UINT16_TEST(acpi_regs.pm1.evt.en, IA64VpcMachineState,
+                            ia64_vpc_acpi_pm_present),
+        VMSTATE_UINT16_TEST(acpi_regs.pm1.cnt.cnt, IA64VpcMachineState,
+                            ia64_vpc_acpi_pm_present),
+        VMSTATE_TIMER_PTR_TEST(acpi_regs.tmr.timer, IA64VpcMachineState,
+                               ia64_vpc_acpi_pm_present),
+        VMSTATE_INT64_TEST(acpi_regs.tmr.overflow_time, IA64VpcMachineState,
+                           ia64_vpc_acpi_pm_present),
+        {
+            .name = "acpi_regs.gpe.sts",
+            .version_id = 1,
+            .field_exists = ia64_vpc_acpi_pm_present,
+            .size = 2,
+            .info = &vmstate_info_buffer,
+            .flags = VMS_BUFFER | VMS_POINTER,
+            .offset = offsetof(IA64VpcMachineState, acpi_regs.gpe.sts),
+        },
+        {
+            .name = "acpi_regs.gpe.en",
+            .version_id = 1,
+            .field_exists = ia64_vpc_acpi_pm_present,
+            .size = 2,
+            .info = &vmstate_info_buffer,
+            .flags = VMS_BUFFER | VMS_POINTER,
+            .offset = offsetof(IA64VpcMachineState, acpi_regs.gpe.en),
+        },
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
         VMSTATE_STRUCT(int10_request, IA64VpcMachineState, 1,

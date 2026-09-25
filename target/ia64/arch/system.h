@@ -39,9 +39,7 @@ uint64_t ia64_system_read_pmc_indexed(CPUIA64State *env, uint64_t index);
 void ia64_system_write_pmc_indexed(CPUIA64State *env, uint64_t index,
                                    uint64_t value);
 uint64_t ia64_system_read_pmd(CPUIA64State *env, uint32_t index);
-uint64_t ia64_system_read_pmd_checked(CPUIA64State *env, uint64_t index,
-                                      uint64_t fault_ip, uint64_t raw,
-                                      uint32_t slot);
+uint64_t ia64_system_read_pmd_checked(CPUIA64State *env, uint64_t index);
 void ia64_system_write_pmd(CPUIA64State *env, uint32_t index,
                            uint64_t value);
 uint64_t ia64_system_read_pmd_indexed(CPUIA64State *env, uint64_t index);

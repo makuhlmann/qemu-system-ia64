@@ -3705,7 +3705,15 @@ static EFI_START_IMAGE_FRAME *start_image_push_frame(EFI_HANDLE ImageHandle)
     frame->in_use = 1;
     frame->image_handle = ImageHandle;
     frame->exit_status = EFI_SUCCESS;
-    frame->saved_psr = fw_read_psr() & ~(IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT);
+    /*
+     * mov r=psr reads PSR.bn as 0 (SDM Vol 2 3.3.2).  The firmware runs in
+     * bank 0; a nested StartImage comes from an image, which calls boot
+     * services in bank 1 and must get bank 1 back (EFI 1.10 2.3.3 takes the
+     * SAL rules: SAL 245359-007 Table 8-2, PSR.bn preserved).
+     */
+    frame->saved_psr = (fw_read_psr() &
+                        ~(IA64_PSR_DT | IA64_PSR_RT | IA64_PSR_IT)) |
+                       (mStartImageFrameDepth > 1 ? IA64_PSR_BN : 0);
     frame->saved_rsc = fw_read_rsc();
     frame->handle_database_generation = mHandleDatabaseGeneration;
     return frame;

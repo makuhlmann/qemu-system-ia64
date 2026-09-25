@@ -44,24 +44,24 @@ void helper_loadrs_rse(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
     ia64_rse_load(env, fault_ip, raw, slot, GETPC());
 }
 
-uint64_t helper_br_cexit(CPUIA64State *env, uint64_t target, uint32_t b_reg)
+uint32_t helper_br_cexit(CPUIA64State *env)
 {
-    return ia64_rse_br_cexit(env, target, b_reg);
+    return ia64_rse_br_cexit(env);
 }
 
-uint64_t helper_br_ctop(CPUIA64State *env, uint64_t target, uint32_t b_reg)
+uint32_t helper_br_ctop(CPUIA64State *env)
 {
-    return ia64_rse_br_ctop(env, target, b_reg);
+    return ia64_rse_br_ctop(env);
 }
 
-uint64_t helper_br_wexit(CPUIA64State *env, uint64_t target, uint32_t qp)
+uint32_t helper_br_wexit(CPUIA64State *env, uint32_t qp)
 {
-    return ia64_rse_br_wexit(env, target, qp);
+    return ia64_rse_br_wexit(env, qp);
 }
 
-uint64_t helper_br_wtop(CPUIA64State *env, uint64_t target, uint32_t qp)
+uint32_t helper_br_wtop(CPUIA64State *env, uint32_t qp)
 {
-    return ia64_rse_br_wtop(env, target, qp);
+    return ia64_rse_br_wtop(env, qp);
 }
 
 void helper_clrrrb_rse(CPUIA64State *env, uint32_t predicate_only)

@@ -170,18 +170,6 @@ IA64GenResult ia64_gen_fp(DisasContext *ctx,
                          tcg_constant_i32(op->source1),
                          tcg_constant_i32(op->source2), ia64_fp_context(insn));
         break;
-    case IA64_OP_FPABS:
-        gen_helper_fpabs(tcg_env, tcg_constant_i32(op->destination),
-                         tcg_constant_i32(op->source1));
-        break;
-    case IA64_OP_FPNEG:
-        gen_helper_fpneg(tcg_env, tcg_constant_i32(op->destination),
-                         tcg_constant_i32(op->source1));
-        break;
-    case IA64_OP_FPNEGABS:
-        gen_helper_fpnegabs(tcg_env, tcg_constant_i32(op->destination),
-                            tcg_constant_i32(op->source1));
-        break;
     case IA64_OP_FPRSQRTA:
         gen_helper_fprsqrta(tcg_env, tcg_constant_i32(op->destination),
                             tcg_constant_i32(op->auxiliary2),

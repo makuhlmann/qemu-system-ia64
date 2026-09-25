@@ -471,16 +471,16 @@ void cpu_x86_cpuid(CPUX86State *xenv, uint32_t index, uint32_t count,
         *ecx = xenv->features[FEAT_1_ECX];
         *edx = xenv->features[FEAT_1_EDX];
         break;
-    case 2:
-        /*
-         * Madison's IA-32 cache descriptors.  The L3 descriptor reports
-         * 3 MB even on larger-cache parts, matching hardware erratum 6.
-         * EDX is architecturally reserved for this implementation.
-         */
-        *eax = 0x7e776701;
-        *ebx = 0x0000008d;
-        *edx = 0x80000000;
+    case 2: {
+        const uint32_t *leaf2 =
+            ia64_env_cpu_class((CPUIA64State *)xenv)->ia32_cpuid_leaf2;
+
+        *eax = leaf2[0];
+        *ebx = leaf2[1];
+        *ecx = leaf2[2];
+        *edx = leaf2[3];
         break;
+    }
     default:
         break;
     }

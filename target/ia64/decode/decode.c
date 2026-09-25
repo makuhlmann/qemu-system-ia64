@@ -800,6 +800,49 @@ static Ia64Instruction ia64_invalid_insn(IA64SlotUnit unit, uint64_t raw,
 }
 
 /*
+ * A "reserved if PR[qp] is 1" encoding (purple or cyan cell of the SDM Vol 3
+ * §4.1 opcode tables) raises Illegal Operation only when PR[qp] is 1 and is
+ * a nop otherwise; ia64_invalid_insn() is a reserved (brown) cell, which
+ * always faults.
+ */
+static Ia64Instruction ia64_reserved_qp_insn(IA64SlotUnit unit, uint64_t raw,
+                                             uint64_t address, uint8_t slot)
+{
+    return ia64_base_insn(IA64_OP_ILLEGAL, unit, raw, address, slot);
+}
+
+/*
+ * An encoding that no instruction claims (SDM Vol 3 §4.1, Tables 4-3 and
+ * 4-47 to 4-55).  B-unit major opcodes 3 and 6 are ignored cells and execute
+ * as a nop.  B major opcodes 8-F, op 4 btypes 1 and 4 and op 0 x6 0x20-0x3f
+ * other than br.cond, br.ia and br.ret are reserved.  Every other unused A,
+ * I, M, F and B cell is reserved if PR[qp] is 1.  An implementation may
+ * treat the L+X cells as reserved (§4.1), and this one does.
+ */
+static Ia64Instruction ia64_unused_insn(IA64SlotUnit unit, uint64_t raw,
+                                        uint64_t address, uint8_t slot)
+{
+    const uint64_t op = ia64_b_op(raw);
+
+    switch (unit) {
+    case IA64_UNIT_M:
+    case IA64_UNIT_I:
+    case IA64_UNIT_F:
+        return ia64_reserved_qp_insn(unit, raw, address, slot);
+    case IA64_UNIT_B:
+        if (op == 3 || op == 6) {
+            return ia64_base_insn(IA64_OP_NOP, unit, raw, address, slot);
+        }
+        if (op >= 8 || op == 4 || (op == 0 && ia64_bits(raw, 27, 6) >= 0x20)) {
+            return ia64_invalid_insn(unit, raw, address, slot);
+        }
+        return ia64_reserved_qp_insn(unit, raw, address, slot);
+    default:
+        return ia64_invalid_insn(unit, raw, address, slot);
+    }
+}
+
+/*
  * MLX long forms are reported at slot 1.  The paired X slot carries the
  * opcode/predicate and low immediate bits, and must not execute separately.
  */
@@ -818,7 +861,9 @@ void ia64_apply_mlx_long_fixup(uint8_t template_code,
     if (ia64_is_i_break(x_slot)) {
         *insn = ia64_base_insn(IA64_OP_BREAK, IA64_UNIT_X, x_slot,
                                insn->address, slot);
-        insn->operands.decoder.imm = ia64_mlx_x1_imm62(l_slot, x_slot);
+        /* Only imm62{20:0} reaches IIM (SDM Vol 3 break). */
+        insn->operands.decoder.imm =
+            ia64_mlx_x1_imm62(l_slot, x_slot) & 0x1fffffULL;
         *skip_x_slot = true;
     } else if (ia64_b_op(x_slot) == 0xc &&
                ia64_bits(x_slot, 6, 3) == 0) {
@@ -1011,8 +1056,7 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
 
         if (ia64_b_op(raw) == 1 &&
             ia64_bits(raw, 33, 3) == 0 &&
-            ia64_bits(raw, 27, 6) == 0x17 &&
-            ia64_bits(raw, 13, 7) == 0) {
+            ia64_bits(raw, 27, 6) == 0x17) {
             Ia64Instruction insn =
                 ia64_base_insn(IA64_OP_MOV_CPUID_INDEXED, unit, raw,
                                address, slot);
@@ -1034,8 +1078,7 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
 
         if (ia64_b_op(raw) == 1 &&
             ia64_bits(raw, 33, 3) == 0 &&
-            ia64_bits(raw, 27, 6) == 0x16 &&
-            ia64_bits(raw, 13, 7) == 0) {
+            ia64_bits(raw, 27, 6) == 0x16) {
             Ia64Instruction insn =
                 ia64_base_insn(IA64_OP_MOV_MSRGR, unit, raw, address, slot);
             insn.operands.decoder.r1 = ia64_bits(raw, 6, 7);
@@ -1132,8 +1175,9 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         }
 
         if (ia64_b_op(raw) == 0 &&
+            ia64_bits(raw, 33, 3) == 0 &&
             ia64_bits(raw, 27, 6) == 0x01 &&
-            ia64_bits(raw, 20, 7) == 64) {
+            ia64_bits(raw, 26, 1) == 1) {
             Ia64Instruction insn =
                 ia64_base_insn(IA64_OP_HINT_M, unit, raw, address, slot);
             insn.operands.decoder.imm = ia64_immu21(raw);
@@ -1146,7 +1190,7 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             ia64_b_op(raw) == 0 &&
             ia64_bits(raw, 33, 3) == 0 &&
             ia64_bits(raw, 27, 6) == 0x01 &&
-            ia64_bits(raw, 20, 7) == 64) {
+            ia64_bits(raw, 26, 1) == 1) {
             Ia64Instruction insn =
                 ia64_base_insn(IA64_OP_HINT_I, unit, raw, address, slot);
             insn.operands.decoder.imm = ia64_immu21(raw);
@@ -1161,14 +1205,6 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         if (ia64_is_i_break(raw)) {
             Ia64Instruction insn =
                 ia64_base_insn(IA64_OP_BREAK, unit, raw, address, slot);
-            insn.operands.decoder.imm = ia64_immu21(raw);
-            return insn;
-        }
-
-        if (unit == IA64_UNIT_I && ia64_b_op(raw) == 1 &&
-            ia64_bits(raw, 27, 2) == 0) {
-            Ia64Instruction insn =
-                ia64_base_insn(IA64_OP_HINT_I, unit, raw, address, slot);
             insn.operands.decoder.imm = ia64_immu21(raw);
             return insn;
         }
@@ -1189,10 +1225,8 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             return insn;
         }
         if (ia64_is_b_break(raw)) {
-            Ia64Instruction insn =
-                ia64_base_insn(IA64_OP_BREAK, unit, raw, address, slot);
-            insn.operands.decoder.imm = ia64_immu21(raw);
-            return insn;
+            /* The b_unit_form ignores imm21: IIM gets 0 (SDM Vol 3 break). */
+            return ia64_base_insn(IA64_OP_BREAK, unit, raw, address, slot);
         }
 
         /*
@@ -1262,6 +1296,12 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
                 insn.operands.decoder.imm = x2b;
                 return insn;
             }
+        }
+
+        /* A10: count2 = (ct2d > 2) ? reservedQP : ct2d + 1 (Table 4-74). */
+        if (x2a == 1 && size_code == 1 && (x4 == 4 || x4 == 6) &&
+            x2b == 3) {
+            return ia64_reserved_qp_insn(unit, raw, address, slot);
         }
 
         if (x2a == 1 && size_code == 1 && x4 == 4) {
@@ -1731,8 +1771,7 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         ia64_bits(raw, 30, 2) == 1 &&
         ia64_bits(raw, 28, 2) == 1 &&
         ((ia64_bits(raw, 36, 1) == 0 && ia64_bits(raw, 33, 1) == 1) ||
-         (ia64_bits(raw, 36, 1) == 1 && ia64_bits(raw, 33, 1) == 0)) &&
-        ia64_bits(raw, 25, 2) == 0) {
+         (ia64_bits(raw, 36, 1) == 1 && ia64_bits(raw, 33, 1) == 0))) {
         Ia64Instruction insn =
             ia64_base_insn(ia64_bits(raw, 36, 1) ?
                            IA64_OP_PSHL4 : IA64_OP_PSHL2,
@@ -1812,14 +1851,14 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             !(insn.operands.decoder.imm == 0 ||
               (insn.operands.decoder.imm >= 8 &&
                insn.operands.decoder.imm <= 11))) {
-            return ia64_invalid_insn(unit, raw, address, slot);
+            return ia64_reserved_qp_insn(unit, raw, address, slot);
         }
         return insn;
     }
 
     if (unit == IA64_UNIT_I && ia64_b_op(raw) == 0x7 &&
-        ia64_bits(raw, 27, 6) == 0x12 &&
-        ia64_bits(raw, 33, 3) == 3 &&
+        ia64_bits(raw, 28, 5) == 0x09 &&
+        ia64_bits(raw, 33, 4) == 3 &&
         ia64_bits(raw, 13, 7) == 0) {
         Ia64Instruction insn =
             ia64_base_insn(IA64_OP_POPCNT, unit, raw, address, slot);
@@ -1829,8 +1868,8 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
     }
 
     if (unit == IA64_UNIT_I && ia64_b_op(raw) == 0x7 &&
-        ia64_bits(raw, 27, 6) == 0x1a &&
-        ia64_bits(raw, 33, 3) == 3 &&
+        ia64_bits(raw, 28, 5) == 0x0d &&
+        ia64_bits(raw, 33, 4) == 3 &&
         ia64_bits(raw, 13, 7) == 0) {
         Ia64Instruction insn =
             ia64_base_insn(IA64_OP_CLZ, unit, raw, address, slot);
@@ -1840,7 +1879,7 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
     }
 
     if (unit == IA64_UNIT_I && ia64_b_op(raw) == 0x7 &&
-        ia64_bits(raw, 33, 3) == 5) {
+        ia64_bits(raw, 33, 4) == 5) {
         const uint64_t x6 = ia64_bits(raw, 27, 6) & ~1ULL;
         Ia64Opcode opcode = IA64_OP_ILLEGAL;
 
@@ -1860,8 +1899,8 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
     }
 
     if (unit == IA64_UNIT_I && ia64_b_op(raw) == 0x7 &&
-        ia64_bits(raw, 33, 3) == 1) {
-        const uint64_t x6 = ia64_bits(raw, 27, 6);
+        ia64_bits(raw, 33, 4) == 1) {
+        const uint64_t x6 = ia64_bits(raw, 27, 6) & ~1ULL;
         Ia64Opcode opcode = IA64_OP_ILLEGAL;
         uint64_t shift = 0;
 
@@ -2026,8 +2065,9 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         }
     }
 
+    /* I29 ignores bit 36 (SDM Vol 3 Table 4-4). */
     if (unit == IA64_UNIT_I && ia64_b_op(raw) == 0 &&
-        ia64_bits(raw, 33, 4) == 0) {
+        ia64_bits(raw, 33, 3) == 0) {
         Ia64Opcode opcode = IA64_OP_ILLEGAL;
 
         switch (ia64_bits(raw, 27, 6)) {
@@ -2427,9 +2467,9 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         return insn;
     }
 
+    /* Bit 36 of M24-M27 is an ignored field (SDM Vol 3 Table 4-4). */
     if (unit == IA64_UNIT_M && ia64_b_op(raw) == 0 &&
-        ia64_bits(raw, 33, 1) == 0 && ia64_bits(raw, 34, 2) == 0 &&
-        ia64_bits(raw, 36, 1) == 0) {
+        ia64_bits(raw, 33, 1) == 0 && ia64_bits(raw, 34, 2) == 0) {
         const uint64_t x6 = ia64_bits(raw, 27, 6);
 
         if (x6 == 0x0a) {
@@ -2458,13 +2498,13 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             opcode = IA64_OP_MOV_PRGR;  /* mov r=pr (PR to GR) */
         } else if (unit == IA64_UNIT_I && x3 == 0 && x6 == 0x30) {
             opcode = IA64_OP_MOV_CURRENT_IP;
-        } else if (x3 == 3) {
+        } else if (unit == IA64_UNIT_I && x3 == 3) {
             opcode = IA64_OP_MOV_GRPR;  /* mov pr=r (GR to PR) */
-        } else if (x3 == 0 && x6 == 0x32) {
+        } else if (unit == IA64_UNIT_I && x3 == 0 && x6 == 0x32) {
             opcode = IA64_OP_MOV_ARGR;  /* mov r=ar (AR to GR) */
-        } else if (x3 == 0 && x6 == 0x2a) {
+        } else if (unit == IA64_UNIT_I && x3 == 0 && x6 == 0x2a) {
             opcode = IA64_OP_MOV_GRAR;  /* mov ar=r (GR to AR) */
-        } else if (x3 == 0 && x6 == 0x0a) {
+        } else if (unit == IA64_UNIT_I && x3 == 0 && x6 == 0x0a) {
             opcode = IA64_OP_MOV_IMMAR; /* mov ar=imm */
         } else if (unit == IA64_UNIT_M && x3 == 0 && x6 == 0x28) {
             opcode = IA64_OP_MOV_IMMAR; /* mov.m ar=imm */
@@ -2516,7 +2556,7 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         }
     }
 
-    if ((unit == IA64_UNIT_M || unit == IA64_UNIT_I) &&
+    if (unit == IA64_UNIT_M &&
         ia64_b_op(raw) == 1 && ia64_bits(raw, 33, 3) == 0) {
         const uint64_t x6 = ia64_bits(raw, 27, 6);
         Ia64Opcode opcode = IA64_OP_ILLEGAL;
@@ -2944,60 +2984,6 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         }
     }
 
-    if (unit == IA64_UNIT_M && ia64_b_op(raw) == 2 &&
-        ia64_bits(raw, 36, 1) == 0 && ia64_bits(raw, 12, 1) == 0) {
-        const uint64_t xhint = ia64_bits(raw, 27, 2);
-        const uint64_t xm = ia64_bits(raw, 29, 2);
-        Ia64Opcode opcode = IA64_OP_ILLEGAL;
-        if (xm == 0 && xhint == 0) {
-            opcode = IA64_OP_XCHG1;
-        } else if (xm == 0 && xhint == 1) {
-            opcode = IA64_OP_XCHG2;
-        } else if (xm == 1 && xhint == 0) {
-            opcode = IA64_OP_XCHG4;
-        } else if (xm == 1 && xhint == 1) {
-            opcode = IA64_OP_XCHG8;
-        } else if (xm == 2 && xhint == 0) {
-            opcode = IA64_OP_CMPXCHG1;
-        } else if (xm == 2 && xhint == 1) {
-            opcode = IA64_OP_CMPXCHG2;
-        } else if (xm == 3 && xhint == 0) {
-            opcode = IA64_OP_CMPXCHG4;
-        } else if (xm == 3 && xhint == 1) {
-            opcode = IA64_OP_CMPXCHG8;
-        }
-        if (opcode != IA64_OP_ILLEGAL) {
-            Ia64Instruction insn =
-                ia64_base_insn(opcode, unit, raw, address, slot);
-            insn.operands.decoder.r1 = ia64_bits(raw, 6, 7);
-            insn.operands.decoder.r2 = ia64_bits(raw, 13, 7);
-            insn.operands.decoder.r3 = ia64_bits(raw, 20, 7);
-            insn.mem_acquire = true;
-            return insn;
-        }
-    }
-
-    if (unit == IA64_UNIT_M && ia64_b_op(raw) == 3 &&
-        ia64_bits(raw, 36, 1) == 0) {
-        const uint64_t x2 = ia64_bits(raw, 27, 1);
-        const uint64_t xm = ia64_bits(raw, 29, 2);
-        Ia64Opcode opcode = IA64_OP_ILLEGAL;
-        if (xm == 0 && x2 == 0) {
-            opcode = IA64_OP_FETCHADD4;
-        } else if (xm == 1 && x2 == 0) {
-            opcode = IA64_OP_FETCHADD8;
-        }
-        if (opcode != IA64_OP_ILLEGAL) {
-            Ia64Instruction insn =
-                ia64_base_insn(opcode, unit, raw, address, slot);
-            insn.operands.decoder.r1 = ia64_bits(raw, 6, 7);
-            insn.operands.decoder.r2 = ia64_bits(raw, 13, 7);
-            insn.operands.decoder.r3 = ia64_bits(raw, 20, 7);
-            insn.mem_acquire = true;
-            return insn;
-        }
-    }
-
     if (unit == IA64_UNIT_F) {
         if (ia64_is_f_nop(raw)) {
             Ia64Instruction insn =
@@ -3010,32 +2996,6 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
                 ia64_base_insn(IA64_OP_BREAK, unit, raw, address, slot);
             insn.operands.decoder.imm = ia64_immu21(raw);
             return insn;
-        }
-        if (ia64_b_op(raw) == 1 &&
-            ia64_bits(raw, 33, 1) == 0 &&
-            ia64_bits(raw, 27, 6) == 0x10 &&
-            ia64_bits(raw, 13, 7) == 0) {
-            Ia64Instruction insn =
-                ia64_base_insn(IA64_OP_FPABS, unit, raw, address, slot);
-            insn.operands.decoder.r1 = ia64_bits(raw, 6, 7);
-            insn.operands.decoder.r2 = ia64_bits(raw, 20, 7);
-            return insn;
-        }
-        if (ia64_b_op(raw) == 1 &&
-            ia64_bits(raw, 33, 1) == 0 &&
-            ia64_bits(raw, 27, 6) == 0x11) {
-            const uint64_t f2 = ia64_bits(raw, 13, 7);
-            const uint64_t f3 = ia64_bits(raw, 20, 7);
-
-            if (f2 == 0 || f2 == f3) {
-                Ia64Instruction insn =
-                    ia64_base_insn(f2 == 0 ? IA64_OP_FPNEGABS :
-                                             IA64_OP_FPNEG,
-                                   unit, raw, address, slot);
-                insn.operands.decoder.r1 = ia64_bits(raw, 6, 7);
-                insn.operands.decoder.r2 = f3;
-                return insn;
-            }
         }
         if ((ia64_b_op(raw) == 0 || ia64_b_op(raw) == 1) &&
             ia64_bits(raw, 36, 1) == 1 &&
@@ -3062,8 +3022,12 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             insn.clear_p2_before_predicate = true;
             return insn;
         }
+        /*
+         * Bit 36 of F8 and F10 and bits 36:34 of F9 are ignored fields, and
+         * the unused cells of Table 4-61 are reserved if PR[qp] is 1 (SDM
+         * Vol 3 Tables 4-4 and 4-61).
+         */
         if (ia64_b_op(raw) == 1 &&
-            ia64_bits(raw, 36, 1) == 0 &&
             ia64_bits(raw, 33, 1) == 0) {
             uint64_t form = ia64_bits(raw, 27, 6);
             Ia64Opcode opcode = IA64_OP_ILLEGAL;
@@ -3095,14 +3059,10 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             }
         }
         if (ia64_b_op(raw) == 1) {
-            Ia64Instruction insn =
-                ia64_base_insn(IA64_OP_HINT_F, unit, raw, address, slot);
-            insn.operands.decoder.imm = ia64_immu21(raw);
-            return insn;
+            return ia64_reserved_qp_insn(unit, raw, address, slot);
         }
 
         const uint64_t x = ia64_bits(raw, 36, 1);
-        const uint64_t x6 = ia64_bits(raw, 30, 6);
         const uint64_t form = ia64_bits(raw, 27, 6);
         Ia64Opcode opcode = IA64_OP_ILLEGAL;
 
@@ -3138,7 +3098,7 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
                      form == 0x15 ? IA64_OP_FMAX :
                      form == 0x16 ? IA64_OP_FAMIN :
                                     IA64_OP_FAMAX;
-        } else if (ia64_b_op(raw) == 0 && x == 0 &&
+        } else if (ia64_b_op(raw) == 0 &&
                    ia64_bits(raw, 33, 1) == 0 && form == 0x1c) {
             opcode = IA64_OP_FCVT_XF;
         } else if (ia64_b_op(raw) == 0 && x == 0 &&
@@ -3146,14 +3106,14 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             opcode = IA64_OP_FRCPA;
         } else if (ia64_b_op(raw) == 0 &&
                    ia64_bits(raw, 33, 1) == 0 &&
-                   ia64_bits(raw, 34, 3) == 0 &&
                    ia64_bits(raw, 27, 6) == 0x28) {
             opcode = IA64_OP_FPACK;
-        } else if (ia64_b_op(raw) == 0 && x == 0 &&
+        } else if (ia64_b_op(raw) == 0 &&
                    ia64_bits(raw, 33, 1) == 0 &&
                    form >= 0x18 && form <= 0x1b) {
             opcode = (form & 1) ? IA64_OP_FCVT_FXU : IA64_OP_FCVT_FX;
-        } else if (ia64_b_op(raw) == 0 && x == 0 && x6 == 0x02 &&
+        } else if (ia64_b_op(raw) == 0 &&
+                   ia64_bits(raw, 33, 1) == 0 &&
                    (ia64_bits(raw, 27, 6) == 0x10 ||
                     ia64_bits(raw, 27, 6) == 0x11 ||
                     ia64_bits(raw, 27, 6) == 0x12)) {
@@ -3211,8 +3171,6 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
                 opcode = IA64_OP_FSXT_L;
                 break;
             }
-        } else if (ia64_b_op(raw) == 0 && x == 0) {
-            opcode = IA64_OP_FMOV;
         } else if (ia64_b_op(raw) == 0xe && x == 0) {
             opcode = IA64_OP_FSELECT;
         } else if (ia64_b_op(raw) == 0xe && x == 1 &&
@@ -3637,7 +3595,8 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         return insn;
     }
 
-    if (unit == IA64_UNIT_M && ia64_b_op(raw) == 0) {
+    if (unit == IA64_UNIT_M && ia64_b_op(raw) == 0 &&
+        ia64_bits(raw, 33, 3) == 0) {
         const uint64_t x6 = ia64_bits(raw, 27, 6);
         const uint64_t x4 = x6 & 0xf;
         Ia64Opcode opcode = IA64_OP_ILLEGAL;
@@ -3758,6 +3717,12 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
             ia64_base_insn(IA64_OP_BR_RET, unit, raw, address, slot);
         insn.operands.decoder.b2 = ia64_bits(raw, 13, 3);
         return insn;
+    }
+
+    if (unit == IA64_UNIT_B && ia64_b_op(raw) == 0 &&
+        ia64_bits(raw, 27, 6) == 0x01) {
+        /* An ignored (white) cell of SDM Vol 3 Table 4-48: a nop. */
+        return ia64_base_insn(IA64_OP_NOP, unit, raw, address, slot);
     }
 
     if (unit == IA64_UNIT_B && ia64_b_op(raw) == 0) {
@@ -3891,5 +3856,5 @@ Ia64Instruction ia64_decode_insn(IA64SlotUnit unit, uint64_t raw,
         }
     }
 
-    return ia64_invalid_insn(unit, raw, address, slot);
+    return ia64_unused_insn(unit, raw, address, slot);
 }

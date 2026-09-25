@@ -186,9 +186,9 @@ bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address)
         return true;
     }
 
-    return env->pal.pal_proc_copy_valid &&
+    return qatomic_load_acquire(&env->pal.pal_proc_copy_valid) &&
            ia64_instruction_address_matches_physical_entry(
-               env, address, env->pal.pal_proc_copy_addr);
+               env, address, qatomic_read(&env->pal.pal_proc_copy_addr));
 }
 
 /* SAL's return to PAL_RESET after the RECOVERY_CHECK call (break 0x100007). */
@@ -302,16 +302,124 @@ bool ia64_insn_requires_slot2(const Ia64Instruction *insn)
     }
 }
 
-bool ia64_insn_has_invalid_fp_pair(const Ia64Instruction *insn)
+static bool ia64_insn_is_fp_load_pair(const Ia64Instruction *insn)
 {
     switch (insn->opcode) {
     case IA64_OP_LDFP8:
     case IA64_OP_LDFPD:
     case IA64_OP_LDFPS:
-        return insn->operands.common.destination <= 1 ||
-               insn->operands.common.source1 <= 1 ||
-               ((insn->operands.common.destination ^
-                 insn->operands.common.source1) & 1) == 0;
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * The bank conflict check of ldfp uses physical FR numbers (SDM Vol 2
+ * Illegal Operation fault).  A pair whose registers are both static or both
+ * rotating keeps its parity under rotation; the other pairs are checked at
+ * run time by ia64_gen_check_fp_pair_bank().
+ */
+bool ia64_insn_has_invalid_fp_pair(const Ia64Instruction *insn)
+{
+    uint8_t f1 = insn->operands.common.destination;
+    uint8_t f2 = insn->operands.common.source1;
+
+    if (!ia64_insn_is_fp_load_pair(insn)) {
+        return false;
+    }
+    return f1 <= 1 || f2 <= 1 ||
+           ((f1 < 32) == (f2 < 32) && ((f1 ^ f2) & 1) == 0);
+}
+
+/* A rotating FR has the parity of its logical number XOR CFM.rrb.fr. */
+static void ia64_gen_check_fp_pair_bank(const Ia64Instruction *insn)
+{
+    uint8_t f1 = insn->operands.common.destination;
+    uint8_t f2 = insn->operands.common.source1;
+    TCGv_i32 rrb_parity;
+    TCGLabel *valid;
+
+    if (!ia64_insn_is_fp_load_pair(insn) || (f1 < 32) == (f2 < 32)) {
+        return;
+    }
+
+    rrb_parity = tcg_temp_new_i32();
+    valid = gen_new_label();
+    tcg_gen_ld8u_i32(rrb_parity, tcg_env, offsetof(CPUIA64State, cfm_rrb_fr));
+    tcg_gen_andi_i32(rrb_parity, rrb_parity, 1);
+    tcg_gen_brcondi_i32(((f1 ^ f2) & 1) ? TCG_COND_EQ : TCG_COND_NE,
+                        rrb_parity, 0, valid);
+    ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address, insn->raw,
+                             insn->slot);
+    gen_set_label(valid);
+}
+
+static bool ia64_insn_writes_fr_f1(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_LDFS:
+    case IA64_OP_LDFD:
+    case IA64_OP_LDF8:
+    case IA64_OP_LDFE:
+    case IA64_OP_LDF_FILL:
+    case IA64_OP_SETF_S:
+    case IA64_OP_SETF_D:
+    case IA64_OP_SETF_EXP:
+    case IA64_OP_SETF_SIG:
+    case IA64_OP_FADD:
+    case IA64_OP_FSUB:
+    case IA64_OP_FMPY:
+    case IA64_OP_FMA:
+    case IA64_OP_FMS:
+    case IA64_OP_FNMA:
+    case IA64_OP_FNORM:
+    case IA64_OP_XMA_L:
+    case IA64_OP_XMA_H:
+    case IA64_OP_XMA_HU:
+    case IA64_OP_XMPY_HU:
+    case IA64_OP_FMOV:
+    case IA64_OP_FMERGE:
+    case IA64_OP_FMERGE_S:
+    case IA64_OP_FMERGE_SE:
+    case IA64_OP_FCVT_XF:
+    case IA64_OP_FCVT_FX:
+    case IA64_OP_FCVT_FXU:
+    case IA64_OP_FMIN:
+    case IA64_OP_FMAX:
+    case IA64_OP_FAMIN:
+    case IA64_OP_FAMAX:
+    case IA64_OP_FRCPA:
+    case IA64_OP_FRSQRTA:
+    case IA64_OP_FSELECT:
+    case IA64_OP_FAND:
+    case IA64_OP_FANDCM:
+    case IA64_OP_FOR:
+    case IA64_OP_FXOR:
+    case IA64_OP_FSWAP:
+    case IA64_OP_FSWAP_NL:
+    case IA64_OP_FSWAP_NR:
+    case IA64_OP_FMIX_LR:
+    case IA64_OP_FMIX_R:
+    case IA64_OP_FMIX_L:
+    case IA64_OP_FSXT_R:
+    case IA64_OP_FSXT_L:
+    case IA64_OP_FPACK:
+    case IA64_OP_FPMERGE:
+    case IA64_OP_FPMERGE_S:
+    case IA64_OP_FPMERGE_SE:
+    case IA64_OP_FPMIN:
+    case IA64_OP_FPMAX:
+    case IA64_OP_FPAMIN:
+    case IA64_OP_FPAMAX:
+    case IA64_OP_FPCMP:
+    case IA64_OP_FPCVT:
+    case IA64_OP_FPMA:
+    case IA64_OP_FPMS:
+    case IA64_OP_FPNMA:
+    case IA64_OP_FPRCPA:
+    case IA64_OP_FPRSQRTA:
+        return true;
     default:
         return false;
     }
@@ -975,7 +1083,7 @@ void ia64_gen_fr_set_nat(uint8_t reg)
 typedef enum IA64AlignAcMode {
     IA64_ALIGN_AC_RUNTIME,  /* PSR.ac unknown: test it at run time */
     IA64_ALIGN_AC_SET,      /* PSR.ac statically 1: any misalignment faults */
-    IA64_ALIGN_AC_CLEAR,    /* PSR.ac statically 0: only a page cross faults */
+    IA64_ALIGN_AC_CLEAR,    /* PSR.ac statically 0: the model's rule applies */
 } IA64AlignAcMode;
 
 static IA64AlignAcMode ia64_align_ac_mode(const Ia64Instruction *insn)
@@ -993,9 +1101,62 @@ static IA64AlignAcMode ia64_align_ac_mode(const Ia64Instruction *insn)
     return ctx->memory.psr_ac ? IA64_ALIGN_AC_SET : IA64_ALIGN_AC_CLEAR;
 }
 
-static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
+/*
+ * 251110-003 sec 5.5: with PSR.ac = 0 an Itanium 2 handles an integer
+ * reference inside an 8-byte window and an FP reference inside a 16-byte
+ * window (ldfe and stfe cover 10 bytes of it); FP pairs and spill/fill must
+ * be naturally aligned, and a UC or WC reference faults when it crosses an
+ * 8-byte boundary.
+ */
+IA64UnalignedWindow ia64_unaligned_window(const Ia64Instruction *insn,
+                                          uint32_t size)
+{
+    const DisasContext *ctx = insn->ctx;
+    const IA64CPUClass *icc;
+    IA64UnalignedWindow w = { .window = 0, .span = size };
+
+    if (!ctx) {
+        return w;
+    }
+    icc = ia64_env_cpu_class(ctx->env);
+
+    switch (insn->opcode) {
+    case IA64_OP_LDFPS:
+    case IA64_OP_LDFPD:
+    case IA64_OP_LDFP8:
+    case IA64_OP_LDF_FILL:
+    case IA64_OP_STF_SPILL:
+        w.window = size;
+        break;
+    case IA64_OP_LDFE:
+    case IA64_OP_STFE:
+        w.window = 16;
+        w.span = 10;
+        w.uc_crosses_8 = true;
+        break;
+    case IA64_OP_LDFS:
+    case IA64_OP_LDFD:
+    case IA64_OP_LDF8:
+    case IA64_OP_STFS:
+    case IA64_OP_STFD:
+    case IA64_OP_STF8:
+        w.window = 16;
+        w.uc_crosses_8 = true;
+        break;
+    default:
+        w.window = icc->unaligned_windows ? 8 : icc->unaligned_int_block;
+        return w;
+    }
+    if (!icc->unaligned_windows) {
+        /* FP references: only the 4 KiB rule. */
+        w = (IA64UnalignedWindow){ .window = 0, .span = size };
+    }
+    return w;
+}
+
+static void ia64_gen_branch_if_alignment_fault(const Ia64Instruction *insn,
+                                               TCGv_i64 addr, uint32_t size,
                                                bool always_fault,
-                                               IA64AlignAcMode ac_mode,
                                                bool is_write,
                                                TCGLabel *fault)
 {
@@ -1018,18 +1179,17 @@ static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
          */
         tcg_gen_br(fault);
     } else {
+        const DisasContext *ctx = insn->ctx;
+        IA64AlignAcMode ac_mode = ia64_align_ac_mode(insn);
+        IA64UnalignedWindow w = ia64_unaligned_window(insn, size);
+        bool uc_exempt =
+            ctx && ia64_env_cpu_class(ctx->env)->unaligned_uc_exempt;
         /*
-         * A misaligned ordinary reference faults when PSR.ac is set, or (with
-         * PSR.ac clear) when it crosses a 4 KiB page boundary (SDM Vol.2 5.5.4).
-         * But unaligned references to the I/O port space -- and more generally
-         * to any non-writeback-cacheable (UC/MMIO) target the platform
-         * decomposes -- are NOT detected as alignment faults, even with PSR.ac
-         * set (SDM Vol.2, "I/O port space"; PSR.ac == EFLAG.ac).  So gather the
-         * fault conditions and, only when one holds, consult the runtime
-         * exemption before actually faulting -- keeping the aligned and
-         * PSR.ac-clear-in-page fast paths free of the probing helper.
+         * The exemption is consulted only once a fault condition holds, so
+         * the aligned and PSR.ac-clear-in-page fast paths stay free of the
+         * probing helper.
          */
-        TCGLabel *maybe_fault = gen_new_label();
+        TCGLabel *maybe_fault = uc_exempt ? gen_new_label() : fault;
 
         if (ac_mode == IA64_ALIGN_AC_SET) {
             tcg_gen_br(maybe_fault);
@@ -1038,17 +1198,35 @@ static void ia64_gen_branch_if_alignment_fault(TCGv_i64 addr, uint32_t size,
                 tcg_gen_andi_i64(tmp, cpu_psr, IA64_PSR_AC);
                 tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, maybe_fault);
             }
-            tcg_gen_andi_i64(tmp, addr, 0xfff);
-            tcg_gen_addi_i64(tmp, tmp, size - 1);
-            tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, 0xfff, maybe_fault);
+            if (w.window != 0) {
+                tcg_gen_andi_i64(tmp, addr, w.window - 1);
+                tcg_gen_addi_i64(tmp, tmp, w.span);
+                tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, w.window, maybe_fault);
+                if (w.uc_crosses_8) {
+                    tcg_gen_andi_i64(tmp, addr, 7);
+                    tcg_gen_addi_i64(tmp, tmp, w.span);
+                    tcg_gen_brcondi_i64(TCG_COND_LEU, tmp, 8, ok);
+                    gen_helper_ia64_unaligned_uncacheable(
+                        tmp, tcg_env, addr, tcg_constant_i32(w.span),
+                        tcg_constant_i32(is_write));
+                    tcg_gen_brcondi_i64(TCG_COND_NE, tmp, 0, maybe_fault);
+                }
+            } else {
+                /* Every model faults a datum spanning 4 KiB (SDM Vol.2 4.5). */
+                tcg_gen_andi_i64(tmp, addr, 0xfff);
+                tcg_gen_addi_i64(tmp, tmp, size - 1);
+                tcg_gen_brcondi_i64(TCG_COND_GTU, tmp, 0xfff, maybe_fault);
+            }
             tcg_gen_br(ok);
         }
 
-        gen_set_label(maybe_fault);
-        gen_helper_ia64_alignment_exempt(tmp, tcg_env, addr,
-                                         tcg_constant_i32(size),
-                                         tcg_constant_i32(is_write));
-        tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, fault);
+        if (uc_exempt) {
+            gen_set_label(maybe_fault);
+            gen_helper_ia64_alignment_exempt(tmp, tcg_env, addr,
+                                             tcg_constant_i32(size),
+                                             tcg_constant_i32(is_write));
+            tcg_gen_brcondi_i64(TCG_COND_EQ, tmp, 0, fault);
+        }
     }
 
     gen_set_label(ok);
@@ -1068,8 +1246,7 @@ void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
 
     fault = gen_new_label();
     ok = gen_new_label();
-    ia64_gen_branch_if_alignment_fault(addr, size, always_fault,
-                                       ia64_align_ac_mode(insn),
+    ia64_gen_branch_if_alignment_fault(insn, addr, size, always_fault,
                                        (isr_access & IA64_ISR_W) != 0, fault);
     tcg_gen_br(ok);
 
@@ -1460,11 +1637,23 @@ void ia64_gen_exit_to_completed(DisasContext *ctx, uint64_t ip,
     ia64_gen_exit_to(ctx, ip);
 }
 
+/* A taken branch in a TB that notes completion traps (DisasContext.psr_tb). */
+static void ia64_gen_note_taken_branch(DisasContext *ctx,
+                                       uint64_t completed_ip)
+{
+    if (ctx->psr_ss || ctx->psr_tb) {
+        gen_helper_completion_trap_taken(
+            tcg_env, tcg_constant_i64(ia64_ip_bundle_addr(completed_ip)),
+            tcg_constant_i32(ctx->trap_slot));
+    }
+}
+
 void ia64_gen_lookup_tcg_completed(DisasContext *ctx, TCGv_i64 ip,
                                    uint64_t completed_ip,
                                    bool record_iipa,
                                    bool track_psr_suppression)
 {
+    ia64_gen_note_taken_branch(ctx, completed_ip);
     ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_store_instruction_group_start(true);
@@ -1479,6 +1668,7 @@ void ia64_gen_lookup_current_completed(DisasContext *ctx,
                                        bool record_iipa,
                                        bool track_psr_suppression)
 {
+    ia64_gen_note_taken_branch(ctx, completed_ip);
     ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_store_instruction_group_start(true);
@@ -1565,6 +1755,7 @@ void ia64_gen_goto_completed(DisasContext *ctx, uint64_t ip,
                              bool record_iipa,
                              bool track_psr_suppression)
 {
+    ia64_gen_note_taken_branch(ctx, completed_ip);
     ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
                                     track_psr_suppression);
     ia64_gen_goto_tb_group(ctx, ip, true);
@@ -1695,6 +1886,7 @@ void ia64_prepare_self_counted_loop(
     ctx->branch.cloop_zero_st1_valid = false;
 
     if (ctx->restart.start_slot != 0 ||
+        ctx->psr_ss || ctx->psr_tb ||
         ctx->base.plugin_enabled ||
         (tb_cflags(ctx->base.tb) & CF_USE_ICOUNT) ||
         !ia64_analyze_self_counted_loop(
@@ -2343,9 +2535,6 @@ static uint32_t ia64_insn_fp_read_sets(const Ia64Instruction *insn)
         return ia64_fp_reg_set(insn->operands.common.source1) |
                ia64_fp_reg_set(insn->operands.common.source2);
 
-    case IA64_OP_FPABS:
-    case IA64_OP_FPNEG:
-    case IA64_OP_FPNEGABS:
     case IA64_OP_FMOV:
     case IA64_OP_FCVT_XF:
     case IA64_OP_FCVT_FX:
@@ -2445,9 +2634,6 @@ static uint32_t ia64_insn_fp_write_sets(const Ia64Instruction *insn)
     case IA64_OP_FPRCPA:
     case IA64_OP_FSELECT:
     case IA64_OP_FNORM:
-    case IA64_OP_FPABS:
-    case IA64_OP_FPNEG:
-    case IA64_OP_FPNEGABS:
     case IA64_OP_FPRSQRTA:
     case IA64_OP_FRSQRTA:
     case IA64_OP_FPACK:
@@ -2561,16 +2747,25 @@ static void ia64_gen_check_disabled_fp(const Ia64Instruction *insn)
     gen_set_label(done);
 }
 
-/* Instructions gated by the CPUID[4].ao 16-byte atomic capability bit. */
-static bool ia64_insn_needs_16byte_atomics(const Ia64Instruction *insn)
+/*
+ * The CPUID[4] capability bit an optional instruction needs, 0 for none.
+ * clz, mpy4 and mpyshl4 fault only when PR[qp] is 1 (SDM Vol 3 clz, mpy4,
+ * mpyshl4 operation).
+ */
+static uint64_t ia64_insn_cpuid4_feature(const Ia64Instruction *insn)
 {
     switch (insn->opcode) {
     case IA64_OP_LD16:
     case IA64_OP_ST16:
     case IA64_OP_CMP8XCHG16:
-        return true;
+        return IA64_CPUID4_AO;
+    case IA64_OP_CLZ:
+        return IA64_CPUID4_CZ;
+    case IA64_OP_MPY4:
+    case IA64_OP_MPYSHL4:
+        return IA64_CPUID4_X2;
     default:
-        return false;
+        return 0;
     }
 }
 
@@ -2667,10 +2862,32 @@ static IA64PrepareResult ia64_gen_prepare_insn(
                                   insn->raw, insn->slot);
         return IA64_PREPARE_NORETURN;
     }
+    if (ia64_insn_needs_long_branch(insn) &&
+        !(ia64_env_cpu_class(ctx->env)->cpuid_features & IA64_CPUID4_LB)) {
+        /*
+         * 245319-002 Vol. 3, brl: "This instruction is not implemented on the
+         * Intel Itanium processor, which takes an Illegal Operation fault
+         * whenever a long branch instruction is encountered, regardless of
+         * whether the branch is taken or not...  Presence of this
+         * instruction is indicated by a 1 in the lb bit of CPUID register
+         * 4."  The fault ignores the qualifying predicate (SDM Vol 2 §7.4).
+         * Windows keys KF_BRL off that bit and emulates brl from its Illegal
+         * Operation handler when it is clear.
+         */
+        ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
+                                  insn->raw, insn->slot);
+        return IA64_PREPARE_NORETURN;
+    }
     ia64_gen_clear_unc_compare_targets(insn);
+    /*
+     * frcpa, frsqrta, fprcpa and fprsqrta clear p2 when PR[qp] is 0.  With
+     * PR[qp] 1 only the helper writes it, so a fault leaves it unchanged
+     * (SDM Vol 3 frcpa, frsqrta).
+     */
     if (insn->clear_p2_before_predicate &&
-        insn->operands.common.auxiliary2 != 0) {
-        tcg_gen_movi_i64(cpu_pr[insn->operands.common.auxiliary2], 0);
+        insn->operands.common.auxiliary2 != 0 && insn->qp != 0) {
+        tcg_gen_and_i64(cpu_pr[insn->operands.common.auxiliary2],
+                        cpu_pr[insn->operands.common.auxiliary2], qp_value);
     }
     skip = ia64_gen_predicate_skip(insn, qp_value);
     *predicate_skip = skip;
@@ -2698,29 +2915,13 @@ static IA64PrepareResult ia64_gen_prepare_insn(
         ia64_gen_predicate_end(skip);
         return IA64_PREPARE_COMPLETE;
     }
-    if (ia64_insn_needs_16byte_atomics(insn) &&
-        !(ia64_env_cpu_class(ctx->env)->cpuid_features & IA64_CPUID4_AO)) {
+    ia64_gen_check_fp_pair_bank(insn);
+    if (ia64_insn_cpuid4_feature(insn) &
+        ~ia64_env_cpu_class(ctx->env)->cpuid_features) {
         /*
-         * The encoding is reserved on a model that clears CPUID[4].ao, so
-         * refuse it the same way an unimplemented opcode is refused.
-         */
-        ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
-                                  insn->raw, insn->slot);
-        if (skip == NULL) {
-            return IA64_PREPARE_NORETURN;
-        }
-        ia64_gen_predicate_end(skip);
-        return IA64_PREPARE_COMPLETE;
-    }
-    if (ia64_insn_needs_long_branch(insn) &&
-        !(ia64_env_cpu_class(ctx->env)->cpuid_features & IA64_CPUID4_LB)) {
-        /*
-         * 245319-002 Vol. 3, brl: "This instruction is not implemented on the
-         * Intel Itanium processor, which takes an Illegal Operation fault
-         * whenever a long branch instruction is encountered...  Presence of
-         * this instruction is indicated by a 1 in the lb bit of CPUID
-         * register 4."  Windows keys KF_BRL off that bit and emulates brl
-         * from its Illegal Operation handler when it is clear.
+         * The instruction is not implemented on a model that clears its
+         * CPUID[4] bit, so refuse it the way an unimplemented opcode is
+         * refused.
          */
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
                                   insn->raw, insn->slot);
@@ -2763,7 +2964,10 @@ static IA64PrepareResult ia64_gen_prepare_insn(
         ia64_gen_predicate_end(skip);
         return IA64_PREPARE_COMPLETE;
     }
-    if (ia64_compare_has_equal_targets(insn)) {
+    if (ia64_compare_has_equal_targets(insn) ||
+        /* FR 0 and FR 1 are read-only (SDM Vol 3 fp_check_target_register). */
+        (ia64_insn_writes_fr_f1(insn) &&
+         insn->operands.common.destination <= 1)) {
         ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address,
                                   insn->raw, insn->slot);
         if (skip == NULL) {
@@ -2915,6 +3119,8 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
         ctx->base.tb->flags & IA64_TB_FLAG_GROUP_START;
     ctx->restart.next_instruction_group_start =
         ctx->restart.instruction_group_start;
+    ctx->psr_ss = flags & IA64_TB_FLAG_PSR_SS;
+    ctx->psr_tb = flags & IA64_TB_FLAG_PSR_TB;
 }
 
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cs)
@@ -3057,6 +3263,16 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         db->is_jmp = DISAS_NORETURN;
         return;
     }
+    /*
+     * Only an rfi with IPSR.ri = 2 enters an MLX bundle at slot 2: Illegal
+     * Operation, with IPSR.ri and ISR.ei 2 (SDM Vol. 2 p. 2:192).
+     */
+    if (ctx->restart.start_slot == 2 &&
+        template_info->units[1] == IA64_UNIT_L) {
+        ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, bundle_ip, 0, 2);
+        db->is_jmp = DISAS_NORETURN;
+        return;
+    }
 
     slots[0] = ia64_bundle_slot(low, high, 0);
     slots[1] = ia64_bundle_slot(low, high, 1);
@@ -3108,7 +3324,8 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         if (ia64_insn_is_empty_hint(&insn) &&
             !ia64_insn_is_yielding_pause(ctx, &insn) &&
             !(record_iipa && track_iipa_for_insn) &&
-            !ctx->restart.track_psr_suppression) {
+            !ctx->restart.track_psr_suppression &&
+            !ctx->psr_ss && !ctx->psr_tb) {
             ia64_gen_advance_restart_point(ctx, bundle_ip, slot,
                                            skip_x_slot);
             ctx->restart.instruction_group_start =
@@ -3126,6 +3343,12 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
                                     psr_suppression_before_insn));
         }
         ia64_gen_set_ri_tracked(ctx, slot);
+        ctx->trap_slot = slot;
+        if (ctx->psr_ss) {
+            gen_helper_completion_trap_arm(tcg_env,
+                                           tcg_constant_i64(bundle_ip),
+                                           tcg_constant_i32(slot));
+        }
         if (ia64_gen_insn(ctx, &insn, record_iipa && track_iipa_for_insn)) {
             db->is_jmp = DISAS_NORETURN;
             return;
@@ -3143,6 +3366,18 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         }
         ctx->restart.track_psr_suppression =
             ia64_insn_may_set_fault_suppression(&insn);
+        if (ctx->psr_ss || ctx->psr_tb) {
+            /*
+             * Leave after one instruction so that its traps are taken
+             * before the next one starts.
+             */
+            ia64_gen_store_instruction_group_start(
+                ctx->restart.instruction_group_start);
+            ia64_gen_save_fault_slot_for_exit(ctx);
+            tcg_gen_exit_tb(NULL, 0);
+            db->is_jmp = DISAS_NORETURN;
+            return;
+        }
     }
 
     ctx->restart.start_slot = 0;

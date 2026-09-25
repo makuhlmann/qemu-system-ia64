@@ -92,6 +92,8 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 
     flags |= (psr & IA64_PSR_FAULT_SUPPRESS_MASK) != 0 ?
              IA64_TB_FLAG_PSR_SUPPRESS : 0;
+    flags |= ((psr & IA64_PSR_SS) ? IA64_TB_FLAG_PSR_SS : 0) |
+             ((psr & IA64_PSR_TB) ? IA64_TB_FLAG_PSR_TB : 0);
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,
@@ -390,7 +392,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     uint8_t perm;
     uint32_t rid;
     IA64Exception excp;
-    bool is_rse = !is_ifetch && mmu_idx == MMU_IDX_RSE;
+    bool is_rse = !is_ifetch &&
+                  (mmu_idx == MMU_IDX_RSE || mmu_idx == MMU_IDX_RSE_PHYS);
     uint8_t access_level;
     bool virt_translation_enabled;
 
@@ -405,7 +408,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     }
 
     rid = ia64_region_rid(&cpu->env, addr);
-    if (mmu_idx == MMU_PHYS_IDX) {
+    if (mmu_idx == MMU_PHYS_IDX || mmu_idx == MMU_IDX_RSE_PHYS) {
         if (!ia64_pa_is_implemented(&cpu->env, addr)) {
             if (probe) {
                 return false;
@@ -852,6 +855,12 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
     env->psr = 0;
     env->ip = info->firmware_entry;
     env->br[IA64_BR_RETURN_LINK] = info->firmware_entry;
+    /*
+     * The flat-image entry is a handoff with an empty frame, not a reset:
+     * every stacked physical register is invalid.
+     */
+    env->cfm_sof = 0;
+    env->rse.rse_invalid = IA64_STACKED_GR_COUNT;
     env->cr_iva = info->iva;
     /*
      * VHPT disabled (ve=0), size field at its architectural minimum.
@@ -930,8 +939,8 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.pr[IA64_PR_TRUE] = 1;
     cpu->env.psr = 0;
     cpu->env.ar_rsc = 0;
-    /* Empty frame: every stacked physical register is invalid. */
-    cpu->env.rse.rse_invalid = IA64_STACKED_GR_COUNT;
+    /* CFM.sof = 96 and the rest 0, BOF at GR32 (SDM Vol 2 6.12). */
+    cpu->env.cfm_sof = IA64_STACKED_GR_COUNT;
     cpu->env.ar_fpsr = IA64_FPSR_DEFAULT;
     cpu->env.cr_iva = 0;
     cpu->env.instruction_group_start = true;
@@ -940,11 +949,19 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     set_float_3nan_prop_rule(float_3nan_prop_abc, &cpu->env.fp.fp_status);
     set_float_infzeronan_rule(float_infzeronan_dnan_never,
                               &cpu->env.fp.fp_status);
-    set_float_default_nan_pattern(0b01000000, &cpu->env.fp.fp_status);
+    /* The QNaN Indefinite has sign 1 (SDM Vol 1 Table 5-2). */
+    set_float_default_nan_pattern(0b11000000, &cpu->env.fp.fp_status);
     cpu->env.cr[IA64_CR_SAPIC_LID] =
         ia64_sapic_lid(MAX(CPU(cpu)->cpu_index, 0), 0);
     cpu->env.cr[IA64_CR_SAPIC_TPR] = 0;
     cpu->env.cr[IA64_CR_ITV] = IA64_VECTOR_MASKED;
+    /* PMV.m is set on reset (245320-003 §6.2.9, 251110-003 §10.3.11). */
+    cpu->env.cr[IA64_CR_PMV] = IA64_VECTOR_MASKED;
+    if (icc->pmu) {
+        for (int i = 0; i < IA64_PMC_COUNT; i++) {
+            cpu->env.pmc[i] = icc->pmu->pmc[i].reset;
+        }
+    }
     cpu->env.pal.pal_proc_copy_valid = false;
     cpu->env.pal.pal_proc_copy_addr = 0;
     cpu->env.pal.pal_interrupt_block_addr = IA64_LOCAL_SAPIC_PA;
@@ -1065,11 +1082,27 @@ static const TCGCPUOps ia64_tcg_ops = {
  * ("supports WB, UC, and WC ... The UCE memory attribute is also supported"),
  * and Merced's write-coalescing buffer has a chapter of its own in
  * 245320-002 ch. 4.  This emulation implements all four identically on every
- * model, so every model reports all four.
+ * model, so every model reports all four.  NaTPage (encoding 7) is an
+ * architected attribute, not a model option (SDM Vol. 2 Table 4-11), and
+ * every model implements it.
  */
-#define IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC \
+#define IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE \
     ((1ULL << IA64_PTE_MA_WB) | (1ULL << IA64_PTE_MA_UC) | \
-     (1ULL << IA64_PTE_MA_UCE) | (1ULL << IA64_PTE_MA_WC))
+     (1ULL << IA64_PTE_MA_UCE) | (1ULL << IA64_PTE_MA_WC) | \
+     (1ULL << IA64_PTE_MA_NATPAGE))
+
+/*
+ * PAL_CACHE_INFO hint vectors of a data or unified cache.  Merced
+ * (245320-003 sec 5.9) and Itanium 2 (251110-003 sec 5.4.2) implement the
+ * t1, nt1, nt2 and nta locality hints.  Loads encode t1, nt1 and nta (bits
+ * 0, 1 and 3 of Table 11-69; nt2 is an lfetch hint), stores t1 and nta (bits
+ * 0 and 3 of Table 11-68).  Instruction caches report no hints.
+ */
+#define IA64_PAL_CACHE_LOAD_HINTS_T1_NT1_NTA  0x0b
+#define IA64_PAL_CACHE_STORE_HINTS_T1_NTA     0x09
+#define IA64_PAL_CACHE_DATA_HINTS \
+    .store_hints = IA64_PAL_CACHE_STORE_HINTS_T1_NTA, \
+    .load_hints = IA64_PAL_CACHE_LOAD_HINTS_T1_NT1_NTA
 
 /*
  * Itanium 2 (Madison) translation caches, 251110-003 sec 6.1.1 and 6.1.2:
@@ -1098,7 +1131,7 @@ static const IA64PalProfile ia64_pal_profile_madison = {
     .pal_vendor = 1,
     .pal_a_model = 2, .pal_a_revision = 0x23,
     .pal_b_model = 2, .pal_b_revision = 0x23,
-    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 4,
     .cache = {
@@ -1108,18 +1141,22 @@ static const IA64PalProfile ia64_pal_profile_madison = {
                     .load_latency = 1, .tag_lsb = 12 },
             [1] = { .size = 16 * KiB, .associativity = 4, .line_shift = 6,
                     .stride_shift = 6, .store_latency = 1,
-                    .load_latency = 1, .tag_lsb = 12 },
+                    .load_latency = 1, .tag_lsb = 12,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         /* Unified L2: reported on the data/unified type only. */
         [1] = {
             [1] = { .size = 256 * KiB, .associativity = 8, .line_shift = 7,
                     .stride_shift = 7, .attribute = 1, .store_latency = 1,
-                    .load_latency = 5, .tag_lsb = 15, .unified = true },
+                    .load_latency = 5, .tag_lsb = 15, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         [2] = {
+            /* L3 load latency: 251110-003 Table 2-5 (12 is McKinley's). */
             [1] = { .size = 3 * MiB, .associativity = 12, .line_shift = 7,
                     .stride_shift = 7, .attribute = 1, .store_latency = 1,
-                    .load_latency = 12, .tag_lsb = 18, .unified = true },
+                    .load_latency = 14, .tag_lsb = 18, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
     },
     .tc_levels = 2,
@@ -1128,6 +1165,9 @@ static const IA64PalProfile ia64_pal_profile_madison = {
         [0] = { IA64_PAL_TC_ITANIUM2_L1, IA64_PAL_TC_ITANIUM2_L1 },
         [1] = { IA64_PAL_TC_ITANIUM2_L2, IA64_PAL_TC_ITANIUM2_L2 },
     },
+    /* 251110-003 Table 10-28 */
+    .perf_counter_width = 48,
+    .perf_retired_mask = 0xf0,
 };
 
 static const IA64PalProfile ia64_pal_profile_montecito = {
@@ -1141,7 +1181,7 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     .pal_vendor = 1,
     .pal_a_model = 2, .pal_a_revision = 0x23,
     .pal_b_model = 2, .pal_b_revision = 0x23,
-    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 5,
     .cache = {
@@ -1175,6 +1215,8 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
         [0] = { IA64_PAL_TC_ITANIUM2_L1, IA64_PAL_TC_ITANIUM2_L1 },
         [1] = { IA64_PAL_TC_ITANIUM2_L2, IA64_PAL_TC_ITANIUM2_L2 },
     },
+    .perf_counter_width = 48,
+    .perf_retired_mask = 0xf0,
 };
 
 /*
@@ -1225,7 +1267,7 @@ static const IA64PalProfile ia64_pal_profile_merced = {
     .pal_vendor = 1,
     .pal_a_model = 8, .pal_a_revision = 0x30,
     .pal_b_model = 8, .pal_b_revision = 0x30,
-    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC,
+    .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 4,
     .cache = {
@@ -1235,17 +1277,20 @@ static const IA64PalProfile ia64_pal_profile_merced = {
                     .load_latency = 1, .tag_lsb = 12 },
             [1] = { .size = 16 * KiB, .associativity = 4, .line_shift = 5,
                     .stride_shift = 5, .store_latency = 1,
-                    .load_latency = 2, .tag_lsb = 12 },
+                    .load_latency = 2, .tag_lsb = 12,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         [1] = {
             [1] = { .size = 96 * KiB, .associativity = 6, .line_shift = 6,
                     .stride_shift = 6, .attribute = 1, .store_latency = 1,
-                    .load_latency = 6, .tag_lsb = 14, .unified = true },
+                    .load_latency = 6, .tag_lsb = 14, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         [2] = {
             [1] = { .size = 4 * MiB, .associativity = 4, .line_shift = 6,
                     .stride_shift = 6, .attribute = 1, .store_latency = 1,
-                    .load_latency = 21, .tag_lsb = 20, .unified = true },
+                    .load_latency = 21, .tag_lsb = 20, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
     },
     .tc_levels = 2,
@@ -1268,11 +1313,21 @@ static const IA64PalProfile ia64_pal_profile_merced = {
                     .page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK },
         },
     },
+    /* 245320-003 Table 6-24 */
+    .perf_counter_width = 32,
+    .perf_retired_mask = 0x10,
 };
 
 static const Property ia64_cpu_properties[] = {
     DEFINE_PROP_UINT32("geographic-id", IA64CPU, geographic_id, UINT32_MAX),
 };
+
+/*
+ * Madison's IA-32 cache descriptors.  The L3 descriptor reports 3 MB even on
+ * larger-cache parts, matching hardware erratum 6.  EDX is architecturally
+ * reserved for this implementation.
+ */
+#define IA64_MADISON_IA32_CPUID_LEAF2 { 0x7e776701, 0x0000008d, 0, 0x80000000 }
 
 static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
 {
@@ -1304,6 +1359,9 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     icc->cpuid_version = 0x000000001f010504ULL;
     icc->cpuid_features = IA64_CPUID4_LB;
     icc->ia32_cpuid_version = 0x00000673;
+    memcpy(icc->ia32_cpuid_leaf2,
+           (const uint32_t[4])IA64_MADISON_IA32_CPUID_LEAF2,
+           sizeof(icc->ia32_cpuid_leaf2));
     icc->itr_count = 64;
     icc->dtr_count = 64;
     icc->insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK;
@@ -1316,6 +1374,8 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     icc->has_native_ia32 = true;
     icc->has_virtualization = false;
     icc->is_montecito = false;
+    icc->unaligned_windows = true;
+    icc->unaligned_uc_exempt = false;
     icc->pal = &ia64_pal_profile_madison;
 }
 
@@ -1323,6 +1383,7 @@ typedef struct IA64CPUModelDef {
     uint64_t cpuid_version;
     uint64_t cpuid_features;
     uint32_t ia32_cpuid_version;
+    uint32_t ia32_cpuid_leaf2[4];
     uint8_t itr_count;
     uint8_t dtr_count;
     uint64_t insertable_page_mask;
@@ -1335,7 +1396,11 @@ typedef struct IA64CPUModelDef {
     bool has_native_ia32;
     bool has_virtualization;
     bool is_montecito;
+    bool unaligned_windows;
+    uint8_t unaligned_int_block;
+    bool unaligned_uc_exempt;
     const IA64PalProfile *pal;
+    const IA64PmuLayout *pmu;
 } IA64CPUModelDef;
 
 static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
@@ -1346,6 +1411,8 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->cpuid_version = model->cpuid_version;
     icc->cpuid_features = model->cpuid_features;
     icc->ia32_cpuid_version = model->ia32_cpuid_version;
+    memcpy(icc->ia32_cpuid_leaf2, model->ia32_cpuid_leaf2,
+           sizeof(icc->ia32_cpuid_leaf2));
     icc->itr_count = model->itr_count;
     icc->dtr_count = model->dtr_count;
     icc->insertable_page_mask = model->insertable_page_mask;
@@ -1358,8 +1425,84 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->has_native_ia32 = model->has_native_ia32;
     icc->has_virtualization = model->has_virtualization;
     icc->is_montecito = model->is_montecito;
+    icc->unaligned_windows = model->unaligned_windows;
+    icc->unaligned_int_block = model->unaligned_int_block;
+    icc->unaligned_uc_exempt = model->unaligned_uc_exempt;
     icc->pal = model->pal;
+    icc->pmu = model->pmu;
 }
+
+/* 245320-003 §6.2: bits 60:51 of an EAR or BTB address read as bit 50. */
+#define IA64_MERCED_PMU_ADDR_SEXT \
+    .sext_mask = 0x1ff8000000000000ULL, .sext_bit = 50
+
+/*
+ * 245320-003 §6.2 and Table 6-24: PMC0-13 and PMD0-17 are populated and the
+ * counters are 32 bits wide.
+ */
+/*
+ * Reset values, 245320-003 §6.2.9: PAL sets PMC[8,9].mifb = 1111 with
+ * mask{29:3} all ones, PMC[11].pt and PMC[13].ta; the rest is undefined.
+ */
+static const IA64PmuLayout ia64_pmu_layout_merced = {
+    .pmc = {
+        [0] = { .mask = 0xf1 },                         /* Table 6-7 */
+        [4 ... 5] = { .mask = 0x037f7f7f },             /* Figure 6-13 */
+        [6 ... 7] = { .mask = 0x033f7f7f },             /* Figure 6-14 */
+        [8 ... 9] = { .mask = 0xfffffffe3ffffff8ULL,    /* Figure 6-17 */
+                      .reset = 0xf00000003ffffff8ULL },
+        [10] = { .mask = 0x030f00cf },                  /* Figure 6-18 */
+        [11] = { .mask = 0x130f00cf,                    /* Figure 6-20 */
+                 .reset = 0x10000000 },
+        [12] = { .mask = 0xffcf },                      /* Figure 6-22 */
+        [13] = { .mask = 0x1, .reset = 0x1 },           /* Figure 6-16 */
+    },
+    .pmd = {
+        /* Figure 6-19 */
+        [0] = { .mask = 0xe007ffffffffffe3ULL, IA64_MERCED_PMU_ADDR_SEXT },
+        [1] = { .mask = 0xfff },
+        /* Figure 6-21 */
+        [2] = { .mask = 0xe007ffffffffffffULL, IA64_MERCED_PMU_ADDR_SEXT },
+        [3] = { .mask = 0xc000000000000fffULL },
+        /* Figure 6-12 */
+        [4 ... 7] = { .mask = 0xffffffff,
+                      .sext_mask = 0xffffffff00000000ULL, .sext_bit = 31 },
+        /* Figure 6-23: software may write any value to bits 60:51. */
+        [8 ... 15] = { .mask = UINT64_MAX },
+        [16] = { .mask = 0xf },                         /* Figure 6-24 */
+        [17] = { .mask = 0xe007fffffffffffdULL, IA64_MERCED_PMU_ADDR_SEXT },
+    },
+};
+
+/*
+ * 251110-003 §10.3: PMC0-15 and PMD0-17 (Table 10-4).  Only the overflow
+ * status registers (Table 10-8) and the 47-bit counters with their overflow
+ * bit (Table 10-7) have their fields modelled.  PAL_PERF_MON_INFO in Table
+ * 10-28 lists PMC0-13 only, but sections 10.3.4 and 10.3.5 define PMC14 and
+ * PMC15, so they stay.
+ */
+static const IA64PmuLayout ia64_pmu_layout_madison = {
+    /*
+     * Reset values, 251110-003 §10.3.11 and PMC4.enable (§10.3.1: set at
+     * reset); the rest is undefined.
+     */
+    .pmc = {
+        [0] = { .mask = 0xf1 },
+        [4] = { .mask = UINT64_MAX, .reset = 1ULL << 23 },
+        [5 ... 7] = { .mask = UINT64_MAX },
+        [8 ... 9] = { .mask = UINT64_MAX, .reset = UINT64_MAX },
+        [10 ... 12] = { .mask = UINT64_MAX },
+        [13] = { .mask = UINT64_MAX, .reset = 0x2078fefefefeULL },
+        [14] = { .mask = UINT64_MAX, .reset = 0xdb6 },
+        [15] = { .mask = UINT64_MAX, .reset = 0xfffffff0 },
+    },
+    .pmd = {
+        [0 ... 3] = { .mask = UINT64_MAX },
+        [4 ... 7] = { .mask = 0x0000ffffffffffffULL,
+                      .sext_mask = 0xffff000000000000ULL, .sext_bit = 47 },
+        [8 ... 17] = { .mask = UINT64_MAX },
+    },
+};
 
 /*
  * Translation-register file size is implementation-specific; the SDM only
@@ -1378,6 +1521,7 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .cpuid_features = IA64_CPUID4_LB,
     /* P6-class IA-32 engine identity: family 6, model 7, stepping 3. */
     .ia32_cpuid_version = 0x00000673,
+    .ia32_cpuid_leaf2 = IA64_MADISON_IA32_CPUID_LEAF2,
     .itr_count = 64,
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
@@ -1389,7 +1533,9 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .vhpt_hash_folds_hpn = true,
     .has_native_ia32 = true,
     .has_virtualization = false,
+    .unaligned_windows = true,
     .pal = &ia64_pal_profile_madison,
+    .pmu = &ia64_pmu_layout_madison,
 };
 
 static const IA64CPUModelDef ia64_cpu_model_montecito = {
@@ -1398,6 +1544,7 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
     /* brl and 16-byte atomics; spontaneous deferral stays unimplemented. */
     .cpuid_features = IA64_CPUID4_LB | IA64_CPUID4_AO,
     .ia32_cpuid_version = 0x00000673,
+    .ia32_cpuid_leaf2 = IA64_MADISON_IA32_CPUID_LEAF2,
     .itr_count = 64,
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
@@ -1436,6 +1583,11 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
      * with a hardware dump value if one ever surfaces.
      */
     .ia32_cpuid_version = 0x00000708,
+    /*
+     * 245320-003 §8.4 Table 8-2; <L2> in EBX is 0x89, the 4 MB cache of
+     * this model's PAL_CACHE_INFO.
+     */
+    .ia32_cpuid_leaf2 = { 0x00151001, 0x0000891a, 0x009b9690, 0x80000000 },
     .itr_count = 8,
     .dtr_count = 48,
     .insertable_page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK,
@@ -1461,7 +1613,10 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
     .has_native_ia32 = true,
     .has_virtualization = false,
     .is_montecito = false,
+    .unaligned_int_block = 16,
+    .unaligned_uc_exempt = true,
     .pal = &ia64_pal_profile_merced,
+    .pmu = &ia64_pmu_layout_merced,
 };
 
 static const TypeInfo ia64_cpu_type_info[] = {

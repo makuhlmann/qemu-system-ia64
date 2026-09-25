@@ -20,12 +20,29 @@
 
 
 static void ia64_swap_banked_gr(CPUIA64State *env);
+
+/*
+ * env->pr[] holds the logical (renamed) view.  mov r=pr, mov pr= and
+ * mov pr.rot= address the predicates as though CFM.rrb.pr were 0 (SDM Vol 1
+ * 4.3.4, Vol 3 mov pr), so bit i is physical predicate i.
+ */
+static uint32_t ia64_pr_logical_index(const CPUIA64State *env,
+                                      uint32_t physical)
+{
+    if (physical < IA64_PR_ROTATING_BASE) {
+        return physical;
+    }
+    return IA64_PR_ROTATING_BASE +
+           (physical - IA64_PR_ROTATING_BASE + 48 - env->cfm_rrb_pr % 48) %
+           48;
+}
+
 uint64_t ia64_system_read_pr(CPUIA64State *env)
 {
     uint64_t value = 0;
 
     for (uint32_t i = 0; i < IA64_PR_COUNT; i++) {
-        value |= (env->pr[i] & 1) << i;
+        value |= (env->pr[ia64_pr_logical_index(env, i)] & 1) << i;
     }
 
     return value;
@@ -115,7 +132,7 @@ void ia64_system_write_pr(CPUIA64State *env, uint64_t value, uint64_t mask)
     if (ctpop64(mask) > IA64_PR_COUNT / 2) {
         for (uint32_t i = 1; i < IA64_PR_COUNT; i++) {
             if (mask & (1ULL << i)) {
-                env->pr[i] = (value >> i) & 1;
+                env->pr[ia64_pr_logical_index(env, i)] = (value >> i) & 1;
             }
         }
         env->pr[IA64_PR_TRUE] = 1;
@@ -125,7 +142,7 @@ void ia64_system_write_pr(CPUIA64State *env, uint64_t value, uint64_t mask)
         uint32_t i = ctz64(mask);
 
         mask &= mask - 1;
-        env->pr[i] = (value >> i) & 1;
+        env->pr[ia64_pr_logical_index(env, i)] = (value >> i) & 1;
     }
     env->pr[IA64_PR_TRUE] = 1;
 }
@@ -587,6 +604,17 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
     }
 }
 
+/* The value a PMC or PMD holds after a write, per the model's layout. */
+static uint64_t ia64_pmu_written_value(const IA64PmuRegister *reg,
+                                       uint64_t value)
+{
+    value &= reg->mask;
+    if (reg->sext_mask && (value >> reg->sext_bit) & 1) {
+        value |= reg->sext_mask;
+    }
+    return value;
+}
+
 uint64_t ia64_system_read_pmc(CPUIA64State *env, uint32_t index)
 {
     if (index >= IA64_PMC_COUNT) {
@@ -597,10 +625,13 @@ uint64_t ia64_system_read_pmc(CPUIA64State *env, uint32_t index)
 
 void ia64_system_write_pmc(CPUIA64State *env, uint32_t index, uint64_t value)
 {
+    const IA64PmuLayout *pmu = ia64_env_cpu_class(env)->pmu;
+
     if (index >= IA64_PMC_COUNT) {
         return;
     }
-    env->pmc[index] = value;
+    env->pmc[index] = pmu ? ia64_pmu_written_value(&pmu->pmc[index], value) :
+                            value;
 }
 
 uint64_t ia64_system_read_pmc_indexed(CPUIA64State *env, uint64_t index)
@@ -615,11 +646,7 @@ uint64_t ia64_system_read_pmc_indexed(CPUIA64State *env, uint64_t index)
 void ia64_system_write_pmc_indexed(CPUIA64State *env, uint64_t index,
                               uint64_t value)
 {
-    index &= 0xff;
-    if (index >= IA64_PMC_COUNT) {
-        return;
-    }
-    env->pmc[index] = value;
+    ia64_system_write_pmc(env, index & 0xff, value);
 }
 
 uint64_t ia64_system_read_pmd(CPUIA64State *env, uint32_t index)
@@ -630,31 +657,31 @@ uint64_t ia64_system_read_pmd(CPUIA64State *env, uint32_t index)
     return env->pmd[index];
 }
 
-uint64_t ia64_system_read_pmd_checked(CPUIA64State *env, uint64_t index,
-                                 uint64_t fault_ip, uint64_t raw,
-                                 uint32_t slot)
+/*
+ * At CPL > 0, PSR.sp or the pm bit of a generic counter's PMC hides the PMD
+ * (SDM Vol. 3 mov indirect, Vol. 2 Table 7-5).  The generic counters are
+ * PMC/PMD 4-7, as PAL_PERF_MON_INFO reports.
+ */
+uint64_t ia64_system_read_pmd_checked(CPUIA64State *env, uint64_t index)
 {
     index &= 0xff;
-    if (index >= IA64_PMD_COUNT) {
-        env->cr_isr = 0x30;
-        ia64_raise_exception(env, IA64_EXCP_RESERVED_REG_FIELD,
-                               fault_ip, raw, slot);
+    if (ia64_psr_cpl(env->psr) != 0 &&
+        ((env->psr & IA64_PSR_SP) ||
+         (index >= 4 && index <= 7 && (env->pmc[index] & IA64_PMC_PM)))) {
+        return 0;
     }
-    if ((env->pmc[index] & (1ULL << 6)) &&
-        ia64_psr_cpl(env->psr) != 0) {
-        env->cr_isr = 0x20;
-        ia64_raise_exception(env, IA64_EXCP_PRIVILEGED_REG,
-                               fault_ip, raw, slot);
-    }
-    return (env->psr & IA64_PSR_SP) ? 0 : env->pmd[index];
+    return ia64_system_read_pmd_indexed(env, index);
 }
 
 void ia64_system_write_pmd(CPUIA64State *env, uint32_t index, uint64_t value)
 {
+    const IA64PmuLayout *pmu = ia64_env_cpu_class(env)->pmu;
+
     if (index >= IA64_PMD_COUNT) {
         return;
     }
-    env->pmd[index] = value;
+    env->pmd[index] = pmu ? ia64_pmu_written_value(&pmu->pmd[index], value) :
+                            value;
 }
 
 uint64_t ia64_system_read_pmd_indexed(CPUIA64State *env, uint64_t index)
@@ -669,11 +696,7 @@ uint64_t ia64_system_read_pmd_indexed(CPUIA64State *env, uint64_t index)
 void ia64_system_write_pmd_indexed(CPUIA64State *env, uint64_t index,
                               uint64_t value)
 {
-    index &= 0xff;
-    if (index >= IA64_PMD_COUNT) {
-        return;
-    }
-    env->pmd[index] = value;
+    ia64_system_write_pmd(env, index & 0xff, value);
 }
 
 
@@ -807,13 +830,8 @@ void ia64_system_rsm(CPUIA64State *env, uint64_t imm)
 uint64_t ia64_system_mov_psrgr_read(CPUIA64State *env, uint32_t unused)
 {
     (void)unused;
-    /*
-     * PSR.ri is only defined as an rfi restart selector and becomes
-     * undefined after the restarted IA-64 instruction begins execution.
-     * The translator keeps it live internally to select a nonzero TB entry
-     * slot, so expose the chosen architectural undefined value of zero.
-     */
-    return env->psr & ~IA64_PSR_RI_MASK;
+    /* Only PSR{36:35,31:0}; the other bits read as zero (SDM Vol 2 3.3.2). */
+    return env->psr & (IA64_PSR_IT | IA64_PSR_MC | 0xffffffffULL);
 }
 
 /* ---- mov to PSR helper ---- */
