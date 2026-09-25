@@ -1745,7 +1745,9 @@ void ia64_gen_exit_or_lookup_slot_completed(DisasContext *ctx, uint64_t ip,
  * whole bound before the other vCPU gets a turn: the firmware's processor
  * rendezvous (20 ms) published one processor.  Under MTTCG every vCPU has
  * its own thread, and a gdb single step must end in its debug exception,
- * so the pause is a no-op there.
+ * so the pause is a no-op there.  With one vCPU there is nobody to yield
+ * to, and MTTCG leaves CF_PARALLEL clear then: the Server 2003 idle loop
+ * would leave cpu_exec on every pause.
  */
 bool ia64_insn_is_yielding_pause(const DisasContext *ctx,
                                  const Ia64Instruction *insn)
@@ -1757,7 +1759,8 @@ bool ia64_insn_is_yielding_pause(const DisasContext *ctx,
     case IA64_OP_HINT_F:
     case IA64_OP_HINT_X:
         return insn->operands.common.immediate == 0 &&
-               !(tb_cflags(ctx->base.tb) & (CF_PARALLEL | CF_SINGLE_STEP));
+               !(tb_cflags(ctx->base.tb) & (CF_PARALLEL | CF_SINGLE_STEP)) &&
+               first_cpu && CPU_NEXT(first_cpu);
     default:
         return false;
     }
