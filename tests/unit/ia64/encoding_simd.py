@@ -198,7 +198,7 @@ def pmpy2(r1, r2, r3, right=False, ignored=0, qp=0):
         | bitfield(qp, 0, 6)
     )
 
-def pmpyshr2(r1, r2, r3, shift, signed=False, qp=0):
+def pmpyshr2(r1, r2, r3, shift, signed=False, ignored=0, qp=0):
     shift_codes = {
         0: 0x02,
         7: 0x0a,
@@ -207,7 +207,8 @@ def pmpyshr2(r1, r2, r3, shift, signed=False, qp=0):
     }
     return (
         op(7)
-        | bitfield(shift_codes[shift] + (4 if signed else 0), 27, 6)
+        | bitfield(shift_codes[shift] + (4 if signed else 0) |
+                   (ignored & 1), 27, 6)
         | bitfield(1, 33, 3)
         | bitfield(r3, 20, 7)
         | bitfield(r2, 13, 7)
@@ -241,7 +242,7 @@ def pshl2(r1, value_reg, count_reg, ignored=0, qp=0):
 def pshl4(r1, value_reg, count_reg, ignored=0, qp=0):
     return pshl(4, r1, value_reg, count_reg, ignored, qp)
 
-def pshl_fixed(size, r1, value_reg, count, qp=0):
+def pshl_fixed(size, r1, value_reg, count, ignored=0, qp=0):
     za, zb = {2: (0, 1), 4: (1, 0)}[size]
     return (
         op(7)
@@ -250,17 +251,18 @@ def pshl_fixed(size, r1, value_reg, count, qp=0):
         | bitfield(zb, 33, 1)
         | bitfield(1, 30, 2)
         | bitfield(1, 28, 2)
+        | bitfield(ignored, 25, 3)
         | bitfield(31 - count, 20, 5)
         | bitfield(value_reg, 13, 7)
         | bitfield(r1, 6, 7)
         | bitfield(qp, 0, 6)
     )
 
-def pshl2_fixed(r1, value_reg, count, qp=0):
-    return pshl_fixed(2, r1, value_reg, count, qp)
+def pshl2_fixed(r1, value_reg, count, ignored=0, qp=0):
+    return pshl_fixed(2, r1, value_reg, count, ignored, qp)
 
-def pshl4_fixed(r1, value_reg, count, qp=0):
-    return pshl_fixed(4, r1, value_reg, count, qp)
+def pshl4_fixed(r1, value_reg, count, ignored=0, qp=0):
+    return pshl_fixed(4, r1, value_reg, count, ignored, qp)
 
 def pshr(size, r1, r3, count_or_r2, unsigned=False, variable=False,
          ignored=0, qp=0):

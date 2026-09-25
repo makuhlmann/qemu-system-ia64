@@ -2004,6 +2004,20 @@ test_chk_a_m_branches_on_miss = require_registers(
          br_cond(0x30, 0x30)),
     ], {"ip": 0x30, "r4": 0}, entry=0x10)
 
+# A displacement of 0x60000 puts x6 = 1 in bits 32:27 and 1 in bit 26: the
+# shape of hint.m (M48), whose x3 is 0.  chk.a has x3 = 4 and must branch.
+test_chk_a_m_hint_shaped_displacement_branches = require_registers(
+    "chk_a_m_hint_shaped_displacement_branches", [
+        (0x10, 0x00, chk_a_nc_m(27, 0x10, 0x60010), nop_i(),
+         nop_i()),
+        (0x20, 0x00, adds(4, 1, 0), nop_i(),
+         nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(),
+         br_cond(0x30, 0x30)),
+        (0x60010, 0x10, nop_m(), nop_i(),
+         br_cond(0x60010, 0x60010)),
+    ], {"ip": 0x60010, "r4": 0}, entry=0x10)
+
 test_chk_a_clr_removes_entry = require_registers(
     "chk_a_clr_removes_entry", [
         (0x10, 0x00, addl(3, 0x100, 0), nop_i(),
@@ -2841,6 +2855,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'bsw_restores_banked_nat',
     'chk_a_clr_removes_entry',
     'chk_a_m_branches_on_miss',
+    'chk_a_m_hint_shaped_displacement_branches',
     'chk_a_nc_m_decode',
     'chk_s_i_long_branch_on_stacked_nat',
     'chk_s_m_branches_on_nat',

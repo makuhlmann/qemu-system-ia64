@@ -125,20 +125,22 @@ def tnat_nz_and(p1, p2, r2, ignored=0, qp=0):
         | bitfield(qp, 0, 6)
     )
 
-def popcnt(r1, r3, qp=0):
+def popcnt(r1, r3, qp=0, ignored=0):
     return (
         op(7)
         | bitfield(0x12, 27, 6)
+        | bitfield(ignored, 27, 1)
         | bitfield(3, 33, 3)
         | bitfield(r3, 20, 7)
         | bitfield(r1, 6, 7)
         | bitfield(qp, 0, 6)
     )
 
-def clz(r1, r3, qp=0):
+def clz(r1, r3, qp=0, ignored=0):
     return (
         op(7)
         | bitfield(0x1a, 27, 6)
+        | bitfield(ignored, 27, 1)
         | bitfield(3, 33, 3)
         | bitfield(r3, 20, 7)
         | bitfield(r1, 6, 7)

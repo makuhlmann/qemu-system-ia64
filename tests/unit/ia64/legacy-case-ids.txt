@@ -77,6 +77,7 @@ cdboot_word_add_cloop_decode
 chk_a_clr_f_ignores_psr_dfh
 chk_a_clr_removes_entry
 chk_a_m_branches_on_miss
+chk_a_m_hint_shaped_displacement_branches
 chk_a_nc_m_decode
 chk_s_f_decode
 chk_s_i_long_branch_on_stacked_nat

@@ -286,7 +286,7 @@ test_mov_cr_lid_ignored_high_bits_read_zero = require_registers(
 
 test_popcnt_decode = require_registers("popcnt_decode", [
     (0x10, *movl_mlx(3, 0xf0f0f0f0f0f0f0f0)),
-    (0x20, 0x00, nop_m(), popcnt(4, 3),
+    (0x20, 0x00, nop_m(), popcnt(4, 3, ignored=1),
      nop_i()),
     (0x30, 0x10, nop_m(), nop_i(),
      br_cond(0x30, 0x30)),
@@ -297,7 +297,7 @@ test_popcnt_decode = require_registers("popcnt_decode", [
 # false predicate and raise Illegal Operation with a true one.
 test_clz_decode = require_registers("clz_decode", [
     (0x10, 0x00, nop_m(), addl(31, 4, 0), adds(4, 0x55, 0)),
-    (0x20, 0x00, mov_cpuid(29, 31), clz(4, 0, qp=1), nop_i()),
+    (0x20, 0x00, mov_cpuid(29, 31), clz(4, 0, qp=1, ignored=1), nop_i()),
     (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
 ], {
     "ip": 0x30,
@@ -379,7 +379,8 @@ test_pmpyshr2_decode = require_registers("pmpyshr2_decode", [
     (0x20, *movl_mlx(31, 0x0002000300040005)),
     (0x30, 0x02, nop_m(), pmpyshr2(4, 29, 31, 16),
      nop_i()),
-    (0x40, 0x02, nop_m(), pmpyshr2(5, 29, 31, 16, signed=True),
+    (0x40, 0x02, nop_m(),
+     pmpyshr2(5, 29, 31, 16, signed=True, ignored=1),
      nop_i()),
     (0x50, 0x10, nop_m(), nop_i(),
      br_cond(0x50, 0x50)),
@@ -406,14 +407,14 @@ test_andcm_imm_negative_mask_round_trip = require_registers(
     }, entry=0x10)
 
 test_hint_m_decode = require_registers("hint_m_decode", [
-    (0x10, 0x00, hint_m(), adds(31, 0x66, 0),
+    (0x10, 0x00, hint_m(0x145678), adds(31, 0x66, 0),
      nop_i()),
     (0x20, 0x10, nop_m(), nop_i(),
      br_cond(0x20, 0x20)),
 ], {"ip": 0x20, "exception": IA64_EXCP_NONE, "r31": 0x66}, entry=0x10)
 
 test_hint_i_decode = require_registers("hint_i_decode", [
-    (0x10, 0x00, nop_m(), hint_i(),
+    (0x10, 0x00, nop_m(), hint_i(0x145678),
      adds(31, 0x66, 0)),
     (0x20, 0x10, nop_m(), nop_i(),
      br_cond(0x20, 0x20)),
@@ -1258,7 +1259,7 @@ test_czx2_l_zero_index = require_registers("czx2_l_zero_index", [
 test_mov_cpuid_indexed_decode = require_registers("mov_cpuid_indexed_decode", [
     (0x10, 0x00, nop_m(), addl(31, 3, 0),
      nop_i()),
-    (0x20, 0x00, mov_cpuid(29, 31, bit36=1), nop_i(),
+    (0x20, 0x00, mov_cpuid(29, 31, bit36=1, ignored=0x55), nop_i(),
      nop_i()),
     (0x30, 0x00, nop_m(), addl(31, 4, 0),
      nop_i()),
@@ -1777,8 +1778,8 @@ test_pshl_fixed_complement_count_decode = require_registers(
     "pshl_fixed_complement_count_decode", [
         (0x10, *movl_mlx(8, 0x0000000000000080)),
         (0x20, *movl_mlx(9, 0x0000000000000080)),
-        (0x30, 0x01, nop_m(), pshl4_fixed(8, 8, 24),
-         pshl2_fixed(9, 9, 8)),
+        (0x30, 0x01, nop_m(), pshl4_fixed(8, 8, 24, ignored=7),
+         pshl2_fixed(9, 9, 8, ignored=7)),
         (0x40, 0x10, nop_m(), nop_i(),
          br_cond(0x40, 0x40)),
     ], {

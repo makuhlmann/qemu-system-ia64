@@ -329,9 +329,10 @@ def mov_rr_read(dest_reg, addr_reg, qp=0, ignored36=0):
             | bitfield(addr_reg, 20, 7) | bitfield(dest_reg, 6, 7)
             | bitfield(qp, 0, 6))
 
-def mov_cpuid(r1, index_reg, qp=0, bit36=0):
+def mov_cpuid(r1, index_reg, qp=0, bit36=0, ignored=0):
     return (op(1) | bitfield(bit36, 36, 1) | bitfield(0x17, 27, 6)
-            | bitfield(index_reg, 20, 7) | bitfield(r1, 6, 7)
+            | bitfield(index_reg, 20, 7) | bitfield(ignored, 13, 7)
+            | bitfield(r1, 6, 7)
             | bitfield(qp, 0, 6))
 
 def mov_dahr_read(r1, index_reg, qp=0, bit36=0, ignored=0):
@@ -504,11 +505,23 @@ def fchkf(sf, source, target, qp=0, ignored26=0):
         | bitfield(qp, 0, 6)
     )
 
-def hint_m(qp=0):
-    return bitfield(1, 27, 6) | bitfield(64, 20, 7) | bitfield(qp, 0, 6)
+def hint_m(imm=0, qp=0):
+    return (
+        bitfield(1, 27, 6)
+        | bitfield(1, 26, 1)
+        | bitfield(imm & 0xfffff, 6, 20)
+        | bitfield((imm >> 20) & 1, 36, 1)
+        | bitfield(qp, 0, 6)
+    )
 
-def hint_i(qp=0):
-    return bitfield(1, 27, 6) | bitfield(64, 20, 7) | bitfield(qp, 0, 6)
+def hint_i(imm=0, qp=0):
+    return (
+        bitfield(1, 27, 6)
+        | bitfield(1, 26, 1)
+        | bitfield(imm & 0xfffff, 6, 20)
+        | bitfield((imm >> 20) & 1, 36, 1)
+        | bitfield(qp, 0, 6)
+    )
 
 def hint_b(imm=0):
     """hint.b (B9): op 2, x6 1."""
