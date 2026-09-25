@@ -942,6 +942,18 @@ static inline void ia64_tlb_entry_translate(const IA64TlbEntry *entry,
 #include "ia32/compat.h"
 
 /* ---- CPU architectural state ---- */
+/*
+ * floor(v * mul / div) for the ITC: mul/div is itc_hz/1e9 or its inverse in
+ * lowest terms, and div_inv = floor(2^64 / div) turns the division into a
+ * multiply and one correction (ia64_itc_scale()).
+ */
+typedef struct IA64ItcScale {
+    uint64_t mul;
+    uint64_t div;
+    uint64_t div_inv;
+    uint64_t max_in;        /* largest v with v * mul < 2^64 */
+} IA64ItcScale;
+
 typedef struct CPUArchState {
     /*
      * Keep the private IA-32 backing state at offset zero.  The x86 TCG
@@ -1012,6 +1024,8 @@ typedef struct CPUArchState {
     /* Application Registers */
     uint64_t ar[IA64_AR_COUNT];
     uint64_t itc_hz;          /* ITC ticks per second, from the PAL profile */
+    IA64ItcScale itc_to_ticks;  /* ns -> ITC ticks */
+    IA64ItcScale itc_to_ns;     /* ITC ticks -> ns */
 #define ar_kr0    ar[IA64_AR_KR0]
 #define ar_kr7    ar[IA64_AR_KR7]
 #define ar_rsc    ar[IA64_AR_RSC]
@@ -1658,6 +1672,27 @@ void ia64_itc_check_timer(CPUIA64State *env);
 void ia64_itc_enter_halt(CPUIA64State *env);
 
 /*
+ * The value muldiv64(v, mul, div) computes, without a division: every ITC
+ * read converts the virtual clock.  floor(x * div_inv / 2^64) is at most 1
+ * below floor(x / div), so the remainder test corrects it exactly.
+ */
+static inline uint64_t ia64_itc_scale(const IA64ItcScale *s, uint64_t v)
+{
+    if (likely(v <= s->max_in)) {
+        uint64_t x = v * s->mul;
+        uint64_t q = ((unsigned __int128)x * s->div_inv) >> 64;
+        uint64_t r = x - q * s->div;
+
+        while (r >= s->div) {
+            q++;
+            r -= s->div;
+        }
+        return q;
+    }
+    return muldiv64(v, s->mul, s->div);
+}
+
+/*
  * ITC rate.  On real parts the interval time counter runs at the processor
  * clock (PAL_FREQ_RATIOS reports the same ratio for both), and firmware
  * written for them stalls on ar.itc scaled by that frequency: the HP i2000's
@@ -1666,7 +1701,7 @@ void ia64_itc_enter_halt(CPUIA64State *env);
  */
 static inline uint64_t ia64_itc_ns_to_ticks(const CPUIA64State *env, int64_t ns)
 {
-    return muldiv64(ns, env->itc_hz, NANOSECONDS_PER_SECOND);
+    return ia64_itc_scale(&env->itc_to_ticks, ns);
 }
 
 /*
@@ -1677,7 +1712,7 @@ static inline uint64_t ia64_itc_ns_to_ticks(const CPUIA64State *env, int64_t ns)
  */
 static inline int64_t ia64_itc_ticks_to_ns(const CPUIA64State *env, uint64_t ticks)
 {
-    uint64_t ns = muldiv64(ticks, NANOSECONDS_PER_SECOND, env->itc_hz);
+    uint64_t ns = ia64_itc_scale(&env->itc_to_ns, ticks);
 
     return ns + (ia64_itc_ns_to_ticks(env, ns) < ticks);
 }

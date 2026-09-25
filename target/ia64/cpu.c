@@ -56,6 +56,38 @@ static vaddr ia64_cpu_get_pc(CPUState *cs)
 }
 
 
+static void ia64_itc_scale_set(IA64ItcScale *s, uint64_t mul, uint64_t div)
+{
+    if (div == 0) {
+        /* No ITC rate: convert everything to 0 rather than divide by 0. */
+        mul = 0;
+        div = 1;
+    }
+    s->mul = mul;
+    s->div = div;
+    s->div_inv = div > 1 ? (uint64_t)(((unsigned __int128)1 << 64) / div) :
+                           UINT64_MAX;
+    s->max_in = mul ? UINT64_MAX / mul : UINT64_MAX;
+}
+
+/* itc_hz / 1e9 in lowest terms for ia64_itc_scale(). */
+static void ia64_itc_scale_init(CPUIA64State *env)
+{
+    uint64_t a = env->itc_hz;
+    uint64_t b = NANOSECONDS_PER_SECOND;
+
+    while (b != 0) {
+        uint64_t t = a % b;
+
+        a = b;
+        b = t;
+    }
+    ia64_itc_scale_set(&env->itc_to_ticks, env->itc_hz / a,
+                       NANOSECONDS_PER_SECOND / a);
+    ia64_itc_scale_set(&env->itc_to_ns, NANOSECONDS_PER_SECOND / a,
+                       env->itc_hz / a);
+}
+
 static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
@@ -911,6 +943,7 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.purgeable_page_mask = icc->purgeable_page_mask;
     cpu->env.itc_hz = icc->pal->freq_base_hz * icc->pal->itc_ratio_num /
                       icc->pal->itc_ratio_den;
+    ia64_itc_scale_init(&cpu->env);
     cpu->env.impl_pa_bits = icc->impl_pa_bits;
     cpu->env.impl_va_msb = icc->impl_va_msb;
     cpu->env.impl_rid_bits = icc->impl_rid_bits;
