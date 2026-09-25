@@ -134,6 +134,7 @@ from .encoding import (
     probe_w_imm,
     probe_w_reg,
     ptc_e,
+    ptc_g,
     ptc_l,
     ptr_d,
     ptr_d_alt,
@@ -3265,6 +3266,34 @@ test_itc_i_resumes_next_slot_after_tb_exit = require_registers(
         "exception": IA64_EXCP_NONE,
         "r31": 1,
     }, entry=0x10)
+
+test_ptc_g_source_purge_precedes_same_bundle_srlz_d = require_registers(
+    "ptc_g_source_purge_precedes_same_bundle_srlz_d", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(20, HIGH_TR_BASE)),
+        (0x30, 0x00, adds(7, 0x68, 0), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(20, 20), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
+        (0x70, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x80, *movl_mlx(2, HIGH_TR_BASE + 0x9000)),
+        (0x90, *movl_mlx(19, IA64_PSR_DT)),
+        (0xa0, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        # Warm the source vCPU's data soft-TLB before the global purge.
+        (0xb0, 0x00, ld8(30, 2), nop_i(), nop_i()),
+        # MMI template 0x0a has a stop after slot 0.  The following srlz.d
+        # is therefore a legal later instruction group in the same bundle.
+        (0xc0, 0x08, ptc_g(20, 7), srlz_d(), nop_i()),
+        (0xd0, 0x00, tak(31, 20), nop_i(), nop_i()),
+        (0xe0, 0x10, nop_m(), nop_i(), br_cond(0xe0, 0xe0)),
+        ITC_DATA_BUNDLE,
+    ], {
+        "ip": 0xe0,
+        "exception": IA64_EXCP_NONE,
+        "r30": ITC_DATA_LOW,
+        # TAK returns one when the completed source purge removed the TC.
+        "r31": 1,
+    }, entry=0x10, alat=None, smp="2")
 
 test_ptc_l_4g_page_size_is_purgeable = require_registers(
     "ptc_l_4g_page_size_is_purgeable", [
@@ -6906,6 +6935,7 @@ CASE_NAMES = (
     'ptc_e_nat_addr_consumes',
     'ptc_e_purges_data_tc_on_srlz_i',
     'ptc_e_skips_uda_on_merced',
+    'ptc_g_source_purge_precedes_same_bundle_srlz_d',
     'ptc_l_4g_page_size_is_purgeable',
     'ptc_l_does_not_clear_local_alat',
     'ptc_l_keeps_nonoverlapping_tc',

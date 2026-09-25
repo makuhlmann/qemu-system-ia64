@@ -810,12 +810,14 @@ static void ia64_ptc_global_remote_work(CPUState *cs, run_on_cpu_data data)
     g_free(work);
 }
 
-static void ia64_ptc_global_source_work(CPUState *cs, run_on_cpu_data data)
+/*
+ * Runs once every other vCPU has left its translation block with the remote
+ * purge queued ahead of its next one, so the issuing processor continues only
+ * after the broadcast has reached every processor.
+ */
+static void ia64_ptc_global_source_barrier(CPUState *cs,
+                                           run_on_cpu_data data)
 {
-    IA64PtcGlobalWork *work = data.host_ptr;
-
-    ia64_ptc_mark_global(cpu_env(cs), work, false);
-    g_free(work);
 }
 
 void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
@@ -845,6 +847,12 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
         };
         bool wait = false;
 
+        /*
+         * The local purge is complete after the issuing processor's next
+         * data serialization (SDM Vol 3 ptc.g), which a stop can place in
+         * the same bundle: mark the local entries before returning.
+         */
+        ia64_ptc_mark_global(env, &template, false);
         CPU_FOREACH(cs) {
             if (cs != src) {
                 IA64PtcGlobalWork *work = g_new(IA64PtcGlobalWork, 1);
@@ -856,13 +864,8 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
             }
         }
         if (wait) {
-            IA64PtcGlobalWork *work = g_new(IA64PtcGlobalWork, 1);
-
-            *work = template;
-            async_safe_run_on_cpu(src, ia64_ptc_global_source_work,
-                                  RUN_ON_CPU_HOST_PTR(work));
-        } else {
-            ia64_ptc_mark_global(env, &template, false);
+            async_safe_run_on_cpu(src, ia64_ptc_global_source_barrier,
+                                  RUN_ON_CPU_NULL);
         }
     } else if (mode == 2) {
         ia64_mark_pending_purge_all_tc(
