@@ -272,6 +272,11 @@ PAL_VM_INFO_L0 = 1 | (32 << 8) | (32 << 16)
 PAL_VM_INFO_L1 = (1 | (128 << 8) | (128 << 16) |
                   (1 << 32) | (1 << 34))
 
+# config_info_1 store_hints{55:48} and load_hints{63:56} of a data or unified
+# cache: t1 and nta stores, t1, nt1 and nta loads (SDM Vol. 2 Tables 11-68
+# and 11-69; 245320-003 sec 5.9, 251110-003 sec 5.4.2).
+PAL_CACHE_INFO_DATA_HINTS = (0x09 << 48) | (0x0b << 56)
+
 # --- Merced cache and TC geometry -------------------------------------------
 # L1I/L1D 16 KB 4-way 32 B lines; L2 unified 96 KB 6-way 64 B write-back;
 # L3 unified 4 MB 4-way 64 B (245473-002 sec 4.1-4.4, 248701-002 sec 2.5.4).
@@ -281,13 +286,16 @@ PAL_CACHE_INFO_MERCED_L0_I_1 = ((4 << 8) | (5 << 16) |
 PAL_CACHE_INFO_MERCED_L0_I_2 = (16384 | (12 << 32) | (12 << 40) |
                                 (IA64_IMPL_PA_BITS - 1 << 48))
 PAL_CACHE_INFO_MERCED_L0_D_1 = ((4 << 8) | (5 << 16) |
-                                (5 << 24) | (1 << 32) | (2 << 40))
+                                (5 << 24) | (1 << 32) | (2 << 40) |
+                                PAL_CACHE_INFO_DATA_HINTS)
 PAL_CACHE_INFO_MERCED_L1_U_1 = (1 | (1 << 1) | (6 << 8) | (6 << 16) |
-                                (6 << 24) | (1 << 32) | (6 << 40))
+                                (6 << 24) | (1 << 32) | (6 << 40) |
+                                PAL_CACHE_INFO_DATA_HINTS)
 PAL_CACHE_INFO_MERCED_L1_U_2 = (96 * 1024 | (14 << 32) | (14 << 40) |
                                 (IA64_IMPL_PA_BITS - 1 << 48))
 PAL_CACHE_INFO_MERCED_L2_U_1 = (1 | (1 << 1) | (4 << 8) | (6 << 16) |
-                                (6 << 24) | (1 << 32) | (21 << 40))
+                                (6 << 24) | (1 << 32) | (21 << 40) |
+                                PAL_CACHE_INFO_DATA_HINTS)
 PAL_CACHE_INFO_MERCED_L2_U_2 = (4 * 1024 * 1024 | (20 << 32) | (20 << 40) |
                                 (IA64_IMPL_PA_BITS - 1 << 48))
 # ITLB 64 entries holding the instruction TRs; DTLB1 32 entries holding none;
@@ -554,6 +562,7 @@ __all__ = (
     'PAL_RATIO_8_1',
     'PAL_RATIO_2_1',
     'PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE',
+    'PAL_CACHE_INFO_DATA_HINTS',
     'PAL_CACHE_INFO_L0_I_1',
     'PAL_CACHE_INFO_L0_D_1',
     'PAL_CACHE_INFO_L0_2',

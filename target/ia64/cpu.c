@@ -1082,6 +1082,19 @@ static const TCGCPUOps ia64_tcg_ops = {
      (1ULL << IA64_PTE_MA_NATPAGE))
 
 /*
+ * PAL_CACHE_INFO hint vectors of a data or unified cache.  Merced
+ * (245320-003 sec 5.9) and Itanium 2 (251110-003 sec 5.4.2) implement the
+ * t1, nt1, nt2 and nta locality hints.  Loads encode t1, nt1 and nta (bits
+ * 0, 1 and 3 of Table 11-69; nt2 is an lfetch hint), stores t1 and nta (bits
+ * 0 and 3 of Table 11-68).  Instruction caches report no hints.
+ */
+#define IA64_PAL_CACHE_LOAD_HINTS_T1_NT1_NTA  0x0b
+#define IA64_PAL_CACHE_STORE_HINTS_T1_NTA     0x09
+#define IA64_PAL_CACHE_DATA_HINTS \
+    .store_hints = IA64_PAL_CACHE_STORE_HINTS_T1_NTA, \
+    .load_hints = IA64_PAL_CACHE_LOAD_HINTS_T1_NT1_NTA
+
+/*
  * Itanium 2 (Madison) translation caches, 251110-003 sec 6.1.1 and 6.1.2:
  * a 32-entry fully associative L1 ITLB and L1 DTLB that "directly support
  * only a 4KB-page size", over a 128-entry fully associative L2 ITLB and
@@ -1118,19 +1131,22 @@ static const IA64PalProfile ia64_pal_profile_madison = {
                     .load_latency = 1, .tag_lsb = 12 },
             [1] = { .size = 16 * KiB, .associativity = 4, .line_shift = 6,
                     .stride_shift = 6, .store_latency = 1,
-                    .load_latency = 1, .tag_lsb = 12 },
+                    .load_latency = 1, .tag_lsb = 12,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         /* Unified L2: reported on the data/unified type only. */
         [1] = {
             [1] = { .size = 256 * KiB, .associativity = 8, .line_shift = 7,
                     .stride_shift = 7, .attribute = 1, .store_latency = 1,
-                    .load_latency = 5, .tag_lsb = 15, .unified = true },
+                    .load_latency = 5, .tag_lsb = 15, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         [2] = {
             /* L3 load latency: 251110-003 Table 2-5 (12 is McKinley's). */
             [1] = { .size = 3 * MiB, .associativity = 12, .line_shift = 7,
                     .stride_shift = 7, .attribute = 1, .store_latency = 1,
-                    .load_latency = 14, .tag_lsb = 18, .unified = true },
+                    .load_latency = 14, .tag_lsb = 18, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
     },
     .tc_levels = 2,
@@ -1246,17 +1262,20 @@ static const IA64PalProfile ia64_pal_profile_merced = {
                     .load_latency = 1, .tag_lsb = 12 },
             [1] = { .size = 16 * KiB, .associativity = 4, .line_shift = 5,
                     .stride_shift = 5, .store_latency = 1,
-                    .load_latency = 2, .tag_lsb = 12 },
+                    .load_latency = 2, .tag_lsb = 12,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         [1] = {
             [1] = { .size = 96 * KiB, .associativity = 6, .line_shift = 6,
                     .stride_shift = 6, .attribute = 1, .store_latency = 1,
-                    .load_latency = 6, .tag_lsb = 14, .unified = true },
+                    .load_latency = 6, .tag_lsb = 14, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
         [2] = {
             [1] = { .size = 4 * MiB, .associativity = 4, .line_shift = 6,
                     .stride_shift = 6, .attribute = 1, .store_latency = 1,
-                    .load_latency = 21, .tag_lsb = 20, .unified = true },
+                    .load_latency = 21, .tag_lsb = 20, .unified = true,
+                    IA64_PAL_CACHE_DATA_HINTS },
         },
     },
     .tc_levels = 2,

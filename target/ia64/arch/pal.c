@@ -1064,7 +1064,9 @@ static void pal_cache_info(CPUIA64State *env)
                  ((uint64_t)info->line_shift << 16) |
                  ((uint64_t)info->stride_shift << 24) |
                  ((uint64_t)info->store_latency << 32) |
-                 ((uint64_t)info->load_latency << 40);
+                 ((uint64_t)info->load_latency << 40) |
+                 ((uint64_t)info->store_hints << 48) |
+                 ((uint64_t)info->load_hints << 56);
     /*
      * config_info_2{39:32} is alias_boundary: the binary log of the minimum
      * separation of aliased addresses for best performance (SDM Vol.2

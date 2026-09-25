@@ -23,6 +23,7 @@ from .encoding import (
     PAL_BUS_SET_FEATURES,
     PAL_CACHE_FLUSH,
     PAL_CACHE_INFO,
+    PAL_CACHE_INFO_DATA_HINTS,
     PAL_CACHE_INFO_L0_2,
     PAL_CACHE_INFO_L0_D_1,
     PAL_CACHE_INFO_L0_I_1,
@@ -429,8 +430,48 @@ test_pal_cache_info_l2_unified_madison = require_registers(
     pal_call_program(PAL_CACHE_INFO, [(29, 2), (30, 2), (31, 0)]),
     {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
      "r9": (1 | (1 << 1) | (12 << 8) | (7 << 16) | (7 << 24) | (1 << 32) |
-            (14 << 40))},
+            (14 << 40) | PAL_CACHE_INFO_DATA_HINTS)},
     entry=0x10, cpu="madison")
+
+
+# config_info_1{63:48}: the load and store hint vectors (SDM Vol. 2 Tables
+# 11-68 and 11-69).  Data and unified caches report the t1/nt1/nta loads and
+# t1/nta stores that 245320-003 sec 5.9 and 251110-003 sec 5.4.2 list;
+# instruction caches report none.
+def _pal_cache_info_hints_program(level, cache_type):
+    return [
+        (0x10, 0x00, nop_m(), addl(28, PAL_CACHE_INFO, 0), nop_i()),
+        (0x20, 0x00, nop_m(), addl(29, level, 0), addl(30, cache_type, 0)),
+        (0x30, 0x00, nop_m(), addl(31, 0, 0), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, PAL_PROC_ENTRY)),
+        (0x50, 0x00, nop_m(), extr_u(12, 9, 48, 16), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ]
+
+
+test_pal_cache_info_hints_madison_l1_data = require_registers(
+    "pal_cache_info_hints_madison_l1_data",
+    _pal_cache_info_hints_program(0, 2),
+    {"ip": 0x60, "r8": 0, "r12": PAL_CACHE_INFO_DATA_HINTS >> 48},
+    entry=0x10, cpu="madison")
+
+test_pal_cache_info_hints_madison_l2_unified = require_registers(
+    "pal_cache_info_hints_madison_l2_unified",
+    _pal_cache_info_hints_program(1, 2),
+    {"ip": 0x60, "r8": 0, "r12": PAL_CACHE_INFO_DATA_HINTS >> 48},
+    entry=0x10, cpu="madison")
+
+test_pal_cache_info_hints_madison_l1_instruction = require_registers(
+    "pal_cache_info_hints_madison_l1_instruction",
+    _pal_cache_info_hints_program(0, 1),
+    {"ip": 0x60, "r8": 0, "r12": 0}, entry=0x10, cpu="madison")
+
+test_pal_cache_info_hints_merced_l1_instruction = require_registers(
+    "pal_cache_info_hints_merced_l1_instruction",
+    _pal_cache_info_hints_program(0, 1),
+    {"ip": 0x60, "r8": 0, "r12": 0}, entry=0x10, cpu="merced")
 
 test_pal_cache_info_invalid = require_registers("pal_cache_info_invalid",
     pal_call_program(PAL_CACHE_INFO, [(29, 3), (30, 1), (31, 0)]),
@@ -1888,6 +1929,10 @@ CASE_NAMES = (
     'pal_cache_info_l1_instruction',
     'pal_cache_info_l2_unified',
     'pal_cache_info_l2_unified_madison',
+    'pal_cache_info_hints_madison_l1_data',
+    'pal_cache_info_hints_madison_l2_unified',
+    'pal_cache_info_hints_madison_l1_instruction',
+    'pal_cache_info_hints_merced_l1_instruction',
     'pal_cache_info_l2_unified_bad_type',
     'pal_cache_init',
     'pal_cache_init_invalid',

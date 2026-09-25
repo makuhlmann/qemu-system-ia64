@@ -1788,6 +1788,8 @@ typedef struct IA64PalCacheLevel {
     uint8_t  store_latency;
     uint8_t  load_latency;
     uint8_t  tag_lsb;
+    uint8_t  store_hints;     /* SDM Vol. 2 Table 11-68 */
+    uint8_t  load_hints;      /* SDM Vol. 2 Table 11-69 */
     bool     unified;
 } IA64PalCacheLevel;
 
