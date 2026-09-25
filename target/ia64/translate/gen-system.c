@@ -865,28 +865,36 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             return IA64_GEN_NORETURN;
         }
         break;
-    case IA64_OP_SRLZ:
-        gen_helper_tlb_serialize(tcg_env, tcg_constant_i32(1),
+    case IA64_OP_SRLZ: {
+        TCGv_i32 main_loop = tcg_temp_new_i32();
+
+        gen_helper_tlb_serialize(main_loop, tcg_env, tcg_constant_i32(1),
                                  tcg_constant_i32(1));
-        ia64_gen_exit_to_slot_completed(ctx, insn->address, insn->slot + 1,
-                                        insn->address,
-                                        record_iipa,
-                                        track_psr_suppression);
+        ia64_gen_exit_or_lookup_slot_completed(ctx, insn->address,
+                                               insn->slot + 1, insn->address,
+                                               record_iipa,
+                                               track_psr_suppression,
+                                               main_loop);
         if (skip == NULL) {
             return IA64_GEN_NORETURN;
         }
         break;
-    case IA64_OP_SRLZ_D:
-        gen_helper_tlb_serialize(tcg_env, tcg_constant_i32(1),
+    }
+    case IA64_OP_SRLZ_D: {
+        TCGv_i32 main_loop = tcg_temp_new_i32();
+
+        gen_helper_tlb_serialize(main_loop, tcg_env, tcg_constant_i32(1),
                                  tcg_constant_i32(0));
-        ia64_gen_exit_to_slot_completed(ctx, insn->address, insn->slot + 1,
-                                        insn->address,
-                                        record_iipa,
-                                        track_psr_suppression);
+        ia64_gen_exit_or_lookup_slot_completed(ctx, insn->address,
+                                               insn->slot + 1, insn->address,
+                                               record_iipa,
+                                               track_psr_suppression,
+                                               main_loop);
         if (skip == NULL) {
             return IA64_GEN_NORETURN;
         }
         break;
+    }
     case IA64_OP_MF:
     case IA64_OP_MF_A:
         tcg_gen_mb(TCG_MO_ALL);

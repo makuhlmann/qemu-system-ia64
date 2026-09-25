@@ -233,6 +233,12 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
                                      uint8_t slot, uint64_t completed_ip,
                                      bool record_iipa,
                                      bool track_psr_suppression);
+void ia64_gen_exit_or_lookup_slot_completed(DisasContext *ctx, uint64_t ip,
+                                            uint8_t slot,
+                                            uint64_t completed_ip,
+                                            bool record_iipa,
+                                            bool track_psr_suppression,
+                                            TCGv_i32 main_loop);
 bool ia64_insn_is_yielding_pause(const DisasContext *ctx,
                                  const Ia64Instruction *insn);
 void ia64_gen_yield_to_slot_completed(DisasContext *ctx, uint64_t ip,

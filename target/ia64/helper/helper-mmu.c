@@ -5,10 +5,16 @@
 #include "exec/helper-proto.h"
 #include "arch/arch.h"
 
-void helper_tlb_serialize(CPUIA64State *env, uint32_t include_data,
-                          uint32_t include_inst)
+/*
+ * Returns whether the main loop has work: a pending interrupt, or a
+ * completion trap, that the serialisation may have made deliverable.
+ * Without one the main loop would only look up the next TB.
+ */
+uint32_t helper_tlb_serialize(CPUIA64State *env, uint32_t include_data,
+                              uint32_t include_inst)
 {
     ia64_tlb_serialize(env, include_data, include_inst);
+    return cpu_test_interrupt(env_cpu(env), ~0) != 0;
 }
 
 void helper_fc(CPUIA64State *env, uint64_t addr)

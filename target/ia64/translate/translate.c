@@ -1707,6 +1707,37 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
 }
 
 /*
+ * As ia64_gen_exit_to_slot_completed, but leave to the main loop only when
+ * @main_loop is nonzero; otherwise look the next TB up directly, which is
+ * what the main loop would do.
+ */
+void ia64_gen_exit_or_lookup_slot_completed(DisasContext *ctx, uint64_t ip,
+                                            uint8_t slot,
+                                            uint64_t completed_ip,
+                                            bool record_iipa,
+                                            bool track_psr_suppression,
+                                            TCGv_i32 main_loop)
+{
+    TCGLabel *lookup;
+
+    if (ctx->psr_ss || ctx->psr_tb) {
+        ia64_gen_exit_to_slot_completed(ctx, ip, slot, completed_ip,
+                                        record_iipa, track_psr_suppression);
+        return;
+    }
+    ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
+                                    track_psr_suppression);
+    ia64_gen_store_instruction_group_start(
+        ctx->restart.next_instruction_group_start);
+    ia64_gen_set_resume_slot(ip, slot);
+    lookup = gen_new_label();
+    tcg_gen_brcondi_i32(TCG_COND_EQ, main_loop, 0, lookup);
+    tcg_gen_exit_tb(NULL, 0);
+    gen_set_label(lookup);
+    tcg_gen_lookup_and_goto_ptr();
+}
+
+/*
  * hint @pause (immediate 0, in any unit) marks a spin-wait loop.  When one
  * host thread runs every vCPU in turn (round-robin TCG), the loop usually
  * waits for a vCPU that cannot run until this one leaves cpu_exec, so the
