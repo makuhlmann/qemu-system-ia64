@@ -377,6 +377,7 @@ static bool ia64_insn_writes_fr_f1(const Ia64Instruction *insn)
     case IA64_OP_XMA_L:
     case IA64_OP_XMA_H:
     case IA64_OP_XMA_HU:
+    case IA64_OP_XMPY_HU:
     case IA64_OP_FMOV:
     case IA64_OP_FMERGE:
     case IA64_OP_FMERGE_S:

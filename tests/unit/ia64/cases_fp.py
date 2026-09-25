@@ -2908,6 +2908,12 @@ test_fand_f1_illegal_operation = require_exception(
         (0x10, 0x0d, nop_m(), fand(1, 0, 1), nop_i()),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
 
+# xma.hu with f2 = f0 decodes as its own opcode (xmpy.hu).
+test_xmpy_hu_f1_illegal_operation = require_exception(
+    "xmpy_hu_f1_illegal_operation", [
+        (0x10, 0x0d, nop_m(), xmpy_hu(1, 8, 9), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
 test_fp_fixed_target_predicated_off_is_nop = require_registers(
     "fp_fixed_target_predicated_off_is_nop", [
         (0x10, *movl_mlx(2, 0)),
@@ -6126,6 +6132,7 @@ CASE_NAMES = (
     'xma_h_decode',
     'xma_hu_decode',
     'xma_natval_propagates',
+    'xmpy_hu_f1_illegal_operation',
 )
 
 CASE_METADATA = {

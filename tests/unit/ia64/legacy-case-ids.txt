@@ -1386,6 +1386,7 @@ xma_fcvt_xf_read_architected_significand
 xma_h_decode
 xma_hu_decode
 xma_natval_propagates
+xmpy_hu_f1_illegal_operation
 zero_alat_check_load_always_reloads
 zero_alat_chk_a_always_branches
 spec_stacked_nat_survives_call_return_bit_00
