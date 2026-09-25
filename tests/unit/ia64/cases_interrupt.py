@@ -196,6 +196,33 @@ test_rfi_target_rse_fill_fault_uses_restored_psr = require_registers(
         "r31": IA64_ISR_R | IA64_ISR_RS | IA64_ISR_IR,
     }, entry=0x10)
 
+# An rfi with IPSR.ri = 2 into an MLX bundle: Illegal Operation, with IPSR.ri
+# and ISR.ei 2 (SDM Vol. 2 p. 2:192).
+test_rfi_to_mlx_slot2_illegal_operation = require_registers(
+    "rfi_to_mlx_slot2_illegal_operation", [
+        (0x10, *movl_mlx(20, 0x200)),
+        (0x20, 0x00, mov_m_gr_cr(20, 19), nop_i(), nop_i()),
+        (0x30, *movl_mlx(20, IA64_PSR_IC | (2 << 41))),
+        (0x40, 0x00, mov_m_gr_cr(20, 16), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(0, 23), nop_i(), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), rfi_b()),
+        (0x200, *break_x_mlx(0x1234)),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(30, 16), nop_i(),
+         nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00, mov_m_cr_gr(29, 19), nop_i(),
+         nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30, IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0x200,
+        "r30": IA64_PSR_IC | (2 << 41),
+        # ISR.code 0 (Illegal Operation) and ISR.ei 2.
+        "r31": 2 << 41,
+    }, entry=0x10)
+
 # A br.ret whose frame restore faults: the fault belongs to the target
 # instruction, so the Taken Branch trap of the br.ret comes first, with ISR.ir
 # for the incomplete frame (SDM Vol. 2 6.6, 6.8).
@@ -5436,6 +5463,7 @@ CASE_NAMES = (
     'rfi_resumes_at_ipsr_ri_slot',
     'rfi_retries_interrupted_current_frame_fill',
     'rfi_target_rse_fill_fault_uses_restored_psr',
+    'rfi_to_mlx_slot2_illegal_operation',
     'rfi_montecito_native_ia32_disabled_fault',
     'rfi_montecito_uncollected_transition_preserves_target',
     'rfi_to_ia32_clears_fault_suppression_but_preserves_psr_id',

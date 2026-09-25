@@ -3257,6 +3257,16 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         db->is_jmp = DISAS_NORETURN;
         return;
     }
+    /*
+     * Only an rfi with IPSR.ri = 2 enters an MLX bundle at slot 2: Illegal
+     * Operation, with IPSR.ri and ISR.ei 2 (SDM Vol. 2 p. 2:192).
+     */
+    if (ctx->restart.start_slot == 2 &&
+        template_info->units[1] == IA64_UNIT_L) {
+        ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, bundle_ip, 0, 2);
+        db->is_jmp = DISAS_NORETURN;
+        return;
+    }
 
     slots[0] = ia64_bundle_slot(low, high, 0);
     slots[1] = ia64_bundle_slot(low, high, 1);
