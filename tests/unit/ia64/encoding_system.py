@@ -375,6 +375,12 @@ def ptc_l(addr_reg, size_reg, qp=0):
             bitfield(addr_reg, 20, 7) | bitfield(size_reg, 13, 7) |
             bitfield(qp, 0, 6))
 
+def ptc_g(addr_reg, size_reg, qp=0):
+    return EndGroupInsn(
+        op(1) | bitfield(0x0a, 27, 6) |
+        bitfield(addr_reg, 20, 7) | bitfield(size_reg, 13, 7) |
+        bitfield(qp, 0, 6))
+
 def ptc_e(addr_reg, qp=0):
     return (op(1) | bitfield(0x34, 27, 6) |
             bitfield(addr_reg, 20, 7) | bitfield(qp, 0, 6))
@@ -684,6 +690,7 @@ __all__ = (
     'itc_d',
     'itc_i',
     'ptc_l',
+    'ptc_g',
     'ptc_e',
     'ptr_op',
     'ptr_d',

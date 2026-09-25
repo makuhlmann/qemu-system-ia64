@@ -295,26 +295,6 @@ bool ia64_data_address_to_phys(CPUIA64State *env, uint64_t va,
 }
 
 
-void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
-{
-    uint64_t pa;
-
-    if ((env->psr & IA64_PSR_DT) ?
-        !ia64_va_is_implemented(env, addr) :
-        !ia64_pa_is_implemented(env, addr)) {
-        ia64_raise_unimplemented_data_address(
-            env, addr, IA64_ISR_R, true, false, ia64_code_tlb_ed(env));
-    }
-
-    if (ia64_data_address_to_phys(env, addr, &pa)) {
-        uint64_t start = pa & ~(IA64_L0_CACHE_LINE_SIZE - 1);
-
-        /* Removing a cache line is an architected ALAT-collision event. */
-        ia64_invalidate_alat_phys_range(env, start, IA64_L0_CACHE_LINE_SIZE);
-        ia64_exec_invalidate_phys_range(env, start, IA64_L0_CACHE_LINE_SIZE);
-    }
-}
-
 static void ia64_discard_pending_purge(IA64TlbEntry *entry,
                                        uint16_t *pending_count)
 {
@@ -830,12 +810,14 @@ static void ia64_ptc_global_remote_work(CPUState *cs, run_on_cpu_data data)
     g_free(work);
 }
 
-static void ia64_ptc_global_source_work(CPUState *cs, run_on_cpu_data data)
+/*
+ * Runs once every other vCPU has left its translation block with the remote
+ * purge queued ahead of its next one, so the issuing processor continues only
+ * after the broadcast has reached every processor.
+ */
+static void ia64_ptc_global_source_barrier(CPUState *cs,
+                                           run_on_cpu_data data)
 {
-    IA64PtcGlobalWork *work = data.host_ptr;
-
-    ia64_ptc_mark_global(cpu_env(cs), work, false);
-    g_free(work);
 }
 
 void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
@@ -865,6 +847,12 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
         };
         bool wait = false;
 
+        /*
+         * The local purge is complete after the issuing processor's next
+         * data serialization (SDM Vol 3 ptc.g), which a stop can place in
+         * the same bundle: mark the local entries before returning.
+         */
+        ia64_ptc_mark_global(env, &template, false);
         CPU_FOREACH(cs) {
             if (cs != src) {
                 IA64PtcGlobalWork *work = g_new(IA64PtcGlobalWork, 1);
@@ -876,13 +864,8 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
             }
         }
         if (wait) {
-            IA64PtcGlobalWork *work = g_new(IA64PtcGlobalWork, 1);
-
-            *work = template;
-            async_safe_run_on_cpu(src, ia64_ptc_global_source_work,
-                                  RUN_ON_CPU_HOST_PTR(work));
-        } else {
-            ia64_ptc_mark_global(env, &template, false);
+            async_safe_run_on_cpu(src, ia64_ptc_global_source_barrier,
+                                  RUN_ON_CPU_NULL);
         }
     } else if (mode == 2) {
         ia64_mark_pending_purge_all_tc(
@@ -900,6 +883,27 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
             &env->mmu.pending_purge_inst_count, va, ps, rid, true, 'i');
     }
     ia64_assert_pending_purge_counts(env);
+}
+
+/*
+ * tlb_translate_nonaccess() (SDM Vol 3 Table 3-1, spec update 248699 item 3b)
+ * checks no protection key, dirty bit or access bit.  Every TLB.ar grants
+ * read at privilege level 0, so the read-rights check restricts only fc and
+ * fc.i at CPL > 0, as their instruction page requires.
+ */
+static IA64Exception ia64_nonaccess_exception_for_pte(uint64_t pte,
+                                                      uint8_t perm)
+{
+    if (!(pte & IA64_PTE_PRESENT)) {
+        return IA64_EXCP_PAGE_NOT_PRESENT;
+    }
+    if (ia64_pte_ma(pte) == IA64_PTE_MA_NATPAGE) {
+        return IA64_EXCP_NAT_CONSUMPTION;
+    }
+    if (!(perm & IA64_TLB_R)) {
+        return IA64_EXCP_DATA_ACCESS;
+    }
+    return IA64_EXCP_NONE;
 }
 
 uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
@@ -926,9 +930,7 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
         if (entry) {
             ia64_tlb_entry_translate(entry, va, ia64_psr_cpl(env->psr), &pa,
                                      &perm);
-            excp = ia64_tlb_exception_for_access(env, entry, perm,
-                                                 IA64_TLB_R, false, false,
-                                                 false);
+            excp = ia64_nonaccess_exception_for_pte(entry->pte, perm);
             if (excp != IA64_EXCP_NONE) {
                 goto tpa_fault;
             }
@@ -939,12 +941,8 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
         if (ia64_vhpt_walk_full(env, va, rid, false, false,
                                 ia64_psr_cpl(env->psr), &pa, &perm, &pte,
                                 &key, &entry)) {
-            excp = entry ?
-                ia64_tlb_exception_for_access(env, entry, perm, IA64_TLB_R,
-                                              false, false, false) :
-                ia64_translation_exception_for_access(env, pte, key, perm,
-                                                      IA64_TLB_R, false,
-                                                      false, false);
+            excp = ia64_nonaccess_exception_for_pte(entry ? entry->pte : pte,
+                                                    perm);
             if (excp != IA64_EXCP_NONE) {
                 goto tpa_fault;
             }
@@ -971,8 +969,7 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
         if (entry) {
             ia64_tlb_entry_translate(entry, va, ia64_psr_cpl(env->psr),
                                      &pa, &perm);
-            excp = ia64_tlb_exception_for_access(
-                env, entry, perm, IA64_TLB_R, false, false, false);
+            excp = ia64_nonaccess_exception_for_pte(entry->pte, perm);
             if (excp != IA64_EXCP_NONE) {
                 goto tpa_fault;
             }
@@ -982,6 +979,7 @@ uint64_t ia64_mmu_tpa(CPUIA64State *env, uint64_t va)
     }
 
 tpa_fault:
+    env->exception_state.fault_addr = va;
     if (env->psr & IA64_PSR_IC) {
         env->cr_ifa = va;
         if (ia64_exception_initializes_iha(excp)) {
@@ -994,8 +992,13 @@ tpa_fault:
         env->cr_isr = IA64_ISR_NA;
         if (excp == IA64_EXCP_UNIMPL_DATA_ADDR) {
             env->cr_isr |= IA64_GENEX_UNIMPL_DATA_ADDR;
+        } else if (excp == IA64_EXCP_NAT_CONSUMPTION) {
+            /* SDM Vol 2 NaT Consumption vector: ISR.code{7:4} = 2. */
+            env->cr_isr |= IA64_ISR_CODE_NAT_PAGE;
         }
     }
+    env->exception_state.fault_ip = ia64_ip_bundle_addr(env->ip);
+    env->exception_state.exception = excp;
     cs->exception_index = excp;
     cpu_loop_exit(cs);
 }
@@ -1067,10 +1070,11 @@ static void ia64_set_data_reference_result(IA64DataReferenceResult *result,
 }
 
 static IA64Exception
-ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
-                              uint32_t is_write, uint32_t is_rw,
-                              uint8_t access_level, bool walk_vhpt,
-                              IA64DataReferenceResult *result)
+ia64_data_translation_exception(CPUIA64State *env, uint64_t va,
+                                uint32_t is_write, uint32_t is_rw,
+                                uint8_t access_level, bool walk_vhpt,
+                                bool nonaccess,
+                                IA64DataReferenceResult *result)
 {
     uint64_t pa;
     uint8_t perm;
@@ -1130,6 +1134,9 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
         ia64_set_data_reference_result(
             result, pa, ia64_pte_memory_speculation(resolved_pte), ma);
 
+        if (nonaccess) {
+            return ia64_nonaccess_exception_for_pte(resolved_pte, perm);
+        }
         if (entry) {
             return ia64_tlb_exception_for_access(env, entry, perm, needed,
                                                 false, is_write || is_rw,
@@ -1158,6 +1165,17 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
     }
 
     return vhpt_enabled ? IA64_EXCP_DTLB_FAULT : IA64_EXCP_ALT_DTLB;
+}
+
+static IA64Exception
+ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
+                              uint32_t is_write, uint32_t is_rw,
+                              uint8_t access_level, bool walk_vhpt,
+                              IA64DataReferenceResult *result)
+{
+    return ia64_data_translation_exception(env, va, is_write, is_rw,
+                                           access_level, walk_vhpt, false,
+                                           result);
 }
 
 bool ia64_translate_data_access(CPUIA64State *env, uint64_t va,
@@ -1586,6 +1604,41 @@ void ia64_mmu_lfetch_fault(CPUIA64State *env, uint64_t va,
         ia64_code_tlb_ed(env), fault_ip, fault_slot);
 }
 
+/* fc and fc.i are non-access instruction 1 (SDM Vol 2 Table 5-1). */
+#define IA64_NON_ACCESS_FC 1
+
+void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
+{
+    IA64DataReferenceResult translation;
+    IA64Exception excp;
+
+    if ((env->psr & IA64_PSR_DT) ?
+        !ia64_va_is_implemented(env, addr) :
+        !ia64_pa_is_implemented(env, addr)) {
+        ia64_raise_unimplemented_data_address(
+            env, addr, IA64_ISR_R | IA64_NON_ACCESS_FC, true, false,
+            ia64_code_tlb_ed(env));
+    }
+
+    /* SDM Vol 3 fc: tlb_translate_nonaccess(), with ISR.r = 1. */
+    excp = ia64_data_translation_exception(env, addr, false, false,
+                                           ia64_psr_cpl(env->psr), true,
+                                           true, &translation);
+    if (excp != IA64_EXCP_NONE) {
+        ia64_raise_data_reference_exception(env, addr, false, false, true,
+                                            IA64_NON_ACCESS_FC, excp, false,
+                                            ia64_code_tlb_ed(env));
+    }
+
+    if (translation.valid) {
+        uint64_t start = translation.pa & ~(IA64_L0_CACHE_LINE_SIZE - 1);
+
+        /* Removing a cache line is an architected ALAT-collision event. */
+        ia64_invalidate_alat_phys_range(env, start, IA64_L0_CACHE_LINE_SIZE);
+        ia64_exec_invalidate_phys_range(env, start, IA64_L0_CACHE_LINE_SIZE);
+    }
+}
+
 void ia64_mmu_check_semaphore_access(CPUIA64State *env, uint64_t va)
 {
     IA64DataReferenceResult translation = { 0 };
@@ -1723,10 +1776,11 @@ uint64_t ia64_mmu_tak(CPUIA64State *env, uint64_t va)
         return 1;
     }
 
+    /* SDM Vol 3 tak, tlb_access_key(): the key is returned in bits 31:8. */
     rid = ia64_region_rid(env, va);
     entry = ia64_tlb_find_cached(env, va, rid, false);
     if (entry && ia64_tlb_entry_present(entry)) {
-        return entry->key;
+        return (uint64_t)entry->key << IA64_ITIR_KEY_SHIFT;
     }
 
     if ((env->psr & IA64_PSR_DT) &&
@@ -1735,7 +1789,7 @@ uint64_t ia64_mmu_tak(CPUIA64State *env, uint64_t va)
                             &entry) &&
         (pte & IA64_PTE_PRESENT)) {
         if (entry && ia64_tlb_entry_present(entry)) {
-            return entry->key;
+            return (uint64_t)entry->key << IA64_ITIR_KEY_SHIFT;
         }
     }
 

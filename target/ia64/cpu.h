@@ -694,21 +694,27 @@ static inline uint8_t ia64_tlb_effective_perm(uint8_t ar, uint8_t pl,
         return access_level <= pl ? (IA64_TLB_R | IA64_TLB_W) : 0;
     case 3:
         return access_level <= pl ? IA64_TLB_ALL : 0;
+    /*
+     * SDM Vol 2 Table 4-4: AR 4-6 give level 0 its own rights (RW, RWX, RW)
+     * whatever the PL; AR 6 adds X only at CPL == PL != 0.
+     */
     case 4:
         if (access_level > pl) {
             return 0;
         }
-        return access_level < pl ? (IA64_TLB_R | IA64_TLB_W) : IA64_TLB_R;
+        return access_level == pl && pl != 0 ?
+               IA64_TLB_R : (IA64_TLB_R | IA64_TLB_W);
     case 5:
         if (access_level > pl) {
             return 0;
         }
-        return access_level < pl ? IA64_TLB_ALL : (IA64_TLB_R | IA64_TLB_X);
+        return access_level == 0 ? IA64_TLB_ALL : (IA64_TLB_R | IA64_TLB_X);
     case 6:
         if (access_level > pl) {
             return 0;
         }
-        return access_level < pl ? IA64_TLB_ALL : (IA64_TLB_R | IA64_TLB_W);
+        return access_level == pl && pl != 0 ?
+               IA64_TLB_ALL : (IA64_TLB_R | IA64_TLB_W);
     case 7:
         return access_level == 0 ? (IA64_TLB_R | IA64_TLB_X) : IA64_TLB_X;
     default:
@@ -1152,6 +1158,7 @@ static inline void ia64_rse_mark_gr_dirty(CPUIA64State *env, uint32_t reg)
 }
 
 void ia64_set_cfm_rrb_fr(CPUIA64State *env, uint32_t new_rrb);
+void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb);
 void ia64_flush_suppressed_tlb(CPUIA64State *env);
 void ia64_firmware_debug_capture(CPUIA64State *env, uint16_t vector,
                                  bool collected);

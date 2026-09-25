@@ -294,7 +294,7 @@ static void ia64_rse_state_restore(CPUIA64State *env,
     env->cfm_sor = state->cfm_sor;
     env->cfm_rrb_gr = state->cfm_rrb_gr;
     ia64_set_cfm_rrb_fr(env, state->cfm_rrb_fr);
-    env->cfm_rrb_pr = state->cfm_rrb_pr;
+    ia64_set_cfm_rrb_pr(env, state->cfm_rrb_pr);
     env->rse.rse_cfle = state->cfle;
 }
 
