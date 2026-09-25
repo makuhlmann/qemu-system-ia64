@@ -392,7 +392,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     uint8_t perm;
     uint32_t rid;
     IA64Exception excp;
-    bool is_rse = !is_ifetch && mmu_idx == MMU_IDX_RSE;
+    bool is_rse = !is_ifetch &&
+                  (mmu_idx == MMU_IDX_RSE || mmu_idx == MMU_IDX_RSE_PHYS);
     uint8_t access_level;
     bool virt_translation_enabled;
 
@@ -407,7 +408,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     }
 
     rid = ia64_region_rid(&cpu->env, addr);
-    if (mmu_idx == MMU_PHYS_IDX) {
+    if (mmu_idx == MMU_PHYS_IDX || mmu_idx == MMU_IDX_RSE_PHYS) {
         if (!ia64_pa_is_implemented(&cpu->env, addr)) {
             if (probe) {
                 return false;

@@ -26,7 +26,7 @@
 
 static int ia64_rse_mmu_index(CPUIA64State *env)
 {
-    return env->psr & IA64_PSR_RT ? MMU_IDX_RSE : MMU_PHYS_IDX;
+    return env->psr & IA64_PSR_RT ? MMU_IDX_RSE : MMU_IDX_RSE_PHYS;
 }
 
 /*

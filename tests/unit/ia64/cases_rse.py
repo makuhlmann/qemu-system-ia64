@@ -19,7 +19,12 @@ from .encoding import (
     IA64_EXCP_ILLEGAL,
     IA64_EXCP_NONE,
     IA64_EXCP_RESERVED_REG_FIELD,
+    IA64_GENERAL_VECTOR,
+    IA64_GENEX_UNIMPL_DATA_ADDR,
+    IA64_IMPL_PA_BITS,
+    IA64_ISR_IR,
     IA64_ISR_NI,
+    IA64_ISR_R,
     IA64_ISR_RS,
     IA64_ISR_W,
     IA64_PSR_CPL3,
@@ -1905,6 +1910,55 @@ test_rse_spill_fault_sets_isr_rs = require_registers(
         "r29": 0,
         "r30": HIGH_TR_BASE + 0x10000,
         "r31": IA64_ISR_W | IA64_ISR_RS | IA64_ISR_NI,
+    }, entry=0x10)
+
+test_rse_physical_spill_fault_sets_isr_rs = require_registers(
+    "rse_physical_spill_fault_sets_isr_rs", [
+        (0x10, *movl_mlx(3, 1 << IA64_IMPL_PA_BITS)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x60, 0x00, nop_m(), alloc(1, 1, 0, 0, 0), nop_i()),
+        (0x70, *movl_mlx(32, 0x123456789abcdef0)),
+        (0x80, 0x18, nop_m(), nop_m(), cover_b()),
+        (0x90, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x20,
+                 IA64_GENERAL_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r30": 1 << IA64_IMPL_PA_BITS,
+        "r31": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_W | IA64_ISR_RS,
+    }, entry=0x10)
+
+test_rse_physical_target_fill_fault_sets_isr_rs_ir = require_registers(
+    "rse_physical_target_fill_fault_sets_isr_rs_ir", [
+        (0x10, *movl_mlx(3, (1 << IA64_IMPL_PA_BITS) + 8)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x30, *movl_mlx(20, (1 << 63) | 1)),
+        (0x40, 0x00, mov_m_gr_cr(20, 23), nop_i(), nop_i()),
+        (0x50, *movl_mlx(20, 0x200)),
+        (0x60, 0x00, mov_m_gr_cr(20, 19), nop_i(), nop_i()),
+        (0x70, *movl_mlx(20, IA64_PSR_IC)),
+        (0x80, 0x00, mov_m_gr_cr(20, 16), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), rfi_b()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x20,
+                 IA64_GENERAL_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r30": 1 << IA64_IMPL_PA_BITS,
+        "r31": (IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R |
+                IA64_ISR_RS | IA64_ISR_IR),
     }, entry=0x10)
 
 test_rse_rfi_bspstore_rebase_preserves_interrupted_call = require_registers(
@@ -5199,6 +5253,8 @@ CASE_NAMES = (
     'rse_rfi_user_context_preserves_loadrs_dirty_partition',
     'rse_rt_enables_protection_key_checks',
     'rse_rt_translates_with_dt_disabled',
+    'rse_physical_spill_fault_sets_isr_rs',
+    'rse_physical_target_fill_fault_sets_isr_rs_ir',
     'rse_spill_fault_sets_isr_rs',
     'rse_tracked_return_redirties_reused_frame',
     'rse_untracked_return_redirties_restored_frame',

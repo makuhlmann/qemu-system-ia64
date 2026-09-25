@@ -22,7 +22,9 @@
 #define MMU_IDX_VIRT_CPL2  3
 #define MMU_IDX_VIRT_CPL3  4
 #define MMU_IDX_RSE        5
-#define NB_MMU_MODES       6
+/* PSR.rt = 0 RSE references: physical, but faults still set ISR.rs. */
+#define MMU_IDX_RSE_PHYS   6
+#define NB_MMU_MODES       7
 
 #define MMU_IDX_VIRT_CPL(cpl) (MMU_IDX_VIRT_CPL0 + (cpl))
 #define MMU_IDX_VIRT_MASK \
