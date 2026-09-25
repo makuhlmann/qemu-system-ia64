@@ -22,6 +22,8 @@ from .encoding import (
     IA64_DCR_DK,
     IA64_DCR_DM,
     IA64_DTLB_VECTOR,
+    IA64_EXCP_ALT_DTLB,
+    IA64_EXCP_DATA_ACCESS,
     IA64_EXCP_DATA_KEY_MISS,
     IA64_EXCP_NAT_CONSUMPTION,
     IA64_EXCP_NONE,
@@ -6494,9 +6496,134 @@ test_fc_i_unimplemented_physical_address_faults = require_registers(
         "exception": IA64_EXCP_NONE,
         "r8": 0x50,
         "r9": (IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R |
-               IA64_ISR_NA),
+               IA64_ISR_NA | 1),
         "r10": 1 << IA64_IMPL_PA_BITS,
     }, entry=0x10)
+
+test_fc_i_translation_miss_raises_nonaccess_alt_dtlb = require_registers(
+    "fc_i_translation_miss_raises_nonaccess_alt_dtlb", [
+        (0x10, *movl_mlx(16, HIGH_TR_BASE + 0x90000)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, fc_i(16), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR, 0x00,
+         mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x20,
+                 IA64_ALT_DTLB_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_ALT_DTLB,
+        "fault_ip": 0x50,
+        "r30": HIGH_TR_BASE + 0x90000,
+        "r31": IA64_ISR_NA | IA64_ISR_R | 1,
+    }, entry=0x10)
+
+test_fc_i_cpl0_ignores_key_and_access_bit = require_registers(
+    "fc_i_cpl0_ignores_key_and_access_bit", [
+        (0x10, *movl_mlx(2, KEY_TEST_VA)),
+        (0x20, *movl_mlx(16, KEY_TEST_RR)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE & ~PTE_ACCESSED)),
+        (0x40, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0x50, 0x00, mov_rr_write(16, 0), nop_i(), nop_i()),
+        (0x60, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x70, 0x00, mov_m_gr_cr(2, 20), nop_i(), nop_i()),
+        (0x80, 0x00, itc_d(18), nop_i(), nop_i()),
+        (0x90, *movl_mlx(19, KEY_TEST_PSR)),
+        (0xa0, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0xa0, 0xb0)),
+        (0xb0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xc0, 0x00, fc_i(2), nop_i(), nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0xd0)),
+    ], {
+        "ip": 0xd0,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x10)
+
+test_fc_i_page_not_present_is_not_silently_ignored = require_registers(
+    "fc_i_page_not_present_is_not_silently_ignored", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000,
+                           pte_flags=DTR_PTE_WB & ~1),
+        (0x70, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x80, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x90, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(16, HIGH_TR_BASE + 0x208)),
+        (0xb0, 0x00, fc_i(16), nop_i(), nop_i()),
+        (IA64_PAGE_NOT_PRESENT_VECTOR, 0x00,
+         mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+        (IA64_PAGE_NOT_PRESENT_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_PAGE_NOT_PRESENT_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_PAGE_NOT_PRESENT_VECTOR + 0x20,
+                 IA64_PAGE_NOT_PRESENT_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_PAGE_NOT_PRESENT_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_PAGE_NOT_PRESENT,
+        "fault_ip": 0xb0,
+        "r30": HIGH_TR_BASE + 0x208,
+        "r31": IA64_ISR_NA | IA64_ISR_R | 1,
+    }, entry=0x10)
+
+test_fc_i_natpage_reports_fc_nonaccess_code = require_registers(
+    "fc_i_natpage_reports_fc_nonaccess_code", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000,
+                           pte_flags=DTR_PTE_NATPAGE),
+        (0x70, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x80, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x90, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(16, HIGH_TR_BASE + 0x208)),
+        (0xb0, 0x00, fc_i(16), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR, 0x00,
+         mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_NAT_CONSUMPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_NAT_CONSUMPTION_VECTOR + 0x20,
+                 IA64_NAT_CONSUMPTION_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_NAT_CONSUMPTION_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_NAT_CONSUMPTION,
+        "fault_ip": 0xb0,
+        "r30": HIGH_TR_BASE + 0x208,
+        "r31": IA64_ISR_NA | IA64_ISR_R | 0x21,
+    }, entry=0x10)
+
+test_fc_i_cpl3_access_rights_fault_is_nonaccess = require_registers(
+    "fc_i_cpl3_access_rights_fault_is_nonaccess", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+        (0x70, *movl_mlx(
+            19, IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_CPL3)),
+        (0x80, *movl_mlx(20, 0xb0)),
+        *rfi_to_gr(0x90, 19, 20),
+        (0xb0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xc0, *movl_mlx(16, HIGH_TR_BASE + 0x208)),
+        (0xd0, 0x00, fc_i(16), nop_i(), nop_i()),
+        (IA64_DATA_ACCESS_VECTOR, 0x00,
+         mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+        (IA64_DATA_ACCESS_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (IA64_DATA_ACCESS_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_DATA_ACCESS_VECTOR + 0x20,
+                 IA64_DATA_ACCESS_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_DATA_ACCESS_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_DATA_ACCESS,
+        "fault_ip": 0xd0,
+        "r30": HIGH_TR_BASE + 0x208,
+        "r31": IA64_ISR_NA | IA64_ISR_R | 1,
+    }, entry=0x10)
+
 
 
 FC_HIGH_RAM_TARGET = 0x80210000
@@ -6648,7 +6775,12 @@ CASE_NAMES = (
     'fc_i_above_4g_ram_invalidates_translated_target',
     'fc_i_high_ram_invalidates_translated_target',
     'fc_i_invalidates_translated_cache_line',
+    'fc_i_cpl0_ignores_key_and_access_bit',
+    'fc_i_cpl3_access_rights_fault_is_nonaccess',
     'fc_i_invalidates_translated_target',
+    'fc_i_natpage_reports_fc_nonaccess_code',
+    'fc_i_page_not_present_is_not_silently_ignored',
+    'fc_i_translation_miss_raises_nonaccess_alt_dtlb',
     'fc_i_unimplemented_physical_address_faults',
     'fetchadd4_alt_dtlb_sets_read_write_isr',
     'firmware_identity_ends_after_iva_handoff',

@@ -295,26 +295,6 @@ bool ia64_data_address_to_phys(CPUIA64State *env, uint64_t va,
 }
 
 
-void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
-{
-    uint64_t pa;
-
-    if ((env->psr & IA64_PSR_DT) ?
-        !ia64_va_is_implemented(env, addr) :
-        !ia64_pa_is_implemented(env, addr)) {
-        ia64_raise_unimplemented_data_address(
-            env, addr, IA64_ISR_R, true, false, ia64_code_tlb_ed(env));
-    }
-
-    if (ia64_data_address_to_phys(env, addr, &pa)) {
-        uint64_t start = pa & ~(IA64_L0_CACHE_LINE_SIZE - 1);
-
-        /* Removing a cache line is an architected ALAT-collision event. */
-        ia64_invalidate_alat_phys_range(env, start, IA64_L0_CACHE_LINE_SIZE);
-        ia64_exec_invalidate_phys_range(env, start, IA64_L0_CACHE_LINE_SIZE);
-    }
-}
-
 static void ia64_discard_pending_purge(IA64TlbEntry *entry,
                                        uint16_t *pending_count)
 {
@@ -1087,10 +1067,11 @@ static void ia64_set_data_reference_result(IA64DataReferenceResult *result,
 }
 
 static IA64Exception
-ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
-                              uint32_t is_write, uint32_t is_rw,
-                              uint8_t access_level, bool walk_vhpt,
-                              IA64DataReferenceResult *result)
+ia64_data_translation_exception(CPUIA64State *env, uint64_t va,
+                                uint32_t is_write, uint32_t is_rw,
+                                uint8_t access_level, bool walk_vhpt,
+                                bool nonaccess,
+                                IA64DataReferenceResult *result)
 {
     uint64_t pa;
     uint8_t perm;
@@ -1150,6 +1131,9 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
         ia64_set_data_reference_result(
             result, pa, ia64_pte_memory_speculation(resolved_pte), ma);
 
+        if (nonaccess) {
+            return ia64_nonaccess_exception_for_pte(resolved_pte, perm);
+        }
         if (entry) {
             return ia64_tlb_exception_for_access(env, entry, perm, needed,
                                                 false, is_write || is_rw,
@@ -1178,6 +1162,17 @@ ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
     }
 
     return vhpt_enabled ? IA64_EXCP_DTLB_FAULT : IA64_EXCP_ALT_DTLB;
+}
+
+static IA64Exception
+ia64_data_reference_exception(CPUIA64State *env, uint64_t va,
+                              uint32_t is_write, uint32_t is_rw,
+                              uint8_t access_level, bool walk_vhpt,
+                              IA64DataReferenceResult *result)
+{
+    return ia64_data_translation_exception(env, va, is_write, is_rw,
+                                           access_level, walk_vhpt, false,
+                                           result);
 }
 
 bool ia64_translate_data_access(CPUIA64State *env, uint64_t va,
@@ -1598,6 +1593,41 @@ void ia64_mmu_lfetch_fault(CPUIA64State *env, uint64_t va,
     ia64_raise_data_reference_exception_at(
         env, va, false, false, true, 4, excp, false,
         ia64_code_tlb_ed(env), fault_ip, fault_slot);
+}
+
+/* fc and fc.i are non-access instruction 1 (SDM Vol 2 Table 5-1). */
+#define IA64_NON_ACCESS_FC 1
+
+void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
+{
+    IA64DataReferenceResult translation;
+    IA64Exception excp;
+
+    if ((env->psr & IA64_PSR_DT) ?
+        !ia64_va_is_implemented(env, addr) :
+        !ia64_pa_is_implemented(env, addr)) {
+        ia64_raise_unimplemented_data_address(
+            env, addr, IA64_ISR_R | IA64_NON_ACCESS_FC, true, false,
+            ia64_code_tlb_ed(env));
+    }
+
+    /* SDM Vol 3 fc: tlb_translate_nonaccess(), with ISR.r = 1. */
+    excp = ia64_data_translation_exception(env, addr, false, false,
+                                           ia64_psr_cpl(env->psr), true,
+                                           true, &translation);
+    if (excp != IA64_EXCP_NONE) {
+        ia64_raise_data_reference_exception(env, addr, false, false, true,
+                                            IA64_NON_ACCESS_FC, excp, false,
+                                            ia64_code_tlb_ed(env));
+    }
+
+    if (translation.valid) {
+        uint64_t start = translation.pa & ~(IA64_L0_CACHE_LINE_SIZE - 1);
+
+        /* Removing a cache line is an architected ALAT-collision event. */
+        ia64_invalidate_alat_phys_range(env, start, IA64_L0_CACHE_LINE_SIZE);
+        ia64_exec_invalidate_phys_range(env, start, IA64_L0_CACHE_LINE_SIZE);
+    }
 }
 
 void ia64_mmu_check_semaphore_access(CPUIA64State *env, uint64_t va)

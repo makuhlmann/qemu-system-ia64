@@ -1138,6 +1138,7 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
     case IA64_OP_FC:
         ia64_gen_check_nat_consumption(insn, op->base, IA64_ISR_R | 1,
                                        IA64_NAT_NON_ACCESS);
+        ia64_gen_sync_ip_for_helper(insn);
         gen_helper_fc(tcg_env, ia64_gr_src(op->base));
         break;
     case IA64_OP_INVALA:
