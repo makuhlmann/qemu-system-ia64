@@ -2806,6 +2806,7 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
     s->pc = s->base.pc_next;
     s->override = -1;
     s->mem_seg = -1;
+    s->ea_checked = false;
     s->popl_esp_hack = 0;
 #ifdef TARGET_X86_64
     s->rex_r = 0;
@@ -3177,6 +3178,7 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
             decode.e.gen != gen_FXRSTOR) {
             X86_GEN_DECODED_ACCESS_CHECK(s, &decode, s->A0, s->mem_seg,
                                          size, access);
+            s->ea_checked = true;
         }
         if (s->prefix & PREFIX_LOCK) {
             X86_GEN_LOCK_INTERCEPT_CHECK(s, s->A0, size);

@@ -5991,6 +5991,18 @@ test_ia32_flat_rmw_reports_write_miss = _ia32_flat_data_case(
     {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_W, "r22": 0xc000},
     psr=IA64_PSR_DT)
 
+# POP m checks its destination against DS, not against the SS of its stack
+# load: the destination lies beyond the 64 KiB SS but inside a flat DS.
+test_ia32_pop_m_destination_checked_against_ds = _ia32_flat_data_case(
+    "ia32_pop_m_destination_checked_against_ds",
+    bytes.fromhex(
+        "8f 05 00 00 02 00 "     # pop dword [0x20000]
+        "0f 0b"),                # ud2
+    IA64_IA32_INTERCEPT_VECTOR,
+    {"r20": IA32_FLAT_CODE + 6},
+    ssd=IA32_TEST_DSD,
+    data=[(0xa800, bytes.fromhex("78 56 34 12"))])
+
 # A TB entered with every SIMD exception masked leaves out the SSE
 # exception bracket; LDMXCSR and FXRSTOR end it, so an exception they unmask
 # is still precise in the next instruction.
@@ -6141,6 +6153,7 @@ CASE_NAMES = (
     'ia32_flat_movaps_tlb_miss_precedes_alignment',
     'ia32_flat_pop_m_probes_destination_first',
     'ia32_flat_rmw_reports_write_miss',
+    'ia32_pop_m_destination_checked_against_ds',
     'ia32_flat_movaps_store_tlb_miss_precedes_alignment',
     'ia32_flat_aligned_movaps_tlb_miss',
     'ia32_flat_misaligned_mapped_movaps_faults',
