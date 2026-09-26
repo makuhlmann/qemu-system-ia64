@@ -327,6 +327,60 @@ test_mov_cr_iip_ic_set_illegal = require_exception(
         (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x60)
 
+# The write side of the same check; the write with PSR.ic clear succeeds.
+test_mov_to_cr_iip_ic_set_illegal = require_exception(
+    "mov_to_cr_iip_ic_set_illegal", [
+        (0x10, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_gr_cr(4, 19), nop_i(), nop_i()),
+        (0x40, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x50, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x60, 0x00, mov_m_gr_cr(4, 19), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x60)
+
+# With PSR.ic clear and no IVT the fault stays at the bundle, as in
+# require_exception() for a fault without a vector.
+_CR_WRITE_RESERVED = {
+    "exception": IA64_EXCP_RESERVED_REG_FIELD,
+    "fault_code": IA64_EXCP_RESERVED_REG_FIELD,
+    "fault_ip": 0x40,
+}
+
+# IPSR bit 0 is reserved; the write of 0 before it succeeds.
+test_mov_to_cr_ipsr_reserved_field_fault = require_registers(
+    "mov_to_cr_ipsr_reserved_field_fault", [
+        (0x10, 0x00, rsm(IA64_PSR_IC), adds(3, 1, 0), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_gr_cr(0, 16), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(3, 16), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], _CR_WRITE_RESERVED, entry=0x10)
+
+# A valid IFS whose frame has sol > sof is a reserved-field write.
+test_mov_to_cr_ifs_invalid_frame_fault = require_registers(
+    "mov_to_cr_ifs_invalid_frame_fault", [
+        (0x10, *movl_mlx(3, (1 << 63) | (5 << 7) | 2)),
+        (0x20, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(3, 23), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], _CR_WRITE_RESERVED, entry=0x10)
+
+test_mov_to_cr_iha_clears_low_bits = require_registers(
+    "mov_to_cr_iha_clears_low_bits", [
+        (0x10, *movl_mlx(3, 0x123456789abcdeff)),
+        (0x20, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(3, 25), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_cr_gr(5, 25), nop_i(), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "exception": IA64_EXCP_NONE,
+        "r5": 0x123456789abcdefc,
+    }, entry=0x10)
+
 test_mov_cr_lid_ignored_high_bits_read_zero = require_registers(
     "mov_cr_lid_ignored_high_bits_read_zero", [
         (0x10, *movl_mlx(2, 0xdeadbeef12340000)),
@@ -3630,6 +3684,10 @@ CASE_NAMES = (
     'mov_cr_lid_ignored_high_bits_read_zero',
     'mov_cr_to_r0_ic_set_illegal',
     'mov_cr_iip_ic_set_illegal',
+    'mov_to_cr_iip_ic_set_illegal',
+    'mov_to_cr_ipsr_reserved_field_fault',
+    'mov_to_cr_ifs_invalid_frame_fault',
+    'mov_to_cr_iha_clears_low_bits',
     'mov_pr_partial_masks_merge_bytes',
     'stacked_write_faults_in_smaller_frame_at_same_ip',
     'mov_dahr_indexed_decode',

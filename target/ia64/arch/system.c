@@ -204,7 +204,7 @@ uint64_t ia64_system_read_ar(CPUIA64State *env, uint32_t ar_num)
 
 static bool ia64_reserved_rsc_field(uint64_t value)
 {
-    return value & ~(0x1fULL | (0x3fffULL << IA64_RSC_LOADRS_SHIFT));
+    return value & ~IA64_RSC_WRITABLE_MASK;
 }
 
 static bool ia64_reserved_fpsr_field(uint64_t value)
@@ -427,6 +427,11 @@ static bool ia64_reserved_cr_field(uint32_t cr_num, uint64_t value)
     default:
         return false;
     }
+}
+
+bool ia64_system_cr_write_reserved(uint32_t cr_num, uint64_t value)
+{
+    return ia64_reserved_cr_field(cr_num, value);
 }
 
 uint64_t ia64_system_validate_cr_access(CPUIA64State *env, uint64_t value,

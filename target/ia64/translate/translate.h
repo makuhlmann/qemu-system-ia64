@@ -279,6 +279,11 @@ bool ia64_clock_access_needs_io(const DisasContext *ctx);
 void ia64_gen_check_cr_read(const Ia64Instruction *insn);
 void ia64_gen_validate_tpr_write(TCGv_i64 result, const Ia64Instruction *insn,
                                  TCGv_i64 value);
+bool ia64_gen_validate_interruption_cr_write(TCGv_i64 result,
+                                             const Ia64Instruction *insn,
+                                             TCGv_i64 value);
+void ia64_gen_check_rse_ar_mode(const Ia64Instruction *insn, TCGv_i64 value,
+                                bool write);
 void ia64_gen_validate_cr_access(TCGv_i64 result,
                                  const Ia64Instruction *insn,
                                  TCGv_i64 value, bool write);

@@ -14,6 +14,33 @@
 #include "target/ia64/translate/translate.h"
 
 /*
+ * A write at CPL 0 to a kernel register or RSC: ia64_system_write_ar()
+ * stores the value unchanged (RSC.pl cannot be below CPL 0), and only a
+ * reserved RSC field can fault.  Returns false for every other case.
+ */
+static bool ia64_gen_write_kernel_ar(DisasContext *ctx,
+                                     const Ia64Instruction *insn,
+                                     uint32_t ar, TCGv_i64 value)
+{
+    if (!ctx->cpl_known || ctx->cpl != 0 ||
+        (ar > IA64_AR_KR7 && ar != IA64_AR_RSC)) {
+        return false;
+    }
+    if (ar == IA64_AR_RSC) {
+        TCGv_i64 bad = tcg_temp_new_i64();
+        TCGLabel *ok = gen_new_label();
+
+        tcg_gen_andi_i64(bad, value, ~IA64_RSC_WRITABLE_MASK);
+        tcg_gen_brcondi_i64(TCG_COND_EQ, bad, 0, ok);
+        ia64_gen_validate_ar_access(insn, value, true);
+        gen_set_label(ok);
+    }
+    tcg_gen_st_i64(value, tcg_env,
+                   offsetof(CPUIA64State, ar) + ar * sizeof(uint64_t));
+    return true;
+}
+
+/*
  * CR numbers whose write behaviour in ia64_write_cr is a plain store into
  * env->cr[] -- no timer rearm, no TLB/TB flush, no SAPIC re-evaluation, no
  * atomics -- and whose value nothing consumes at translation time.  These
@@ -94,14 +121,18 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         /*
          * The application-register access check applies to the read itself, so
          * it must run even when the destination is r0 (a discarded result).
+         * Only BSPSTORE, RNAT and ITC reads can fault, and every AR but ITC
+         * reads straight from env->ar[] (ia64_system_read_ar).
          */
-        if (!ia64_ar_is_simple(op->source)) {
+        if (op->source == IA64_AR_BSPSTORE || op->source == IA64_AR_RNAT) {
+            ia64_gen_check_rse_ar_mode(insn, tcg_constant_i64(0), false);
+        } else if (ia64_ar_access_reads_clock(op->source)) {
             ia64_gen_validate_ar_access(insn, tcg_constant_i64(0), false);
         }
         if (op->destination != 0) {
             TCGv_i64 val = tcg_temp_new_i64();
 
-            if (ia64_ar_is_simple(op->source)) {
+            if (!ia64_ar_access_reads_clock(op->source)) {
                 ia64_gen_read_simple_ar(val, op->source);
             } else {
                 if (ia64_ar_access_reads_clock(op->source) &&
@@ -125,14 +156,18 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
              * 35), ahead of Register NaT Consumption (43): SDM Vol 3 mov ar,
              * Vol 2 Table 5-6.
              */
-            ia64_gen_validate_ar_access(insn, ia64_gr_src(op->destination),
-                                        true);
+            ia64_gen_check_rse_ar_mode(insn, ia64_gr_src(op->destination),
+                                       true);
             ia64_gen_check_nat_register(insn, op->destination);
             gen_helper_write_ar(tcg_env, tcg_constant_i32(op->source),
                                 ia64_gr_src(op->destination));
             break;
         }
         ia64_gen_check_nat_register(insn, op->destination);
+        if (ia64_gen_write_kernel_ar(ctx, insn, op->source,
+                                     ia64_gr_src(op->destination))) {
+            break;
+        }
         if (ia64_ar_is_simple(op->source)) {
             if (op->source == 40 || op->source == 64) {
                 ia64_gen_validate_ar_access(insn, ia64_gr_src(op->destination),
@@ -151,6 +186,10 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         }
         break;
     case IA64_OP_MOV_IMMAR:
+        if (ia64_gen_write_kernel_ar(ctx, insn, op->source,
+                                     tcg_constant_i64(op->immediate))) {
+            break;
+        }
         if (ia64_ar_is_simple(op->source)) {
             if (op->source == 40 || op->source == 64) {
                 ia64_gen_validate_ar_access(
@@ -213,8 +252,11 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             gen_helper_write_tpr(tcg_env, checked);
             break;
         }
-        ia64_gen_validate_cr_access(checked, insn,
-                                    ia64_gr_src(op->destination), true);
+        if (!ia64_gen_validate_interruption_cr_write(
+                checked, insn, ia64_gr_src(op->destination))) {
+            ia64_gen_validate_cr_access(checked, insn,
+                                        ia64_gr_src(op->destination), true);
+        }
         if (ia64_cr_write_is_plain_store(op->source)) {
             /*
              * validate_cr_access already faulted or masked the value, so

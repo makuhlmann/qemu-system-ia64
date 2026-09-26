@@ -355,6 +355,8 @@ static inline uint8_t ia64_psr_cpl(uint64_t psr)
 #define IA64_RSC_BE      0x10ULL
 #define IA64_RSC_LOADRS_SHIFT 16
 #define IA64_RSC_LOADRS_MASK  0x3fffULL
+#define IA64_RSC_WRITABLE_MASK \
+    (0x1fULL | (IA64_RSC_LOADRS_MASK << IA64_RSC_LOADRS_SHIFT))
 
 static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 {

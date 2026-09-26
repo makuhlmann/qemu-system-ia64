@@ -5180,6 +5180,21 @@ test_mov_rnat_rsc_mode_precedes_source_nat = require_exception(
         (0x200, 0x00, 0, 0, 0),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x40)
 
+# Reads of RNAT and BSPSTORE fault as their writes do.
+test_mov_from_rnat_rsc_mode_illegal = require_exception(
+    "mov_from_rnat_rsc_mode_illegal", [
+        (0x10, 0x00, mov_m_ar_gr(5, 19), nop_i(), nop_i()),
+        (0x20, 0x00, mov_m_imm_ar(16, 3), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_ar_gr(6, 19), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x30)
+
+test_mov_from_bspstore_rsc_mode_illegal = require_exception(
+    "mov_from_bspstore_rsc_mode_illegal", [
+        (0x10, 0x00, mov_m_ar_gr(5, 18), nop_i(), nop_i()),
+        (0x20, 0x00, mov_m_imm_ar(16, 1), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_ar_gr(6, 18), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x30)
+
 test_loadrs_rejects_nonzero_rsc_mode = require_exception(
     "loadrs_rejects_nonzero_rsc_mode", [
         (0x10, 0x01, nop_m(), adds(3, 1, 0), nop_i()),
@@ -5554,6 +5569,8 @@ CASE_NAMES = (
     'mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates',
     'mov_pr_partial_masks_with_nonzero_rrb',
     'mov_rnat_rsc_mode_precedes_source_nat',
+    'mov_from_rnat_rsc_mode_illegal',
+    'mov_from_bspstore_rsc_mode_illegal',
     'postincrement_base_out_of_frame',
     'predicated_off_stacked_gr_destination_does_not_fault',
     'rsc_reserved_field_fault',

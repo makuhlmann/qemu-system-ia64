@@ -346,6 +346,11 @@ void helper_write_tpr(CPUIA64State *env, uint64_t value)
     ia64_write_cr(env, IA64_CR_SAPIC_TPR, value);
 }
 
+uint64_t helper_cr_write_reserved(uint32_t cr_num, uint64_t value)
+{
+    return ia64_system_cr_write_reserved(cr_num, value);
+}
+
 uint64_t helper_validate_cr_access(CPUIA64State *env, uint64_t value,
                                    uint32_t cr_num, uint32_t write,
                                    uint64_t fault_ip, uint64_t raw,

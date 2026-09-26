@@ -2998,6 +2998,61 @@ void ia64_gen_check_cr_read(const Ia64Instruction *insn)
     gen_set_label(ok);
 }
 
+/*
+ * The part of ia64_system_validate_cr_access() a write to an interruption CR
+ * other than IFA needs: PSR.ic set or a reserved field faults, and only IHA
+ * is masked.  The full check runs on the faulting paths only.
+ */
+bool ia64_gen_validate_interruption_cr_write(TCGv_i64 result,
+                                             const Ia64Instruction *insn,
+                                             TCGv_i64 value)
+{
+    uint32_t cr = insn->operands.common.source1;
+    TCGv_i64 t;
+    TCGLabel *slow;
+    TCGLabel *done;
+
+    if (cr < IA64_CR_IPSR || cr > IA64_CR_IHA || cr == IA64_CR_IFA) {
+        return false;
+    }
+    t = tcg_temp_new_i64();
+    slow = gen_new_label();
+    done = gen_new_label();
+    tcg_gen_andi_i64(t, cpu_psr, IA64_PSR_IC);
+    tcg_gen_brcondi_i64(TCG_COND_NE, t, 0, slow);
+    if (cr == IA64_CR_IPSR || cr == IA64_CR_ISR || cr == IA64_CR_IFS) {
+        gen_helper_cr_write_reserved(t, tcg_constant_i32(cr), value);
+        tcg_gen_brcondi_i64(TCG_COND_NE, t, 0, slow);
+    }
+    if (cr == IA64_CR_IHA) {
+        tcg_gen_andi_i64(result, value, ~3ULL);
+    } else {
+        tcg_gen_mov_i64(result, value);
+    }
+    tcg_gen_br(done);
+    gen_set_label(slow);
+    ia64_gen_validate_cr_access(result, insn, value, true);
+    gen_set_label(done);
+    return true;
+}
+
+/*
+ * The part of ia64_system_validate_ar_access() a move to or from BSPSTORE
+ * or RNAT needs: an Illegal Operation fault unless RSC.mode is 0.
+ */
+void ia64_gen_check_rse_ar_mode(const Ia64Instruction *insn, TCGv_i64 value,
+                                bool write)
+{
+    TCGv_i64 mode = tcg_temp_new_i64();
+    TCGLabel *ok = gen_new_label();
+
+    tcg_gen_ld_i64(mode, tcg_env, offsetof(CPUIA64State, ar_rsc));
+    tcg_gen_andi_i64(mode, mode, IA64_RSC_MODE);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, mode, 0, ok);
+    ia64_gen_validate_ar_access(insn, value, write);
+    gen_set_label(ok);
+}
+
 /* Of the TPR checks only the reserved bits 15:8 can fault a write. */
 void ia64_gen_validate_tpr_write(TCGv_i64 result, const Ia64Instruction *insn,
                                  TCGv_i64 value)
