@@ -17,6 +17,7 @@ void ia64_system_validate_ar_access(CPUIA64State *env, uint64_t value,
 void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num,
                           uint64_t value);
 uint64_t ia64_system_read_cr(CPUIA64State *env, uint32_t cr_num);
+bool ia64_system_cr_write_reserved(uint32_t cr_num, uint64_t value);
 uint64_t ia64_system_validate_cr_access(CPUIA64State *env, uint64_t value,
                                         uint32_t cr_num, uint32_t write,
                                         uint64_t fault_ip, uint64_t raw,

@@ -267,9 +267,9 @@ static void gen_load(DisasContext *s, X86DecodedInsn *decode, int opn, TCGv v)
     case X86_OP_INT:
         if (op->has_ea) {
             if (v == s->T0 && decode->e.special == X86_SPECIAL_SExtT0) {
-                gen_op_ld_v(s, op->ot | MO_SIGN, v, s->A0);
+                gen_op_ld_ea(s, op->ot | MO_SIGN, v);
             } else {
-                gen_op_ld_v(s, op->ot, v, s->A0);
+                gen_op_ld_ea(s, op->ot, v);
             }
 
         } else if (op->ot < MO_TL && v == s->T0 &&
@@ -346,7 +346,7 @@ static void gen_writeback(DisasContext *s, X86DecodedInsn *decode, int opn, TCGv
         break;
     case X86_OP_INT:
         if (op->has_ea) {
-            gen_op_st_v(s, op->ot, v, s->A0);
+            gen_op_st_ea(s, op->ot, v);
         } else {
             gen_op_mov_reg_v(s, op->ot, op->n, v);
         }
@@ -2917,6 +2917,7 @@ static void gen_PAUSE(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_update_cc_op(s);
     gen_update_eip_next(s);
+    X86_GEN_BEFORE_PAUSE(s);
     gen_helper_pause(tcg_env);
     s->base.is_jmp = DISAS_NORETURN;
 }

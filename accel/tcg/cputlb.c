@@ -509,10 +509,9 @@ static void tlb_flush_vtlb_page_mask_locked(CPUState *cpu, int mmu_idx,
     int k;
 
     assert_cpu_is_self(cpu);
+    /* n_used_entries counts the main table only (tlb_set_page_full). */
     for (k = 0; k < CPU_VTLB_SIZE; k++) {
-        if (tlb_flush_entry_mask_locked(&d->vtable[k], page, mask)) {
-            tlb_n_used_entries_dec(cpu, mmu_idx);
-        }
+        tlb_flush_entry_mask_locked(&d->vtable[k], page, mask);
     }
 }
 
@@ -562,6 +561,8 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
     tlb_debug("page addr: %016" VADDR_PRIx " mmu_map:0x%x\n", addr, idxmap);
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    /* A clean index has no entry since its last full flush. */
+    idxmap &= cpu->neg.tlb.c.dirty;
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         if ((idxmap >> mmu_idx) & 1) {
             tlb_flush_page_locked(cpu, mmu_idx, addr);
@@ -703,6 +704,40 @@ void tlb_flush_page_all_cpus_synced(CPUState *src, vaddr addr)
     tlb_flush_page_by_mmuidx_all_cpus_synced(src, addr, ALL_MMUIDX_BITS);
 }
 
+static inline bool tlb_cmp_in_range(uint64_t cmp, vaddr addr, vaddr len)
+{
+    return !(cmp & TLB_INVALID_MASK) && (cmp & TARGET_PAGE_MASK) - addr < len;
+}
+
+static inline bool tlb_entry_in_range(CPUTLBEntry *tlb_entry,
+                                      vaddr addr, vaddr len)
+{
+    return tlb_cmp_in_range(tlb_entry->addr_read, addr, len) ||
+           tlb_cmp_in_range(tlb_addr_write(tlb_entry), addr, len) ||
+           tlb_cmp_in_range(tlb_entry->addr_code, addr, len);
+}
+
+/* Called with tlb_c.lock held */
+static void tlb_flush_range_scan_locked(CPUState *cpu, int midx,
+                                        vaddr addr, vaddr len)
+{
+    CPUTLBDesc *d = &cpu->neg.tlb.d[midx];
+    CPUTLBDescFast *f = cpu_tlb_fast(cpu, midx);
+    size_t n = tlb_n_entries(f);
+
+    for (size_t i = 0; i < n; i++) {
+        if (tlb_entry_in_range(&f->table[i], addr, len)) {
+            memset(&f->table[i], -1, sizeof(f->table[i]));
+            tlb_n_used_entries_dec(cpu, midx);
+        }
+    }
+    for (int k = 0; k < CPU_VTLB_SIZE; k++) {
+        if (tlb_entry_in_range(&d->vtable[k], addr, len)) {
+            memset(&d->vtable[k], -1, sizeof(d->vtable[k]));
+        }
+    }
+}
+
 static void tlb_flush_range_locked(CPUState *cpu, int midx,
                                    vaddr addr, vaddr len,
                                    unsigned bits, int64_t *full_flush_now)
@@ -717,11 +752,8 @@ static void tlb_flush_range_locked(CPUState *cpu, int midx,
      * the same TLB entry.
      * TODO: Perhaps allow bits to be a few bits less than the size.
      * For now, just flush the entire TLB.
-     *
-     * If @len is larger than the tlb size, then it will take longer to
-     * test all of the entries in the TLB than it will to flush it all.
      */
-    if (mask < f->mask || len > f->mask) {
+    if (mask < f->mask) {
         tlb_debug("forcing full flush midx %d ("
                   "%016" VADDR_PRIx "/%016" VADDR_PRIx "+%016" VADDR_PRIx ")\n",
                   midx, addr, mask, len);
@@ -747,6 +779,34 @@ static void tlb_flush_range_locked(CPUState *cpu, int midx,
         }
         tlb_flush_one_mmuidx_locked(cpu, midx, *full_flush_now);
         cpu->neg.tlb.c.dirty &= ~(1 << midx);
+        return;
+    }
+
+    /*
+     * A range longer than the table's byte span.  Upstream flushes the
+     * whole table here, but testing each entry costs about what clearing
+     * it does and keeps the translations outside the range: an IA-64
+     * guest inserts and purges 16/64 MiB pages next to a small-page
+     * working set, which a full flush made it refill every time.  A
+     * mostly empty table still gets the full flush: there it costs less,
+     * and only a full flush lets tlb_mmu_resize_locked() shrink the table.
+     * So does a table above the use rate at which that function grows it,
+     * or a working set larger than the table would thrash in it until the
+     * next full flush.
+     */
+    if (len > f->mask) {
+        size_t n = tlb_n_entries(f);
+
+        if (bits < target_long_bits() || n > d->n_used_entries * 64 ||
+            MAX(d->window_max_entries, d->n_used_entries) * 100 / n > 70) {
+            if (*full_flush_now < 0) {
+                *full_flush_now = get_clock_realtime();
+            }
+            tlb_flush_one_mmuidx_locked(cpu, midx, *full_flush_now);
+            cpu->neg.tlb.c.dirty &= ~(1 << midx);
+            return;
+        }
+        tlb_flush_range_scan_locked(cpu, midx, addr, len);
         return;
     }
 
@@ -1215,13 +1275,15 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
      * Only evict the old entry to the victim tlb if it's for a
      * different page; otherwise just overwrite the stale data.
      */
-    if (!tlb_hit_page_anyprot(te, addr_page) && !tlb_entry_is_empty(te)) {
-        unsigned vidx = desc->vindex++ % CPU_VTLB_SIZE;
-        CPUTLBEntry *tv = &desc->vtable[vidx];
+    if (!tlb_entry_is_empty(te)) {
+        if (!tlb_hit_page_anyprot(te, addr_page)) {
+            unsigned vidx = desc->vindex++ % CPU_VTLB_SIZE;
+            CPUTLBEntry *tv = &desc->vtable[vidx];
 
-        /* Evict the old entry into the victim tlb.  */
-        copy_tlb_helper_locked(tv, te);
-        desc->vfulltlb[vidx] = desc->fulltlb[index];
+            /* Evict the old entry into the victim tlb.  */
+            copy_tlb_helper_locked(tv, te);
+            desc->vfulltlb[vidx] = desc->fulltlb[index];
+        }
         tlb_n_used_entries_dec(cpu, mmu_idx);
     }
 
@@ -1267,7 +1329,9 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
                     MMU_DATA_STORE, prot & PAGE_WRITE);
 
     copy_tlb_helper_locked(te, &tn);
-    tlb_n_used_entries_inc(cpu, mmu_idx);
+    if (!tlb_entry_is_empty(te)) {
+        tlb_n_used_entries_inc(cpu, mmu_idx);
+    }
     qemu_spin_unlock(&tlb->c.lock);
 }
 
@@ -1409,6 +1473,9 @@ static bool victim_tlb_hit(CPUState *cpu, size_t mmu_idx, size_t index,
             copy_tlb_helper_locked(&tmptlb, tlb);
             copy_tlb_helper_locked(tlb, vtlb);
             copy_tlb_helper_locked(vtlb, &tmptlb);
+            if (tlb_entry_is_empty(&tmptlb)) {
+                tlb_n_used_entries_inc(cpu, mmu_idx);
+            }
             qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 
             CPUTLBEntryFull *f1 = &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
@@ -1599,6 +1666,22 @@ void *probe_access(CPUArchState *env, vaddr addr, int size,
     }
 
     return host;
+}
+
+CPUTLBEntryFull *tlb_lookup_full_nofill(CPUArchState *env, vaddr addr,
+                                        MMUAccessType access_type,
+                                        int mmu_idx)
+{
+    CPUState *cpu = env_cpu(env);
+    uintptr_t index = tlb_index(cpu, mmu_idx, addr);
+    CPUTLBEntry *entry = tlb_entry(cpu, mmu_idx, addr);
+    vaddr page_addr = addr & TARGET_PAGE_MASK;
+
+    if (!tlb_hit_page(tlb_read_idx(entry, access_type), page_addr) &&
+        !victim_tlb_hit(cpu, mmu_idx, index, access_type, page_addr)) {
+        return NULL;
+    }
+    return &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
 }
 
 void *tlb_vaddr_to_host(CPUArchState *env, vaddr addr,

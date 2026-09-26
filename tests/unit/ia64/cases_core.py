@@ -263,6 +263,47 @@ test_mov_pr_rot_imm_sign_extends = require_registers(
         "pr_mask": 1 | (((1 << 21) - 1) << 43),
     }, entry=0x10)
 
+# The callee writes r34.  Its first caller passes four outputs, its second
+# two, so the second write must fault although the same code ran before.
+test_stacked_write_faults_in_smaller_frame_at_same_ip = require_registers(
+    "stacked_write_faults_in_smaller_frame_at_same_ip", [
+        (0x10, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, 0x00, nop_m(), alloc(2, 5, 1, 0, 0), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, 0x200)),
+        (0x50, 0x00, nop_m(), alloc(2, 3, 1, 0, 0), adds(9, 1, 0)),
+        (0x60, 0x10, nop_m(), nop_i(), br_call(0, 0x60, 0x200)),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+        (0x200, 0x00, nop_m(), adds(34, 7, 0), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_ret(0)),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(20, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x10, IA64_GENERAL_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r9": 1,
+        "r20": 0x200,
+    }, entry=0x10)
+
+# mov pr= with every predicate, then with a mask of low predicates only
+# (0x0f3c), then with the rotating predicates only.
+test_mov_pr_partial_masks_merge_bytes = require_registers(
+    "mov_pr_partial_masks_merge_bytes", [
+        (0x10, *movl_mlx(2, 0x0123456789abcdef)),
+        (0x20, *movl_mlx(3, 0xfedcba9876543210)),
+        (0x30, 0x01, nop_m(), mov_gr_pr(2, -2), nop_i()),
+        (0x40, 0x01, nop_m(), mov_gr_pr(3, 0x0f3c), nop_i()),
+        (0x50, 0x01, nop_m(), mov_pr_gr(4), adds(5, -1, 0)),
+        (0x60, 0x01, nop_m(), mov_gr_pr(5, 0x10000), nop_i()),
+        (0x70, 0x01, nop_m(), mov_pr_gr(6), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "r4": 0x0123456789abc2d3,
+        "r6": 0xffffffffffffc2d3,
+    }, entry=0x10)
+
 test_mov_cr_to_r0_ic_set_illegal = require_exception(
     "mov_cr_to_r0_ic_set_illegal", [
         (0x10, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
@@ -272,6 +313,73 @@ test_mov_cr_to_r0_ic_set_illegal = require_exception(
         (0x30, 0x00, mov_m_cr_gr(0, 19), nop_i(), nop_i()),
         (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x30)
+
+# The same read into a real register: here only PSR.ic makes it illegal.
+# PSR.ic is set inside the TB, after the one the TB was entered with.
+test_mov_cr_iip_ic_set_illegal = require_exception(
+    "mov_cr_iip_ic_set_illegal", [
+        (0x10, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_cr_gr(4, 19), nop_i(), nop_i()),
+        (0x40, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x50, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x60, 0x00, mov_m_cr_gr(4, 19), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x60)
+
+# The write side of the same check; the write with PSR.ic clear succeeds.
+test_mov_to_cr_iip_ic_set_illegal = require_exception(
+    "mov_to_cr_iip_ic_set_illegal", [
+        (0x10, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_gr_cr(4, 19), nop_i(), nop_i()),
+        (0x40, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x50, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x60, 0x00, mov_m_gr_cr(4, 19), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x60)
+
+# With PSR.ic clear and no IVT the fault stays at the bundle, as in
+# require_exception() for a fault without a vector.
+_CR_WRITE_RESERVED = {
+    "exception": IA64_EXCP_RESERVED_REG_FIELD,
+    "fault_code": IA64_EXCP_RESERVED_REG_FIELD,
+    "fault_ip": 0x40,
+}
+
+# IPSR bit 0 is reserved; the write of 0 before it succeeds.
+test_mov_to_cr_ipsr_reserved_field_fault = require_registers(
+    "mov_to_cr_ipsr_reserved_field_fault", [
+        (0x10, 0x00, rsm(IA64_PSR_IC), adds(3, 1, 0), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_gr_cr(0, 16), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(3, 16), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], _CR_WRITE_RESERVED, entry=0x10)
+
+# A valid IFS whose frame has sol > sof is a reserved-field write.
+test_mov_to_cr_ifs_invalid_frame_fault = require_registers(
+    "mov_to_cr_ifs_invalid_frame_fault", [
+        (0x10, *movl_mlx(3, (1 << 63) | (5 << 7) | 2)),
+        (0x20, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(3, 23), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], _CR_WRITE_RESERVED, entry=0x10)
+
+test_mov_to_cr_iha_clears_low_bits = require_registers(
+    "mov_to_cr_iha_clears_low_bits", [
+        (0x10, *movl_mlx(3, 0x123456789abcdeff)),
+        (0x20, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(3, 25), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_cr_gr(5, 25), nop_i(), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+    ], {
+        "ip": 0x60,
+        "exception": IA64_EXCP_NONE,
+        "r5": 0x123456789abcdefc,
+    }, entry=0x10)
 
 test_mov_cr_lid_ignored_high_bits_read_zero = require_registers(
     "mov_cr_lid_ignored_high_bits_read_zero", [
@@ -421,39 +529,59 @@ test_hint_i_decode = require_registers("hint_i_decode", [
      br_cond(0x20, 0x20)),
 ], {"ip": 0x20, "exception": IA64_EXCP_NONE, "r31": 0x66}, entry=0x10)
 
-# hint @pause yields to the next vCPU when TBs are not CF_PARALLEL, which
-# includes this battery's single processor: the yield stores the state after
-# the hint and leaves cpu_exec.  Each pass pauses in slot 0 (hint.m), slot 2
-# (hint.i), the L+X slots (hint.x) and slot 1 of an MBB (hint.b), and counts
-# around the pauses: resuming at a wrong slot runs an increment twice or not
-# at all, or loops.  These two cases guard the resume point, not the yield:
-# they also pass when the pause is a no-op.  They take the yield only because
-# -smp 1 TBs lack CF_PARALLEL (tcg_cpu_init_cflags); if that changes, they
-# pass without testing it.  The fix itself is guarded by the functional test
+# hint @pause yields to the next vCPU when one host thread runs several
+# vCPUs (round-robin TCG): the yield stores the state after the hint and
+# leaves cpu_exec.  Each pass pauses in slot 0 (hint.m), slot 2 (hint.i), the
+# L+X slots (hint.x) and slot 1 of an MBB (hint.b), and counts around the
+# pauses: resuming at a wrong slot runs an increment twice or not at all, or
+# loops.  The cases guard the resume point, not the yield: they also pass
+# when the pause is a no-op.  The _rr variants run two vCPUs under
+# thread=single, where the pause yields; with one vCPU it does not.  The fix
+# itself is guarded by the functional test
 # test_460gx_processor_ids_round_robin.
+HINT_PAUSE_EACH_SLOT = [
+    (0x10, 0x01, adds(8, 0, 0), adds(9, 0, 0), adds(10, 64, 0)),
+    (0x20, 0x00, hint_m(), adds(8, 1, 8), hint_i()),
+    (0x30, *hint_x_mlx(0)),
+    (0x40, 0x0b, adds(9, 1, 9), nop_m(), cmp_ltu_unc(6, 7, 9, 10)),
+    (0x50, 0x13, nop_m(), hint_b(), br_cond(0x50, 0x20, qp=6)),
+    (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+]
+HINT_PAUSE_EACH_SLOT_EXPECTED = {
+    "ip": 0x60, "exception": IA64_EXCP_NONE, "r8": 64, "r9": 64,
+}
+
 test_hint_pause_resumes_after_each_slot = require_registers(
-    "hint_pause_resumes_after_each_slot", [
-        (0x10, 0x01, adds(8, 0, 0), adds(9, 0, 0), adds(10, 64, 0)),
-        (0x20, 0x00, hint_m(), adds(8, 1, 8), hint_i()),
-        (0x30, *hint_x_mlx(0)),
-        (0x40, 0x0b, adds(9, 1, 9), nop_m(), cmp_ltu_unc(6, 7, 9, 10)),
-        (0x50, 0x13, nop_m(), hint_b(), br_cond(0x50, 0x20, qp=6)),
-        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
-    ], {"ip": 0x60, "exception": IA64_EXCP_NONE, "r8": 64, "r9": 64},
-    entry=0x10)
+    "hint_pause_resumes_after_each_slot", HINT_PAUSE_EACH_SLOT,
+    HINT_PAUSE_EACH_SLOT_EXPECTED, entry=0x10)
+
+test_hint_pause_resumes_after_each_slot_rr = require_registers(
+    "hint_pause_resumes_after_each_slot_rr", HINT_PAUSE_EACH_SLOT,
+    HINT_PAUSE_EACH_SLOT_EXPECTED, entry=0x10, alat=None, smp="2",
+    extra_args=("-accel", "tcg,thread=single"))
 
 # A br.cloop to its own bundle runs as a counted loop inside one TB; a pause
 # in its body yields on every pass instead, and the count must still be exact
 # (LC + 1 passes: br.cloop branches while LC is nonzero before the decrement).
+HINT_PAUSE_SELF_LOOP = [
+    (0x10, 0x01, adds(8, 0, 0), adds(9, 63, 0), nop_i()),
+    (0x20, 0x01, nop_m(), mov_m_gr_ar(9, 65), nop_i()),
+    (0x30, 0x11, adds(8, 1, 8), hint_i(), br_cloop(0x30, 0x30)),
+    (0x40, 0x01, nop_m(), mov_m_ar_gr(11, 65), nop_i()),
+    (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+]
+HINT_PAUSE_SELF_LOOP_EXPECTED = {
+    "ip": 0x50, "exception": IA64_EXCP_NONE, "r8": 64, "r11": 0,
+}
+
 test_hint_pause_in_counted_self_loop = require_registers(
-    "hint_pause_in_counted_self_loop", [
-        (0x10, 0x01, adds(8, 0, 0), adds(9, 63, 0), nop_i()),
-        (0x20, 0x01, nop_m(), mov_m_gr_ar(9, 65), nop_i()),
-        (0x30, 0x11, adds(8, 1, 8), hint_i(), br_cloop(0x30, 0x30)),
-        (0x40, 0x01, nop_m(), mov_m_ar_gr(11, 65), nop_i()),
-        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
-    ], {"ip": 0x50, "exception": IA64_EXCP_NONE, "r8": 64, "r11": 0},
-    entry=0x10)
+    "hint_pause_in_counted_self_loop", HINT_PAUSE_SELF_LOOP,
+    HINT_PAUSE_SELF_LOOP_EXPECTED, entry=0x10)
+
+test_hint_pause_in_counted_self_loop_rr = require_registers(
+    "hint_pause_in_counted_self_loop_rr", HINT_PAUSE_SELF_LOOP,
+    HINT_PAUSE_SELF_LOOP_EXPECTED, entry=0x10, alat=None, smp="2",
+    extra_args=("-accel", "tcg,thread=single"))
 
 test_cmp_lt_unc_imm_decode = require_registers("cmp_lt_unc_imm_decode", [
     (0x10, 0x00, adds(3, 20, 0), cmp_lt_unc_imm(7, 8, 15, 3),
@@ -3542,7 +3670,9 @@ CASE_NAMES = (
     'hint_i_decode',
     'hint_m_decode',
     'hint_pause_in_counted_self_loop',
+    'hint_pause_in_counted_self_loop_rr',
     'hint_pause_resumes_after_each_slot',
+    'hint_pause_resumes_after_each_slot_rr',
     'hint_x_mlx_decode',
     'mf_ignored_bit_decode',
     'mix_decode',
@@ -3553,6 +3683,13 @@ CASE_NAMES = (
     'mov_cpuid_madison_model',
     'mov_cr_lid_ignored_high_bits_read_zero',
     'mov_cr_to_r0_ic_set_illegal',
+    'mov_cr_iip_ic_set_illegal',
+    'mov_to_cr_iip_ic_set_illegal',
+    'mov_to_cr_ipsr_reserved_field_fault',
+    'mov_to_cr_ifs_invalid_frame_fault',
+    'mov_to_cr_iha_clears_low_bits',
+    'mov_pr_partial_masks_merge_bytes',
+    'stacked_write_faults_in_smaller_frame_at_same_ip',
     'mov_dahr_indexed_decode',
     'mov_dbr_ibr_indexed_decode',
     'mov_ip_current_bundle',

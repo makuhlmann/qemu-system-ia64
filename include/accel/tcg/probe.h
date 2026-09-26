@@ -101,6 +101,22 @@ int probe_access_full_mmu(CPUArchState *env, vaddr addr, int size,
                           MMUAccessType access_type, int mmu_idx,
                           void **phost, CPUTLBEntryFull **pfull);
 
+/**
+ * tlb_lookup_full_nofill:
+ * @env: CPUArchState
+ * @addr: guest virtual address to look up
+ * @access_type: 0 for read, 1 for write, 2 for execute
+ * @mmu_idx: MMU index to use for lookup
+ *
+ * Look up the specified guest virtual address in the TCG softmmu TLB and
+ * its victim TLB, without filling it on a miss: for a target whose fill has
+ * architectural side effects.  Return the full entry of a hit, or NULL.
+ * The result is valid until the next TLB access.
+ */
+CPUTLBEntryFull *tlb_lookup_full_nofill(CPUArchState *env, vaddr addr,
+                                        MMUAccessType access_type,
+                                        int mmu_idx);
+
 #endif /* !CONFIG_USER_ONLY */
 
 /**

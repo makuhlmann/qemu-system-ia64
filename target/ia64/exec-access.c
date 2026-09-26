@@ -264,6 +264,58 @@ bool ia64_exec_probe_host(CPUIA64State *env, uint64_t addr, int size,
     return flags == 0 && *host != NULL;
 }
 
+/*
+ * Host address behind a guest page whose TLB entry is present and needs no
+ * slow path for this access type: no MMIO, watchpoint, pending dirty tracking
+ * or plugin memory callback.  Unlike a probe it never faults, fills the TLB
+ * or clears TLB_NOTDIRTY.  The address is valid only until the TLB changes,
+ * so a caller keeps it for the rest of one helper at most.
+ */
+void *ia64_exec_direct_host(CPUIA64State *env, uint64_t addr,
+                            MMUAccessType access_type, int mmu_idx)
+{
+#ifdef CONFIG_PLUGIN
+    if (env_cpu(env)->neg.plugin_mem_cbs) {
+        return NULL;
+    }
+#endif
+    return tlb_vaddr_to_host(env, addr, access_type, mmu_idx);
+}
+
+/*
+ * The IA64MemorySpeculation of a softmmu read entry for addr, or -1 without
+ * one.  The entry was filled only after the translation, its access rights
+ * and keys passed for this mmu_idx; a miss is not filled here, because a fill
+ * runs the VHPT walker.
+ */
+int ia64_exec_load_hit_speculation(CPUIA64State *env, uint64_t addr,
+                                   int mmu_idx)
+{
+    CPUTLBEntryFull *full = tlb_lookup_full_nofill(env, addr, MMU_DATA_LOAD,
+                                                   mmu_idx);
+
+    return full ? full->extra.ia64.speculation : -1;
+}
+
+/*
+ * True when a softmmu entry for addr grants read and write at this mmu_idx
+ * and maps write-back memory.  full->prot holds the rights the fill computed
+ * from the access rights, the dirty and access bits and the protection key
+ * (before any MemoryRegion restriction), so such an entry exists only where
+ * the software walk of a semaphore access would find no fault either.
+ */
+bool ia64_exec_semaphore_hit_writeback(CPUIA64State *env, uint64_t addr,
+                                       int mmu_idx)
+{
+    CPUTLBEntryFull *full = tlb_lookup_full_nofill(env, addr, MMU_DATA_STORE,
+                                                   mmu_idx);
+
+    return full &&
+           (full->prot & (PAGE_READ | PAGE_WRITE)) ==
+               (PAGE_READ | PAGE_WRITE) &&
+           full->extra.ia64.memory_attribute == IA64_PTE_MA_WB;
+}
+
 bool ia64_exec_probe_writeback_ram(CPUIA64State *env, uint64_t addr,
                                    int size, MMUAccessType access_type,
                                    bool *direct, uintptr_t ra)
@@ -313,13 +365,17 @@ bool ia64_exec_probe_writeback(CPUIA64State *env, uint64_t addr,
 bool ia64_exec_advanced_load_allowed(CPUIA64State *env, uint64_t addr,
                                      int mmu_idx)
 {
-    CPUTLBEntryFull *full;
-    void *host;
-    int flags = probe_access_full(env, addr, 1, MMU_DATA_LOAD, mmu_idx, true,
-                                  &host, &full, 0);
+    CPUTLBEntryFull *full = tlb_lookup_full_nofill(env, addr, MMU_DATA_LOAD,
+                                                   mmu_idx);
 
-    if (flags & TLB_INVALID_MASK) {
-        return true;
+    if (!full) {
+        void *host;
+        int flags = probe_access_full(env, addr, 1, MMU_DATA_LOAD, mmu_idx,
+                                      true, &host, &full, 0);
+
+        if (flags & TLB_INVALID_MASK) {
+            return true;
+        }
     }
     return full->extra.ia64.speculation != IA64_MEM_NON_SPECULATIVE;
 }

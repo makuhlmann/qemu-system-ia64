@@ -10,6 +10,7 @@ from .encoding import (
     EIGHT_K_ITIR,
     HIGH_TR_BASE,
     IA64_ALT_DTLB_VECTOR,
+    IA64_ALT_ITLB_VECTOR,
     IA64_BREAK_VECTOR,
     IA64_CR_SAPIC_IRR3,
     IA64_DATA_ACCESS_BIT_VECTOR,
@@ -90,6 +91,8 @@ from .encoding import (
     cmp4_eq_imm,
     cmpxchg4,
     cmpxchg4_acq,
+    cmp_eq_imm,
+    cmpxchg_acq,
     dtr_setup_bundles,
     fc_i,
     fetchadd4_acq,
@@ -2247,6 +2250,397 @@ def test_itc_d_evicted_refill_flushes_host_tlb(qemu):
                 timeout=5.0)
 
 
+def _evicted_tc_purge_test(qemu, name, purge, refill_while_pending=False,
+                           empty_tc_first=False):
+    """
+    A TC translation that later insertions displaced may still serve loads
+    (the TC may keep a translation until it is purged), but no purge may leave
+    it behind: after purge and srlz.d the load must miss.  With PSR.ic clear
+    and the VHPT walker off, the miss is a Data Nested TLB fault.  IVA moves
+    off the firmware, which keeps displaced translations only for an OS.
+    With refill_while_pending, the translation is reloaded between the purge
+    and srlz.d and then displaced with its purge pending.  With
+    empty_tc_first, ptc.l removes the other entries a few at a time, so the
+    final purge finds almost nothing in the TC itself.
+    """
+    page_shift = 14
+    itir = page_shift << 2
+    target_va = 0x08000000
+    fill_va = 0x10000000
+    page_a = 0x05000000
+    value_a = 0x1122334455667788
+    iva = 0x200000
+    cursor = 0x100000
+    bundles = [
+        (cursor, *movl_mlx(3, iva)),
+        (cursor + 0x10, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (cursor + 0x20, 0x01, srlz_i(), nop_i(), nop_i()),
+    ]
+    cursor += 0x30
+
+    def append_itc(va):
+        nonlocal cursor
+
+        bundles.extend([
+            (cursor, *movl_mlx(18, page_a | DTR_PTE_WB)),
+            (cursor + 0x10, *movl_mlx(19, va)),
+            (cursor + 0x20, 0x00, mov_m_gr_cr(19, 20),
+             adds(7, itir, 0), nop_i()),
+            (cursor + 0x30, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+            (cursor + 0x40, 0x00, itc_d(18), nop_i(), nop_i()),
+        ])
+        cursor += 0x50
+
+    def append_code(*code):
+        nonlocal cursor
+
+        for slot0 in code:
+            bundles.append((cursor, 0x01, slot0, nop_i(), nop_i()))
+            cursor += 0x10
+
+    append_itc(target_va)
+    bundles.extend([
+        (cursor, *movl_mlx(2, target_va)),
+        (cursor + 0x10, 0x01, adds(8, itir, 0), nop_i(), nop_i()),
+    ])
+    cursor += 0x20
+    append_code(ssm(IA64_PSR_DT), srlz_d(), ld8(30, 2), rsm(IA64_PSR_DT),
+                srlz_d())
+    if refill_while_pending:
+        append_code(ssm(IA64_PSR_DT), srlz_d(), purge, ld8(29, 2))
+    for index in range(IA64_TLB_MAX):
+        append_itc(fill_va + index * (1 << page_shift))
+    if empty_tc_first:
+        for index in range(IA64_TLB_MAX):
+            bundles.append((cursor,
+                            *movl_mlx(19, fill_va + index * (1 << page_shift))))
+            cursor += 0x10
+            append_code(ptc_l(19, 8))
+            if index % 4 == 3:
+                append_code(srlz_d())
+    if not refill_while_pending:
+        append_code(purge)
+    append_code(srlz_d(), ssm(IA64_PSR_DT), srlz_d(), ld8(31, 2))
+    bundles.extend([
+        (cursor, 0x10, nop_m(), nop_i(), br_cond(cursor, cursor)),
+        (iva + IA64_DATA_NESTED_TLB_VECTOR, 0x00, nop_m(), nop_i(), nop_i()),
+        (iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10,
+                 iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10)),
+        raw_bundle(page_a, value_a, ~value_a & UINT64_MAX),
+    ])
+    expected = {
+        "ip": iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r30": value_a,
+        "r31": 0,
+    }
+    if refill_while_pending:
+        expected["r29"] = value_a
+    run_program(qemu, bundles, entry=0x100000, expected=expected, name=name,
+                timeout=5.0)
+
+
+def test_ptc_l_purges_displaced_tc_translation(qemu):
+    _evicted_tc_purge_test(qemu, "ptc_l_purges_displaced_tc_translation",
+                           ptc_l(2, 8))
+
+
+def test_ptc_g_purges_displaced_tc_translation(qemu):
+    _evicted_tc_purge_test(qemu, "ptc_g_purges_displaced_tc_translation",
+                           ptc_g(2, 8))
+
+
+def test_ptc_e_purges_displaced_tc_translation(qemu):
+    _evicted_tc_purge_test(qemu, "ptc_e_purges_displaced_tc_translation",
+                           ptc_e(2), empty_tc_first=True)
+
+
+def test_ptr_d_purges_displaced_tc_translation(qemu):
+    _evicted_tc_purge_test(qemu, "ptr_d_purges_displaced_tc_translation",
+                           ptr_d(2, 8))
+
+
+def test_displaced_tc_with_pending_purge_is_gone_after_srlz(qemu):
+    _evicted_tc_purge_test(
+        qemu, "displaced_tc_with_pending_purge_is_gone_after_srlz",
+        ptc_l(2, 8), refill_while_pending=True)
+
+
+def _large_page_purge_test(qemu, name, purge, probe_offset):
+    """
+    A 16 MiB data translation, loaded through at 19 of its 4 KiB pages and
+    then displaced from the TC, must be gone after purge and srlz.d.  The
+    range is longer than the softmmu table's span, so the softmmu tests each
+    of its entries against it; the page at 1 MiB shares the first index of a
+    256-entry table with the page at 0 and moves that one to the victim
+    table.  The miss is a Data Nested TLB fault (PSR.ic clear, walker off).
+    """
+    target_va = 0x08000000
+    fill_va = 0x10000000
+    page_a = 0x05000000
+    value_a = 0x1122334455667788
+    iva = 0x200000
+    cursor = 0x100000
+    bundles = [
+        (cursor, *movl_mlx(3, iva)),
+        (cursor + 0x10, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (cursor + 0x20, 0x01, srlz_i(), nop_i(), nop_i()),
+    ]
+    cursor += 0x30
+
+    def append_itc(va, page_shift):
+        nonlocal cursor
+
+        bundles.extend([
+            (cursor, *movl_mlx(18, page_a | DTR_PTE_WB)),
+            (cursor + 0x10, *movl_mlx(19, va)),
+            (cursor + 0x20, 0x00, mov_m_gr_cr(19, 20),
+             adds(7, page_shift << 2, 0), nop_i()),
+            (cursor + 0x30, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+            (cursor + 0x40, 0x00, itc_d(18), nop_i(), nop_i()),
+        ])
+        cursor += 0x50
+
+    def append_code(*code):
+        nonlocal cursor
+
+        for slot0 in code:
+            bundles.append((cursor, 0x01, slot0, nop_i(), nop_i()))
+            cursor += 0x10
+
+    append_itc(target_va, 24)
+    bundles.extend([
+        (cursor, *movl_mlx(2, target_va)),
+        (cursor + 0x10, *movl_mlx(4, target_va + (1 << 20))),
+        (cursor + 0x20, *movl_mlx(5, target_va + (1 << 24) - 0x1000)),
+    ])
+    cursor += 0x30
+    append_code(adds(8, 24 << 2, 0), adds(3, 0, 2), ssm(IA64_PSR_DT),
+                srlz_d(), ld8(30, 2))
+    for _ in range(16):
+        append_code(adds(3, 0x1000, 3), ld8(29, 3))
+    append_code(ld8(29, 5), ld8(29, 4), rsm(IA64_PSR_DT), srlz_d())
+    for index in range(IA64_TLB_MAX):
+        append_itc(fill_va + index * (1 << 14), 14)
+    # Eight pages outside the range: the table does not look empty to the
+    # flushes of the other regions, which share the RID.
+    bundles.append((cursor, *movl_mlx(3, fill_va + 8 * (1 << 14))))
+    cursor += 0x10
+    append_code(ssm(IA64_PSR_DT), srlz_d())
+    for _ in range(8):
+        append_code(ld8(28, 3), adds(3, 0x2000, 3), adds(3, 0x2000, 3))
+    append_code(rsm(IA64_PSR_DT), srlz_d())
+    bundles.append((cursor, *movl_mlx(3, target_va + probe_offset)))
+    cursor += 0x10
+    append_code(purge, srlz_d(), ssm(IA64_PSR_DT), srlz_d(), ld8(31, 3))
+    bundles.extend([
+        (cursor, 0x10, nop_m(), nop_i(), br_cond(cursor, cursor)),
+        (iva + IA64_DATA_NESTED_TLB_VECTOR, 0x00, nop_m(), nop_i(), nop_i()),
+        (iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10,
+                 iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10)),
+        raw_bundle(page_a, value_a, ~value_a & UINT64_MAX),
+    ])
+    run_program(qemu, bundles, entry=0x100000, expected={
+        "ip": iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r30": value_a,
+        "r31": 0,
+    }, name=name, timeout=5.0)
+
+
+def test_ptc_l_16m_purges_displaced_translation_in_table(qemu):
+    _large_page_purge_test(
+        qemu, "ptc_l_16m_purges_displaced_translation_in_table",
+        ptc_l(2, 8), 5 << 12)
+
+
+def test_ptc_l_16m_purges_displaced_translation_in_victim(qemu):
+    _large_page_purge_test(
+        qemu, "ptc_l_16m_purges_displaced_translation_in_victim",
+        ptc_l(2, 8), 0)
+
+
+def test_ptc_g_16m_purges_displaced_translation_last_page(qemu):
+    _large_page_purge_test(
+        qemu, "ptc_g_16m_purges_displaced_translation_last_page",
+        ptc_g(2, 8), (1 << 24) - 0x1000)
+
+
+def _itc_i_purge_stops_translated_code_test(qemu, name, purge, page_shift):
+    """
+    Code reached through an ITC entry runs once, which leaves its translated
+    block in the jump cache; after the purge and srlz.i the same indirect
+    branch must take an Alternate Instruction TLB fault instead of running
+    that block again.  An ITR maps the test code and the IVT one to one;
+    only r1-r15 are used, since rfi changes the register bank.
+    """
+    code_va = 0x08000000
+    code_pa = 0x05000000
+    iva = 0x200000
+    cursor = 0x100000
+    bundles = [
+        (cursor, *movl_mlx(3, iva)),
+        (cursor + 0x10, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (cursor + 0x20, *movl_mlx(4, DTR_PTE_WB)),
+        (cursor + 0x30, 0x00, mov_m_gr_cr(0, 20), adds(7, 24 << 2, 0),
+         adds(5, 0, 0)),
+        (cursor + 0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (cursor + 0x50, 0x00, itr_i(5, 4), nop_i(), nop_i()),
+        (cursor + 0x60, 0x01, srlz_i(), nop_i(), nop_i()),
+        (cursor + 0x70, *movl_mlx(15, IA64_PSR_IT)),
+        (cursor + 0x80, *movl_mlx(11, cursor + 0xb0)),
+        *rfi_to_gr(cursor + 0x90, 15, 11),
+    ]
+    cursor += 0xb0
+
+    def append_code(*code):
+        nonlocal cursor
+
+        for slot0 in code:
+            bundles.append((cursor, 0x01, slot0, nop_i(), nop_i()))
+            cursor += 0x10
+
+    bundles.extend([
+        (cursor, *movl_mlx(4, code_pa | DTR_PTE_WB)),
+        (cursor + 0x10, *movl_mlx(2, code_va)),
+    ])
+    cursor += 0x20
+    append_code(mov_m_gr_cr(2, 20), adds(8, page_shift << 2, 0),
+                mov_m_gr_cr(8, 21), itc_i(4), srlz_i())
+    bundles.extend([
+        (cursor, 0x01, nop_m(), nop_i(), mov_br_gr(1, 2)),
+        (cursor + 0x10, *movl_mlx(10, cursor + 0x40)),
+        (cursor + 0x20, 0x01, nop_m(), nop_i(), mov_br_gr(2, 10)),
+        (cursor + 0x30, 0x10, nop_m(), nop_i(), br_indirect(1)),
+    ])
+    cursor += 0x40
+    append_code(purge, srlz_d(), srlz_i())
+    bundles.extend([
+        (cursor, *movl_mlx(10, cursor + 0x30)),
+        (cursor + 0x10, 0x01, nop_m(), nop_i(), mov_br_gr(2, 10)),
+        (cursor + 0x20, 0x10, nop_m(), nop_i(), br_indirect(1)),
+        (cursor + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(cursor + 0x30, cursor + 0x30)),
+        (code_pa, 0x00, adds(14, 1, 14), nop_i(), nop_i()),
+        (code_pa + 0x10, 0x10, nop_m(), nop_i(), br_indirect(2)),
+        (iva + IA64_ALT_ITLB_VECTOR, 0x10, nop_m(), nop_i(),
+         br_cond(iva + IA64_ALT_ITLB_VECTOR, iva + IA64_ALT_ITLB_VECTOR)),
+    ])
+    run_program(qemu, bundles, entry=0x100000, expected={
+        "ip": iva + IA64_ALT_ITLB_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "r14": 1,
+    }, name=name, timeout=5.0)
+
+
+def test_ptc_l_stops_translated_code_4k(qemu):
+    _itc_i_purge_stops_translated_code_test(
+        qemu, "ptc_l_stops_translated_code_4k", ptc_l(2, 8), 12)
+
+
+def test_ptc_l_stops_translated_code_16m(qemu):
+    _itc_i_purge_stops_translated_code_test(
+        qemu, "ptc_l_stops_translated_code_16m", ptc_l(2, 8), 24)
+
+
+def test_ptc_g_stops_translated_code_16m(qemu):
+    _itc_i_purge_stops_translated_code_test(
+        qemu, "ptc_g_stops_translated_code_16m", ptc_g(2, 8), 24)
+
+
+def _mixed_page_itc_test(qemu, name, first, second, expect_fault):
+    """
+    Insert data translations of different page sizes over one VA and load
+    through it after each.  An insertion must purge every overlapping TC entry
+    of any size (SDM Vol 2, Translation Cache): a larger page over smaller
+    ones, or a smaller page inside a larger one, after which the rest of the
+    larger page misses (a Data Nested TLB fault with PSR.ic clear).
+    first and second are (page shift, physical address) pairs.
+    """
+    va = 0x08000000
+    iva = 0x200000
+    value_a = 0x1122334455667788
+    value_b = 0x8877665544332211
+    cursor = 0x100000
+    bundles = [
+        (cursor, *movl_mlx(3, iva)),
+        (cursor + 0x10, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (cursor + 0x20, 0x01, srlz_i(), nop_i(), nop_i()),
+        (cursor + 0x30, *movl_mlx(2, va)),
+    ]
+    cursor += 0x40
+
+    def append_itc(page_shift, pa, insert_va):
+        nonlocal cursor
+
+        bundles.extend([
+            (cursor, *movl_mlx(18, pa | DTR_PTE_WB)),
+            (cursor + 0x10, *movl_mlx(19, insert_va)),
+            (cursor + 0x20, 0x00, mov_m_gr_cr(19, 20),
+             adds(7, page_shift << 2, 0), nop_i()),
+            (cursor + 0x30, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+            (cursor + 0x40, 0x00, itc_d(18), nop_i(), nop_i()),
+        ])
+        cursor += 0x50
+
+    def append_load(reg):
+        nonlocal cursor
+
+        for slot0 in (ssm(IA64_PSR_DT), srlz_d(), ld8(reg, 2),
+                      rsm(IA64_PSR_DT), srlz_d()):
+            bundles.append((cursor, 0x01, slot0, nop_i(), nop_i()))
+            cursor += 0x10
+
+    first_shift, first_pa = first
+    second_shift, second_pa = second
+    append_itc(first_shift, first_pa, va)
+    if first_shift < second_shift:
+        # A second small entry inside the coming large page.
+        append_itc(first_shift, first_pa, va + (1 << first_shift))
+    append_load(30)
+    append_itc(second_shift, second_pa,
+               va + (2 << second_shift if second_shift < first_shift else 0))
+    append_load(31)
+    bundles.extend([
+        (cursor, 0x10, nop_m(), nop_i(), br_cond(cursor, cursor)),
+        (iva + IA64_DATA_NESTED_TLB_VECTOR, 0x00, nop_m(), nop_i(),
+         nop_i()),
+        (iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10,
+                 iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10)),
+        raw_bundle(first_pa, value_a, ~value_a & UINT64_MAX),
+        raw_bundle(second_pa, value_b, ~value_b & UINT64_MAX),
+    ])
+    expected = {
+        "exception": IA64_EXCP_NONE,
+        "r30": value_a,
+        "r31": 0 if expect_fault else value_b,
+    }
+    if expect_fault:
+        expected["ip"] = iva + IA64_DATA_NESTED_TLB_VECTOR + 0x10
+    else:
+        expected["ip"] = cursor
+    run_program(qemu, bundles, entry=0x100000, expected=expected, name=name,
+                timeout=5.0)
+
+
+def test_itc_d_64k_page_purges_4k_entries_inside(qemu):
+    _mixed_page_itc_test(qemu, "itc_d_64k_page_purges_4k_entries_inside",
+                         (12, 0x05000000), (16, 0x06000000), False)
+
+
+def test_itc_d_16m_page_purges_4k_entries_inside(qemu):
+    _mixed_page_itc_test(qemu, "itc_d_16m_page_purges_4k_entries_inside",
+                         (12, 0x05000000), (24, 0x06000000), False)
+
+
+def test_itc_d_4k_page_purges_containing_64k_entry(qemu):
+    _mixed_page_itc_test(qemu, "itc_d_4k_page_purges_containing_64k_entry",
+                         (16, 0x05000000), (12, 0x06000000), True)
+
+
 def test_itr_d_all_tr_slots_survive_tc_churn(qemu):
     page_shift = 14
     page_size = 1 << page_shift
@@ -2953,6 +3347,202 @@ test_itc_d_key_permission_store_raises_permission_vector = require_registers(
         "exception": IA64_EXCP_NONE,
         "r30": KEY_TEST_VA,
         "r31": IA64_ISR_W,
+        "r28": KEY_TEST_RR,
+    }, entry=0x10)
+
+# The TB at 0xb0 runs twice with the same key (PSR.ic, entered by a branch):
+# mov psr.l sets PSR.dt to 1, then to 0, and its srlz.d leaves the TB.  The
+# load after it must use the new PSR.dt each time, so that exit cannot keep
+# a link to the TB chosen on the first pass.
+SRLZ_DT_SWITCH_VIRT = bundle_words(0x00, 0x1111, 0, 0)[0]
+SRLZ_DT_SWITCH_PHYS = bundle_words(0x00, 0x2222, 0, 0)[0]
+test_srlz_d_after_mov_psr_rechooses_next_tb = require_registers(
+    "srlz_d_after_mov_psr_rechooses_next_tb", [
+        *dtr_setup_bundles(0x10, 0x0, 0x400000),
+        (0x70, *movl_mlx(6, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x80, *movl_mlx(3, IA64_PSR_IC)),
+        (0x90, 0x00, adds(11, 0, 0), addl(4, 0x9000, 0), adds(2, 0, 6)),
+        (0xa0, 0x18, mov_gr_psr_full(3), srlz_d(), br_cond(0xa0, 0xb0)),
+        (0xb0, 0x08, mov_gr_psr_full(2), srlz_d(), nop_i()),
+        (0xc0, 0x00, ld8(5, 4), nop_i(), nop_i()),
+        (0xd0, 0x00, nop_m(), cmp_eq_imm(6, 7, 0, 11), nop_i()),
+        (0xe0, 0x00, adds(7, 0, 5, qp=6), adds(2, 0, 3, qp=6),
+         adds(11, 1, 0, qp=6)),
+        (0xf0, 0x08, mov_gr_psr_full(3, qp=6), srlz_d(), nop_i()),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0xb0, qp=6)),
+        (0x110, 0x00, adds(8, 0, 5), nop_i(), nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+        (0x9000, 0x00, 0x2222, 0, 0),
+        (0x409000, 0x00, 0x1111, 0, 0),
+    ], {
+        "ip": 0x120,
+        "r7": SRLZ_DT_SWITCH_VIRT,
+        "r8": SRLZ_DT_SWITCH_PHYS,
+    }, entry=0x10)
+
+# As above, but mov psr.l ends its own bundle (and TB) and srlz.d runs in the
+# next TB.  The mov psr.l exit must not link either: a TB entered through a
+# stale link would keep the first pass's PSR.dt past the srlz.d.
+test_srlz_d_after_mov_psr_bundle_rechooses_next_tb = require_registers(
+    "srlz_d_after_mov_psr_bundle_rechooses_next_tb", [
+        *dtr_setup_bundles(0x10, 0x0, 0x400000),
+        (0x70, *movl_mlx(6, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x80, *movl_mlx(3, IA64_PSR_IC)),
+        (0x90, 0x00, adds(11, 0, 0), addl(4, 0x9000, 0), adds(2, 0, 6)),
+        (0xa0, 0x18, mov_gr_psr_full(3), srlz_d(), br_cond(0xa0, 0xb0)),
+        (0xb0, 0x01, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0xc0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xd0, 0x00, ld8(5, 4), nop_i(), nop_i()),
+        (0xe0, 0x00, nop_m(), cmp_eq_imm(6, 7, 0, 11), nop_i()),
+        (0xf0, 0x00, adds(7, 0, 5, qp=6), adds(2, 0, 3, qp=6),
+         adds(11, 1, 0, qp=6)),
+        (0x100, 0x18, mov_gr_psr_full(3, qp=6), srlz_d(),
+         br_cond(0x100, 0xb0, qp=6)),
+        (0x110, 0x00, adds(8, 0, 5), nop_i(), nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+        (0x9000, 0x00, 0x2222, 0, 0),
+        (0x409000, 0x00, 0x1111, 0, 0),
+    ], {
+        "ip": 0x120,
+        "r7": SRLZ_DT_SWITCH_VIRT,
+        "r8": SRLZ_DT_SWITCH_PHYS,
+    }, entry=0x10)
+
+test_itc_d_key_write_disable_survives_load_fill = require_registers(
+    "itc_d_key_write_disable_survives_load_fill", [
+        (0x10, *movl_mlx(2, KEY_TEST_VA)),
+        (0x20, *movl_mlx(16, KEY_TEST_RR)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x40, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0x50, *movl_mlx(4, KEY_TEST_PKR | IA64_PKR_WD)),
+        (0x60, 0x00, mov_rr_write(16, 0), adds(3, 0, 0),
+         nop_i()),
+        (0x70, 0x00, mov_pkr_indexed(3, 4, bit36=1), nop_i(),
+         nop_i()),
+        (0x80, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0xb0, *movl_mlx(29, 0x1122334455667788)),
+        (0xc0, *movl_mlx(19, KEY_TEST_PSR)),
+        (0xd0, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0xd0, 0xe0)),
+        (0xe0, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0xf0, 0x00, ld8(5, 2), nop_i(),
+         nop_i()),
+        (0x100, 0x00, st8(2, 29), nop_i(),
+         nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(),
+         br_cond(0x110, 0x110)),
+        (IA64_KEY_PERMISSION_VECTOR, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x10, 0x00, mov_m_cr_gr(31, 17),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x20, 0x00, mov_m_cr_gr(28, 21),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_KEY_PERMISSION_VECTOR + 0x30,
+                 IA64_KEY_PERMISSION_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_KEY_PERMISSION_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r30": KEY_TEST_VA,
+        "r31": IA64_ISR_W,
+        "r28": KEY_TEST_RR,
+    }, entry=0x10)
+
+test_itc_d_key_read_disable_survives_store_fill = require_registers(
+    "itc_d_key_read_disable_survives_store_fill", [
+        (0x10, *movl_mlx(2, KEY_TEST_VA)),
+        (0x20, *movl_mlx(16, KEY_TEST_RR)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x40, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0x50, *movl_mlx(4, KEY_TEST_PKR | IA64_PKR_RD)),
+        (0x60, 0x00, mov_rr_write(16, 0), adds(3, 0, 0),
+         nop_i()),
+        (0x70, 0x00, mov_pkr_indexed(3, 4, bit36=1), nop_i(),
+         nop_i()),
+        (0x80, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0xb0, *movl_mlx(29, 0x1122334455667788)),
+        (0xc0, *movl_mlx(19, KEY_TEST_PSR)),
+        (0xd0, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0xd0, 0xe0)),
+        (0xe0, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0xf0, 0x00, st8(2, 29), nop_i(),
+         nop_i()),
+        (0x100, 0x00, ld8(5, 2), nop_i(),
+         nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(),
+         br_cond(0x110, 0x110)),
+        (IA64_KEY_PERMISSION_VECTOR, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x10, 0x00, mov_m_cr_gr(31, 17),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x20, 0x00, mov_m_cr_gr(28, 21),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_KEY_PERMISSION_VECTOR + 0x30,
+                 IA64_KEY_PERMISSION_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_KEY_PERMISSION_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r30": KEY_TEST_VA,
+        "r31": IA64_ISR_R,
+        "r28": KEY_TEST_RR,
+    }, entry=0x10)
+
+test_itc_d_key_read_disable_faults_cmpxchg = require_registers(
+    "itc_d_key_read_disable_faults_cmpxchg", [
+        (0x10, *movl_mlx(2, KEY_TEST_VA)),
+        (0x20, *movl_mlx(16, KEY_TEST_RR)),
+        (0x30, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x40, *movl_mlx(7, KEY_TEST_ITIR)),
+        (0x50, *movl_mlx(4, KEY_TEST_PKR | IA64_PKR_RD)),
+        (0x60, 0x00, mov_rr_write(16, 0), adds(3, 0, 0),
+         nop_i()),
+        (0x70, 0x00, mov_pkr_indexed(3, 4, bit36=1), nop_i(),
+         nop_i()),
+        (0x80, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(2, 20), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0xb0, *movl_mlx(29, 0x1122334455667788)),
+        (0xc0, *movl_mlx(19, KEY_TEST_PSR)),
+        (0xd0, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0xd0, 0xe0)),
+        (0xe0, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0xf0, 0x00, st8(2, 29), nop_i(),
+         nop_i()),
+        (0x100, 0x00, cmpxchg_acq(3, 5, 2, 29), nop_i(),
+         nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(),
+         br_cond(0x110, 0x110)),
+        (IA64_KEY_PERMISSION_VECTOR, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x10, 0x00, mov_m_cr_gr(31, 17),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x20, 0x00, mov_m_cr_gr(28, 21),
+         nop_i(), nop_i()),
+        (IA64_KEY_PERMISSION_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_KEY_PERMISSION_VECTOR + 0x30,
+                 IA64_KEY_PERMISSION_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_KEY_PERMISSION_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r30": KEY_TEST_VA,
+        "r31": IA64_ISR_R | IA64_ISR_W,
         "r28": KEY_TEST_RR,
     }, entry=0x10)
 
@@ -6908,7 +7498,26 @@ CASE_NAMES = (
     'itc_d_data_key_miss_raises_key_vector',
     'itc_d_full_tc_replacement_rotates',
     'itc_d_evicted_refill_flushes_host_tlb',
+    'ptc_l_purges_displaced_tc_translation',
+    'ptc_g_purges_displaced_tc_translation',
+    'ptc_e_purges_displaced_tc_translation',
+    'ptr_d_purges_displaced_tc_translation',
+    'displaced_tc_with_pending_purge_is_gone_after_srlz',
+    'itc_d_64k_page_purges_4k_entries_inside',
+    'itc_d_16m_page_purges_4k_entries_inside',
+    'itc_d_4k_page_purges_containing_64k_entry',
+    'ptc_l_16m_purges_displaced_translation_in_table',
+    'ptc_l_16m_purges_displaced_translation_in_victim',
+    'ptc_g_16m_purges_displaced_translation_last_page',
+    'ptc_l_stops_translated_code_4k',
+    'ptc_l_stops_translated_code_16m',
+    'ptc_g_stops_translated_code_16m',
     'itc_d_key_permission_store_raises_permission_vector',
+    'srlz_d_after_mov_psr_rechooses_next_tb',
+    'srlz_d_after_mov_psr_bundle_rechooses_next_tb',
+    'itc_d_key_write_disable_survives_load_fill',
+    'itc_d_key_read_disable_survives_store_fill',
+    'itc_d_key_read_disable_faults_cmpxchg',
     'itc_d_matching_pkr_allows_keyed_load',
     'itc_d_mii_02_slot0_without_stop_is_illegal',
     'itc_d_mii_03_slot0_without_stop_is_illegal',

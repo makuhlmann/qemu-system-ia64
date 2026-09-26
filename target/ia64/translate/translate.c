@@ -15,6 +15,7 @@
 #include "decoder.h"
 #include "ia32/translate.h"
 #include "translate/translate.h"
+#include "trace.h"
 
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
@@ -494,6 +495,13 @@ static bool ia64_insn_writes_gr_r1(const Ia64Instruction *insn)
     }
 }
 
+/*
+ * The TB this thread translates: NaT reads fold to 0 where its facts know a
+ * bit clear, and a TCG write that may set a NaT bit forgets the fact.  The
+ * policy in ia64_update_nat_known() then states what the instruction proved.
+ */
+static __thread DisasContext *ia64_nat_ctx;
+
 static bool ia64_nat_is_known_clear(const DisasContext *ctx, uint8_t reg)
 {
     return reg == 0 ||
@@ -687,6 +695,14 @@ void ia64_update_frame_tracking(DisasContext *ctx,
     if (ia64_insn_may_modify_cfm_sof(insn)) {
         ctx->cfm_sof_valid = false;
         ctx->cfm_sof_checked = 0;
+        ctx->frame_known = false;
+    }
+    if (insn->opcode == IA64_OP_COVER && insn->qp == 0) {
+        ctx->cfm_sof = tcg_constant_i32(0);
+        ctx->cfm_sof_valid = true;
+        ctx->frame_known = true;
+        ctx->frame_sof = 0;
+        ctx->frame_sol = 0;
     }
 
     /*
@@ -700,19 +716,70 @@ void ia64_update_frame_tracking(DisasContext *ctx,
         ctx->cfm_sof = tcg_constant_i32(new_sof);
         ctx->cfm_sof_checked = new_sof;
         ctx->cfm_sof_valid = true;
+        ctx->frame_known = true;
+        ctx->frame_sof = new_sof;
+        ctx->frame_sol = (insn->operands.common.immediate >> 7) & 0x7f;
+    }
+}
+
+/*
+ * The RSE helpers of these instructions rename or reload the stacked
+ * registers, and bsw swaps r16-r31 with the other bank, before the TB goes
+ * on or the branch leaves it.
+ */
+static void ia64_drop_nat_known_renamed(const Ia64Instruction *insn,
+                                        uint64_t known[2])
+{
+    switch (insn->opcode) {
+    case IA64_OP_ALLOC:
+    case IA64_OP_COVER:
+    case IA64_OP_LOADRS:
+    case IA64_OP_CLRRRB:
+    case IA64_OP_CLRRRB_PR:
+    case IA64_OP_BR_CTOP:
+    case IA64_OP_BR_CEXIT:
+    case IA64_OP_BR_WTOP:
+    case IA64_OP_BR_WEXIT:
+    case IA64_OP_BR_CALL:
+    case IA64_OP_BR_CALL_INDIRECT:
+    case IA64_OP_BRL_CALL:
+    case IA64_OP_BR_RET:
+    case IA64_OP_RFI:
+        known[0] &= IA64_STATIC_GR_NAT_MASK;
+        known[1] = 0;
+        break;
+    case IA64_OP_BSW0:
+    case IA64_OP_BSW1:
+        known[0] &= ~(0xffffULL << 16);
+        break;
+    default:
+        break;
     }
 }
 
 void ia64_update_nat_known(DisasContext *ctx,
                            const Ia64Instruction *insn)
 {
-    bool old_r1 = ia64_nat_is_known_clear(
-        ctx, insn->operands.common.destination);
-    bool old_r2 = ia64_nat_is_known_clear(ctx, insn->operands.common.source1);
-    bool old_r3 = ia64_nat_is_known_clear(ctx, insn->operands.common.source2);
+    const uint64_t *before = ctx->memory.nat_known_before;
+    uint8_t r1 = insn->operands.common.destination;
+    uint8_t r2 = insn->operands.common.source1;
+    uint8_t r3 = insn->operands.common.source2;
+    bool old_r1 = r1 == 0 || (before[r1 / 64] >> (r1 % 64)) & 1;
+    bool old_r2 = r2 == 0 || (before[r2 / 64] >> (r2 % 64)) & 1;
+    bool old_r3 = r3 == 0 || (before[r3 / 64] >> (r3 % 64)) & 1;
+    uint64_t after[2] = {
+        ctx->memory.nat_known_clear[0], ctx->memory.nat_known_clear[1]
+    };
+    bool result;
+
+    /* The policy judges the sources as they were before the instruction. */
+    ctx->memory.nat_known_clear[0] = before[0];
+    ctx->memory.nat_known_clear[1] = before[1];
+    result = ia64_nat_result_is_known_clear(ctx, insn);
+    ctx->memory.nat_known_clear[0] = after[0];
+    ctx->memory.nat_known_clear[1] = after[1];
 
     if (ia64_insn_writes_gr_r1(insn)) {
-        bool result = ia64_nat_result_is_known_clear(ctx, insn);
 
         /* A predicated-off instruction preserves the old destination. */
         ia64_nat_set_known_clear(ctx, insn->operands.common.destination,
@@ -725,6 +792,18 @@ void ia64_update_nat_known(DisasContext *ctx,
                                  old_r3 && old_r2);
     }
     /* An immediate base update preserves the base register's NaT bit. */
+
+    ia64_drop_nat_known_renamed(insn, ctx->memory.nat_known_clear);
+}
+
+static void ia64_set_exit_nat_known(DisasContext *ctx,
+                                    const Ia64Instruction *insn)
+{
+    ctx->memory.nat_known_before[0] = ctx->memory.nat_known_clear[0];
+    ctx->memory.nat_known_before[1] = ctx->memory.nat_known_clear[1];
+    ctx->memory.nat_known_at_exit[0] = ctx->memory.nat_known_clear[0];
+    ctx->memory.nat_known_at_exit[1] = ctx->memory.nat_known_clear[1];
+    ia64_drop_nat_known_renamed(insn, ctx->memory.nat_known_at_exit);
 }
 
 static bool ia64_insn_is_privileged(const Ia64Instruction *insn)
@@ -1516,13 +1595,11 @@ static void ia64_gen_force_ri_tracked(DisasContext *ctx, uint8_t slot)
 }
 
 /*
- * Keep the architecturally visible restart point at the next instruction
- * boundary after an instruction completes.  In particular, a vCPU kick can
- * make TCG leave a translated block between the end of one instruction and
- * the generated code for the next one.  Leaving PSR.ri at the slot that just
- * completed makes an asynchronous interruption replay that instruction; at
- * the end of a bundle it can also pair the following bundle address with a
- * stale slot number.
+ * Move the restart point to the next instruction boundary after an
+ * instruction completes.  PSR.ri itself is stored only before code that can
+ * observe it (ia64_gen_sync_ri): under TCG a TB is left only at its exits, at
+ * a helper that raises or longjmps, or at a softmmu fault or I/O recompile,
+ * and a pending interrupt is only taken at TB entry.
  *
  * An MLX L+X instruction occupies slots 1 and 2, so its successor is slot 0
  * of the next bundle rather than slot 2 of the current bundle.  SDM Vol. 2,
@@ -1533,10 +1610,27 @@ void ia64_gen_advance_restart_point(DisasContext *ctx, uint64_t bundle_ip,
                                     uint8_t slot, bool mlx_long)
 {
     if (slot == 2 || (slot == 1 && mlx_long)) {
-        ia64_gen_force_ri_tracked(ctx, 0);
+        ctx->restart.logical_ri = 0;
         tcg_gen_movi_i64(cpu_ip, bundle_ip + 16);
     } else {
-        ia64_gen_force_ri_tracked(ctx, slot + 1);
+        ctx->restart.logical_ri = slot + 1;
+    }
+}
+
+static void ia64_gen_sync_ri(DisasContext *ctx)
+{
+    ia64_gen_set_ri_tracked(ctx, ctx->restart.logical_ri);
+}
+
+/*
+ * An exit path branches off code that goes on, so it must leave the
+ * translation-time view of PSR.ri as it is.
+ */
+static void ia64_gen_sync_ri_for_exit(const DisasContext *ctx)
+{
+    if (!ctx->restart.current_ri_known ||
+        ctx->restart.current_ri != ctx->restart.logical_ri) {
+        ia64_gen_set_ri(ctx->restart.logical_ri);
     }
 }
 
@@ -1560,11 +1654,7 @@ static void ia64_gen_save_fault_slot_from_ri(void)
 
 void ia64_gen_save_fault_slot_for_exit(DisasContext *ctx)
 {
-    if (ctx->restart.current_ri_known) {
-        ia64_gen_set_fault_slot(ctx->restart.current_ri);
-    } else {
-        ia64_gen_save_fault_slot_from_ri();
-    }
+    ia64_gen_set_fault_slot(ctx->restart.logical_ri);
 }
 
 static void ia64_gen_note_successful_bundle(const DisasContext *ctx,
@@ -1706,6 +1796,170 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
     tcg_gen_exit_tb(NULL, 0);
 }
 
+static void ia64_gen_link_or_lookup(DisasContext *ctx, uint64_t dest);
+
+/*
+ * Instructions whose change to the TB key, if any, is fixed by their
+ * encoding, and which change neither the frame nor how code is fetched.
+ */
+static bool ia64_insn_keeps_tb_key(const Ia64Instruction *insn)
+{
+    if (ia64_integer_pure_kind(insn) != IA64_PURE_NONE) {
+        return true;
+    }
+    switch (insn->opcode) {
+    case IA64_OP_NOP:
+    case IA64_OP_LD1:
+    case IA64_OP_LD2:
+    case IA64_OP_LD4:
+    case IA64_OP_LD8:
+    case IA64_OP_ST1:
+    case IA64_OP_ST2:
+    case IA64_OP_ST4:
+    case IA64_OP_ST8:
+    case IA64_OP_ST1REL:
+    case IA64_OP_ST2REL:
+    case IA64_OP_ST4REL:
+    case IA64_OP_ST8REL:
+    case IA64_OP_MF:
+    case IA64_OP_MF_A:
+    case IA64_OP_SSM:
+    case IA64_OP_RSM:
+    case IA64_OP_SUM_UM:
+    case IA64_OP_RUM:
+    case IA64_OP_MOV_PRGR:
+    case IA64_OP_MOV_GRPR:
+    case IA64_OP_MOV_PR_ROT_IMM:
+    case IA64_OP_MOV_BRGR:
+    case IA64_OP_MOV_GRBR:
+        return true;
+    case IA64_OP_MOV_GRCR:
+        return insn->operands.system.source == IA64_CR_SAPIC_TPR;
+    default:
+        return false;
+    }
+}
+
+/*
+ * Instructions that change the TB key (PSR.dt/it/ic/be/ac, CPL) by a value
+ * known only at run time.  The bundle-end exit after them is a link today,
+ * which the SDM permits until a srlz makes the new PSR take effect.
+ */
+static bool ia64_insn_sets_tb_key_at_run_time(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_MOV_GRPSR:
+    case IA64_OP_MOV_GRUM:
+    case IA64_OP_EPC:
+        return true;
+    case IA64_OP_SSM:
+    case IA64_OP_RSM:
+    case IA64_OP_SUM_UM:
+    case IA64_OP_RUM:
+        return insn->qp != 0;
+    default:
+        return false;
+    }
+}
+
+void ia64_note_tb_key_effect(DisasContext *ctx, const Ia64Instruction *insn)
+{
+    if (!ia64_insn_keeps_tb_key(insn)) {
+        ctx->key_static = false;
+    }
+    if (ia64_insn_sets_tb_key_at_run_time(insn)) {
+        ctx->key_dynamic = true;
+    }
+    switch (insn->opcode) {
+    case IA64_OP_SSM:
+    case IA64_OP_RSM:
+        if (!(insn->operands.system.immediate & IA64_PSR_DFL)) {
+            break;
+        }
+        if (insn->qp != 0) {
+            ctx->psr_dfl_known = false;
+        } else {
+            ctx->psr_dfl = insn->opcode == IA64_OP_SSM;
+        }
+        break;
+    case IA64_OP_MOV_GRPSR:
+    case IA64_OP_BREAK:
+        ctx->psr_dfl_known = false;
+        break;
+    default:
+        break;
+    }
+}
+
+/*
+ * As ia64_gen_exit_or_lookup_slot_completed, but when the TB key at the
+ * exit is fixed (key_static, frame_known) link to the next TB instead of
+ * looking it up.
+ */
+void ia64_gen_link_or_exit_slot_completed(DisasContext *ctx, uint64_t ip,
+                                          uint8_t slot,
+                                          uint64_t completed_ip,
+                                          bool record_iipa,
+                                          bool track_psr_suppression,
+                                          TCGv_i32 main_loop)
+{
+    TCGLabel *link;
+
+    if (!ctx->key_static || ctx->restart.track_psr_suppression) {
+        ia64_gen_exit_or_lookup_slot_completed(ctx, ip, slot, completed_ip,
+                                               record_iipa,
+                                               track_psr_suppression,
+                                               main_loop);
+        return;
+    }
+    if (ctx->psr_ss || ctx->psr_tb) {
+        ia64_gen_exit_to_slot_completed(ctx, ip, slot, completed_ip,
+                                        record_iipa, track_psr_suppression);
+        return;
+    }
+    ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
+                                    track_psr_suppression);
+    ia64_gen_store_instruction_group_start(
+        ctx->restart.next_instruction_group_start);
+    ia64_gen_set_resume_slot(ip, slot);
+    link = gen_new_label();
+    tcg_gen_brcondi_i32(TCG_COND_EQ, main_loop, 0, link);
+    tcg_gen_exit_tb(NULL, 0);
+    gen_set_label(link);
+    ia64_gen_link_or_lookup(ctx, slot >= 3 ? ip + 16 : ip);
+}
+
+/*
+ * As ia64_gen_exit_to_slot_completed, but leave to the main loop only when
+ * @main_loop is nonzero; otherwise look the next TB up directly, which is
+ * what the main loop would do.
+ */
+void ia64_gen_exit_or_lookup_slot_completed(DisasContext *ctx, uint64_t ip,
+                                            uint8_t slot,
+                                            uint64_t completed_ip,
+                                            bool record_iipa,
+                                            bool track_psr_suppression,
+                                            TCGv_i32 main_loop)
+{
+    TCGLabel *lookup;
+
+    if (ctx->psr_ss || ctx->psr_tb) {
+        ia64_gen_exit_to_slot_completed(ctx, ip, slot, completed_ip,
+                                        record_iipa, track_psr_suppression);
+        return;
+    }
+    ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
+                                    track_psr_suppression);
+    ia64_gen_store_instruction_group_start(
+        ctx->restart.next_instruction_group_start);
+    ia64_gen_set_resume_slot(ip, slot);
+    lookup = gen_new_label();
+    tcg_gen_brcondi_i32(TCG_COND_EQ, main_loop, 0, lookup);
+    tcg_gen_exit_tb(NULL, 0);
+    gen_set_label(lookup);
+    tcg_gen_lookup_and_goto_ptr();
+}
+
 /*
  * hint @pause (immediate 0, in any unit) marks a spin-wait loop.  When one
  * host thread runs every vCPU in turn (round-robin TCG), the loop usually
@@ -1714,7 +1968,9 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
  * whole bound before the other vCPU gets a turn: the firmware's processor
  * rendezvous (20 ms) published one processor.  Under MTTCG every vCPU has
  * its own thread, and a gdb single step must end in its debug exception,
- * so the pause is a no-op there.
+ * so the pause is a no-op there.  With one vCPU there is nobody to yield
+ * to, and MTTCG leaves CF_PARALLEL clear then: the Server 2003 idle loop
+ * would leave cpu_exec on every pause.
  */
 bool ia64_insn_is_yielding_pause(const DisasContext *ctx,
                                  const Ia64Instruction *insn)
@@ -1726,7 +1982,8 @@ bool ia64_insn_is_yielding_pause(const DisasContext *ctx,
     case IA64_OP_HINT_F:
     case IA64_OP_HINT_X:
         return insn->operands.common.immediate == 0 &&
-               !(tb_cflags(ctx->base.tb) & (CF_PARALLEL | CF_SINGLE_STEP));
+               !(tb_cflags(ctx->base.tb) & (CF_PARALLEL | CF_SINGLE_STEP)) &&
+               first_cpu && CPU_NEXT(first_cpu);
     default:
         return false;
     }
@@ -1843,6 +2100,8 @@ static bool ia64_analyze_self_counted_loop(
               insn.operands.common.branch2 == 0 &&
               insn.address + insn.operands.common.immediate == bundle_ip))) {
             self_loop_slot = slot;
+            ctx->branch.counted_self_rotates =
+                insn.opcode == IA64_OP_BR_CTOP;
             if (insn.opcode != IA64_OP_BR_CLOOP || insn.qp != 0) {
                 zero_st1_exact = false;
             }
@@ -1899,24 +2158,79 @@ void ia64_prepare_self_counted_loop(
      * The counted self-loop places a TCG back edge at the loop label:
      * everything after it executes again with whatever the loop body
      * left behind.  Facts cached from code above the label (a CFM.sof
-     * load, NaT-known bits) would be re-consumed on the second
-     * iteration even if the body invalidated them later in translation
-     * order, so drop them before the label is planted.  Facts learned
-     * inside the body are re-established by the re-executed code.
+     * load) would be re-consumed on the second iteration even if the body
+     * invalidated them later in translation order, so drop them before
+     * the label is planted.  Facts learned inside the body are
+     * re-established by the re-executed code.  The NaT-known bits stay:
+     * the back edge tests the ones the body cannot prove again
+     * (ia64_gen_self_counted_loop), and a br.ctop back edge rotates the
+     * stacked registers, so those are dropped.
      */
-    ctx->cfm_sof_valid = false;
-    ctx->cfm_sof_checked = 0;
-    ctx->memory.nat_known_clear[0] = 1;
-    ctx->memory.nat_known_clear[1] = 0;
+    ctx->branch.counted_self_frame_known = ctx->frame_known;
+    ctx->branch.counted_self_frame_sof = ctx->frame_sof;
+    ctx->branch.counted_self_frame_sol = ctx->frame_sol;
+    ctx->branch.counted_self_dfl_known = ctx->psr_dfl_known;
+    ctx->branch.counted_self_dfl = ctx->psr_dfl;
+    if (!ctx->frame_known) {
+        ctx->cfm_sof_valid = false;
+        ctx->cfm_sof_checked = 0;
+    }
+    if (ctx->branch.counted_self_rotates) {
+        ctx->memory.nat_known_clear[0] &= IA64_STATIC_GR_NAT_MASK;
+        ctx->memory.nat_known_clear[1] = 0;
+    }
+    ctx->branch.counted_self_nat_known[0] = ctx->memory.nat_known_clear[0];
+    ctx->branch.counted_self_nat_known[1] = ctx->memory.nat_known_clear[1];
 
     /*
      * The budget temp is created and initialized once per TB in
      * ia64_tr_tb_start (see there for why it cannot be initialized here);
      * multiple self-loops in one TB share it, which only tightens the cap.
+     * Both paths into the label hold RI 0: the back edge stores it.
      */
+    ia64_gen_sync_ri(ctx);
     ctx->branch.counted_self_label = gen_new_label();
     ctx->branch.counted_self_ip = bundle_ip;
     gen_set_label(ctx->branch.counted_self_label);
+}
+
+/* Branch to set when any GR NaT bit selected by mask0/mask1 is set. */
+static void ia64_gen_brcond_nat_set(uint64_t mask0, uint64_t mask1,
+                                    TCGLabel *set)
+{
+    TCGv_i64 t = tcg_temp_new_i64();
+
+    tcg_gen_andi_i64(t, cpu_nat[0], mask0);
+    if (mask1 != 0) {
+        TCGv_i64 t1 = tcg_temp_new_i64();
+
+        tcg_gen_andi_i64(t1, cpu_nat[1], mask1);
+        tcg_gen_or_i64(t, t, t1);
+    }
+    tcg_gen_brcondi_i64(TCG_COND_NE, t, 0, set);
+}
+
+/*
+ * The self-loop label trusts the NaT facts it was planted with; the back
+ * edge takes it only when the bits the body cannot prove again are clear.
+ * A br.ctop back edge has renamed the stacked registers first.
+ */
+static void ia64_gen_self_loop_nat_check(DisasContext *ctx, TCGLabel *fail)
+{
+    uint64_t known0 = ctx->memory.nat_known_clear[0];
+    uint64_t known1 = ctx->memory.nat_known_clear[1];
+    uint64_t test0;
+    uint64_t test1;
+
+    if (ctx->branch.counted_self_rotates) {
+        known0 &= IA64_STATIC_GR_NAT_MASK;
+        known1 = 0;
+    }
+    test0 = ctx->branch.counted_self_nat_known[0] & ~known0;
+    test1 = ctx->branch.counted_self_nat_known[1] & ~known1;
+    if ((test0 | test1) != 0) {
+        ia64_gen_brcond_nat_set(test0, test1, fail);
+    }
 }
 
 bool ia64_gen_self_counted_loop(DisasContext *ctx, uint64_t target,
@@ -1931,10 +2245,23 @@ bool ia64_gen_self_counted_loop(DisasContext *ctx, uint64_t target,
         completed_ip != ctx->branch.counted_self_ip) {
         return false;
     }
+    /* The body after the label was translated for the frame there. */
+    if (ctx->branch.counted_self_frame_known &&
+        (!ctx->frame_known ||
+         ctx->frame_sof != ctx->branch.counted_self_frame_sof ||
+         ctx->frame_sol != ctx->branch.counted_self_frame_sol)) {
+        return false;
+    }
+    if (ctx->branch.counted_self_dfl_known &&
+        (!ctx->psr_dfl_known ||
+         ctx->psr_dfl != ctx->branch.counted_self_dfl)) {
+        return false;
+    }
 
     exit_to_tb = gen_new_label();
     tcg_gen_brcondi_i64(TCG_COND_EQ, ctx->branch.counted_self_budget,
                         0, exit_to_tb);
+    ia64_gen_self_loop_nat_check(ctx, exit_to_tb);
     tcg_gen_subi_i64(ctx->branch.counted_self_budget,
                      ctx->branch.counted_self_budget, 1);
     ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
@@ -2013,8 +2340,263 @@ void ia64_gen_gr_nat_clear(uint8_t reg)
     }
 
     ia64_gen_note_stacked_gr_write(reg);
+    if (ia64_nat_ctx && ia64_nat_is_known_clear(ia64_nat_ctx, reg)) {
+        return;
+    }
     tcg_gen_andi_i64(cpu_nat[reg / 64], cpu_nat[reg / 64],
                      ~(1ULL << (reg % 64)));
+}
+
+/*
+ * alloc without the helper in its common case.  With all rename bases zero
+ * the frame keeps its physical mapping, a changed sor cannot raise the
+ * Reserved Register/Field fault, and the dirty registers of the current
+ * frame need not be written back first.  The new registers must come from
+ * the invalid partition, with no NaT in the physical file and without
+ * wrapping around it, and no ALAT entry may be active; anything else, a
+ * shrink or an unknown frame calls the helper.  So does every alloc while
+ * the ia64_rse_state trace is on, which only the helper emits.
+ */
+void ia64_gen_alloc(DisasContext *ctx, const Ia64Instruction *insn,
+                    uint8_t r1, uint32_t sof, uint32_t sol, uint32_t sor)
+{
+    TCGv_i32 packed = tcg_constant_i32(sof | (sol << 7) | (sor << 14));
+    uint32_t old_sof = ctx->frame_sof;
+    uint32_t growth = sof - old_sof;
+    TCGLabel *slow;
+    TCGLabel *done;
+    TCGv_i32 t32;
+    TCGv_i32 acc;
+    TCGv_i32 base;
+
+    if (!ctx->frame_known || sof < old_sof || growth > 16 ||
+        trace_event_get_state_backends(TRACE_IA64_RSE_STATE)) {
+        gen_helper_alloc_rse(tcg_env, tcg_constant_i32(r1), packed,
+                             tcg_constant_i64(insn->address),
+                             tcg_constant_i32(insn->slot));
+        return;
+    }
+
+    slow = gen_new_label();
+    done = gen_new_label();
+    t32 = tcg_temp_new_i32();
+    acc = tcg_temp_new_i32();
+    base = tcg_temp_new_i32();
+
+    tcg_gen_ld8u_i32(acc, tcg_env, offsetof(CPUIA64State, cfm_rrb_gr));
+    tcg_gen_ld8u_i32(t32, tcg_env, offsetof(CPUIA64State, cfm_rrb_fr));
+    tcg_gen_or_i32(acc, acc, t32);
+    tcg_gen_ld8u_i32(t32, tcg_env, offsetof(CPUIA64State, cfm_rrb_pr));
+    tcg_gen_or_i32(acc, acc, t32);
+    tcg_gen_brcondi_i32(TCG_COND_NE, acc, 0, slow);
+    if (ctx->memory.full_alat) {
+        tcg_gen_ld_i32(acc, tcg_env,
+                       offsetof(CPUIA64State, alat_state.alat_active_count));
+        tcg_gen_brcondi_i32(TCG_COND_NE, acc, 0, slow);
+    }
+    tcg_gen_ld_i32(acc, tcg_env, offsetof(CPUIA64State, rse.rse_invalid));
+    tcg_gen_brcondi_i32(TCG_COND_LT, acc, growth, slow);
+    if (growth != 0) {
+        TCGv_i64 n0 = tcg_temp_new_i64();
+        TCGv_i64 n1 = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(n0, tcg_env,
+                       offsetof(CPUIA64State, rse.rse_pgr_nat[0]));
+        tcg_gen_ld_i64(n1, tcg_env,
+                       offsetof(CPUIA64State, rse.rse_pgr_nat[1]));
+        tcg_gen_or_i64(n0, n0, n1);
+        tcg_gen_brcondi_i64(TCG_COND_NE, n0, 0, slow);
+        tcg_gen_ld_i32(base, tcg_env, offsetof(CPUIA64State, rse.rse_bol));
+        tcg_gen_addi_i32(base, base, old_sof);
+        tcg_gen_brcondi_i32(TCG_COND_GTU, base,
+                            IA64_STACKED_GR_COUNT - growth, slow);
+    }
+
+    tcg_gen_subi_i32(acc, acc, growth);
+    tcg_gen_st_i32(acc, tcg_env, offsetof(CPUIA64State, rse.rse_invalid));
+    tcg_gen_st8_i32(tcg_constant_i32(sof), tcg_env,
+                    offsetof(CPUIA64State, cfm_sof));
+    tcg_gen_st8_i32(tcg_constant_i32(sol), tcg_env,
+                    offsetof(CPUIA64State, cfm_sol));
+    tcg_gen_st8_i32(tcg_constant_i32(sor), tcg_env,
+                    offsetof(CPUIA64State, cfm_sor));
+    if (growth != 0) {
+        TCGv_ptr slot = tcg_temp_new_ptr();
+        uint32_t first = IA64_STACKED_GR_BASE + old_sof;
+
+        /* The new registers take the values of their physical registers. */
+        tcg_gen_shli_i32(base, base, 3);
+        tcg_gen_ext_i32_ptr(slot, base);
+        tcg_gen_add_ptr(slot, slot, tcg_env);
+        for (uint32_t i = 0; i < growth; i++) {
+            tcg_gen_ld_i64(cpu_gr[first + i], slot,
+                           offsetof(CPUIA64State, rse.rse_pgr) + i * 8);
+        }
+        for (uint32_t reg = first; reg < first + growth; reg++) {
+            tcg_gen_andi_i64(cpu_nat[reg / 64], cpu_nat[reg / 64],
+                             ~(1ULL << (reg % 64)));
+        }
+    }
+    if (r1 != 0) {
+        tcg_gen_ld_i64(cpu_gr[r1], tcg_env,
+                       offsetof(CPUIA64State, ar[IA64_AR_PFS]));
+        ia64_gen_gr_nat_clear(r1);
+    }
+    tcg_gen_br(done);
+
+    gen_set_label(slow);
+    gen_helper_alloc_rse(tcg_env, tcg_constant_i32(r1), packed,
+                         tcg_constant_i64(insn->address),
+                         tcg_constant_i32(insn->slot));
+    gen_set_label(done);
+}
+
+/*
+ * br.call without the helper in its common case: no rename base to clear, no
+ * active ALAT entry, no NaT in the frame or the physical file, and a frame
+ * that does not wrap the physical file.  The frame then goes to its physical
+ * registers (so every virtual register is clean), the outputs are renamed
+ * down to r32, and the locals join the dirty partition (SDM Vol.2 6.5.2).
+ * Anything else, an unknown frame, or the ia64_rse_state trace calls the
+ * helper.
+ */
+void ia64_gen_br_call(DisasContext *ctx, uint8_t link, uint64_t next_ip,
+                      TCGv_i64 target)
+{
+    uint32_t sof = ctx->frame_sof;
+    uint32_t sol = ctx->frame_sol;
+    uint32_t outputs = sof > sol ? sof - sol : 0;
+    TCGLabel *slow;
+    TCGLabel *done;
+    TCGv_i32 acc;
+    TCGv_i32 t32;
+    TCGv_i32 bol;
+    TCGv_i64 t64;
+    TCGv_i64 pfs;
+
+    if (!ctx->frame_known || sol > sof ||
+        trace_event_get_state_backends(TRACE_IA64_RSE_STATE)) {
+        gen_helper_br_call_rse(tcg_env, tcg_constant_i32(link),
+                               tcg_constant_i64(next_ip), target);
+        return;
+    }
+
+    slow = gen_new_label();
+    done = gen_new_label();
+    acc = tcg_temp_new_i32();
+    t32 = tcg_temp_new_i32();
+    bol = tcg_temp_new_i32();
+    t64 = tcg_temp_new_i64();
+    pfs = tcg_temp_new_i64();
+
+    tcg_gen_ld8u_i32(acc, tcg_env, offsetof(CPUIA64State, cfm_rrb_gr));
+    tcg_gen_ld8u_i32(t32, tcg_env, offsetof(CPUIA64State, cfm_rrb_fr));
+    tcg_gen_or_i32(acc, acc, t32);
+    tcg_gen_ld8u_i32(t32, tcg_env, offsetof(CPUIA64State, cfm_rrb_pr));
+    tcg_gen_or_i32(acc, acc, t32);
+    tcg_gen_brcondi_i32(TCG_COND_NE, acc, 0, slow);
+    if (ctx->memory.full_alat) {
+        tcg_gen_ld_i32(acc, tcg_env,
+                       offsetof(CPUIA64State, alat_state.alat_active_count));
+        tcg_gen_brcondi_i32(TCG_COND_NE, acc, 0, slow);
+    }
+    tcg_gen_ld_i64(t64, tcg_env, offsetof(CPUIA64State, rse.rse_pgr_nat[0]));
+    tcg_gen_ld_i64(pfs, tcg_env, offsetof(CPUIA64State, rse.rse_pgr_nat[1]));
+    tcg_gen_or_i64(t64, t64, pfs);
+    if (sof != 0) {
+        uint32_t low = MIN(sof, 64 - IA64_STACKED_GR_BASE);
+
+        tcg_gen_andi_i64(pfs, cpu_nat[0],
+                         MAKE_64BIT_MASK(IA64_STACKED_GR_BASE, low));
+        tcg_gen_or_i64(t64, t64, pfs);
+        if (sof > low) {
+            tcg_gen_andi_i64(pfs, cpu_nat[1], MAKE_64BIT_MASK(0, sof - low));
+            tcg_gen_or_i64(t64, t64, pfs);
+        }
+    }
+    tcg_gen_brcondi_i64(TCG_COND_NE, t64, 0, slow);
+    tcg_gen_ld_i32(bol, tcg_env, offsetof(CPUIA64State, rse.rse_bol));
+    if (sof != 0) {
+        TCGv_ptr slot = tcg_temp_new_ptr();
+
+        tcg_gen_brcondi_i32(TCG_COND_GTU, bol, IA64_STACKED_GR_COUNT - sof,
+                            slow);
+        tcg_gen_shli_i32(t32, bol, 3);
+        tcg_gen_ext_i32_ptr(slot, t32);
+        tcg_gen_add_ptr(slot, slot, tcg_env);
+        for (uint32_t i = 0; i < sof; i++) {
+            tcg_gen_st_i64(cpu_gr[IA64_STACKED_GR_BASE + i], slot,
+                           offsetof(CPUIA64State, rse.rse_pgr) + i * 8);
+        }
+    }
+    tcg_gen_movi_i64(cpu_rse_gr_dirty[0], 0);
+    tcg_gen_movi_i64(cpu_rse_gr_dirty[1], 0);
+
+    /* ar.pfs: the caller's CFM (its rename bases are 0), ar.ec and CPL. */
+    tcg_gen_ld8u_i64(pfs, tcg_env, offsetof(CPUIA64State, cfm_sor));
+    tcg_gen_shli_i64(pfs, pfs, IA64_CFM_SOR_SHIFT);
+    tcg_gen_ori_i64(pfs, pfs, sof | ((uint64_t)sol << IA64_CFM_SOL_SHIFT));
+    tcg_gen_ld_i64(t64, tcg_env, offsetof(CPUIA64State, ar[IA64_AR_EC]));
+    tcg_gen_andi_i64(t64, t64, 0x3f);
+    tcg_gen_shli_i64(t64, t64, IA64_PFS_PEC_SHIFT);
+    tcg_gen_or_i64(pfs, pfs, t64);
+    tcg_gen_andi_i64(t64, cpu_psr, IA64_PSR_CPL_MASK);
+    tcg_gen_shli_i64(t64, t64, IA64_PFS_PPL_SHIFT - IA64_PSR_CPL_SHIFT);
+    tcg_gen_or_i64(pfs, pfs, t64);
+    tcg_gen_st_i64(pfs, tcg_env, offsetof(CPUIA64State, ar[IA64_AR_PFS]));
+
+    for (uint32_t i = 0; i < outputs && sol != 0; i++) {
+        tcg_gen_mov_i64(cpu_gr[IA64_STACKED_GR_BASE + i],
+                        cpu_gr[IA64_STACKED_GR_BASE + sol + i]);
+    }
+    if (sol != 0) {
+        TCGv_i32 nats = tcg_temp_new_i32();
+        TCGv_i32 count = tcg_temp_new_i32();
+
+        /* NaT collection slots crossed: (BSP{8:3} + sol) / 63, sol < 96. */
+        tcg_gen_ld_i64(t64, tcg_env, offsetof(CPUIA64State, ar[IA64_AR_BSP]));
+        tcg_gen_extrl_i64_i32(t32, t64);
+        tcg_gen_shri_i32(t32, t32, 3);
+        tcg_gen_andi_i32(t32, t32, 0x3f);
+        tcg_gen_addi_i32(t32, t32, sol);
+        tcg_gen_setcondi_i32(TCG_COND_GEU, nats, t32, 63);
+        tcg_gen_setcondi_i32(TCG_COND_GEU, t32, t32, 126);
+        tcg_gen_add_i32(nats, nats, t32);
+
+        tcg_gen_addi_i32(count, nats, sol);
+        tcg_gen_shli_i32(count, count, 3);
+        tcg_gen_extu_i32_i64(pfs, count);
+        tcg_gen_add_i64(t64, t64, pfs);
+        tcg_gen_st_i64(t64, tcg_env, offsetof(CPUIA64State, ar[IA64_AR_BSP]));
+
+        tcg_gen_addi_i32(bol, bol, sol);
+        tcg_gen_subi_i32(t32, bol, IA64_STACKED_GR_COUNT);
+        tcg_gen_movcond_i32(TCG_COND_GEU, bol, bol,
+                            tcg_constant_i32(IA64_STACKED_GR_COUNT), t32, bol);
+        tcg_gen_st_i32(bol, tcg_env, offsetof(CPUIA64State, rse.rse_bol));
+
+        tcg_gen_ld_i32(t32, tcg_env, offsetof(CPUIA64State, rse.rse_dirty));
+        tcg_gen_addi_i32(t32, t32, sol);
+        tcg_gen_st_i32(t32, tcg_env, offsetof(CPUIA64State, rse.rse_dirty));
+        tcg_gen_ld_i32(t32, tcg_env, offsetof(CPUIA64State, rse.rse_dirty_nat));
+        tcg_gen_add_i32(t32, t32, nats);
+        tcg_gen_st_i32(t32, tcg_env, offsetof(CPUIA64State, rse.rse_dirty_nat));
+    }
+    tcg_gen_st8_i32(tcg_constant_i32(outputs), tcg_env,
+                    offsetof(CPUIA64State, cfm_sof));
+    tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
+                    offsetof(CPUIA64State, cfm_sol));
+    tcg_gen_st8_i32(tcg_constant_i32(0), tcg_env,
+                    offsetof(CPUIA64State, cfm_sor));
+    tcg_gen_movi_i64(cpu_br[link], next_ip);
+    tcg_gen_andi_i64(cpu_ip, target, ~(uint64_t)0xf);
+    tcg_gen_andi_i64(cpu_psr, cpu_psr, ~IA64_PSR_RI_MASK);
+    tcg_gen_br(done);
+
+    gen_set_label(slow);
+    gen_helper_br_call_rse(tcg_env, tcg_constant_i32(link),
+                           tcg_constant_i64(next_ip), target);
+    gen_set_label(done);
 }
 
 void ia64_gen_gr_nat_set(uint8_t reg)
@@ -2024,6 +2606,9 @@ void ia64_gen_gr_nat_set(uint8_t reg)
     }
 
     ia64_gen_note_stacked_gr_write(reg);
+    if (ia64_nat_ctx) {
+        ia64_nat_set_known_clear(ia64_nat_ctx, reg, false);
+    }
     tcg_gen_ori_i64(cpu_nat[reg / 64], cpu_nat[reg / 64],
                     1ULL << (reg % 64));
 }
@@ -2046,6 +2631,9 @@ void ia64_gen_gr_nat_assign(uint8_t reg, TCGv_i64 bit)
     }
 
     ia64_gen_note_stacked_gr_write(reg);
+    if (ia64_nat_ctx) {
+        ia64_nat_set_known_clear(ia64_nat_ctx, reg, false);
+    }
     shifted = tcg_temp_new_i64();
     tcg_gen_andi_i64(shifted, bit, 1);
     tcg_gen_shli_i64(shifted, shifted, reg % 64);
@@ -2058,7 +2646,8 @@ TCGv_i64 ia64_gen_gr_nat_read(uint8_t reg)
 {
     TCGv_i64 bit = tcg_temp_new_i64();
 
-    if (reg == 0) {
+    if (reg == 0 ||
+        (ia64_nat_ctx && ia64_nat_is_known_clear(ia64_nat_ctx, reg))) {
         tcg_gen_movi_i64(bit, 0);
         return bit;
     }
@@ -2387,6 +2976,138 @@ void ia64_gen_validate_cr_access(TCGv_i64 result,
                                   tcg_constant_i32(insn->slot));
 }
 
+/*
+ * The part of ia64_system_validate_cr_access() a read needs: an
+ * interruption CR (cr16-cr25) read with PSR.ic set is an Illegal Operation
+ * fault (SDM Vol 3 mov cr).  The helper still raises it.
+ */
+/*
+ * The part of ia64_system_validate_ar_access() a write to AR.PFS needs: a
+ * reserved field faults (ia64_reserved_pfs_field()).  Every non-leaf
+ * function writes AR.PFS before it returns, so the test is inline and the
+ * full check runs on the faulting path only.
+ */
+void ia64_gen_check_pfs_write(const Ia64Instruction *insn, TCGv_i64 value)
+{
+    TCGv_i64 bad = tcg_temp_new_i64();
+    TCGv_i64 sof = tcg_temp_new_i64();
+    TCGv_i64 field = tcg_temp_new_i64();
+    TCGv_i64 t = tcg_temp_new_i64();
+    TCGLabel *ok = gen_new_label();
+
+    tcg_gen_andi_i64(bad, value, (0xfULL << 58) | (0x3fffULL << 38));
+    tcg_gen_setcondi_i64(TCG_COND_NE, bad, bad, 0);
+    tcg_gen_extract_i64(sof, value, 0, 7);
+    tcg_gen_setcondi_i64(TCG_COND_GTU, t, sof, IA64_STACKED_GR_COUNT);
+    tcg_gen_or_i64(bad, bad, t);
+    tcg_gen_extract_i64(field, value, 7, 7);            /* sol */
+    tcg_gen_setcond_i64(TCG_COND_GTU, t, field, sof);
+    tcg_gen_or_i64(bad, bad, t);
+    tcg_gen_extract_i64(field, value, 14, 4);
+    tcg_gen_shli_i64(field, field, 3);                  /* sor */
+    tcg_gen_setcond_i64(TCG_COND_GTU, t, field, sof);
+    tcg_gen_or_i64(bad, bad, t);
+    /* rrb.gr must be 0 without a rotating region, else below sor. */
+    tcg_gen_umax_i64(field, field, tcg_constant_i64(1));
+    tcg_gen_extract_i64(t, value, 18, 7);
+    tcg_gen_setcond_i64(TCG_COND_GEU, t, t, field);
+    tcg_gen_or_i64(bad, bad, t);
+    tcg_gen_extract_i64(t, value, 25, 7);               /* rrb.fr */
+    tcg_gen_setcondi_i64(TCG_COND_GEU, t, t, 96);
+    tcg_gen_or_i64(bad, bad, t);
+    tcg_gen_extract_i64(t, value, 32, 6);               /* rrb.pr */
+    tcg_gen_setcondi_i64(TCG_COND_GEU, t, t, 48);
+    tcg_gen_or_i64(bad, bad, t);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, bad, 0, ok);
+    ia64_gen_validate_ar_access(insn, value, true);
+    gen_set_label(ok);
+}
+
+void ia64_gen_check_cr_read(const Ia64Instruction *insn)
+{
+    uint32_t cr = insn->operands.common.source1;
+    TCGv_i64 ic;
+    TCGLabel *ok;
+
+    if (cr < IA64_CR_IPSR || cr > IA64_CR_IHA) {
+        return;
+    }
+    ic = tcg_temp_new_i64();
+    ok = gen_new_label();
+    tcg_gen_andi_i64(ic, cpu_psr, IA64_PSR_IC);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, ic, 0, ok);
+    ia64_gen_validate_cr_access(ic, insn, tcg_constant_i64(0), false);
+    gen_set_label(ok);
+}
+
+/*
+ * The part of ia64_system_validate_cr_access() a write to an interruption CR
+ * other than IFA needs: PSR.ic set or a reserved field faults, and only IHA
+ * is masked.  The full check runs on the faulting paths only.
+ */
+bool ia64_gen_validate_interruption_cr_write(TCGv_i64 result,
+                                             const Ia64Instruction *insn,
+                                             TCGv_i64 value)
+{
+    uint32_t cr = insn->operands.common.source1;
+    TCGv_i64 t;
+    TCGLabel *slow;
+    TCGLabel *done;
+
+    if (cr < IA64_CR_IPSR || cr > IA64_CR_IHA || cr == IA64_CR_IFA) {
+        return false;
+    }
+    t = tcg_temp_new_i64();
+    slow = gen_new_label();
+    done = gen_new_label();
+    tcg_gen_andi_i64(t, cpu_psr, IA64_PSR_IC);
+    tcg_gen_brcondi_i64(TCG_COND_NE, t, 0, slow);
+    if (cr == IA64_CR_IPSR || cr == IA64_CR_ISR || cr == IA64_CR_IFS) {
+        gen_helper_cr_write_reserved(t, tcg_constant_i32(cr), value);
+        tcg_gen_brcondi_i64(TCG_COND_NE, t, 0, slow);
+    }
+    if (cr == IA64_CR_IHA) {
+        tcg_gen_andi_i64(result, value, ~3ULL);
+    } else {
+        tcg_gen_mov_i64(result, value);
+    }
+    tcg_gen_br(done);
+    gen_set_label(slow);
+    ia64_gen_validate_cr_access(result, insn, value, true);
+    gen_set_label(done);
+    return true;
+}
+
+/*
+ * The part of ia64_system_validate_ar_access() a move to or from BSPSTORE
+ * or RNAT needs: an Illegal Operation fault unless RSC.mode is 0.
+ */
+void ia64_gen_check_rse_ar_mode(const Ia64Instruction *insn, TCGv_i64 value,
+                                bool write)
+{
+    TCGv_i64 mode = tcg_temp_new_i64();
+    TCGLabel *ok = gen_new_label();
+
+    tcg_gen_ld_i64(mode, tcg_env, offsetof(CPUIA64State, ar_rsc));
+    tcg_gen_andi_i64(mode, mode, IA64_RSC_MODE);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, mode, 0, ok);
+    ia64_gen_validate_ar_access(insn, value, write);
+    gen_set_label(ok);
+}
+
+/* Of the TPR checks only the reserved bits 15:8 can fault a write. */
+void ia64_gen_validate_tpr_write(TCGv_i64 result, const Ia64Instruction *insn,
+                                 TCGv_i64 value)
+{
+    TCGLabel *ok = gen_new_label();
+
+    tcg_gen_andi_i64(result, value, 0xff00);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, result, 0, ok);
+    ia64_gen_validate_cr_access(result, insn, value, true);
+    gen_set_label(ok);
+    tcg_gen_andi_i64(result, value, IA64_TPR_WRITABLE_MASK);
+}
+
 void ia64_gen_check_nat_register(const Ia64Instruction *insn, uint8_t reg)
 {
     ia64_gen_check_nat_consumption(insn, reg, 0, IA64_NAT_ACCESS);
@@ -2711,10 +3432,12 @@ static uint64_t ia64_insn_disabled_fp_isr_flags(
 
 static void ia64_gen_check_disabled_fp(const Ia64Instruction *insn)
 {
+    const DisasContext *ctx = insn->ctx;
     uint32_t reads = ia64_insn_fp_read_sets(insn);
     uint32_t writes = ia64_insn_fp_write_sets(insn);
     uint32_t sets = reads | writes;
     uint64_t disabled_mask;
+    uint64_t test_mask;
     uint64_t isr_flags;
     TCGv_i64 disabled;
     TCGv_i64 isr;
@@ -2725,18 +3448,27 @@ static void ia64_gen_check_disabled_fp(const Ia64Instruction *insn)
     }
 
     /*
-     * Check the live PSR: a mask instruction earlier in the same bundle can
-     * change dfl/dfh after the TB was translated.
+     * Test the live PSR: an ssm or rsm earlier in the same bundle can change
+     * dfl/dfh after the TB was translated.  A PSR.dfl the translator knows
+     * to be clear needs no test.
      */
+    disabled_mask = ((sets & 1) ? IA64_PSR_DFL : 0) |
+                    ((sets & 2) ? IA64_PSR_DFH : 0);
+    test_mask = disabled_mask;
+    if (ctx && ctx->psr_dfl_known && !ctx->psr_dfl) {
+        test_mask &= ~IA64_PSR_DFL;
+    }
+    if (test_mask == 0) {
+        return;
+    }
     done = gen_new_label();
     disabled = tcg_temp_new_i64();
     isr = tcg_temp_new_i64();
-    disabled_mask = ((sets & 1) ? IA64_PSR_DFL : 0) |
-                    ((sets & 2) ? IA64_PSR_DFH : 0);
     isr_flags = ia64_insn_disabled_fp_isr_flags(insn);
 
-    tcg_gen_andi_i64(disabled, cpu_psr, disabled_mask);
+    tcg_gen_andi_i64(disabled, cpu_psr, test_mask);
     tcg_gen_brcondi_i64(TCG_COND_EQ, disabled, 0, done);
+    tcg_gen_andi_i64(disabled, cpu_psr, disabled_mask);
     tcg_gen_shri_i64(isr, disabled, 18);
     if (isr_flags != 0) {
         tcg_gen_ori_i64(isr, isr, isr_flags);
@@ -3098,8 +3830,17 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
         MMU_PHYS_IDX;
     ctx->cpl = (flags & IA64_TB_FLAG_CPL_MASK) >> IA64_TB_FLAG_CPL_SHIFT;
     ctx->cpl_known = true;
-    ctx->cfm_sof_valid = false;
-    ctx->cfm_sof_checked = 0;
+    ctx->key_static = true;
+    ctx->key_dynamic = false;
+    ctx->psr_dfl_known = true;
+    ctx->psr_dfl = flags & IA64_TB_FLAG_PSR_DFL;
+    ctx->frame_known = true;
+    ctx->frame_sof = ctx->base.tb->cs_base & 0x7f;
+    ctx->frame_sol = (ctx->base.tb->cs_base >> IA64_TB_CS_BASE_SOL_SHIFT) &
+                     0x7f;
+    ctx->cfm_sof = tcg_constant_i32(ctx->frame_sof);
+    ctx->cfm_sof_valid = true;
+    ctx->cfm_sof_checked = ctx->frame_sof;
     ctx->restart.start_slot = (ctx->base.tb->flags & IA64_TB_FLAG_RI_MASK) >>
                       IA64_TB_FLAG_RI_SHIFT;
     if (ctx->restart.start_slot > 2) {
@@ -3107,14 +3848,25 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     }
     ctx->restart.current_ri = ctx->restart.start_slot;
     ctx->restart.current_ri_known = true;
+    ctx->restart.logical_ri = ctx->restart.start_slot;
     ctx->restart.track_iipa = ctx->base.tb->flags & IA64_TB_FLAG_PSR_IC;
     ctx->restart.track_psr_suppression =
         ctx->base.tb->flags & IA64_TB_FLAG_PSR_SUPPRESS;
     ctx->memory.be_data = ctx->base.tb->flags & IA64_TB_FLAG_BE;
     ctx->memory.psr_ac = ctx->base.tb->flags & IA64_TB_FLAG_PSR_AC;
     ctx->memory.full_alat = ctx->env->alat_state.alat_full;
-    ctx->memory.nat_known_clear[0] = 1;
-    ctx->memory.nat_known_clear[1] = 0;
+    if (ctx->base.tb->flags & IA64_TB_FLAG_NAT_CLEAR) {
+        ctx->memory.nat_known_clear[0] = UINT64_MAX;
+        ctx->memory.nat_known_clear[1] = UINT64_MAX;
+    } else {
+        ctx->memory.nat_known_clear[0] = 1;
+        ctx->memory.nat_known_clear[1] = 0;
+    }
+    ctx->memory.nat_known_at_exit[0] = ctx->memory.nat_known_clear[0];
+    ctx->memory.nat_known_at_exit[1] = ctx->memory.nat_known_clear[1];
+    ctx->memory.nat_known_before[0] = ctx->memory.nat_known_clear[0];
+    ctx->memory.nat_known_before[1] = ctx->memory.nat_known_clear[1];
+    ia64_nat_ctx = ctx;
     ctx->restart.instruction_group_start =
         ctx->base.tb->flags & IA64_TB_FLAG_GROUP_START;
     ctx->restart.next_instruction_group_start =
@@ -3145,6 +3897,36 @@ static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cs)
     ctx->branch.counted_self_budget = tcg_temp_new_i64();
     tcg_gen_movi_i64(ctx->branch.counted_self_budget,
                      IA64_COUNTED_SELF_BUDGET);
+}
+
+/*
+ * Whether the code for insn can observe PSR.ri: through a helper, a memory
+ * access that may fault, an exception or a TB exit.  The rest runs with a
+ * stale PSR.ri, which nothing reads before the next sync.
+ */
+static bool ia64_insn_observes_ri(DisasContext *ctx,
+                                  const Ia64Instruction *insn)
+{
+    uint8_t dst = insn->operands.common.destination;
+
+    if (ctx->psr_ss || ctx->psr_tb || ctx->restart.track_psr_suppression ||
+        ctx->base.plugin_enabled || !insn->valid ||
+        insn->placement_illegal || insn->reserved_field ||
+        (ia64_insn_cpuid4_feature(insn) &
+         ~ia64_env_cpu_class(ctx->env)->cpuid_features)) {
+        return true;
+    }
+    switch (ia64_integer_pure_kind(insn)) {
+    case IA64_PURE_GR:
+        /* r0 and an unproven stacked target take the frame check's fault. */
+        return dst == 0 ||
+               (dst >= IA64_STACKED_GR_BASE &&
+                dst - IA64_STACKED_GR_BASE + 1 > ctx->cfm_sof_checked);
+    case IA64_PURE_PR:
+        return ia64_compare_has_equal_targets(insn);
+    default:
+        return true;
+    }
 }
 
 static void ia64_tr_insn_start(DisasContextBase *db, CPUState *cs)
@@ -3295,6 +4077,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
             slot);
         bool stop_after;
         bool track_iipa_for_insn;
+        bool ri_synced;
 
         ia64_apply_mlx_long_fixup(template_code, slots, slot, &insn,
                                   &skip_x_slot);
@@ -3342,13 +4125,18 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
                                     exception_state.
                                     psr_suppression_before_insn));
         }
-        ia64_gen_set_ri_tracked(ctx, slot);
+        ctx->restart.logical_ri = slot;
+        ri_synced = ia64_insn_observes_ri(ctx, &insn);
+        if (ri_synced) {
+            ia64_gen_sync_ri(ctx);
+        }
         ctx->trap_slot = slot;
         if (ctx->psr_ss) {
             gen_helper_completion_trap_arm(tcg_env,
                                            tcg_constant_i64(bundle_ip),
                                            tcg_constant_i32(slot));
         }
+        ia64_set_exit_nat_known(ctx, &insn);
         if (ia64_gen_insn(ctx, &insn, record_iipa && track_iipa_for_insn)) {
             db->is_jmp = DISAS_NORETURN;
             return;
@@ -3356,10 +4144,18 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         ia64_gen_advance_restart_point(ctx, bundle_ip, slot, skip_x_slot);
         ia64_update_nat_known(ctx, &insn);
         ia64_update_frame_tracking(ctx, &insn);
+        ia64_note_tb_key_effect(ctx, &insn);
         ctx->restart.instruction_group_start =
             ctx->restart.next_instruction_group_start;
         if (ia64_insn_may_modify_psr_ri(&insn)) {
             ctx->restart.current_ri_known = false;
+        } else if (ri_synced) {
+            /*
+             * Code that stored another slot (a self-loop back edge) left the
+             * TB there; the path that goes on still holds the synced slot.
+             */
+            ctx->restart.current_ri = slot;
+            ctx->restart.current_ri_known = true;
         }
         if (track_iipa_for_insn && !psr_ic_modified) {
             record_iipa = false;
@@ -3373,6 +4169,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
              */
             ia64_gen_store_instruction_group_start(
                 ctx->restart.instruction_group_start);
+            ia64_gen_sync_ri_for_exit(ctx);
             ia64_gen_save_fault_slot_for_exit(ctx);
             tcg_gen_exit_tb(NULL, 0);
             db->is_jmp = DISAS_NORETURN;
@@ -3394,22 +4191,46 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
     }
 }
 
-void ia64_gen_goto_tb_group(DisasContext *ctx, uint64_t dest,
-                            bool group_start)
+/* Leave for the TB at @dest, whose ip, RI and fault slot are stored. */
+static void ia64_gen_link_or_lookup(DisasContext *ctx, uint64_t dest)
 {
     uint8_t slot = ctx->branch.goto_tb_slots;
 
+    if (slot < 2 && ctx->frame_known && !ctx->key_dynamic &&
+        translator_use_goto_tb(&ctx->base, dest)) {
+        uint64_t test0 = ~ctx->memory.nat_known_at_exit[0];
+        uint64_t test1 = ~ctx->memory.nat_known_at_exit[1];
+        TCGLabel *unlinked = NULL;
+
+        /*
+         * A goto_tb link does not look at the flags again: take it only
+         * with no GR NaT set, so the TB it reaches may trust
+         * IA64_TB_FLAG_NAT_CLEAR.
+         */
+        if ((test0 | test1) != 0) {
+            unlinked = gen_new_label();
+            ia64_gen_brcond_nat_set(test0, test1, unlinked);
+        }
+        ctx->branch.goto_tb_slots = slot + 1;
+        tcg_gen_goto_tb(slot);
+        tcg_gen_exit_tb(ctx->base.tb, slot);
+        if (unlinked != NULL) {
+            gen_set_label(unlinked);
+            tcg_gen_lookup_and_goto_ptr();
+        }
+    } else {
+        tcg_gen_lookup_and_goto_ptr();
+    }
+}
+
+void ia64_gen_goto_tb_group(DisasContext *ctx, uint64_t dest,
+                            bool group_start)
+{
     ia64_gen_store_instruction_group_start(group_start);
     ia64_gen_save_fault_slot_for_exit(ctx);
     ia64_gen_clear_ri();
     tcg_gen_movi_i64(cpu_ip, dest);
-    if (slot < 2 && translator_use_goto_tb(&ctx->base, dest)) {
-        ctx->branch.goto_tb_slots = slot + 1;
-        tcg_gen_goto_tb(slot);
-        tcg_gen_exit_tb(ctx->base.tb, slot);
-    } else {
-        tcg_gen_lookup_and_goto_ptr();
-    }
+    ia64_gen_link_or_lookup(ctx, dest);
 }
 
 static void ia64_gen_goto_tb(DisasContext *ctx, uint64_t dest)
@@ -3424,6 +4245,8 @@ static void ia64_tr_tb_stop(DisasContextBase *db, CPUState *cs)
     switch (db->is_jmp) {
     case IA64_DISAS_EXIT:
     case DISAS_TOO_MANY:
+        ctx->memory.nat_known_at_exit[0] = ctx->memory.nat_known_clear[0];
+        ctx->memory.nat_known_at_exit[1] = ctx->memory.nat_known_clear[1];
         ia64_gen_goto_tb(ctx, db->pc_next);
         break;
     case DISAS_NORETURN:
@@ -3431,6 +4254,7 @@ static void ia64_tr_tb_stop(DisasContextBase *db, CPUState *cs)
     default:
         g_assert_not_reached();
     }
+    ia64_nat_ctx = NULL;
 }
 
 static const char *ia64_unit_log_name(IA64SlotUnit unit)

@@ -24,28 +24,65 @@ static void ia64_swap_banked_gr(CPUIA64State *env);
 /*
  * env->pr[] holds the logical (renamed) view.  mov r=pr, mov pr= and
  * mov pr.rot= address the predicates as though CFM.rrb.pr were 0 (SDM Vol 1
- * 4.3.4, Vol 3 mov pr), so bit i is physical predicate i.
+ * 4.3.4, Vol 3 mov pr), so bit i is physical predicate i.  Logical rotating
+ * predicate 16 + j is physical 16 + (j + rrb.pr) mod 48: the 48 rotating
+ * bits of the physical word are the logical ones rotated left by rrb.pr.
  */
-static uint32_t ia64_pr_logical_index(const CPUIA64State *env,
-                                      uint32_t physical)
+#define IA64_PR_ROTATING_MASK48 ((1ULL << 48) - 1)
+
+static uint64_t ia64_pr_rotl48(uint64_t bits, uint32_t count)
 {
-    if (physical < IA64_PR_ROTATING_BASE) {
-        return physical;
+    bits &= IA64_PR_ROTATING_MASK48;
+    if (count == 0) {
+        return bits;
     }
-    return IA64_PR_ROTATING_BASE +
-           (physical - IA64_PR_ROTATING_BASE + 48 - env->cfm_rrb_pr % 48) %
-           48;
+    return ((bits << count) | (bits >> (48 - count))) &
+           IA64_PR_ROTATING_MASK48;
+}
+
+/*
+ * Eight predicates per step with constant shifts: one loop with a variable
+ * shift and a single dependency chain cost about 1 ns per predicate.
+ */
+static inline uint64_t ia64_pr_pack8(const uint64_t *p)
+{
+    return ((p[0] & 1) | ((p[1] & 1) << 1)) |
+           (((p[2] & 1) << 2) | ((p[3] & 1) << 3)) |
+           (((p[4] & 1) << 4) | ((p[5] & 1) << 5)) |
+           (((p[6] & 1) << 6) | ((p[7] & 1) << 7));
+}
+
+static inline void ia64_pr_unpack8(uint64_t *p, uint64_t bits)
+{
+    p[0] = bits & 1;
+    p[1] = (bits >> 1) & 1;
+    p[2] = (bits >> 2) & 1;
+    p[3] = (bits >> 3) & 1;
+    p[4] = (bits >> 4) & 1;
+    p[5] = (bits >> 5) & 1;
+    p[6] = (bits >> 6) & 1;
+    p[7] = (bits >> 7) & 1;
+}
+
+static inline void ia64_pr_merge8(uint64_t *p, uint64_t bits, uint64_t mask)
+{
+    for (uint32_t k = 0; k < 8; k++) {
+        uint64_t take = -((mask >> k) & 1);
+
+        p[k] ^= (p[k] ^ ((bits >> k) & 1)) & take;
+    }
 }
 
 uint64_t ia64_system_read_pr(CPUIA64State *env)
 {
-    uint64_t value = 0;
+    uint64_t logical = 0;
 
-    for (uint32_t i = 0; i < IA64_PR_COUNT; i++) {
-        value |= (env->pr[ia64_pr_logical_index(env, i)] & 1) << i;
+    for (uint32_t j = 0; j < IA64_PR_COUNT; j += 8) {
+        logical |= ia64_pr_pack8(&env->pr[j]) << j;
     }
-
-    return value;
+    return (logical & ((1ULL << IA64_PR_ROTATING_BASE) - 1)) |
+           (ia64_pr_rotl48(logical >> IA64_PR_ROTATING_BASE,
+                           env->cfm_rrb_pr % 48) << IA64_PR_ROTATING_BASE);
 }
 
 
@@ -128,21 +165,25 @@ void ia64_system_epc(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
 
 void ia64_system_write_pr(CPUIA64State *env, uint64_t value, uint64_t mask)
 {
-    mask &= ~1ULL;
-    if (ctpop64(mask) > IA64_PR_COUNT / 2) {
-        for (uint32_t i = 1; i < IA64_PR_COUNT; i++) {
-            if (mask & (1ULL << i)) {
-                env->pr[ia64_pr_logical_index(env, i)] = (value >> i) & 1;
-            }
-        }
-        env->pr[IA64_PR_TRUE] = 1;
-        return;
-    }
-    while (mask) {
-        uint32_t i = ctz64(mask);
+    uint32_t back = (48 - env->cfm_rrb_pr % 48) % 48;
+    const uint64_t static_mask = (1ULL << IA64_PR_ROTATING_BASE) - 1;
 
-        mask &= mask - 1;
-        env->pr[ia64_pr_logical_index(env, i)] = (value >> i) & 1;
+    value = (value & static_mask) |
+            (ia64_pr_rotl48(value >> IA64_PR_ROTATING_BASE, back) <<
+             IA64_PR_ROTATING_BASE);
+    mask = (mask & static_mask) |
+           (ia64_pr_rotl48(mask >> IA64_PR_ROTATING_BASE, back) <<
+            IA64_PR_ROTATING_BASE);
+    /* p0 is written below, so its mask bit need not stop the fast case. */
+    mask |= 1;
+    for (uint32_t j = 0; j < IA64_PR_COUNT; j += 8) {
+        uint64_t m = (mask >> j) & 0xff;
+
+        if (m == 0xff) {
+            ia64_pr_unpack8(&env->pr[j], value >> j);
+        } else if (m != 0) {
+            ia64_pr_merge8(&env->pr[j], value >> j, m);
+        }
     }
     env->pr[IA64_PR_TRUE] = 1;
 }
@@ -163,7 +204,7 @@ uint64_t ia64_system_read_ar(CPUIA64State *env, uint32_t ar_num)
 
 static bool ia64_reserved_rsc_field(uint64_t value)
 {
-    return value & ~(0x1fULL | (0x3fffULL << IA64_RSC_LOADRS_SHIFT));
+    return value & ~IA64_RSC_WRITABLE_MASK;
 }
 
 static bool ia64_reserved_fpsr_field(uint64_t value)
@@ -245,6 +286,7 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
     if (ar_num == 44) {
         bool match = env->cr[IA64_CR_ITM] == value;
 
+        ia64_itc_check_timer(env);
         ia64_itc_write(env, value);
         env->interrupt.itm_last_match_valid = false;
         if (match) {
@@ -256,24 +298,9 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
     }
     if (ar_num == 16) {
         uint8_t pl = MAX(ia64_rsc_pl(value), ia64_psr_cpl(env->psr));
-        uint64_t old_rsc = env->ar_rsc;
 
         env->ar_rsc = (value & ~IA64_RSC_PL) |
                       ((uint64_t)pl << IA64_RSC_PL_SHIFT);
-        if ((old_rsc ^ env->ar_rsc) & IA64_RSC_PL) {
-            /*
-             * The RSC privilege level feeds the permission check for RSE
-             * backing-store accesses, which are cached in the MMU_IDX_RSE
-             * softmmu entries, so those must be discarded when it changes.
-             * Windows writes ar.rsc=0 at every trap entry and restores the
-             * user RSC on exit, so this runs on every user<->kernel
-             * transition.  MMU_IDX_RSE is a data-only index (instruction
-             * fetch never uses it), so the invalidation cannot stale a
-             * translated block: keep the jump cache instead of wiping all
-             * 4096 hints on each transition.
-             */
-            tlb_flush_by_mmuidx_no_jmp_cache(env_cpu(env), 1u << MMU_IDX_RSE);
-        }
         return;
     }
     if (ar_num == 19) {
@@ -401,6 +428,11 @@ static bool ia64_reserved_cr_field(uint32_t cr_num, uint64_t value)
     default:
         return false;
     }
+}
+
+bool ia64_system_cr_write_reserved(uint32_t cr_num, uint64_t value)
+{
+    return ia64_reserved_cr_field(cr_num, value);
 }
 
 uint64_t ia64_system_validate_cr_access(CPUIA64State *env, uint64_t value,
@@ -542,6 +574,7 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
     }
     switch (cr_num) {
     case 1:
+        ia64_itc_check_timer(env);
         env->cr[IA64_CR_ITM] = value;
         ia64_itm_update(env, value);
         break;
@@ -590,6 +623,7 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
     case IA64_CR_SAPIC_IRR3:
         break;
     case IA64_CR_ITV:
+        ia64_itc_check_timer(env);
         env->cr[cr_num] = value;
         ia64_itm_update(env, env->cr[IA64_CR_ITM]);
         break;
@@ -713,24 +747,19 @@ void ia64_system_st_spill_unat(CPUIA64State *env, uint32_t reg, uint64_t addr)
     }
 }
 
+/* Every interruption and rfi switch banks, so no per-register loop. */
 static void ia64_swap_banked_gr(CPUIA64State *env)
 {
-    uint32_t i;
+    uint64_t live[ARRAY_SIZE(env->banked_gr)];
+    uint16_t live_nat = extract64(env->nat[0], IA64_GR_BANKED_BASE,
+                                  ARRAY_SIZE(live));
 
-    for (i = 0; i < 16; i++) {
-        uint32_t reg = 16 + i;
-        uint64_t value = env->gr[reg];
-        bool nat = ia64_gr_nat_get(env, reg);
-
-        env->gr[reg] = env->banked_gr[i];
-        ia64_gr_nat_set(env, reg, (env->banked_nat >> i) & 1);
-        env->banked_gr[i] = value;
-        if (nat) {
-            env->banked_nat |= (uint16_t)(1U << i);
-        } else {
-            env->banked_nat &= (uint16_t)~(1U << i);
-        }
-    }
+    memcpy(live, &env->gr[IA64_GR_BANKED_BASE], sizeof(live));
+    memcpy(&env->gr[IA64_GR_BANKED_BASE], env->banked_gr, sizeof(live));
+    memcpy(env->banked_gr, live, sizeof(live));
+    env->nat[0] = deposit64(env->nat[0], IA64_GR_BANKED_BASE,
+                            ARRAY_SIZE(live), env->banked_nat);
+    env->banked_nat = live_nat;
 }
 
 void ia64_set_psr(CPUIA64State *env, uint64_t value)

@@ -181,6 +181,8 @@ static void ia32_store_fp(CPUIA64State *env)
                               xenv->xmm_regs[i].ZMM_Q(1),
                               IA64_FP_REG_INTEGER_EXP);
     }
+    /* SSE instructions without the exception bracket leave flags there. */
+    update_mxcsr_from_sse_status(xenv);
     fsr |= (uint64_t)(xenv->mxcsr & 0x3f) << 32;
     fcr |= (uint64_t)(xenv->mxcsr & 0xffc0) << 32;
     env->ar_fsr = fsr;

@@ -167,6 +167,38 @@ static void ia64_gen_integer_load(DisasContext *ctx,
     ia64_gen_memory_plan_base_update(insn, &plan);
 }
 
+/*
+ * ar.ccv is compared with the zero-extended memory value, so a ccv wider than
+ * the access never matches and the instruction only reads.  The out-of-line
+ * helper adds only the invalidation of ALAT entries, and without a full ALAT
+ * there are none.
+ */
+static void ia64_gen_cmpxchg(DisasContext *ctx, TCGv_i64 dest,
+                             const IA64MemoryPlan *plan, TCGv_i64 ccv,
+                             TCGv_i64 value)
+{
+    TCGLabel *wide = NULL;
+    TCGLabel *done = NULL;
+
+    if (plan->size < 8) {
+        TCGv_i64 high = tcg_temp_new_i64();
+
+        wide = gen_new_label();
+        done = gen_new_label();
+        tcg_gen_shri_i64(high, ccv, plan->size * 8);
+        tcg_gen_brcondi_i64(TCG_COND_NE, high, 0, wide);
+    }
+    tcg_gen_atomic_cmpxchg_i64(dest, plan->address, ccv, value,
+                               ctx->memory.mmu_idx, plan->memop);
+    if (wide) {
+        tcg_gen_br(done);
+        gen_set_label(wide);
+        tcg_gen_qemu_ld_i64(dest, plan->address, ctx->memory.mmu_idx,
+                            plan->memop);
+        gen_set_label(done);
+    }
+}
+
 static void ia64_gen_check_nat_access(const Ia64Instruction *insn,
                                       uint8_t reg, bool is_write)
 {
@@ -268,6 +300,23 @@ static void ia64_gen_ld_fill_nat(uint8_t reg, TCGv_i64 addr)
     ia64_gen_gr_nat_assign(reg, natbit);
 }
 
+/* The mirror of ia64_gen_ld_fill_nat: UNAT bit addr{8:3} takes the NaT. */
+static void ia64_gen_st_spill_unat(uint8_t reg, TCGv_i64 addr)
+{
+    TCGv_i64 unat = tcg_temp_new_i64();
+    TCGv_i64 bitpos = tcg_temp_new_i64();
+    TCGv_i64 mask = tcg_temp_new_i64();
+    TCGv_i64 nat = ia64_gen_gr_nat_read(reg);
+
+    ia64_gen_read_simple_ar(unat, IA64_AR_UNAT);
+    tcg_gen_extract_i64(bitpos, addr, 3, 6);
+    tcg_gen_shl_i64(mask, tcg_constant_i64(1), bitpos);
+    tcg_gen_andc_i64(unat, unat, mask);
+    tcg_gen_shl_i64(nat, nat, bitpos);
+    tcg_gen_or_i64(unat, unat, nat);
+    ia64_gen_write_simple_ar(IA64_AR_UNAT, unat);
+}
+
 static void ia64_gen_speculative_probe(const Ia64Instruction *insn,
                                        TCGv_i64 ok, TCGv_i64 addr,
                                        uint32_t size)
@@ -363,6 +412,16 @@ static uint32_t ia64_fp_load_size(Ia64Opcode opcode)
     }
 }
 
+/*
+ * stf.spill and ldf.fill are not atomic (SDM Vol 3 ldf, stf), so the 16-byte
+ * slot needs only the atomicity of its aligned 8-byte halves; a default
+ * 16-byte access would take the cmpxchg16b path.
+ */
+static MemOp ia64_fp_spill_memop(DisasContext *ctx)
+{
+    return ia64_data_memop(ctx, MO_UO | MO_ATOM_IFALIGN_PAIR);
+}
+
 static void ia64_gen_fp_load_value(DisasContext *ctx,
                                    const Ia64Instruction *insn,
                                    TCGv_i64 addr)
@@ -388,9 +447,15 @@ static void ia64_gen_fp_load_value(DisasContext *ctx,
                          ia64_data_memop(ctx, MO_LEUQ),
                          IA64_FP_REGISTER_LOAD_SIGNIFICAND);
         break;
-    case IA64_OP_LDF_FILL:
-        gen_helper_ldf_fill(tcg_env, tcg_constant_i32(op->destination), addr);
+    case IA64_OP_LDF_FILL: {
+        TCGv_i128 value = tcg_temp_new_i128();
+
+        tcg_gen_qemu_ld_i128(value, addr, ctx->memory.mmu_idx,
+                             ia64_fp_spill_memop(ctx));
+        gen_helper_fr_from_spill(tcg_env, tcg_constant_i32(op->destination),
+                                 value);
         break;
+    }
     case IA64_OP_LDFE:
         gen_helper_ldfe(tcg_env, tcg_constant_i32(op->destination), addr);
         break;
@@ -858,8 +923,7 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
         }
         ia64_gen_invalidate_alat_store(ctx, plan.address, plan.size);
         if (spill) {
-            gen_helper_st_spill_unat(tcg_env, tcg_constant_i32(op->source),
-                                     plan.address);
+            ia64_gen_st_spill_unat(op->source, plan.address);
         }
         if (insn->imm_base_update && op->base != 0) {
             tcg_gen_addi_i64(cpu_gr[op->base], plan.address, op->immediate);
@@ -916,11 +980,14 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
         break;
     }
     case IA64_OP_STF_SPILL: {
+        TCGv_i128 value = tcg_temp_new_i128();
+
         ia64_gen_check_nat_access(insn, op->base, true);
         ia64_gen_check_alignment(insn, ia64_gr_src(op->base), 16, false,
                                  true);
-        gen_helper_stf_spill(tcg_env, ia64_gr_src(op->base),
-                             tcg_constant_i32(op->source));
+        gen_helper_fr_to_spill(value, tcg_env, tcg_constant_i32(op->source));
+        tcg_gen_qemu_st_i128(value, ia64_gr_src(op->base), ctx->memory.mmu_idx,
+                             ia64_fp_spill_memop(ctx));
         ia64_gen_invalidate_alat_store(ctx, ia64_gr_src(op->base), 16);
         if (insn->imm_base_update && op->base != 0) {
             tcg_gen_addi_i64(cpu_gr[op->base], cpu_gr[op->base], op->immediate);
@@ -998,8 +1065,12 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
         gen_helper_check_semaphore_access(tcg_env, plan.address);
         ia64_gen_read_simple_ar(ccv, 32);
         ia64_gen_memory_release(insn);
-        gen_helper_cmpxchg(cpu_gr[op->destination], tcg_env, plan.address, ccv,
-                           value, tcg_constant_i32(plan.size));
+        if (ctx->memory.full_alat) {
+            gen_helper_cmpxchg(cpu_gr[op->destination], tcg_env, plan.address,
+                               ccv, value, tcg_constant_i32(plan.size));
+        } else {
+            ia64_gen_cmpxchg(ctx, cpu_gr[op->destination], &plan, ccv, value);
+        }
         ia64_gen_memory_acquire(insn);
         ia64_gen_gr_nat_clear(op->destination);
         break;
@@ -1052,10 +1123,21 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
     case IA64_OP_CHK_S:
         if (!insn->check_fp) {
             TCGv_i64 failed = ia64_gen_gr_nat_read(op->source);
+            uint64_t known0 = ctx->memory.nat_known_at_exit[0];
+            uint64_t known1 = ctx->memory.nat_known_at_exit[1];
 
+            /*
+             * The branch is taken only with a GR NaT set, so the TB it
+             * links to never trusts IA64_TB_FLAG_NAT_CLEAR: it needs no
+             * run-time test (ia64_gen_goto_tb_group).
+             */
+            ctx->memory.nat_known_at_exit[0] = UINT64_MAX;
+            ctx->memory.nat_known_at_exit[1] = UINT64_MAX;
             ia64_gen_check_branch(ctx, failed, insn->address + op->immediate,
                                   insn->address, record_iipa,
                                   track_psr_suppression);
+            ctx->memory.nat_known_at_exit[0] = known0;
+            ctx->memory.nat_known_at_exit[1] = known1;
         } else {
             ia64_gen_check_branch(ctx, ia64_gen_fr_nat_read(op->source),
                                   insn->address + op->immediate, insn->address,

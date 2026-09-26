@@ -10,6 +10,7 @@ from .encoding import (
     CHECK_LOAD_DATA,
     DTR_PTE_NATPAGE,
     DTR_PTE_UC,
+    DTR_PTE_WB,
     HIGH_TR_BASE,
     IA64_ALT_DTLB_VECTOR,
     IA64_BREAK_VECTOR,
@@ -51,6 +52,9 @@ from .encoding import (
     br_call,
     br_cloop,
     br_cond,
+    cmp_eq_imm,
+    mov_pr_gr,
+    tnat_z,
     br_ctop_many,
     br_ret,
     break_m,
@@ -70,6 +74,7 @@ from .encoding import (
     cmp_ge_or,
     cmpxchg4,
     cmpxchg4_acq,
+    cmpxchg_acq,
     cmpxchg_rel,
     czx1_r,
     dtr_setup_bundles,
@@ -421,6 +426,130 @@ test_ld8_s_uc_defers = require_registers(
     ], {"ip": 0xd0, "r4_nat": 1,
         "exception": IA64_EXCP_NONE}, entry=0x10)
 
+# ld8.s after a plain ld8 of the same page: the softmmu entry is filled, so
+# the speculative probe answers from it.  Write-back memory loads the value;
+# uncacheable memory still defers, whatever the entry allows the plain load.
+test_ld8_s_after_filled_wb_entry_loads = require_registers(
+    "ld8_s_after_filled_wb_entry_loads", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+        (0x70, *movl_mlx(2, ADV_UC_LOAD_VA)),
+        (0x80, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x90, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xa0, 0x01, ld8(5, 2), nop_i(), nop_i()),
+        (0xb0, 0x01, ld8_s(4, 2), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        ADV_UC_LOAD_BUNDLE,
+    ], {"ip": 0xc0, "r4": ADV_UC_LOAD_DATA, "r4_nat": 0,
+        "r5": ADV_UC_LOAD_DATA, "exception": IA64_EXCP_NONE}, entry=0x10)
+
+test_ld8_s_after_filled_uc_entry_defers = require_registers(
+    "ld8_s_after_filled_uc_entry_defers", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000,
+                           pte_flags=DTR_PTE_UC),
+        (0x70, *movl_mlx(2, ADV_UC_LOAD_VA)),
+        (0x80, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x90, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xa0, 0x01, ld8(5, 2), nop_i(), nop_i()),
+        (0xb0, 0x01, ld8_s(4, 2), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        ADV_UC_LOAD_BUNDLE,
+    ], {"ip": 0xc0, "r4_nat": 1, "r5": ADV_UC_LOAD_DATA,
+        "exception": IA64_EXCP_NONE}, entry=0x10)
+
+def advanced_load_after_filled_entry_test(name, pte_flags, expected_r4):
+    return require_registers(name, [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000, pte_flags=pte_flags),
+        (0x70, *movl_mlx(2, ADV_UC_LOAD_VA)),
+        (0x80, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x90, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xa0, 0x01, ld8(5, 2), adds(4, 7, 0), nop_i()),
+        (0xb0, 0x01, ld8_a(4, 2), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        ADV_UC_LOAD_BUNDLE,
+    ], {"ip": 0xc0, "r4": expected_r4, "r5": ADV_UC_LOAD_DATA,
+        "exception": IA64_EXCP_NONE}, entry=0x10)
+
+
+test_ld8_a_after_filled_uc_entry_zeroes_target = \
+    advanced_load_after_filled_entry_test(
+        "ld8_a_after_filled_uc_entry_zeroes_target", DTR_PTE_UC, 0)
+
+test_ld8_a_after_filled_wb_entry_loads = \
+    advanced_load_after_filled_entry_test(
+        "ld8_a_after_filled_wb_entry_loads", DTR_PTE_WB, ADV_UC_LOAD_DATA)
+
+test_cmpxchg8_after_filled_uc_entry_unsupported = require_registers(
+    "cmpxchg8_after_filled_uc_entry_unsupported", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000,
+                           pte_flags=DTR_PTE_UC),
+        (0x70, *movl_mlx(2, ADV_UC_LOAD_VA)),
+        (0x80, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x90, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xa0, 0x01, ld8(5, 2), nop_i(), nop_i()),
+        (0xb0, 0x01, cmpxchg_acq(3, 4, 2, 5), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        (IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR, 0x00,
+         mov_m_cr_gr(14, 20), nop_i(), nop_i()),
+        (IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(15, 17), nop_i(), nop_i()),
+        (IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20,
+                 IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20)),
+        ADV_UC_LOAD_BUNDLE,
+    ], {
+        "ip": IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_UNSUPPORTED_DATA_REFERENCE,
+        "fault_ip": 0xb0,
+        "r5": ADV_UC_LOAD_DATA,
+        "r14": ADV_UC_LOAD_VA,
+        "r15": IA64_ISR_R | IA64_ISR_W,
+    }, entry=0x10)
+
+# Memory at 0x200 holds 11 22 33 44 55 66 77 88.  cmpxchg1 and cmpxchg2
+# succeed, cmpxchg4 gets a ccv with bit 32 set and must not store, the first
+# cmpxchg8 fails and the second succeeds.
+CMPXCHG_SIZES_BUNDLES = [
+    (0x10, 0x00, addl(3, 0x200, 0), addl(7, 0x202, 0), addl(8, 0x204, 0)),
+    (0x20, *movl_mlx(4, 0x8877665544332211)),
+    (0x30, 0x00, st8(3, 4), addl(9, 0x11, 0), addl(6, 0xaa, 0)),
+    (0x40, 0x00, mov_m_gr_ar(9, 32), nop_i(), nop_i()),
+    (0x50, 0x00, cmpxchg_acq(0, 10, 3, 6), nop_i(), nop_i()),
+    (0x60, *movl_mlx(9, 0x4433)),
+    (0x70, 0x00, mov_m_gr_ar(9, 32), addl(6, 0xbbcc, 0), nop_i()),
+    (0x80, 0x00, cmpxchg_acq(1, 11, 7, 6), nop_i(), nop_i()),
+    (0x90, *movl_mlx(9, 0x188776655)),
+    (0xa0, 0x00, mov_m_gr_ar(9, 32), addl(6, 0xdead, 0), nop_i()),
+    (0xb0, 0x00, cmpxchg_acq(2, 12, 8, 6), nop_i(), nop_i()),
+    (0xc0, 0x00, ld4(16, 8), nop_i(), nop_i()),
+    (0xd0, 0x00, mov_m_imm_ar(32, 0), nop_i(), nop_i()),
+    (0xe0, 0x00, cmpxchg_acq(3, 13, 3, 6), nop_i(), nop_i()),
+    (0xf0, *movl_mlx(14, 0x0123456789abcdef)),
+    (0x100, 0x00, mov_m_gr_ar(13, 32), nop_i(), nop_i()),
+    (0x110, 0x00, cmpxchg_rel(3, 15, 3, 14), nop_i(), nop_i()),
+    (0x120, 0x00, ld8(17, 3), nop_i(), nop_i()),
+    (0x130, 0x10, nop_m(), nop_i(), br_cond(0x130, 0x130)),
+]
+CMPXCHG_SIZES_EXPECTED = {
+    "ip": 0x130,
+    "r10": 0x11,
+    "r11": 0x4433,
+    "r12": 0x88776655,
+    "r16": 0x88776655,
+    "r13": 0x88776655bbcc22aa,
+    "r15": 0x88776655bbcc22aa,
+    "r17": 0x0123456789abcdef,
+}
+
+test_cmpxchg_sizes_compare_zero_extended = require_registers(
+    "cmpxchg_sizes_compare_zero_extended", CMPXCHG_SIZES_BUNDLES,
+    CMPXCHG_SIZES_EXPECTED, entry=0x10)
+
+test_cmpxchg_sizes_compare_zero_extended_zero_alat = require_registers(
+    "cmpxchg_sizes_compare_zero_extended_zero_alat", CMPXCHG_SIZES_BUNDLES,
+    CMPXCHG_SIZES_EXPECTED, entry=0x10, alat=None)
+
 test_ld8_c_nc_address_mismatch_reloads = require_registers(
     "ld8_c_nc_address_mismatch_reloads", [
         (0x10, 0x00, addl(3, 0x100, 0), addl(5, 0x110, 0),
@@ -677,40 +806,48 @@ test_data_big_endian_load_store = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+DATA_BIG_ENDIAN_CMPXCHG4_BUNDLES = [
+    (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x201, 0),
+     addl(5, 0x202, 0)),
+    (0x20, 0x00, addl(6, 0x203, 0), nop_i(),
+     nop_i()),
+    (0x30, *movl_mlx(10, 0x01020304)),
+    (0x40, *movl_mlx(16, 0x01020304)),
+    (0x50, *movl_mlx(18, 0x11223344)),
+    (0x60, 0x00, sum_um(IA64_PSR_BE), nop_i(),
+     nop_i()),
+    (0x70, 0x00, st4(3, 16), nop_i(),
+     nop_i()),
+    (0x80, 0x00, mov_m_gr_ar(10, 32), nop_i(),
+     nop_i()),
+    (0x90, 0x00, cmpxchg4_acq(17, 3, 18), nop_i(),
+     nop_i()),
+    (0xa0, 0x00, rum(IA64_PSR_BE), nop_i(),
+     nop_i()),
+    (0xb0, 0x08, ld1(19, 3), ld1(20, 4),
+     nop_i()),
+    (0xc0, 0x08, ld1(21, 5), ld1(22, 6),
+     nop_i()),
+    (0xd0, 0x10, nop_m(), nop_i(),
+     br_cond(0xd0, 0xd0)),
+]
+DATA_BIG_ENDIAN_CMPXCHG4_EXPECTED = {
+    "ip": 0xd0,
+    "r17": 0x01020304,
+    "r19": 0x11,
+    "r20": 0x22,
+    "r21": 0x33,
+    "r22": 0x44,
+    "exception": IA64_EXCP_NONE,
+}
+
 test_data_big_endian_cmpxchg4 = require_registers(
-    "data_big_endian_cmpxchg4", [
-        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x201, 0),
-         addl(5, 0x202, 0)),
-        (0x20, 0x00, addl(6, 0x203, 0), nop_i(),
-         nop_i()),
-        (0x30, *movl_mlx(10, 0x01020304)),
-        (0x40, *movl_mlx(16, 0x01020304)),
-        (0x50, *movl_mlx(18, 0x11223344)),
-        (0x60, 0x00, sum_um(IA64_PSR_BE), nop_i(),
-         nop_i()),
-        (0x70, 0x00, st4(3, 16), nop_i(),
-         nop_i()),
-        (0x80, 0x00, mov_m_gr_ar(10, 32), nop_i(),
-         nop_i()),
-        (0x90, 0x00, cmpxchg4_acq(17, 3, 18), nop_i(),
-         nop_i()),
-        (0xa0, 0x00, rum(IA64_PSR_BE), nop_i(),
-         nop_i()),
-        (0xb0, 0x08, ld1(19, 3), ld1(20, 4),
-         nop_i()),
-        (0xc0, 0x08, ld1(21, 5), ld1(22, 6),
-         nop_i()),
-        (0xd0, 0x10, nop_m(), nop_i(),
-         br_cond(0xd0, 0xd0)),
-    ], {
-        "ip": 0xd0,
-        "r17": 0x01020304,
-        "r19": 0x11,
-        "r20": 0x22,
-        "r21": 0x33,
-        "r22": 0x44,
-        "exception": IA64_EXCP_NONE,
-    }, entry=0x10)
+    "data_big_endian_cmpxchg4", DATA_BIG_ENDIAN_CMPXCHG4_BUNDLES,
+    DATA_BIG_ENDIAN_CMPXCHG4_EXPECTED, entry=0x10)
+
+test_data_big_endian_cmpxchg4_zero_alat = require_registers(
+    "data_big_endian_cmpxchg4_zero_alat", DATA_BIG_ENDIAN_CMPXCHG4_BUNDLES,
+    DATA_BIG_ENDIAN_CMPXCHG4_EXPECTED, entry=0x10, alat=None)
 
 test_store_invalidates_advanced_load = require_registers(
     "store_invalidates_advanced_load", [
@@ -1677,6 +1814,25 @@ test_st8_spill_updates_unat_bit = require_registers(
          br_cond(0x50, 0x50)),
     ], {"ip": 0x50, "ar_unat": 0}, entry=0x10)
 
+# UNAT starts with bits 63 and 7:4.  r16 gets its NaT from the fill of
+# bit 63; the spills set bit 1, clear bit 63, keep bit 4, clear bit 5 and
+# (from r0) clear bit 6.
+test_st8_spill_sets_and_clears_unat_bits = require_registers(
+    "st8_spill_sets_and_clears_unat_bits", [
+        (0x10, *movl_mlx(9, (1 << 63) | 0xf0)),
+        (0x20, 0x00, mov_m_gr_ar(9, 36), addl(3, 0x1f8, 0),
+         addl(17, 5, 0)),
+        (0x30, 0x00, ld8_fill_postinc(16, 3, 0), addl(4, 0x208, 0),
+         addl(5, 0x220, 0)),
+        (0x40, 0x00, st8_spill_postinc(4, 16, 0), addl(6, 0x228, 0),
+         addl(7, 0x230, 0)),
+        (0x50, 0x00, st8_spill_postinc(3, 17, 0), nop_i(), nop_i()),
+        (0x60, 0x00, st8_spill_postinc(5, 16, 0), nop_i(), nop_i()),
+        (0x70, 0x00, st8_spill_postinc(6, 17, 0), nop_i(), nop_i()),
+        (0x80, 0x00, st8_spill_postinc(7, 0, 0), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {"ip": 0x90, "r16_nat": 1, "ar_unat": 0x92}, entry=0x10)
+
 test_integer_postinc_imm9_decode = require_registers(
     "integer_postinc_imm9_decode", [
         (0x10, 0x00, addl(3, 0x300, 0), nop_i(),
@@ -2314,6 +2470,44 @@ test_bsw_restores_banked_nat = require_registers(
         "exception": IA64_EXCP_NONE,
         "psr": 0,
         "r16_nat": 1,
+    }, entry=0x10)
+
+# Both banks keep their own values and NaT bits in every one of r16-r31:
+# bank 0 holds NaTs in r17 and r31, bank 1 one in r20 (SDM Vol 2 3.3.7).
+# The bank-0 values are copied out with their NaTs before the last bsw.1.
+test_bsw_swaps_every_banked_value_and_nat = require_registers(
+    "bsw_swaps_every_banked_value_and_nat", [
+        (0x10, *movl_mlx(16, 0x1111)),
+        (0x20, *movl_mlx(20, 0x2020)),
+        (0x30, 0x01, adds(10, -1, 0), addl(6, 0x200, 0), nop_i()),
+        (0x40, 0x01, mov_m_gr_ar(10, 36), nop_i(), nop_i()),
+        (0x50, 0x01, ld8_fill_postinc(17, 6, 0), nop_i(), nop_i()),
+        (0x60, 0x01, ld8_fill_postinc(31, 6, 0), nop_i(), nop_i()),
+        (0x70, 0x13, nop_m(), nop_b(), bsw1()),
+        (0x80, *movl_mlx(16, 0x16)),
+        (0x90, *movl_mlx(31, 0x31)),
+        (0xa0, 0x01, ld8_fill_postinc(20, 6, 0), nop_i(), nop_i()),
+        (0xb0, 0x13, nop_m(), nop_b(), bsw0()),
+        (0xc0, 0x01, adds(2, 0, 16), adds(3, 0, 17), nop_i()),
+        (0xd0, 0x01, adds(4, 0, 31), adds(5, 0, 20), nop_i()),
+        (0xe0, 0x13, nop_m(), nop_b(), bsw1()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+        (0x200, 0x00, 0, 0, 0),
+    ], {
+        "ip": 0xf0,
+        "exception": IA64_EXCP_NONE,
+        "r2": 0x1111,
+        "r2_nat": 0,
+        "r3_nat": 1,
+        "r4_nat": 1,
+        "r5": 0x2020,
+        "r5_nat": 0,
+        "r16": 0x16,
+        "r17": 0,
+        "r17_nat": 0,
+        "r20_nat": 1,
+        "r31": 0x31,
+        "r31_nat": 0,
     }, entry=0x10)
 
 test_cloop_zero_st1_invalidates_alat_range = require_registers(
@@ -3087,15 +3281,149 @@ test_self_loop_nat_consumption_not_elided = require_exception(
          br_cloop(0x40, 0x40)),
     ], IA64_EXCP_NAT_CONSUMPTION, fault_ip=0x40, entry=0x10)
 
+# A TB translated with every GR NaT clear trusts that at entry.  The first
+# two passes link 0x30 to 0x100 to 0x200 while no NaT is set; the third
+# sets one before the linked branches, and 0x200 must fault in that pass,
+# with r7 still 1, not in a later one.
+test_nat_clear_tb_rechecks_chained_entry = require_registers(
+    "nat_clear_tb_rechecks_chained_entry", [
+        (0x10, 0x00, addl(5, 0x300, 0), addl(9, 0x300, 0), adds(7, 3, 0)),
+        (0x20, *movl_mlx(8, 1 << 32)),
+        (0x30, 0x09, cmp_eq_imm(6, 0, 1, 7), mov_m_gr_ar(8, 36), nop_i()),
+        # ld8.fill takes the NaT from AR.UNAT without leaving the TB.
+        (0x40, 0x10, ld8_fill_postinc(5, 9, 0, qp=6), nop_i(),
+         br_cond(0x40, 0x100)),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0x200)),
+        (0x200, 0x00, ld8(10, 5), adds(7, -1, 7), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_cond(0x210, 0x30)),
+        (IA64_NAT_CONSUMPTION_VECTOR, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_NAT_CONSUMPTION_VECTOR, IA64_NAT_CONSUMPTION_VECTOR)),
+    ], {
+        "ip": IA64_NAT_CONSUMPTION_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "r7": 1,
+    }, entry=0x10)
+
+# br.call renames the output registers before it leaves the TB: the NaT
+# that the second pass fills into output r40 is the callee's r32, although
+# the caller wrote its own r32 NaT-clear.  The linked call must not reach
+# the callee TB that trusts every NaT clear.
+test_nat_clear_call_link_rechecks_renamed_outputs = require_registers(
+    "nat_clear_call_link_rechecks_renamed_outputs", [
+        (0x10, 0x00, addl(9, 0x300, 0), adds(7, 2, 0), nop_i()),
+        (0x20, *movl_mlx(8, 1 << 32)),
+        (0x30, 0x19, nop_m(), mov_m_gr_ar(8, 36), br_cond(0x30, 0x40)),
+        (0x40, 0x01, alloc(2, 9, 8, 0, 0), cmp_eq_imm(6, 0, 1, 7), nop_i()),
+        (0x50, 0x09, addl(32, 0x300, 0), ld8_fill_postinc(40, 9, 0, qp=6),
+         nop_i()),
+        (0x60, 0x11, nop_m(), nop_i(), br_call(0, 0x60, 0x200)),
+        (0x70, 0x11, nop_m(), adds(7, -1, 7), br_cond(0x70, 0x40)),
+        (0x200, 0x00, ld8(10, 32), nop_i(), nop_i()),
+        (0x210, 0x11, nop_m(), nop_i(), br_ret(0)),
+        (IA64_NAT_CONSUMPTION_VECTOR, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_NAT_CONSUMPTION_VECTOR, IA64_NAT_CONSUMPTION_VECTOR)),
+    ], {
+        "ip": IA64_NAT_CONSUMPTION_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "r7": 1,
+    }, entry=0x10)
+
+# A taken br.ctop rotates before it leaves the TB: the NaT that the fourth
+# pass fills into r39 is r32 in the next pass, while r39 is NaT-clear
+# again.  The linked back edge must not reach the loop TB that trusts every
+# NaT clear.
+test_nat_clear_ctop_link_rechecks_rotated_registers = require_registers(
+    "nat_clear_ctop_link_rechecks_rotated_registers", [
+        (0x10, 0x00, addl(9, 0x300, 0), adds(7, 3, 0), nop_i()),
+        (0x20, *movl_mlx(8, 1 << 32)),
+        (0x30, 0x19, nop_m(), mov_m_gr_ar(8, 36), br_cond(0x30, 0x40)),
+        (0x40, 0x01, alloc(2, 8, 8, 1, 0), mov_i_imm_ar(66, 1),
+         mov_i_imm_ar(65, 100)),
+    ] + [
+        (0x50 + 0x10 * i, 0x00, addl(32 + 3 * i, 0x300, 0),
+         addl(33 + 3 * i, 0x300, 0), addl(34 + 3 * i, 0x300, 0))
+        for i in range(2)
+    ] + [
+        (0x70, 0x11, addl(38, 0x300, 0), addl(39, 0x300, 0),
+         br_cond(0x70, 0x80)),
+        (0x80, 0x09, ld8(10, 32), ld8_fill_postinc(39, 9, 0, qp=6),
+         nop_i()),
+        (0x90, 0x11, cmp_eq_imm(6, 0, 1, 7), adds(7, -1, 7),
+         br_ctop_many(0x90, 0x80)),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+        (IA64_NAT_CONSUMPTION_VECTOR, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_NAT_CONSUMPTION_VECTOR, IA64_NAT_CONSUMPTION_VECTOR)),
+    ], {
+        "ip": IA64_NAT_CONSUMPTION_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "r7": (1 << 64) - 1,
+    }, entry=0x10)
+
+# A TB entered with every GR NaT clear still sees the NaT that ld8.fill
+# gives r5: the compare writes 0 to both targets and tnat.z finds the NaT.
+test_nat_clear_tb_compare_sees_filled_nat = require_registers(
+    "nat_clear_tb_compare_sees_filled_nat", [
+        (0x10, 0x00, addl(9, 0x300, 0), nop_i(), nop_i()),
+        (0x20, *movl_mlx(8, 1 << 32)),
+        (0x30, 0x09, nop_m(), mov_m_gr_ar(8, 36), nop_i()),
+        (0x40, 0x11, cmp_eq_imm(6, 0, 0, 0), cmp_eq_imm(7, 0, 0, 0),
+         br_cond(0x40, 0x50)),
+        (0x50, 0x09, ld8_fill_postinc(5, 9, 0), nop_m(), nop_i()),
+        (0x60, 0x01, cmp_eq_imm(6, 7, 0, 5), tnat_z(8, 9, 5), nop_i()),
+        (0x70, 0x01, nop_m(), mov_pr_gr(10), nop_i()),
+        (0x80, 0x00, nop_m(), extr_u(11, 10, 6, 4), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "exception": IA64_EXCP_NONE,
+        "r11": 0b1000,
+    }, entry=0x10)
+
+# A br.ctop that falls through has still rotated the stacked registers: the
+# NaT that ld8.s leaves in r39 is in r32 afterwards, although r32 was
+# written NaT-clear earlier in the same TB.
+test_br_ctop_fallthrough_rotation_drops_nat_facts = require_exception(
+    "br_ctop_fallthrough_rotation_drops_nat_facts", [
+        (0x10, *movl_mlx(3, 1 << 61)),
+        (0x20, 0x11, nop_m(), nop_i(), br_cond(0x20, 0x30)),
+        (0x30, 0x01, alloc(2, 8, 8, 1, 0), mov_i_imm_ar(66, 1),
+         mov_i_imm_ar(65, 0)),
+        (0x40, 0x01, addl(32, 0x300, 0), nop_i(), nop_i()),
+        (0x50, 0x11, ld8_s(39, 3), nop_i(), br_ctop_many(0x50, 0x30)),
+        (0x60, 0x00, ld8(10, 32), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], IA64_EXCP_NAT_CONSUMPTION, fault_ip=0x60, entry=0x10)
+
+# The bank that a predicated bsw brings in holds a NaT in r16 that the r16
+# written before it did not have.
+test_predicated_bsw_drops_banked_nat_facts = require_exception(
+    "predicated_bsw_drops_banked_nat_facts", [
+        (0x10, *movl_mlx(3, 1 << 61)),
+        (0x20, 0x11, nop_m(), nop_i(), bsw0()),
+        (0x30, 0x01, ld8_s(16, 3), nop_i(), nop_i()),
+        (0x40, 0x11, nop_m(), nop_i(), bsw1()),
+        (0x50, 0x01, addl(16, 0x300, 0), cmp_eq_imm(1, 0, 0, 0), nop_i()),
+        (0x60, 0x11, nop_m(), nop_i(), bsw0(qp=1)),
+        (0x70, 0x00, ld8(10, 16), nop_i(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], IA64_EXCP_NAT_CONSUMPTION, fault_ip=0x70, entry=0x10)
+
 CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
 
     'self_loop_nat_consumption_not_elided',
+    'nat_clear_tb_rechecks_chained_entry',
+    'nat_clear_call_link_rechecks_renamed_outputs',
+    'nat_clear_ctop_link_rechecks_rotated_registers',
+    'nat_clear_tb_compare_sees_filled_nat',
+    'br_ctop_fallthrough_rotation_drops_nat_facts',
+    'predicated_bsw_drops_banked_nat_facts',
 
 
     'alat_reloading_register_does_not_leave_duplicate',
     'alloc_clears_destination_nat',
     'br_ctop_long_speculative_load_pipeline',
     'bsw_restores_banked_nat',
+    'bsw_swaps_every_banked_value_and_nat',
     'chk_a_clr_removes_entry',
     'chk_a_m_branches_on_miss',
     'chk_a_m_hint_shaped_displacement_branches',
@@ -3116,6 +3444,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'cmpxchg4_result_base_alias_success_invalidates_alat',
     'cmpxchg4_uses_ar_ccv',
     'data_big_endian_cmpxchg4',
+    'data_big_endian_cmpxchg4_zero_alat',
     'data_big_endian_load_store',
     'fc_invalidates_advanced_load',
     'fc_nat_source_consumes_non_access',
@@ -3157,6 +3486,13 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'ld8_nt1_postinc_decode',
     'ld8_s_d2_hint_decode',
     'ld8_s_uc_defers',
+    'ld8_s_after_filled_wb_entry_loads',
+    'ld8_s_after_filled_uc_entry_defers',
+    'ld8_a_after_filled_uc_entry_zeroes_target',
+    'ld8_a_after_filled_wb_entry_loads',
+    'cmpxchg8_after_filled_uc_entry_unsupported',
+    'cmpxchg_sizes_compare_zero_extended',
+    'cmpxchg_sizes_compare_zero_extended_zero_alat',
     'ld8_sa_failure_invalidates_old_entry',
     'ld_imm_postinc_same_target_illegal',
     'ld_postinc_same_target_predicated_false',
@@ -3231,6 +3567,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'st4_variants_preserve_adjacent_halfword',
     'st8_postinc_same_base_value_uses_old_base',
     'st8_spill_updates_unat_bit',
+    'st8_spill_sets_and_clears_unat_bits',
     'store_invalidates_advanced_load',
     'store_postinc_x6_38_reserved_illegal_operation',
     'store_postinc_x6_39_reserved_illegal_operation',

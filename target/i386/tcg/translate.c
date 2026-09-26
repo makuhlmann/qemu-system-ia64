@@ -121,6 +121,16 @@
     (void)(access);                                                  \
 } while (0)
 #endif
+#ifndef X86_GEN_BEFORE_PAUSE
+#define X86_GEN_BEFORE_PAUSE(s) ((void)0)
+#endif
+#ifndef X86_GEN_SINGLE_ACCESS_CHECK
+#define X86_GEN_SINGLE_ACCESS_CHECK X86_GEN_SEGMENT_ACCESS_CHECK
+#endif
+#ifndef X86_GEN_DECODED_ACCESS_CHECK
+#define X86_GEN_DECODED_ACCESS_CHECK(s, decode, addr, seg, size, access) \
+    X86_GEN_SEGMENT_ACCESS_CHECK(s, addr, seg, size, access)
+#endif
 #ifndef X86_GEN_BOUND_ACCESS_CHECK
 #define X86_GEN_BOUND_ACCESS_CHECK(s, addr, seg, element_size) do { \
     (void)(s);                                                        \
@@ -213,6 +223,7 @@ typedef struct DisasContext {
 
     int8_t override; /* -1 if no override, else R_CS, R_DS, etc */
     int8_t mem_seg;  /* segment used to form the current memory address */
+    bool ea_checked; /* disas_insn() checked the decoded memory operand */
     uint8_t prefix;
 
     bool has_modrm;
@@ -648,9 +659,9 @@ void gen_op_add_reg_im(DisasContext *s, MemOp size, int reg, int32_t val)
 static inline void gen_op_ld_v(DisasContext *s, int idx, TCGv t0, TCGv a0)
 {
     if (s->mem_seg >= 0) {
-        X86_GEN_SEGMENT_ACCESS_CHECK(s, a0, s->mem_seg,
-                                     1 << (idx & MO_SIZE),
-                                     X86_SEG_ACCESS_READ);
+        X86_GEN_SINGLE_ACCESS_CHECK(s, a0, s->mem_seg,
+                                    1 << (idx & MO_SIZE),
+                                    X86_SEG_ACCESS_READ);
     }
     tcg_gen_qemu_ld_tl(t0, a0, s->mem_index,
                        idx | MO_LE | X86_MEMOP_ALIGNMENT(s, idx));
@@ -659,11 +670,36 @@ static inline void gen_op_ld_v(DisasContext *s, int idx, TCGv t0, TCGv a0)
 static inline void gen_op_st_v(DisasContext *s, int idx, TCGv t0, TCGv a0)
 {
     if (s->mem_seg >= 0) {
-        X86_GEN_SEGMENT_ACCESS_CHECK(s, a0, s->mem_seg,
-                                     1 << (idx & MO_SIZE),
-                                     X86_SEG_ACCESS_WRITE);
+        X86_GEN_SINGLE_ACCESS_CHECK(s, a0, s->mem_seg,
+                                    1 << (idx & MO_SIZE),
+                                    X86_SEG_ACCESS_WRITE);
     }
     tcg_gen_qemu_st_tl(t0, a0, s->mem_index,
+                       idx | MO_LE | X86_MEMOP_ALIGNMENT(s, idx));
+}
+
+/*
+ * Load or store the decoded memory operand at s->A0.  disas_insn() has
+ * checked it already, against its own segment: s->mem_seg may since name
+ * another one (the stack of POP m).
+ */
+static inline void gen_op_ld_ea(DisasContext *s, int idx, TCGv t0)
+{
+    if (!s->ea_checked) {
+        gen_op_ld_v(s, idx, t0, s->A0);
+        return;
+    }
+    tcg_gen_qemu_ld_tl(t0, s->A0, s->mem_index,
+                       idx | MO_LE | X86_MEMOP_ALIGNMENT(s, idx));
+}
+
+static inline void gen_op_st_ea(DisasContext *s, int idx, TCGv t0)
+{
+    if (!s->ea_checked) {
+        gen_op_st_v(s, idx, t0, s->A0);
+        return;
+    }
+    tcg_gen_qemu_st_tl(t0, s->A0, s->mem_index,
                        idx | MO_LE | X86_MEMOP_ALIGNMENT(s, idx));
 }
 

@@ -332,12 +332,27 @@ void helper_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
 
 uint64_t helper_read_cr(CPUIA64State *env, uint32_t cr_num)
 {
+    if (cr_num == IA64_CR_SAPIC_IVR ||
+        (cr_num >= IA64_CR_SAPIC_IRR0 && cr_num <= IA64_CR_SAPIC_IRR3)) {
+        ia64_itc_check_timer(env);
+    }
     return ia64_system_read_cr(env, cr_num);
 }
 
 void helper_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
 {
     ia64_write_cr(env, cr_num, value);
+}
+
+/* Touches only CR.TPR and the interrupt request, no TCG global. */
+void helper_write_tpr(CPUIA64State *env, uint64_t value)
+{
+    ia64_write_cr(env, IA64_CR_SAPIC_TPR, value);
+}
+
+uint64_t helper_cr_write_reserved(uint32_t cr_num, uint64_t value)
+{
+    return ia64_system_cr_write_reserved(cr_num, value);
 }
 
 uint64_t helper_validate_cr_access(CPUIA64State *env, uint64_t value,
@@ -434,11 +449,6 @@ void helper_write_pmd_indexed(CPUIA64State *env, uint64_t index,
                               uint64_t value)
 {
     ia64_system_write_pmd_indexed(env, index, value);
-}
-
-void helper_st_spill_unat(CPUIA64State *env, uint32_t reg, uint64_t addr)
-{
-    ia64_system_st_spill_unat(env, reg, addr);
 }
 
 void helper_clear_psr_fault_suppression(CPUIA64State *env)

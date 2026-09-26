@@ -14,6 +14,33 @@
 #include "target/ia64/translate/translate.h"
 
 /*
+ * A write at CPL 0 to a kernel register or RSC: ia64_system_write_ar()
+ * stores the value unchanged (RSC.pl cannot be below CPL 0), and only a
+ * reserved RSC field can fault.  Returns false for every other case.
+ */
+static bool ia64_gen_write_kernel_ar(DisasContext *ctx,
+                                     const Ia64Instruction *insn,
+                                     uint32_t ar, TCGv_i64 value)
+{
+    if (!ctx->cpl_known || ctx->cpl != 0 ||
+        (ar > IA64_AR_KR7 && ar != IA64_AR_RSC)) {
+        return false;
+    }
+    if (ar == IA64_AR_RSC) {
+        TCGv_i64 bad = tcg_temp_new_i64();
+        TCGLabel *ok = gen_new_label();
+
+        tcg_gen_andi_i64(bad, value, ~IA64_RSC_WRITABLE_MASK);
+        tcg_gen_brcondi_i64(TCG_COND_EQ, bad, 0, ok);
+        ia64_gen_validate_ar_access(insn, value, true);
+        gen_set_label(ok);
+    }
+    tcg_gen_st_i64(value, tcg_env,
+                   offsetof(CPUIA64State, ar) + ar * sizeof(uint64_t));
+    return true;
+}
+
+/*
  * CR numbers whose write behaviour in ia64_write_cr is a plain store into
  * env->cr[] -- no timer rearm, no TLB/TB flush, no SAPIC re-evaluation, no
  * atomics -- and whose value nothing consumes at translation time.  These
@@ -94,14 +121,18 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         /*
          * The application-register access check applies to the read itself, so
          * it must run even when the destination is r0 (a discarded result).
+         * Only BSPSTORE, RNAT and ITC reads can fault, and every AR but ITC
+         * reads straight from env->ar[] (ia64_system_read_ar).
          */
-        if (!ia64_ar_is_simple(op->source)) {
+        if (op->source == IA64_AR_BSPSTORE || op->source == IA64_AR_RNAT) {
+            ia64_gen_check_rse_ar_mode(insn, tcg_constant_i64(0), false);
+        } else if (ia64_ar_access_reads_clock(op->source)) {
             ia64_gen_validate_ar_access(insn, tcg_constant_i64(0), false);
         }
         if (op->destination != 0) {
             TCGv_i64 val = tcg_temp_new_i64();
 
-            if (ia64_ar_is_simple(op->source)) {
+            if (!ia64_ar_access_reads_clock(op->source)) {
                 ia64_gen_read_simple_ar(val, op->source);
             } else {
                 if (ia64_ar_access_reads_clock(op->source) &&
@@ -125,16 +156,22 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
              * 35), ahead of Register NaT Consumption (43): SDM Vol 3 mov ar,
              * Vol 2 Table 5-6.
              */
-            ia64_gen_validate_ar_access(insn, ia64_gr_src(op->destination),
-                                        true);
+            ia64_gen_check_rse_ar_mode(insn, ia64_gr_src(op->destination),
+                                       true);
             ia64_gen_check_nat_register(insn, op->destination);
             gen_helper_write_ar(tcg_env, tcg_constant_i32(op->source),
                                 ia64_gr_src(op->destination));
             break;
         }
         ia64_gen_check_nat_register(insn, op->destination);
+        if (ia64_gen_write_kernel_ar(ctx, insn, op->source,
+                                     ia64_gr_src(op->destination))) {
+            break;
+        }
         if (ia64_ar_is_simple(op->source)) {
-            if (op->source == 40 || op->source == 64) {
+            if (op->source == 64) {
+                ia64_gen_check_pfs_write(insn, ia64_gr_src(op->destination));
+            } else if (op->source == 40) {
                 ia64_gen_validate_ar_access(insn, ia64_gr_src(op->destination),
                                             true);
             }
@@ -151,8 +188,15 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         }
         break;
     case IA64_OP_MOV_IMMAR:
+        if (ia64_gen_write_kernel_ar(ctx, insn, op->source,
+                                     tcg_constant_i64(op->immediate))) {
+            break;
+        }
         if (ia64_ar_is_simple(op->source)) {
-            if (op->source == 40 || op->source == 64) {
+            if (op->source == 64) {
+                ia64_gen_check_pfs_write(insn,
+                                         tcg_constant_i64(op->immediate));
+            } else if (op->source == 40) {
                 ia64_gen_validate_ar_access(
                     insn, tcg_constant_i64(op->immediate), true);
             }
@@ -172,10 +216,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
     case IA64_OP_MOV_CRGR:
     {
         /* The CR access check applies even when the destination is r0. */
-        TCGv_i64 checked = tcg_temp_new_i64();
-
-        ia64_gen_validate_cr_access(checked, insn,
-                                    tcg_constant_i64(0), false);
+        ia64_gen_check_cr_read(insn);
         if (op->destination != 0) {
             TCGv_i64 val = tcg_temp_new_i64();
 
@@ -204,8 +245,23 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             break;
         }
         ia64_gen_check_nat_register(insn, op->destination);
-        ia64_gen_validate_cr_access(checked, insn,
-                                    ia64_gr_src(op->destination), true);
+        if (op->source == IA64_CR_SAPIC_TPR) {
+            /*
+             * The new priority needs a srlz.d to take effect on interrupt
+             * masking (SDM Vol 2 serialization requirements); the srlz.d
+             * exit and the kick from the helper deliver an interrupt it
+             * unmasks, so the TB goes on.
+             */
+            ia64_gen_validate_tpr_write(checked, insn,
+                                        ia64_gr_src(op->destination));
+            gen_helper_write_tpr(tcg_env, checked);
+            break;
+        }
+        if (!ia64_gen_validate_interruption_cr_write(
+                checked, insn, ia64_gr_src(op->destination))) {
+            ia64_gen_validate_cr_access(checked, insn,
+                                        ia64_gr_src(op->destination), true);
+        }
         if (ia64_cr_write_is_plain_store(op->source)) {
             /*
              * validate_cr_access already faulted or masked the value, so
@@ -231,9 +287,9 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
                                 checked);
         } else {
             /*
-             * ITM/IVA/PTA/TPR/EOI/ITV and any unlisted number: timer
-             * rearm, TLB/TB flush or interrupt re-evaluation -- keep the
-             * helper and end the TB so the pending-interrupt check runs.
+             * ITM/IVA/PTA/EOI/ITV and any unlisted number: timer rearm,
+             * TLB/TB flush or interrupt re-evaluation -- keep the helper
+             * and end the TB so the pending-interrupt check runs.
              */
             if (ia64_cr_write_reads_clock(op->source)) {
                 translator_io_start(&ctx->base);
@@ -526,12 +582,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
                                       insn->raw, insn->slot);
             return IA64_GEN_NORETURN;
         }
-        gen_helper_alloc_rse(tcg_env,
-                              tcg_constant_i32(op->destination),
-                              tcg_constant_i32(sof | (sol << 7) |
-                                               (sor << 14)),
-                              tcg_constant_i64(insn->address),
-                              tcg_constant_i32(insn->slot));
+        ia64_gen_alloc(ctx, insn, op->destination, sof, sol, sor);
         break;
     }
     case IA64_OP_COVER:
@@ -865,28 +916,36 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             return IA64_GEN_NORETURN;
         }
         break;
-    case IA64_OP_SRLZ:
-        gen_helper_tlb_serialize(tcg_env, tcg_constant_i32(1),
+    case IA64_OP_SRLZ: {
+        TCGv_i32 main_loop = tcg_temp_new_i32();
+
+        gen_helper_tlb_serialize(main_loop, tcg_env, tcg_constant_i32(1),
                                  tcg_constant_i32(1));
-        ia64_gen_exit_to_slot_completed(ctx, insn->address, insn->slot + 1,
-                                        insn->address,
-                                        record_iipa,
-                                        track_psr_suppression);
+        ia64_gen_exit_or_lookup_slot_completed(ctx, insn->address,
+                                               insn->slot + 1, insn->address,
+                                               record_iipa,
+                                               track_psr_suppression,
+                                               main_loop);
         if (skip == NULL) {
             return IA64_GEN_NORETURN;
         }
         break;
-    case IA64_OP_SRLZ_D:
-        gen_helper_tlb_serialize(tcg_env, tcg_constant_i32(1),
+    }
+    case IA64_OP_SRLZ_D: {
+        TCGv_i32 main_loop = tcg_temp_new_i32();
+
+        gen_helper_tlb_serialize(main_loop, tcg_env, tcg_constant_i32(1),
                                  tcg_constant_i32(0));
-        ia64_gen_exit_to_slot_completed(ctx, insn->address, insn->slot + 1,
-                                        insn->address,
-                                        record_iipa,
-                                        track_psr_suppression);
+        ia64_gen_link_or_exit_slot_completed(ctx, insn->address,
+                                               insn->slot + 1, insn->address,
+                                               record_iipa,
+                                               track_psr_suppression,
+                                               main_loop);
         if (skip == NULL) {
             return IA64_GEN_NORETURN;
         }
         break;
+    }
     case IA64_OP_MF:
     case IA64_OP_MF_A:
         tcg_gen_mb(TCG_MO_ALL);

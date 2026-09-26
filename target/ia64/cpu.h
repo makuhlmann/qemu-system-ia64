@@ -21,16 +21,26 @@
 #define MMU_IDX_VIRT_CPL1  2
 #define MMU_IDX_VIRT_CPL2  3
 #define MMU_IDX_VIRT_CPL3  4
-#define MMU_IDX_RSE        5
+/*
+ * PSR.rt = 1 RSE references, one index per RSC.pl: the level decides the
+ * access rights, so a change of RSC.pl needs no TLB flush.
+ */
+#define MMU_IDX_RSE_PL0    5
+#define MMU_IDX_RSE_PL1    6
+#define MMU_IDX_RSE_PL2    7
+#define MMU_IDX_RSE_PL3    8
 /* PSR.rt = 0 RSE references: physical, but faults still set ISR.rs. */
-#define MMU_IDX_RSE_PHYS   6
-#define NB_MMU_MODES       7
+#define MMU_IDX_RSE_PHYS   9
+#define NB_MMU_MODES       10
 
 #define MMU_IDX_VIRT_CPL(cpl) (MMU_IDX_VIRT_CPL0 + (cpl))
 #define MMU_IDX_VIRT_MASK \
     (((1u << 4) - 1) << MMU_IDX_VIRT_CPL0)
+#define MMU_IDX_RSE_PL(pl) (MMU_IDX_RSE_PL0 + (pl))
+#define MMU_IDX_RSE_MASK \
+    (((1u << 4) - 1) << MMU_IDX_RSE_PL0)
 #define MMU_IDX_TRANSLATED_MASK \
-    (MMU_IDX_VIRT_MASK | (1u << MMU_IDX_RSE))
+    (MMU_IDX_VIRT_MASK | MMU_IDX_RSE_MASK)
 
 #define IA64_GR_COUNT    128
 #define IA64_STACKED_GR_BASE   32
@@ -345,6 +355,8 @@ static inline uint8_t ia64_psr_cpl(uint64_t psr)
 #define IA64_RSC_BE      0x10ULL
 #define IA64_RSC_LOADRS_SHIFT 16
 #define IA64_RSC_LOADRS_MASK  0x3fffULL
+#define IA64_RSC_WRITABLE_MASK \
+    (0x1fULL | (IA64_RSC_LOADRS_MASK << IA64_RSC_LOADRS_SHIFT))
 
 static inline uint8_t ia64_rsc_pl(uint64_t rsc)
 {
@@ -510,6 +522,8 @@ typedef enum IA64GeneralRegisterIndex {
     IA64_GR_RETURN3 = 11,
     IA64_GR_STACK_POINTER = 12,
     IA64_GR_THREAD_POINTER = 13,
+    /* r16-r31 have two banks, selected by PSR.bn (SDM Vol 2 3.3.7). */
+    IA64_GR_BANKED_BASE = 16,
     /*
      * IA-32 execution model mapping (SDM volume 1, section 6.2): GR8-GR15
      * hold the IA-32 general registers, GR16/GR17 the packed data- and
@@ -942,6 +956,18 @@ static inline void ia64_tlb_entry_translate(const IA64TlbEntry *entry,
 #include "ia32/compat.h"
 
 /* ---- CPU architectural state ---- */
+/*
+ * floor(v * mul / div) for the ITC: mul/div is itc_hz/1e9 or its inverse in
+ * lowest terms, and div_inv = floor(2^64 / div) turns the division into a
+ * multiply and one correction (ia64_itc_scale()).
+ */
+typedef struct IA64ItcScale {
+    uint64_t mul;
+    uint64_t div;
+    uint64_t div_inv;
+    uint64_t max_in;        /* largest v with v * mul < 2^64 */
+} IA64ItcScale;
+
 typedef struct CPUArchState {
     /*
      * Keep the private IA-32 backing state at offset zero.  The x86 TCG
@@ -1012,6 +1038,8 @@ typedef struct CPUArchState {
     /* Application Registers */
     uint64_t ar[IA64_AR_COUNT];
     uint64_t itc_hz;          /* ITC ticks per second, from the PAL profile */
+    IA64ItcScale itc_to_ticks;  /* ns -> ITC ticks */
+    IA64ItcScale itc_to_ns;     /* ITC ticks -> ns */
 #define ar_kr0    ar[IA64_AR_KR0]
 #define ar_kr7    ar[IA64_AR_KR7]
 #define ar_rsc    ar[IA64_AR_RSC]
@@ -1146,6 +1174,7 @@ static inline uint64_t ia64_pkr_mask(const CPUIA64State *env)
 }
 
 void ia64_tlb_bump_generation(CPUIA64State *env, bool is_ifetch);
+void ia64_tlb_index_rebuild(CPUIA64State *env);
 void ia64_tlb_bump_slot_generation(CPUIA64State *env, bool is_ifetch,
                                    uint16_t slot);
 const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
@@ -1229,6 +1258,33 @@ ia64_key_exception_for_access(const CPUIA64State *env, uint32_t key,
     return ia64_key_exception_for_key(env, key, needed, is_ifetch);
 }
 
+/*
+ * The rights that the PKR of @key disables.  A softmmu fill caches every
+ * right of the page, not only the one it checked, so a load fill must not
+ * leave a store to a write-disabled key without its Key Permission fault.
+ */
+static inline uint8_t
+ia64_key_disabled_perm(const CPUIA64State *env, uint32_t key,
+                       bool is_ifetch, bool is_rse)
+{
+    const uint64_t pkr_key = (uint64_t)key << IA64_PKR_KEY_SHIFT;
+
+    if (!ia64_key_check_enabled(env, is_ifetch, is_rse)) {
+        return 0;
+    }
+    for (uint32_t i = 0; i < IA64_PKR_COUNT; i++) {
+        uint64_t pkr = env->pkr[i];
+
+        if ((pkr & IA64_PKR_VALID) &&
+            (pkr & ia64_pkr_key_mask(env)) == pkr_key) {
+            return (pkr & IA64_PKR_RD ? IA64_TLB_R : 0) |
+                   (pkr & IA64_PKR_WD ? IA64_TLB_W : 0) |
+                   (pkr & IA64_PKR_XD ? IA64_TLB_X : 0);
+        }
+    }
+    return IA64_TLB_R | IA64_TLB_W | IA64_TLB_X;
+}
+
 static inline IA64Exception
 ia64_translation_exception_for_access(const CPUIA64State *env, uint64_t pte,
                                       uint32_t key, uint8_t perm,
@@ -1299,6 +1355,41 @@ static inline bool ia64_tlb_match(const IA64TlbEntry *entry, uint64_t va,
     }
 
     return ((va ^ entry->va) & entry->page_mask) == 0;
+}
+
+static inline unsigned ia64_tlb_index_bucket(uint64_t va, uint32_t rid,
+                                             unsigned shift)
+{
+    uint64_t key = ((va & IA64_REGION7_PHYS_MASK) >> shift) ^
+                   ((uint64_t)rid << 40) ^ shift;
+
+    return (key * 0x9e3779b97f4a7c15ULL) >> (64 - IA64_TLB_INDEX_BITS);
+}
+
+/* The lowest slot whose entry maps va under rid, or -1: as a scan finds it. */
+static inline int ia64_tlb_index_find(const IA64TlbIndex *index,
+                                      const IA64TlbEntry *tlb, uint64_t va,
+                                      uint32_t rid)
+{
+    uint64_t shifts = index->shift_mask;
+    int best = -1;
+
+    while (shifts != 0) {
+        unsigned shift = ctz64(shifts);
+        unsigned link = index->head[ia64_tlb_index_bucket(va, rid, shift)];
+
+        shifts &= shifts - 1;
+        while (link != 0) {
+            int slot = link - 1;
+
+            if ((best < 0 || slot < best) &&
+                ia64_tlb_match(&tlb[slot], va, rid)) {
+                best = slot;
+            }
+            link = index->next[slot];
+        }
+    }
+    return best;
 }
 
 static inline QEMU_ALWAYS_INLINE uint16_t
@@ -1658,6 +1749,27 @@ void ia64_itc_check_timer(CPUIA64State *env);
 void ia64_itc_enter_halt(CPUIA64State *env);
 
 /*
+ * The value muldiv64(v, mul, div) computes, without a division: every ITC
+ * read converts the virtual clock.  floor(x * div_inv / 2^64) is at most 1
+ * below floor(x / div), so the remainder test corrects it exactly.
+ */
+static inline uint64_t ia64_itc_scale(const IA64ItcScale *s, uint64_t v)
+{
+    if (likely(v <= s->max_in)) {
+        uint64_t x = v * s->mul;
+        uint64_t q = ((unsigned __int128)x * s->div_inv) >> 64;
+        uint64_t r = x - q * s->div;
+
+        while (r >= s->div) {
+            q++;
+            r -= s->div;
+        }
+        return q;
+    }
+    return muldiv64(v, s->mul, s->div);
+}
+
+/*
  * ITC rate.  On real parts the interval time counter runs at the processor
  * clock (PAL_FREQ_RATIOS reports the same ratio for both), and firmware
  * written for them stalls on ar.itc scaled by that frequency: the HP i2000's
@@ -1666,7 +1778,7 @@ void ia64_itc_enter_halt(CPUIA64State *env);
  */
 static inline uint64_t ia64_itc_ns_to_ticks(const CPUIA64State *env, int64_t ns)
 {
-    return muldiv64(ns, env->itc_hz, NANOSECONDS_PER_SECOND);
+    return ia64_itc_scale(&env->itc_to_ticks, ns);
 }
 
 /*
@@ -1677,7 +1789,7 @@ static inline uint64_t ia64_itc_ns_to_ticks(const CPUIA64State *env, int64_t ns)
  */
 static inline int64_t ia64_itc_ticks_to_ns(const CPUIA64State *env, uint64_t ticks)
 {
-    uint64_t ns = muldiv64(ticks, NANOSECONDS_PER_SECOND, env->itc_hz);
+    uint64_t ns = ia64_itc_scale(&env->itc_to_ns, ticks);
 
     return ns + (ia64_itc_ns_to_ticks(env, ns) < ticks);
 }

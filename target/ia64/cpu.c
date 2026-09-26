@@ -56,6 +56,38 @@ static vaddr ia64_cpu_get_pc(CPUState *cs)
 }
 
 
+static void ia64_itc_scale_set(IA64ItcScale *s, uint64_t mul, uint64_t div)
+{
+    if (div == 0) {
+        /* No ITC rate: convert everything to 0 rather than divide by 0. */
+        mul = 0;
+        div = 1;
+    }
+    s->mul = mul;
+    s->div = div;
+    s->div_inv = div > 1 ? (uint64_t)(((unsigned __int128)1 << 64) / div) :
+                           UINT64_MAX;
+    s->max_in = mul ? UINT64_MAX / mul : UINT64_MAX;
+}
+
+/* itc_hz / 1e9 in lowest terms for ia64_itc_scale(). */
+static void ia64_itc_scale_init(CPUIA64State *env)
+{
+    uint64_t a = env->itc_hz;
+    uint64_t b = NANOSECONDS_PER_SECOND;
+
+    while (b != 0) {
+        uint64_t t = a % b;
+
+        a = b;
+        b = t;
+    }
+    ia64_itc_scale_set(&env->itc_to_ticks, env->itc_hz / a,
+                       NANOSECONDS_PER_SECOND / a);
+    ia64_itc_scale_set(&env->itc_to_ns, NANOSECONDS_PER_SECOND / a,
+                       env->itc_hz / a);
+}
+
 static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
@@ -67,6 +99,8 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
         uint32_t flags = xenv->hflags |
             (xenv->eflags &
              (IOPL_MASK | TF_MASK | RF_MASK | VM_MASK | AC_MASK)) |
+            ia64_ia32_tb_state(&cpu->env) |
+            ((psr & IA64_PSR_DT) ? IA64_TB_FLAG_IA32_PSR_DT : 0) |
             ((psr & IA64_PSR_DB) ? IA64_TB_FLAG_IA32_PSR_DB : 0) |
             ((psr & IA64_PSR_AC) ? IA64_TB_FLAG_IA32_PSR_AC : 0) |
             ((psr & IA64_PSR_SS) ? TF_MASK : 0);
@@ -94,9 +128,20 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
              IA64_TB_FLAG_PSR_SUPPRESS : 0;
     flags |= ((psr & IA64_PSR_SS) ? IA64_TB_FLAG_PSR_SS : 0) |
              ((psr & IA64_PSR_TB) ? IA64_TB_FLAG_PSR_TB : 0);
+    /*
+     * Two 8-byte loads: generated code has just stored the words one by
+     * one, and one 16-byte load of both (as compilers merge this) misses
+     * store forwarding on every TB lookup.
+     */
+    flags |= (qatomic_read(&cpu->env.nat[0]) |
+              qatomic_read(&cpu->env.nat[1])) == 0 ?
+             IA64_TB_FLAG_NAT_CLEAR : 0;
+    flags |= (psr & IA64_PSR_DFL) ? IA64_TB_FLAG_PSR_DFL : 0;
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,
+        .cs_base = cpu->env.cfm_sof |
+                   ((uint64_t)cpu->env.cfm_sol << IA64_TB_CS_BASE_SOL_SHIFT),
         .flags = flags,
     };
 }
@@ -137,31 +182,29 @@ const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
                                        uint32_t rid, bool is_ifetch)
 {
     IA64TlbEntry *tlb = is_ifetch ? env->mmu.tlb_inst : env->mmu.tlb_data;
+    const IA64TlbIndex *index = is_ifetch ? &env->mmu.tlb_inst_index :
+                                            &env->mmu.tlb_data_index;
     IA64MicroTlbEntry *micro = is_ifetch ? env->mmu.tlb_inst_micro :
                                            env->mmu.tlb_data_micro;
-    uint16_t tlb_count = is_ifetch ? env->mmu.tlb_inst_count :
-                                     env->mmu.tlb_data_count;
     uint32_t generation = is_ifetch ? env->mmu.tlb_inst_generation :
                                       env->mmu.tlb_data_generation;
-    uint16_t i;
+    int slot = ia64_tlb_index_find(index, tlb, va, rid);
+    IA64TlbEntry *entry;
 
-    for (i = 0; i < tlb_count; i++) {
-        IA64TlbEntry *entry = &tlb[i];
-
-        if (ia64_tlb_match(entry, va, rid)) {
-            micro[ia64_micro_tlb_index(va, rid)] = (IA64MicroTlbEntry) {
-                .va = entry->va,
-                .page_mask = entry->page_mask,
-                .rid = entry->rid,
-                .generation = generation,
-                .slot_generation = entry->micro_generation,
-                .slot = i,
-                .valid = true,
-            };
-            return entry;
-        }
+    if (slot < 0) {
+        return NULL;
     }
-    return NULL;
+    entry = &tlb[slot];
+    micro[ia64_micro_tlb_index(va, rid)] = (IA64MicroTlbEntry) {
+        .va = entry->va,
+        .page_mask = entry->page_mask,
+        .rid = entry->rid,
+        .generation = generation,
+        .slot_generation = entry->micro_generation,
+        .slot = slot,
+        .valid = true,
+    };
+    return entry;
 }
 
 static void ia64_cpu_synchronize_from_tb(CPUState *cs,
@@ -393,7 +436,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     uint32_t rid;
     IA64Exception excp;
     bool is_rse = !is_ifetch &&
-                  (mmu_idx == MMU_IDX_RSE || mmu_idx == MMU_IDX_RSE_PHYS);
+                  ((MMU_IDX_RSE_MASK >> mmu_idx) & 1 ||
+                   mmu_idx == MMU_IDX_RSE_PHYS);
     uint8_t access_level;
     bool virt_translation_enabled;
 
@@ -431,7 +475,7 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     }
 
     if (is_rse) {
-        access_level = ia64_rsc_pl(cpu->env.ar_rsc);
+        access_level = mmu_idx - MMU_IDX_RSE_PL0;
     } else {
         g_assert(mmu_idx >= MMU_IDX_VIRT_CPL0 &&
                  mmu_idx <= MMU_IDX_VIRT_CPL3);
@@ -495,6 +539,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                 excp = pte_excp;
                 goto raise_exception;
             }
+            perm &= ~ia64_key_disabled_perm(&cpu->env, entry->key,
+                                            is_ifetch, is_rse);
             prot = ia64_tlb_prot_for_pte(&cpu->env, entry->pte, perm,
                                          is_ifetch);
             ia64_record_suppressed_tlb_fill_if_needed(
@@ -539,6 +585,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                 excp = pte_excp;
                 goto raise_exception;
             }
+            perm &= ~ia64_key_disabled_perm(
+                &cpu->env, new_entry ? new_entry->key : key, false, is_rse);
             prot = ia64_tlb_prot_for_pte(&cpu->env,
                                          new_entry ? new_entry->pte : pte,
                                          perm, false);
@@ -911,6 +959,7 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.purgeable_page_mask = icc->purgeable_page_mask;
     cpu->env.itc_hz = icc->pal->freq_base_hz * icc->pal->itc_ratio_num /
                       icc->pal->itc_ratio_den;
+    ia64_itc_scale_init(&cpu->env);
     cpu->env.impl_pa_bits = icc->impl_pa_bits;
     cpu->env.impl_va_msb = icc->impl_va_msb;
     cpu->env.impl_rid_bits = icc->impl_rid_bits;
@@ -1066,6 +1115,7 @@ static const TCGCPUOps ia64_tcg_ops = {
     .cpu_exec_halt = ia64_cpu_has_work,
     .cpu_exec_reset = cpu_reset,
     .do_interrupt = ia64_cpu_do_interrupt,
+    .do_interrupt_needs_bql = ia64_cpu_do_interrupt_needs_bql,
 };
 
 /*

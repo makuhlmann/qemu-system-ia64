@@ -27,11 +27,13 @@ from .encoding import (
     IA64_DCR_BE,
     IA64_DCR_LC,
     IA64_DCR_PP,
+    IA64_DATA_ACCESS_VECTOR,
     IA64_DISABLED_FP_VECTOR,
     IA64_EXCP_BREAK,
     IA64_EXCP_DISABLED_ISA_TRANSITION,
     IA64_EXCP_ILLEGAL,
     IA64_EXCP_NONE,
+    IA64_EXCP_RESERVED_REG_FIELD,
     IA64_EXCP_RESERVED_TEMPLATE,
     IA64_EXCP_UNALIGNED,
     IA64_GENERAL_VECTOR,
@@ -46,6 +48,7 @@ from .encoding import (
     IA64_ISR_IR,
     IA64_ISR_NI,
     IA64_ISR_R,
+    IA64_ISR_W,
     IA64_ISR_RS,
     IA64_ISR_X,
     IA64_ITC_TICKS_PER_MILLISECOND,
@@ -124,6 +127,7 @@ from .encoding import (
     mov_lc_gr,
     mov_m_ar_gr,
     mov_m_cr_gr,
+    mov_i_imm_ar,
     mov_m_gr_ar,
     mov_m_gr_cr,
     mov_m_psr_gr,
@@ -514,6 +518,16 @@ test_mov_to_irr_illegal = require_exception(
          nop_i()),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
 
+# TPR bits 15:8 are reserved: writing one is a Reserved Register/Field
+# fault, even though the value would be masked.
+test_mov_to_tpr_reserved_bits_fault = require_exception(
+    "mov_to_tpr_reserved_bits_fault", [
+        (0x10, 0x00, adds(3, 0x100, 0), nop_i(), nop_i()),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_SAPIC_TPR), nop_i(),
+         nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x20)
+
 test_mov_to_read_only_cr_predicate_false = require_registers(
     "mov_to_read_only_cr_predicate_false", [
         (0x10, 0x00, mov_m_gr_cr(0, IA64_CR_SAPIC_IVR, qp=1),
@@ -594,12 +608,21 @@ def _pending_interrupt_unmask_program(unmask):
     these cases can pass without testing anything.  After such a change,
     run them on a binary without the PSR.i kick in ia64_set_psr(): they
     must fail there.
+
+    The tpr_srlz variant keeps PSR.i = 1 and masks the vector with
+    TPR.mmi instead; `mov cr.tpr = r0;; srlz.d` unmasks it, and the
+    interrupt must be taken right after the srlz.d (IIP the unmask bundle,
+    IPSR.ri 2).  The TPR write kicks the vCPU; srlz.d leaves its TB through
+    a direct TB lookup when no request was pending at the serialisation, so
+    this guards that the kick still ends the next TB at its entry.
     """
     warm_passes = 3
     unmask_ip = 0x120
     # rfi writes CR.IPSR/IIP/IFS, which PSR.ic = 1 does not allow.
     initial_psr = 0 if unmask == "rfi" else IA64_PSR_IC
     remask = IA64_PSR_IC | IA64_PSR_I if unmask == "rfi" else IA64_PSR_I
+    if unmask == "tpr_srlz":
+        initial_psr = IA64_PSR_IC | IA64_PSR_I
     program = [
         (0x10, *movl_mlx(19, initial_psr)),
         (0x20, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
@@ -642,6 +665,12 @@ def _pending_interrupt_unmask_program(unmask):
             (0x120, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
             (0x130, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
         ]
+    elif unmask == "tpr_srlz":
+        loop = 0x130
+        program += [
+            (0x120, 0x0a, mov_m_gr_cr(0, IA64_CR_SAPIC_TPR), srlz_d(),
+             nop_i()),
+        ]
     elif unmask == "rfi":
         loop = 0x200
         program += [
@@ -660,23 +689,36 @@ def _pending_interrupt_unmask_program(unmask):
         (loop + 0x20, 0x10, nop_m(), nop_i(),
          br_cond(loop + 0x20, loop, qp=6)),
         # Warm pass done: mask again and start the next pass.
-        (loop + 0x30, 0x00, rsm(remask), adds(8, 0, 0), adds(9, -1, 9)),
+        (loop + 0x30, 0x00,
+         mov_m_gr_cr(21, IA64_CR_SAPIC_TPR) if unmask == "tpr_srlz"
+         else rsm(remask), adds(8, 0, 0), adds(9, -1, 9)),
         (loop + 0x40, 0x08, srlz_d(), nop_m(), nop_i()),
         (loop + 0x50, 0x10, nop_m(), nop_i(), br_cond(loop + 0x50, 0x50)),
         (0x3000, 0x00, mov_m_cr_gr(31, 19), adds(30, 0, 8), adds(29, 0, 9)),
-        (0x3010, 0x10, nop_m(), nop_i(), br_cond(0x3010, 0x3010)),
+        (0x3010, 0x00, mov_m_cr_gr(28, 16), nop_i(), nop_i()),
+        (0x3020, 0x10, nop_m(), nop_i(), br_cond(0x3020, 0x3020)),
     ]
+    if unmask == "tpr_srlz":
+        program += [
+            (0x3100, *movl_mlx(21, IA64_TPR_MMI)),
+            (0x3110, 0x10, mov_m_gr_cr(21, IA64_CR_SAPIC_TPR), nop_i(),
+             br_cond(0x3110, 0x10)),
+        ]
     return program, loop
 
 
 def _require_pending_interrupt_taken_after_unmask(qemu, unmask):
     name = f"pending_interrupt_taken_after_{unmask}"
     program, loop = _pending_interrupt_unmask_program(unmask)
-    result = run_program(qemu, program, entry=0x10, terminal_ip=0x3010,
+    # tpr_srlz enters at 0x3100 to mask the vector with TPR.mmi first.
+    entry = 0x3100 if unmask == "tpr_srlz" else 0x10
+    iip, ri = (0x120, 2) if unmask == "tpr_srlz" else (loop, 0)
+    result = run_program(qemu, program, entry=entry, terminal_ip=0x3020,
                          timeout=4.0)
     state = result.state
     if (state.exception != IA64_EXCP_NONE or state.gr[29] != 0 or
-            state.gr[30] != 0 or state.gr[31] != loop):
+            state.gr[30] != 0 or state.gr[31] != iip or
+            (state.gr[28] >> 41) & 3 != ri):
         raise RuntimeError(
             f"{name} failed: warm passes left r29={state.gr[29]:#x} "
             f"loop passes before delivery r30={state.gr[30]:#x} "
@@ -694,6 +736,10 @@ def test_pending_interrupt_taken_after_mov_psr_l(qemu):
 
 def test_pending_interrupt_taken_after_rfi(qemu):
     _require_pending_interrupt_taken_after_unmask(qemu, "rfi")
+
+
+def test_pending_interrupt_taken_after_tpr_srlz(qemu):
+    _require_pending_interrupt_taken_after_unmask(qemu, "tpr_srlz")
 
 
 def test_async_timer_interrupt_never_resumes_mlx_slot2(qemu):
@@ -1264,6 +1310,45 @@ test_tpr_mmi_masks_timer_until_cleared = require_registers(
         "r31": 0x63,
     }, entry=0x10)
 
+# A TPR write that unmasks a pending timer interrupt must have it
+# delivered once srlz.d completes, before the next instruction group
+# (SDM Vol 2 serialization requirements).  The write may deliver it
+# earlier; r8 shows whether the instruction after srlz.d ran first.
+test_tpr_unmask_delivers_by_srlz_d = require_registers(
+    "tpr_unmask_delivers_by_srlz_d", [
+        (0x10, *movl_mlx(3, IA64_TPR_MMI)),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_SAPIC_TPR), nop_i(),
+         nop_i()),
+        (0x30, 0x00, adds(4, 0xef, 0), nop_i(),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(4, IA64_CR_ITV), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_ar(0, 44), nop_i(),
+         nop_i()),
+        (0x60, 0x00, mov_m_gr_cr(0, IA64_CR_ITM), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(19, (1 << 13) | (1 << 14))),
+        (0x80, 0x01, mov_gr_psr_full(19), nop_i(),
+         nop_i()),
+        (0x90, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_TPR), nop_i(),
+         nop_i()),
+        (0xa0, 0x01, srlz_d(), nop_i(),
+         nop_i()),
+        (0xb0, 0x01, nop_m(), adds(8, 0x2a, 0),
+         nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(),
+         br_cond(0xc0, 0xc0)),
+        (0x3000, 0x10, nop_m(), adds(31, 0x63, 0),
+         br_cond(0x3000, 0x3010)),
+        (0x3010, 0x10, nop_m(), nop_i(),
+         br_cond(0x3010, 0x3010)),
+    ], {
+        "ip": 0x3010,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r31": 0x63,
+    }, entry=0x10)
+
 def sapic_nested_timer_priority_program(first_vector, second_vector):
     psr_ic_i = (1 << 13) | (1 << 14)
 
@@ -1623,8 +1708,30 @@ test_masking_itv_preserves_pended_timer_irr = require_registers(
     }, entry=0x10)
 
 
+# The ITM deadline cases below need one write to land before ITC reaches the
+# deadline in r4, and a loaded host can stop the vCPU for longer than the
+# deadline is ahead.  r10 reads ITC after that write: a run in which it has
+# already reached r4 tests nothing, so it runs again.  The reprogram cases
+# replace a deadline 5 ms ahead with a second write; if that write comes late,
+# the first deadline matches first, and the interrupt it pends is right.
+ITM_DEADLINE_ATTEMPTS = 5
+
+
+def _run_itm_deadline_case(qemu, name, bundles, terminal_ip):
+    for _ in range(ITM_DEADLINE_ATTEMPTS):
+        result = run_program(qemu, bundles, entry=0x10,
+                             terminal_ip=terminal_ip)
+        if result.state.gr[10] < result.state.gr[4]:
+            return result
+    raise RuntimeError(
+        f"{name} failed: ITC reached the deadline before the ITM write "
+        f"in all {ITM_DEADLINE_ATTEMPTS} runs\n"
+        f"{result.register_output}")
+
+
 def test_future_itm_rearm_uses_latest_deadline(qemu):
-    result = run_program(qemu, [
+    result = _run_itm_deadline_case(
+        qemu, "future_itm_rearm_uses_latest_deadline", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
         (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(), nop_i()),
         (0x30, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
@@ -1634,15 +1741,16 @@ def test_future_itm_rearm_uses_latest_deadline(qemu):
         (0x60, *movl_mlx(6, IA64_ITC_ADDL_DELAY_TICKS)),
         (0x70, 0x00, nop_m(), add(5, 4, 6), nop_i()),
         (0x80, 0x00, mov_m_gr_cr(5, IA64_CR_ITM), nop_i(), nop_i()),
-        (0x90, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
-        (0xa0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
-        (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
+        (0x90, 0x02, mov_m_ar_gr(10, 44), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
+        (0xb0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
         (0x3000, 0x00, mov_m_cr_gr(6, IA64_CR_SAPIC_IVR),
          nop_i(), nop_i()),
         (0x3010, 0x02, mov_m_ar_gr(8, 44), nop_i(), nop_i()),
         (0x3020, 0x00, mov_m_cr_gr(9, IA64_CR_ITM), nop_i(), nop_i()),
         (0x3030, 0x10, nop_m(), nop_i(), br_cond(0x3030, 0x3030)),
-    ], entry=0x10, terminal_ip=0x3030)
+    ], terminal_ip=0x3030)
     state = result.state
     if (state.exception != IA64_EXCP_NONE or
         state.gr[6] != 0xef or
@@ -1657,7 +1765,8 @@ def test_future_itm_rearm_uses_latest_deadline(qemu):
 
 
 def test_past_itm_reprogram_cancels_future_deadline(qemu):
-    result = run_program(qemu, [
+    result = _run_itm_deadline_case(
+        qemu, "past_itm_reprogram_cancels_future_deadline", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
         (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(), nop_i()),
         (0x30, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
@@ -1666,19 +1775,20 @@ def test_past_itm_reprogram_cancels_future_deadline(qemu):
         (0x50, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(), nop_i()),
         (0x60, 0x00, adds(5, -1, 3), nop_i(), nop_i()),
         (0x70, 0x00, mov_m_gr_cr(5, IA64_CR_ITM), nop_i(), nop_i()),
-        (0x80, *movl_mlx(7, IA64_ITC_ADDL_DELAY_TICKS)),
-        (0x90, 0x00, nop_m(), add(7, 4, 7), nop_i()),
-        (0xa0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
-        (0xb0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
-        (0xc0, 0x02, mov_m_ar_gr(6, 44), nop_i(), nop_i()),
-        (0xd0, 0x00, nop_m(), cmp_ltu_unc(6, 7, 6, 7), nop_i()),
-        (0xe0, 0x10, nop_m(), nop_i(), br_cond(0xe0, 0xc0, qp=6)),
-        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+        (0x80, 0x02, mov_m_ar_gr(10, 44), nop_i(), nop_i()),
+        (0x90, *movl_mlx(7, IA64_ITC_ADDL_DELAY_TICKS)),
+        (0xa0, 0x00, nop_m(), add(7, 4, 7), nop_i()),
+        (0xb0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
+        (0xc0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xd0, 0x02, mov_m_ar_gr(6, 44), nop_i(), nop_i()),
+        (0xe0, 0x00, nop_m(), cmp_ltu_unc(6, 7, 6, 7), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xd0, qp=6)),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0x100)),
         (0x3000, 0x00, mov_m_cr_gr(9, IA64_CR_SAPIC_IVR),
          nop_i(), nop_i()),
         (0x3010, 0x00, nop_m(), adds(8, 1, 8), nop_i()),
         (0x3020, 0x10, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), nop_i(), rfi_b()),
-    ], entry=0x10, terminal_ip=0xf0)
+    ], terminal_ip=0x100)
     state = result.state
     if (state.exception != IA64_EXCP_NONE or
         state.gr[6] < state.gr[7] or state.gr[8] != 0):
@@ -1688,6 +1798,120 @@ def test_past_itm_reprogram_cancels_future_deadline(qemu):
             f"cancel_itm={state.gr[5]!r} "
             f"wait_itc={state.gr[7]!r} final_itc={state.gr[6]!r} "
             f"interrupts={state.gr[8]!r}\n"
+            f"{result.register_output}")
+
+
+# ITC equal to ITM raises an Interval Timer interrupt (SDM Vol 2 3.3.4.2), and
+# with ITV.m clear the occurrence is pended (5.8.3.6, Table 5-12), whatever the
+# guest writes to ITM or ITV afterwards.  The model pends it from a QEMU timer
+# whose callback reaches the vCPU later, so a write or a read in between must
+# pend it first (ia64_itc_check_timer()).  Each case arms ITM 1 ms ahead, reads ITC
+# after the arm (r10), and waits with PSR.i = 0 until an ITC read (r11) is at
+# the deadline; the steps after the wait start at 0xa0.
+def _itm_match_program(after_wait):
+    return [
+        (0x10, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(), nop_i()),
+        (0x30, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
+        (0x40, 0x00, addl(4, IA64_ITC_TICKS_PER_MILLISECOND, 3),
+         nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(), nop_i()),
+        (0x60, 0x02, mov_m_ar_gr(10, 44), nop_i(), nop_i()),
+        (0x70, 0x02, mov_m_ar_gr(11, 44), nop_i(), nop_i()),
+        (0x80, 0x00, nop_m(), cmp_ltu_unc(6, 7, 11, 4), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x70, qp=6)),
+        *after_wait,
+    ]
+
+
+ITV_VECTOR_IRR3_BIT = 1 << (0xef - 192)
+
+
+def test_armed_itm_match_pends_before_past_itm_write(qemu):
+    result = _run_itm_deadline_case(
+        qemu, "armed_itm_match_pends_before_past_itm_write",
+        _itm_match_program([
+            (0xa0, 0x00, adds(5, -1, 3), nop_i(), nop_i()),
+            (0xb0, 0x00, mov_m_gr_cr(5, IA64_CR_ITM), nop_i(), nop_i()),
+            (0xc0, *movl_mlx(7, IA64_ITC_TICKS_PER_MILLISECOND)),
+            (0xd0, 0x00, nop_m(), add(7, 4, 7), nop_i()),
+            (0xe0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
+            (0xf0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+            (0x100, 0x02, mov_m_ar_gr(6, 44), nop_i(), nop_i()),
+            (0x110, 0x00, nop_m(), cmp_ltu_unc(6, 7, 6, 7), nop_i()),
+            (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x100, qp=6)),
+            (0x130, 0x10, nop_m(), nop_i(), br_cond(0x130, 0x130)),
+            (0x3000, 0x00, mov_m_cr_gr(9, IA64_CR_SAPIC_IVR),
+             nop_i(), nop_i()),
+            (0x3010, 0x00, nop_m(), adds(8, 1, 8), nop_i()),
+            (0x3020, 0x10, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), nop_i(),
+             rfi_b()),
+        ]), terminal_ip=0x130)
+    state = result.state
+    if (state.exception != IA64_EXCP_NONE or
+        state.gr[8] != 1 or state.gr[9] != 0xef):
+        raise RuntimeError(
+            "armed_itm_match_pends_before_past_itm_write failed: "
+            f"exception={state.exception!r} itm={state.gr[4]!r} "
+            f"wait_itc={state.gr[11]!r} interrupts={state.gr[8]!r} "
+            f"vector={state.gr[9]!r}\n{result.register_output}")
+
+
+def test_armed_itm_match_shows_in_irr(qemu):
+    result = _run_itm_deadline_case(
+        qemu, "armed_itm_match_shows_in_irr",
+        _itm_match_program([
+            (0xa0, 0x00, mov_m_cr_gr(12, IA64_CR_SAPIC_IRR3),
+             nop_i(), nop_i()),
+            (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
+        ]), terminal_ip=0xb0)
+    state = result.state
+    if (state.exception != IA64_EXCP_NONE or
+        not state.gr[12] & ITV_VECTOR_IRR3_BIT):
+        raise RuntimeError(
+            "armed_itm_match_shows_in_irr failed: "
+            f"exception={state.exception!r} itm={state.gr[4]!r} "
+            f"wait_itc={state.gr[11]!r} irr3={state.gr[12]:#x}\n"
+            f"{result.register_output}")
+
+
+def test_armed_itm_match_survives_itv_mask(qemu):
+    result = _run_itm_deadline_case(
+        qemu, "armed_itm_match_survives_itv_mask",
+        _itm_match_program([
+            (0xa0, *movl_mlx(13, IA64_VECTOR_MASKED | 0xef)),
+            (0xb0, 0x00, mov_m_gr_cr(13, IA64_CR_ITV), nop_i(), nop_i()),
+            (0xc0, 0x00, mov_m_cr_gr(12, IA64_CR_SAPIC_IRR3),
+             nop_i(), nop_i()),
+            (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0xd0)),
+        ]), terminal_ip=0xd0)
+    state = result.state
+    if (state.exception != IA64_EXCP_NONE or
+        not state.gr[12] & ITV_VECTOR_IRR3_BIT):
+        raise RuntimeError(
+            "armed_itm_match_survives_itv_mask failed: "
+            f"exception={state.exception!r} itm={state.gr[4]!r} "
+            f"wait_itc={state.gr[11]!r} irr3={state.gr[12]:#x}\n"
+            f"{result.register_output}")
+
+
+
+def test_armed_itm_match_survives_itc_write_back(qemu):
+    result = _run_itm_deadline_case(
+        qemu, "armed_itm_match_survives_itc_write_back",
+        _itm_match_program([
+            (0xa0, 0x00, mov_m_gr_ar(3, 44), nop_i(), nop_i()),
+            (0xb0, 0x00, mov_m_cr_gr(12, IA64_CR_SAPIC_IRR3),
+             nop_i(), nop_i()),
+            (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        ]), terminal_ip=0xc0)
+    state = result.state
+    if (state.exception != IA64_EXCP_NONE or
+        not state.gr[12] & ITV_VECTOR_IRR3_BIT):
+        raise RuntimeError(
+            "armed_itm_match_survives_itc_write_back failed: "
+            f"exception={state.exception!r} itm={state.gr[4]!r} "
+            f"wait_itc={state.gr[11]!r} irr3={state.gr[12]:#x}\n"
             f"{result.register_output}")
 
 
@@ -2306,6 +2530,82 @@ test_unaligned_ac_set_no_page_cross_faults = require_exception(
     ],
     IA64_EXCP_UNALIGNED, fault_ip=0x40,
 )
+
+# PSR.ri is stored only before code that can observe it.  Each case takes a
+# data TLB fault, which reports the slot from PSR.ri, after slots that do not
+# observe it, and reads the slot back from IPSR.ri and ISR.ei (SDM Vol.2
+# 3.3.5).
+_RI_DTLB_SETUP = [
+    *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+    (0x70, *movl_mlx(3, HIGH_TR_BASE)),
+    (0x80, *movl_mlx(5, HIGH_TR_BASE + 0x100000)),
+    (0x90, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DT)),
+    (0xa0, 0x01, mov_gr_psr_full(2), nop_i(), nop_i()),
+    # srlz resumes at slot 1; the branch starts the tested TB at slot 0.
+    (0xb0, 0x11, srlz_d(), nop_i(), br_cond(0xb0, 0xc0)),
+]
+_RI_DTLB_HANDLER = [
+    (IA64_ALT_DTLB_VECTOR, 0x09, mov_m_cr_gr(31, 16),
+     mov_m_cr_gr(30, 17), nop_i()),
+    (IA64_ALT_DTLB_VECTOR + 0x10, 0x09, mov_m_cr_gr(29, 19),
+     nop_m(), extr_u(31, 31, 41, 2)),
+    (IA64_ALT_DTLB_VECTOR + 0x20, 0x01, nop_m(),
+     extr_u(30, 30, 41, 2), nop_i()),
+    (IA64_ALT_DTLB_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+     br_cond(IA64_ALT_DTLB_VECTOR + 0x30,
+             IA64_ALT_DTLB_VECTOR + 0x30)),
+]
+
+test_ri_fault_in_slot1_after_unobserving_slot = require_registers(
+    "ri_fault_in_slot1_after_unobserving_slot", [
+        *_RI_DTLB_SETUP,
+        (0xc0, 0x00, ld8(9, 3), adds(10, 1, 0), adds(11, 2, 0)),
+        (0xd0, 0x08, adds(12, 3, 0), ld8(14, 5), nop_i()),
+        *_RI_DTLB_HANDLER,
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r12": 3,
+        "r29": 0xd0,
+        "r30": 1,
+        "r31": 1,
+    }, entry=0x10)
+
+# Slot 1 of the first bundle leaves PSR.ri at 1; the faulting slot 1 of the
+# next bundle may reuse it, but only because it is the same slot.
+test_ri_fault_in_slot1_reuses_stored_slot = require_registers(
+    "ri_fault_in_slot1_reuses_stored_slot", [
+        *_RI_DTLB_SETUP,
+        (0xc0, 0x08, ld8(9, 3), ld8(10, 3), adds(11, 2, 0)),
+        (0xd0, 0x08, adds(12, 3, 0), ld8(14, 5), nop_i()),
+        *_RI_DTLB_HANDLER,
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r12": 3,
+        "r29": 0xd0,
+        "r30": 1,
+        "r31": 1,
+    }, entry=0x10)
+
+# The counted self-loop's back edge stores RI 0 on the path that loops; the
+# path that leaves the loop still holds the br.cloop slot, so a fault in slot
+# 0 of the next bundle must store its own slot.
+test_ri_fault_after_counted_self_loop_exit = require_registers(
+    "ri_fault_after_counted_self_loop_exit", [
+        *_RI_DTLB_SETUP,
+        (0xc0, 0x01, nop_m(), mov_i_imm_ar(65, 3), nop_i()),
+        (0xd0, 0x11, nop_m(), adds(8, 1, 8), br_cloop(0xd0, 0xd0)),
+        (0xe0, 0x00, ld8(14, 5), nop_i(), nop_i()),
+        *_RI_DTLB_HANDLER,
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 4,
+        "r29": 0xe0,
+        "r30": 0,
+        "r31": 0,
+    }, entry=0x10)
 
 test_counted_self_loop_fault_has_slot1_ri = require_registers(
     "counted_self_loop_fault_has_slot1_ri", [
@@ -5331,9 +5631,639 @@ test_rfi_montecito_uncollected_transition_preserves_target = \
         }, entry=0x10)
 
 GROUP = 'interrupt'
+# CPU 1 sends 2000 IPIs to CPU 0, each after CPU 0 counted the one before,
+# while CPU 0 takes a Break fault in a loop with PSR.i set: faults, which are
+# delivered without the BQL, and interrupts, which read the IRR under it,
+# interleave on CPU 0 while CPU 1 writes that IRR.  A lost IPI hangs CPU 1.
+_IPI_COUNTER = 0x8000
+_IPI_DONE = 0x8008
+_IPI_IVA = 0x200000
+test_ipis_during_break_faults_all_arrive = require_registers(
+    "ipis_during_break_faults_all_arrive", [
+        (0x10, *movl_mlx(3, _IPI_IVA)),
+        (0x20, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (0x30, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x40, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_TPR), nop_i(), nop_i()),
+        (0x50, 0x01, srlz_d(), nop_i(), nop_i()),
+        (0x60, *movl_mlx(2, (1 << 63) | 0xfee01000)),
+        (0x70, 0x01, adds(3, 0xf0, 0), nop_i(), nop_i()),
+        (0x80, 0x01, st8(2, 3), nop_i(), nop_i()),  # wake CPU 1
+        (0x90, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I | IA64_PSR_BN)),
+        (0xa0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xb0, *movl_mlx(4, _IPI_DONE)),
+        (0xc0, 0x01, break_m(0x1234), nop_i(), nop_i()),
+        (0xd0, 0x01, ld8(9, 4), nop_i(), nop_i()),
+        (0xe0, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 9), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xc0, qp=6)),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0x100)),
+
+        # Break: resume at the next bundle (the break is in slot 0).
+        (_IPI_IVA + 0x2c00, 0x01, mov_m_cr_gr(17, 19), nop_i(), nop_i()),
+        (_IPI_IVA + 0x2c10, 0x01, adds(17, 16, 17), nop_i(), nop_i()),
+        (_IPI_IVA + 0x2c20, 0x01, mov_m_gr_cr(17, 19), nop_i(), nop_i()),
+        (_IPI_IVA + 0x2c30, 0x11, nop_m(), nop_i(), rfi_b()),
+
+        # External interrupt: acknowledge, count, EOI.
+        (_IPI_IVA + 0x3000, 0x01, mov_m_cr_gr(16, IA64_CR_SAPIC_IVR),
+         nop_i(), nop_i()),
+        (_IPI_IVA + 0x3010, *movl_mlx(18, _IPI_COUNTER)),
+        (_IPI_IVA + 0x3020, 0x01, ld8(19, 18), nop_i(), nop_i()),
+        (_IPI_IVA + 0x3030, 0x01, adds(19, 1, 19), nop_i(), nop_i()),
+        (_IPI_IVA + 0x3040, 0x01, st8(18, 19), nop_i(), nop_i()),
+        (_IPI_IVA + 0x3050, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI),
+         nop_i(), nop_i()),
+        (_IPI_IVA + 0x3060, 0x01, srlz_d(), nop_i(), nop_i()),
+        (_IPI_IVA + 0x3070, 0x11, nop_m(), nop_i(), rfi_b()),
+
+        # CPU 1, woken at the image base.
+        (0x100000, *movl_mlx(2, (1 << 63) | 0xfee00000)),
+        (0x100010, *movl_mlx(4, _IPI_COUNTER)),
+        (0x100020, *movl_mlx(8, _IPI_DONE)),
+        (0x100030, 0x01, adds(3, 0x40, 0), adds(5, 2000, 0), adds(6, 1, 0)),
+        (0x100040, 0x01, st8(2, 3), nop_i(), nop_i()),
+        (0x100050, 0x01, ld8(7, 4), nop_i(), nop_i()),
+        (0x100060, 0x01, nop_m(), cmp_ltu_unc(6, 7, 7, 6), nop_i()),
+        (0x100070, 0x10, nop_m(), nop_i(),
+         br_cond(0x100070, 0x100050, qp=6)),
+        (0x100080, 0x01, nop_m(), adds(6, 1, 6), adds(5, -1, 5)),
+        (0x100090, 0x01, nop_m(), cmp4_eq_imm(9, 10, 0, 5), nop_i()),
+        (0x1000a0, 0x10, nop_m(), nop_i(),
+         br_cond(0x1000a0, 0x100040, qp=10)),
+        (0x1000b0, 0x01, adds(9, 1, 0), nop_i(), nop_i()),
+        (0x1000c0, 0x01, st8(8, 9), nop_i(), nop_i()),
+        (0x1000d0, 0x10, nop_m(), nop_i(), br_cond(0x1000d0, 0x1000d0)),
+    ], {
+        "ip": 0x1000d0,
+        "exception": IA64_EXCP_NONE,
+        "r5": 0,
+        "r6": 2001,
+    }, entry=0x10, alat=None, smp="2", state_cpu=1)
+
+# A 4 GiB code segment lets a TB leave out the per-instruction checks
+# (ia64_ia32_tb_fast).  These variants rerun debug and disabled-FP cases
+# with such a segment: each condition must still select the checked TB.
+IA32_FLAT_CSD = IA32_TEST_CSD | (0xf << 48) | (1 << 63)
+
+
+def _ia32_flat_cs_variant(name, case, csd=IA32_FLAT_CSD):
+    bundles = [b for b in case.bundles if b[0] != 0x750]
+    return require_registers(name, [*bundles, (0x750, *movl_mlx(31, csd))],
+                             dict(case.expected), entry=0x700, cpu="madison")
+
+
+test_ia32_flat_cs_psr_ss_traps_after_one_instruction = _ia32_flat_cs_variant(
+    "ia32_flat_cs_psr_ss_traps_after_one_instruction",
+    test_ia32_psr_ss_traps_after_one_instruction_and_resumes,
+    IA32_FLAT_CSD | (1 << 62))
+
+test_ia32_flat_cs_eflag_tf_traps_after_one_instruction = \
+    _ia32_flat_cs_variant(
+        "ia32_flat_cs_eflag_tf_traps_after_one_instruction",
+        test_ia32_eflag_tf_traps_after_one_instruction_and_resumes,
+        IA32_FLAT_CSD | (1 << 62))
+
+test_ia32_flat_cs_ibr_instruction_breakpoint_fault = _ia32_flat_cs_variant(
+    "ia32_flat_cs_ibr_instruction_breakpoint_fault",
+    test_ia32_ibr_instruction_breakpoint_fault)
+
+test_ia32_flat_cs_taken_branch_clears_rf_and_psr_id = _ia32_flat_cs_variant(
+    "ia32_flat_cs_taken_branch_clears_rf_and_psr_id",
+    test_ia32_taken_branch_clears_rf_and_psr_id)
+
+test_ia32_flat_cs_not_taken_branch_clears_rf_and_psr_id = \
+    _ia32_flat_cs_variant(
+        "ia32_flat_cs_not_taken_branch_clears_rf_and_psr_id",
+        test_ia32_not_taken_branch_clears_rf_and_psr_id)
+
+test_ia32_flat_cs_gate_intercept_reports_concurrent_debug_traps = \
+    _ia32_flat_cs_variant(
+        "ia32_flat_cs_gate_intercept_reports_concurrent_debug_traps",
+        test_ia32_gate_intercept_reports_concurrent_debug_traps)
+
+test_ia32_flat_cs_dfh_faults_first_target_instruction = _ia32_flat_cs_variant(
+    "ia32_flat_cs_dfh_faults_first_target_instruction",
+    test_ia32_dfh_faults_first_target_instruction)
+
+test_ia32_flat_cs_dfl_faults_first_x87_instruction = _ia32_flat_cs_variant(
+    "ia32_flat_cs_dfl_faults_first_x87_instruction",
+    test_ia32_dfl_faults_first_x87_instruction)
+
+test_ia32_flat_cs_taken_branch_trap = _ia32_flat_cs_variant(
+    "ia32_flat_cs_taken_branch_trap",
+    test_rfi_to_ia32_taken_branch_trap_records_byte_ips)
+
+
+def _ia32_flat_cs_first_completion_clears(name, eflags, psr):
+    """RF or PSR.id alone: the first completed instruction clears it."""
+    return require_registers(name, [
+        *ia32_environment_bundles(0x700, 0x10, csd=IA32_FLAT_CSD),
+        (0x10, *movl_mlx(3, eflags)),
+        (0x20, 0x00, mov_m_gr_ar(3, 24), nop_i(), nop_i()),
+        (0x30, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_IS | psr)),
+        (0x40, *movl_mlx(3, 0x100)),
+        *rfi_to_gr(0x50, 2, 3),
+        ia32_bundle(0x100, bytes.fromhex(
+            "90 "
+            "0f 0b")),     # ud2 -> instruction intercept
+        (IA64_IA32_INTERCEPT_VECTOR, 0x00,
+         mov_m_ar_gr(8, 24), nop_i(), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 16), nop_i(), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x20, 0x00,
+         nop_m(), extr_u(9, 9, 37, 1), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x30, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_INTERCEPT_VECTOR + 0x30,
+                 IA64_IA32_INTERCEPT_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_IA32_INTERCEPT_VECTOR + 0x30,
+        "r8": 2,
+        "r9": 0,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+
+test_ia32_flat_cs_first_completion_clears_rf = \
+    _ia32_flat_cs_first_completion_clears(
+        "ia32_flat_cs_first_completion_clears_rf", (1 << 16) | 2, 0)
+
+test_ia32_flat_cs_first_completion_clears_psr_id = \
+    _ia32_flat_cs_first_completion_clears(
+        "ia32_flat_cs_first_completion_clears_psr_id", 2, 1 << 37)
+
+# RETF to CPL 3 in a TB without per-instruction checks: PSR.cpl must follow
+# before the next TB, whose loads are translated for PSR.cpl.  The page is
+# PL0 only, so the CPL 3 stack read takes a data access rights fault.
+test_ia32_flat_cs_retf_to_cpl3_updates_psr_cpl = require_registers(
+    "ia32_flat_cs_retf_to_cpl3_updates_psr_cpl", [
+        *ia32_environment_bundles(
+            0x700, 0x10, csd=IA32_FLAT_CSD | (1 << 62)),
+        (0x10, *movl_mlx(3, 1)),  # CFLG.pe
+        (0x20, 0x00, mov_m_gr_ar(3, 27), nop_i(), nop_i()),
+        *dtr_setup_bundles(0x30, 0, 0, page_shift=12, slot=5),
+        (0x90, *movl_mlx(12, 0x400)),
+        (0xa0, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_IS | IA64_PSR_DT)),
+        (0xb0, *movl_mlx(3, 0x100)),
+        *rfi_to_gr(0xc0, 2, 3),
+        ia32_bundle(0x100, bytes.fromhex(
+            "68 0b 04 00 00 "   # push 0x40b (SS)
+            "68 00 03 00 00 "   # push 0x300 (ESP)
+            "68 03 04 00 00 "   # push 0x403 (CS)
+            "68")),             # push 0x120 (EIP)
+        ia32_bundle(0x110, bytes.fromhex(
+            "20 01 00 00 "
+            "cb")),             # retf
+        ia32_bundle(0x120, bytes.fromhex(
+            "8b 04 24 "         # mov eax,[esp]
+            "0f 0b")),
+        # Flat DPL 3 code and data descriptors at GDT offsets 0x400, 0x408.
+        ia32_bundle(0x400, bytes.fromhex(
+            "ff ff 00 00 00 fb cf 00 "
+            "ff ff 00 00 00 f3 cf 00")),
+        (IA64_DATA_ACCESS_VECTOR, 0x00,
+         mov_m_cr_gr(8, 20), nop_i(), nop_i()),
+        (IA64_DATA_ACCESS_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 16), nop_i(), nop_i()),
+        (IA64_DATA_ACCESS_VECTOR + 0x20, 0x00,
+         nop_m(), extr_u(9, 9, 32, 2), nop_i()),
+        (IA64_DATA_ACCESS_VECTOR + 0x30, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_DATA_ACCESS_VECTOR + 0x30,
+                 IA64_DATA_ACCESS_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_DATA_ACCESS_VECTOR + 0x30,
+        "r8": 0x300,
+        "r9": 3,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+
+def _ia32_second_entry_checked_tb(name, second_csd, fault_eip):
+    """Run IA-32 code under a 4 GiB CS, then again under second_csd.
+
+    The first TB has no fetch check.  The second entry must not reuse it,
+    so the fetch at fault_eip raises #GP instead of reaching JMPE again.
+    """
+    return require_registers(name, [
+        *ia32_environment_bundles(0x700, 0x10, csd=IA32_FLAT_CSD),
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, *movl_mlx(8, 0x100)),
+        (0x50, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "90 90 "
+            "0f b8 00 02")),  # jmpe 0x200
+        (0x200, *movl_mlx(3, second_csd)),
+        (0x210, 0x00, mov_m_gr_ar(3, 25), adds(20, 1, 20), nop_i()),
+        (0x220, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        (IA64_IA32_EXCEPTION_VECTOR, 0x00,
+         mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_EXCEPTION_VECTOR + 0x20,
+                 IA64_IA32_EXCEPTION_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_IA32_EXCEPTION_VECTOR + 0x20,
+        "r8": fault_eip,
+        "r9": 13 << 16,
+        "r20": 1,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+
+# A 0x100-byte limit: the second NOP is beyond it.
+test_ia32_cs_limit_shrink_selects_checked_tb = _ia32_second_entry_checked_tb(
+    "ia32_cs_limit_shrink_selects_checked_tb", 0x09b0010000000000, 0x101)
+
+# Still 4 GiB, but not accessed (type 0xa): the first fetch faults.
+test_ia32_cs_not_accessed_selects_checked_tb = _ia32_second_entry_checked_tb(
+    "ia32_cs_not_accessed_selects_checked_tb",
+    IA32_FLAT_CSD & ~(1 << 52), 0x100)
+
+# The IA-32 memory index depends on PSR.dt (ia64_cpu_mmu_index), so the TB
+# key must too: the second entry reads the DTR-mapped page, not physical
+# 0x2000 through the TB of the first entry.
+test_ia32_psr_dt_change_selects_new_tb = require_registers(
+    "ia32_psr_dt_change_selects_new_tb", [
+        *ia32_environment_bundles(0x700, 0x10),
+        *dtr_setup_bundles(0x10, 0x2000, 0x5000, page_shift=12, slot=5),
+        (0x70, *movl_mlx(2, IA64_PSR_IC)),
+        (0x80, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x90, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(8, 0x100)),
+        (0xb0, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "66 a1 00 20 "     # mov eax,[0x2000]
+            "0f b8 00 02")),   # jmpe 0x200
+        ia32_bundle(0x2000, bytes.fromhex("44 33 22 11")),
+        ia32_bundle(0x5000, bytes.fromhex("88 77 66 55")),
+        (0x200, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 20), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_cond(0x210, 0x300, qp=7)),
+        (0x220, 0x00, nop_m(), adds(20, 1, 20), adds(21, 0, 8)),
+        (0x230, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x240, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x250, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x260, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        (0x300, 0x10, nop_m(), nop_i(), br_cond(0x300, 0x300)),
+    ], {
+        "ip": 0x300,
+        "r8": 0x55667788,
+        "r21": 0x11223344,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+# A flat data segment lets a TB leave out the segment check of an access
+# (ia64_ia32_tb_flat_segs).  Each case below breaks one condition of that
+# flag, or is an access whose check must stay, and expects the fault the
+# check raises.
+IA32_FLAT_DSD = IA32_TEST_DSD | (0xf << 48) | (1 << 62) | (1 << 63)
+IA32_FLAT_CODE = 0x9000
+
+
+def _dsd_type(desc, seg_type):
+    return (desc & ~(0xf << 52)) | (seg_type << 52)
+
+
+def _ia32_flat_data_case(name, code, vector, expected, dsd=IA32_FLAT_DSD,
+                         ssd=IA32_FLAT_DSD, csd=IA32_FLAT_CSD | (1 << 62),
+                         psr=0, eflags=2, cflg=None, esp=0xa800, dtrs=(),
+                         pre=(), data=()):
+    """Enter IA-32 code at 0x9000 by rfi with IPSR = ic, is and psr.
+
+    dtrs maps 4 KiB pages (va, pa) while PSR.ic is still clear; pre holds
+    further IA-64 bundles, or ("movl", gr, value); the handler at vector
+    records IIP, ISR and IFA in r20, r21 and r22.
+    """
+    bundles = list(ia32_environment_bundles(0x700, 0x10, csd=csd, dsd=dsd,
+                                            ssd=ssd))
+    addr = 0x10
+    for slot, (va, pa) in enumerate(dtrs):
+        bundles += dtr_setup_bundles(addr, va, pa, page_shift=12,
+                                     slot=5 + slot)
+        addr += 0x60
+    steps = [("movl", 3, eflags), (0x00, mov_m_gr_ar(3, 24), nop_i(), nop_i())]
+    if cflg is not None:
+        steps += [("movl", 3, cflg),
+                  (0x00, mov_m_gr_ar(3, 27), nop_i(), nop_i())]
+    steps += [("movl", 12, esp), *pre,
+              ("movl", 2, IA64_PSR_IC | IA64_PSR_IS | psr),
+              ("movl", 3, IA32_FLAT_CODE)]
+    for step in steps:
+        if step[0] == "movl":
+            bundles.append((addr, *movl_mlx(step[1], step[2])))
+        else:
+            bundles.append((addr, *step))
+        addr += 0x10
+    bundles += rfi_to_gr(addr, 2, 3)
+    assert addr + 0x20 <= 0x400
+    for offset in range(0, len(code), 16):
+        bundles.append(ia32_bundle(IA32_FLAT_CODE + offset,
+                                   code[offset:offset + 16]))
+    bundles += [ia32_bundle(address, payload) for address, payload in data]
+    bundles += [
+        (vector, 0x00, mov_m_cr_gr(20, 19), nop_i(), nop_i()),
+        (vector + 0x10, 0x00, mov_m_cr_gr(21, 17), nop_i(), nop_i()),
+        (vector + 0x20, 0x00, mov_m_cr_gr(22, 20), nop_i(), nop_i()),
+        (vector + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(vector + 0x30, vector + 0x30)),
+    ]
+    return require_registers(name, bundles, {
+        "ip": vector + 0x30, **expected, "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+
+_MOV_EAX_A000 = bytes.fromhex("a1 00 a0 00 00")      # mov eax,[0xa000]
+_MOV_A000_EAX = bytes.fromhex("a3 00 a0 00 00")      # mov [0xa000],eax
+
+test_ia32_flat_ds_psr_ac_faults = _ia32_flat_data_case(
+    "ia32_flat_ds_psr_ac_faults",
+    bytes.fromhex("a1 01 a0 00 00"), IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 17 << 16, "r22": 0xa001},
+    psr=IA64_PSR_AC)
+
+test_ia32_flat_ds_eflags_ac_faults_at_cpl3 = _ia32_flat_data_case(
+    "ia32_flat_ds_eflags_ac_faults_at_cpl3",
+    bytes.fromhex("a1 01 a0 00 00"), IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 17 << 16, "r22": 0xa001},
+    ssd=IA32_FLAT_DSD | (3 << 57), psr=3 << 32, eflags=2 | (1 << 18),
+    cflg=1 | (1 << 18))
+
+test_ia32_flat_ds_data_breakpoint_traps = _ia32_flat_data_case(
+    "ia32_flat_ds_data_breakpoint_traps",
+    _MOV_EAX_A000 + bytes.fromhex("0f 0b"), IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE + 5, "r21": (1 << 16) | (1 << 4)},
+    psr=IA64_PSR_DB, pre=[
+        ("movl", 4, 0),
+        ("movl", 5, 0xa000),
+        (0x00, mov_dbr_indexed_write(4, 5), adds(4, 1, 0), nop_i()),
+        ("movl", 5, 0x81000000ffffffff),
+        (0x00, mov_dbr_indexed_write(4, 5), nop_i(), nop_i()),
+    ])
+
+test_ia32_flat_read_only_ds_store_faults = _ia32_flat_data_case(
+    "ia32_flat_read_only_ds_store_faults",
+    _MOV_A000_EAX, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=_dsd_type(IA32_FLAT_DSD, 0x1))
+
+test_ia32_flat_expand_down_ds_load_faults = _ia32_flat_data_case(
+    "ia32_flat_expand_down_ds_load_faults",
+    _MOV_EAX_A000, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=_dsd_type(IA32_FLAT_DSD, 0x7))
+
+test_ia32_flat_code_ds_store_faults = _ia32_flat_data_case(
+    "ia32_flat_code_ds_store_faults",
+    _MOV_A000_EAX, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=_dsd_type(IA32_FLAT_DSD, 0xb))
+
+test_ia32_flat_ss_wrong_dpl_push_faults = _ia32_flat_data_case(
+    "ia32_flat_ss_wrong_dpl_push_faults",
+    bytes.fromhex("50"), IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 12 << 16},
+    ssd=IA32_FLAT_DSD | (3 << 57))
+
+test_ia32_flat_system_ds_load_faults = _ia32_flat_data_case(
+    "ia32_flat_system_ds_load_faults",
+    _MOV_EAX_A000, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=IA32_FLAT_DSD & ~(1 << 56))
+
+test_ia32_flat_not_present_ds_load_faults = _ia32_flat_data_case(
+    "ia32_flat_not_present_ds_load_faults",
+    _MOV_EAX_A000, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=IA32_FLAT_DSD & ~(1 << 59))
+
+test_ia32_flat_not_accessed_ds_load_faults = _ia32_flat_data_case(
+    "ia32_flat_not_accessed_ds_load_faults",
+    _MOV_EAX_A000, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=_dsd_type(IA32_FLAT_DSD, 0x2))
+
+# 16-bit protected-mode code: MOV DS does not end the TB, so the new
+# 64 KiB DS must be checked in the same TB.
+test_ia32_16bit_mov_ds_limits_same_tb = _ia32_flat_data_case(
+    "ia32_16bit_mov_ds_limits_same_tb",
+    bytes.fromhex(
+        "b8 00 a0 "              # mov ax,0xa000
+        "8e d8 "                 # mov ds,ax
+        "67 a1 00 00 01 00"),    # mov ax,[0x10000]
+    IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE + 5, "r21": 13 << 16},
+    csd=IA32_FLAT_CSD, cflg=1,
+    data=[(0xa000, bytes.fromhex("ff ff 00 00 00 93 00 00"))])
+
+test_ia32_vm86_big_ss_push_faults = _ia32_flat_data_case(
+    "ia32_vm86_big_ss_push_faults",
+    bytes.fromhex("50"), IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 12 << 16},
+    csd=IA32_FLAT_CSD | (3 << 57), ssd=IA32_FLAT_DSD | (3 << 57),
+    psr=3 << 32, eflags=2 | (1 << 17), cflg=1)
+
+# FS and GS never take the flat path: their TB-flag positions hold PSR.dt
+# and PSR.db.
+test_ia32_fs_limit_checked_with_psr_dt = _ia32_flat_data_case(
+    "ia32_fs_limit_checked_with_psr_dt",
+    bytes.fromhex("64 a1 00 00 01 00"),  # mov eax,fs:[0x10000]
+    IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    psr=IA64_PSR_DT, dtrs=[(0x10000, 0x10000)],
+    pre=[("movl", 28, IA32_TEST_DSD)])
+
+# The probe of these operands comes first: a misaligned MOVAPS reports the
+# TLB miss, POP m the destination before the stack, and a read-modify-write
+# a write miss.
+test_ia32_flat_movaps_tlb_miss_precedes_alignment = _ia32_flat_data_case(
+    "ia32_flat_movaps_tlb_miss_precedes_alignment",
+    bytes.fromhex("0f 28 05 08 c0 00 00"),  # movaps xmm0,[0xc008]
+    IA64_ALT_DTLB_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_R, "r22": 0xc008},
+    psr=IA64_PSR_DT, cflg=(1 << 9) << 32)
+
+test_ia32_flat_movaps_store_tlb_miss_precedes_alignment = \
+    _ia32_flat_data_case(
+        "ia32_flat_movaps_store_tlb_miss_precedes_alignment",
+        bytes.fromhex("0f 29 05 08 c0 00 00"),  # movaps [0xc008],xmm0
+        IA64_ALT_DTLB_VECTOR,
+        {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_W, "r22": 0xc008},
+        psr=IA64_PSR_DT, cflg=(1 << 9) << 32)
+
+test_ia32_flat_aligned_movaps_tlb_miss = _ia32_flat_data_case(
+    "ia32_flat_aligned_movaps_tlb_miss",
+    bytes.fromhex("0f 28 05 00 c0 00 00"),  # movaps xmm0,[0xc000]
+    IA64_ALT_DTLB_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_R, "r22": 0xc000},
+    psr=IA64_PSR_DT, cflg=(1 << 9) << 32)
+
+test_ia32_flat_misaligned_mapped_movaps_faults = _ia32_flat_data_case(
+    "ia32_flat_misaligned_mapped_movaps_faults",
+    bytes.fromhex("0f 28 05 08 c0 00 00"),  # movaps xmm0,[0xc008]
+    IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    psr=IA64_PSR_DT, cflg=(1 << 9) << 32, dtrs=[(0xc000, 0xc000)])
+
+test_ia32_flat_movups_tlb_miss = _ia32_flat_data_case(
+    "ia32_flat_movups_tlb_miss",
+    bytes.fromhex("0f 10 05 08 c0 00 00"),  # movups xmm0,[0xc008]
+    IA64_ALT_DTLB_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_R, "r22": 0xc008},
+    psr=IA64_PSR_DT, cflg=(1 << 9) << 32)
+
+test_ia32_flat_pop_m_probes_destination_first = _ia32_flat_data_case(
+    "ia32_flat_pop_m_probes_destination_first",
+    bytes.fromhex("8f 05 00 c0 00 00"),  # pop dword [0xc000]
+    IA64_ALT_DTLB_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_W, "r22": 0xc000},
+    psr=IA64_PSR_DT, esp=0xb000)
+
+test_ia32_flat_rmw_reports_write_miss = _ia32_flat_data_case(
+    "ia32_flat_rmw_reports_write_miss",
+    bytes.fromhex("01 05 00 c0 00 00"),  # add [0xc000],eax
+    IA64_ALT_DTLB_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_W, "r22": 0xc000},
+    psr=IA64_PSR_DT)
+
+# POP m checks its destination against DS, not against the SS of its stack
+# load: the destination lies beyond the 64 KiB SS but inside a flat DS.
+test_ia32_pop_m_destination_checked_against_ds = _ia32_flat_data_case(
+    "ia32_pop_m_destination_checked_against_ds",
+    bytes.fromhex(
+        "8f 05 00 00 02 00 "     # pop dword [0x20000]
+        "0f 0b"),                # ud2
+    IA64_IA32_INTERCEPT_VECTOR,
+    {"r20": IA32_FLAT_CODE + 6},
+    ssd=IA32_TEST_DSD,
+    data=[(0xa800, bytes.fromhex("78 56 34 12"))])
+
+# PAUSE leaves for the main loop; it must still complete like any other
+# instruction: a PSR.ss trap after it, and PSR.id cleared.
+test_ia32_pause_psr_ss_traps_after_it = require_registers(
+    "ia32_pause_psr_ss_traps_after_it", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_IS | IA64_PSR_SS)),
+        (0x20, *movl_mlx(3, 0x100)),
+        *rfi_to_gr(0x30, 2, 3),
+        ia32_bundle(0x100, bytes.fromhex(
+            "f3 90 "        # pause
+            "0f 0b")),      # ud2
+        (IA64_IA32_EXCEPTION_VECTOR, 0x00,
+         mov_m_cr_gr(5, 19), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(6, 17), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_EXCEPTION_VECTOR + 0x20,
+                 IA64_IA32_EXCEPTION_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_IA32_EXCEPTION_VECTOR + 0x20,
+        "r5": 0x102,
+        "r6": (1 << 16) | (1 << 3),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_pause_clears_psr_id = require_registers(
+    "ia32_pause_clears_psr_id", [
+        *ia32_environment_bundles(0x700, 0x10),
+        # Break on the NOP after PAUSE; PSR.id suppresses only PAUSE's fetch.
+        (0x10, *movl_mlx(4, 0)),
+        (0x20, *movl_mlx(5, 0x102)),
+        (0x30, 0x00, mov_ibr_indexed_write(4, 5), nop_i(), nop_i()),
+        (0x40, 0x00, nop_m(), adds(4, 1, 0), nop_i()),
+        (0x50, *movl_mlx(5, 0x81000000ffffffff)),
+        (0x60, 0x00, mov_ibr_indexed_write(4, 5), nop_i(), nop_i()),
+        (0x70, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0x80, *movl_mlx(
+            2, IA64_PSR_IC | IA64_PSR_IS | IA64_PSR_DB | (1 << 37))),
+        (0x90, *movl_mlx(3, 0x100)),
+        *rfi_to_gr(0xa0, 2, 3),
+        ia32_bundle(0x100, bytes.fromhex(
+            "f3 90 "        # pause
+            "90 "           # breakpoint
+            "0f 0b")),      # ud2
+        (IA64_IA32_EXCEPTION_VECTOR, 0x00,
+         mov_m_cr_gr(5, 19), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(6, 17), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_EXCEPTION_VECTOR + 0x20,
+                 IA64_IA32_EXCEPTION_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_IA32_EXCEPTION_VECTOR + 0x20,
+        "r5": 0x102,
+        "r6": (1 << 32) | (1 << 16),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+# A TB entered with every SIMD exception masked leaves out the SSE
+# exception bracket; LDMXCSR and FXRSTOR end it, so an exception they unmask
+# is still precise in the next instruction.
+def _ia32_simd_unmask_case(name, code, data, expected):
+    return require_registers(name, [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(3, 0x1f80 << 32)),
+        (0x20, 0x00, mov_m_gr_ar(3, 21), nop_i(), nop_i()),
+        (0x30, *movl_mlx(4, ((1 << 9) | (1 << 10)) << 32)),
+        (0x40, 0x00, mov_m_gr_ar(4, 27), nop_i(), nop_i()),
+        (0x50, *movl_mlx(5, 0x112233443f800000)),
+        (0x60, 0x00, setf_sig(16, 5), nop_i(), nop_i()),
+        (0x70, 0x00, setf_sig(18, 0), nop_i(), nop_i()),
+        (0x80, *movl_mlx(2, IA64_PSR_IC)),
+        (0x90, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0xa0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xb0, *movl_mlx(8, 0x100)),
+        (0xc0, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, code),
+        ia32_bundle(*data),
+        (IA64_IA32_EXCEPTION_VECTOR, 0x00,
+         mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_EXCEPTION_VECTOR + 0x20,
+                 IA64_IA32_EXCEPTION_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_IA32_EXCEPTION_VECTOR + 0x20,
+        **expected,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+
+test_ia32_ldmxcsr_unmasked_exception_faults_in_same_tb = \
+    _ia32_simd_unmask_case(
+        "ia32_ldmxcsr_unmasked_exception_faults_in_same_tb",
+        bytes.fromhex(
+            "0f ae 16 00 a0 "   # ldmxcsr [0xa000]: divide-by-zero unmasked
+            "f3 0f 5e c1"),     # divss xmm0,xmm1 (1.0 / 0)
+        (0xa000, bytes.fromhex("80 1d 00 00")),
+        {"r8": 0x105, "r9": 19 << 16})
+
+test_ia32_fxrstor_unmasked_exception_faults_in_same_tb = \
+    _ia32_simd_unmask_case(
+        "ia32_fxrstor_unmasked_exception_faults_in_same_tb",
+        bytes.fromhex(
+            "0f ae 0e 00 a0 "   # fxrstor [0xa000]: MXCSR 0x1f00, XMM zero
+            "f3 0f 5e c1"),     # divss xmm0,xmm1 (0 / 0: invalid unmasked)
+        (0xa010, bytes.fromhex("00 00 00 00 00 00 00 00 00 1f 00 00")),
+        {"r8": 0x105, "r9": 19 << 16})
+
 CASE_NAMES = (
+    'ipis_during_break_faults_all_arrive',
 
     'ar_itc_advances_in_guest_loop',
+    'armed_itm_match_pends_before_past_itm_write',
+    'armed_itm_match_shows_in_irr',
+    'armed_itm_match_survives_itc_write_back',
+    'armed_itm_match_survives_itv_mask',
     'async_timer_interrupt_enters_ivt',
     'async_timer_interrupt_never_resumes_mlx_slot2',
     'async_timer_interrupt_preserves_bank1_grs',
@@ -5353,6 +6283,9 @@ CASE_NAMES = (
     'break_preserves_ifa_and_records_iim_isr',
     'cloop_zero_st1_timer_interrupts_batched_loop',
     'counted_self_loop_fault_has_slot1_ri',
+    'ri_fault_in_slot1_after_unobserving_slot',
+    'ri_fault_in_slot1_reuses_stored_slot',
+    'ri_fault_after_counted_self_loop_exit',
     'cover_saves_interrupted_cfm_to_ifs',
     'exception_break',
     'exception_break_f',
@@ -5392,6 +6325,46 @@ CASE_NAMES = (
     'ia32_cross_page_tlb_precedes_later_cs_limit',
     'ia32_dfl_faults_first_x87_instruction',
     'ia32_ds_operand_crossing_limit_faults',
+    'ia32_flat_cs_psr_ss_traps_after_one_instruction',
+    'ia32_flat_cs_eflag_tf_traps_after_one_instruction',
+    'ia32_flat_cs_ibr_instruction_breakpoint_fault',
+    'ia32_flat_cs_taken_branch_clears_rf_and_psr_id',
+    'ia32_flat_cs_not_taken_branch_clears_rf_and_psr_id',
+    'ia32_flat_cs_gate_intercept_reports_concurrent_debug_traps',
+    'ia32_flat_cs_dfh_faults_first_target_instruction',
+    'ia32_flat_cs_dfl_faults_first_x87_instruction',
+    'ia32_flat_cs_taken_branch_trap',
+    'ia32_flat_cs_first_completion_clears_rf',
+    'ia32_flat_cs_first_completion_clears_psr_id',
+    'ia32_flat_cs_retf_to_cpl3_updates_psr_cpl',
+    'ia32_cs_limit_shrink_selects_checked_tb',
+    'ia32_cs_not_accessed_selects_checked_tb',
+    'ia32_psr_dt_change_selects_new_tb',
+    'ia32_flat_ds_psr_ac_faults',
+    'ia32_flat_ds_eflags_ac_faults_at_cpl3',
+    'ia32_flat_ds_data_breakpoint_traps',
+    'ia32_flat_read_only_ds_store_faults',
+    'ia32_flat_expand_down_ds_load_faults',
+    'ia32_flat_code_ds_store_faults',
+    'ia32_flat_ss_wrong_dpl_push_faults',
+    'ia32_flat_system_ds_load_faults',
+    'ia32_flat_not_present_ds_load_faults',
+    'ia32_flat_not_accessed_ds_load_faults',
+    'ia32_16bit_mov_ds_limits_same_tb',
+    'ia32_vm86_big_ss_push_faults',
+    'ia32_fs_limit_checked_with_psr_dt',
+    'ia32_flat_movaps_tlb_miss_precedes_alignment',
+    'ia32_flat_pop_m_probes_destination_first',
+    'ia32_flat_rmw_reports_write_miss',
+    'ia32_pop_m_destination_checked_against_ds',
+    'ia32_pause_psr_ss_traps_after_it',
+    'ia32_pause_clears_psr_id',
+    'ia32_flat_movaps_store_tlb_miss_precedes_alignment',
+    'ia32_flat_aligned_movaps_tlb_miss',
+    'ia32_flat_misaligned_mapped_movaps_faults',
+    'ia32_flat_movups_tlb_miss',
+    'ia32_ldmxcsr_unmasked_exception_faults_in_same_tb',
+    'ia32_fxrstor_unmasked_exception_faults_in_same_tb',
     'ia32_gate_intercept_reports_concurrent_debug_traps',
     'ia32_gdt_descriptor_read_triggers_data_breakpoint',
     'ia32_gdt_descriptor_read_wraps_at_4g',
@@ -5478,10 +6451,13 @@ CASE_NAMES = (
     'sapic_same_class_higher_vector_preempts',
     'timer_interrupt_exits_chained_loop_after_virtual_deadline',
     'tpr_mmi_masks_timer_until_cleared',
+    'tpr_unmask_delivers_by_srlz_d',
+    'mov_to_tpr_reserved_bits_fault',
     'tpr_preserves_mmi_and_mic',
     'unimplemented_physical_instruction_traps',
     'pending_interrupt_taken_after_ssm',
     'pending_interrupt_taken_after_mov_psr_l',
+    'pending_interrupt_taken_after_tpr_srlz',
     'pending_interrupt_taken_after_rfi',
     'itc_read_storm_keeps_virtual_time_rate',
     'itc_read_storm_keeps_virtual_time_rate_merced',

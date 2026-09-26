@@ -131,52 +131,43 @@ static int ia64_tlb_circular_tc_victim(const IA64TlbEntry *tlb,
  * Largest IA-64 page for which ia64_qemu_tlb_flush_entry() walks the softmmu
  * TLB one 4 KiB page at a time instead of issuing a range flush.  Covers the
  * 4/8/16/64/256 KiB pages the guest OSes actually map their working sets with
- * (Windows 8 KiB, Linux 16 KiB); 1 MiB+ TR granules fall through to the range
- * flush.  256 KiB is 64 single-page flushes worst case -- far cheaper than the
- * full-index flush and refill storm the range path degrades to.
+ * (Windows 8 KiB, Linux 16 KiB); 1 MiB+ granules take the range flush, which
+ * tests every softmmu entry once the range is longer than the table's span.
  */
 #define IA64_TLB_PAGEWISE_FLUSH_MAX (64ULL * TARGET_PAGE_SIZE)
 
-static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
-                                      const IA64TlbEntry *entry,
-                                      bool is_data)
+/* Drop the softmmu translations of [va, va + ps) in every region using rid. */
+static void ia64_qemu_tlb_flush_range(CPUIA64State *env, uint64_t va,
+                                      uint64_t ps, uint32_t rid, bool is_data)
 {
     uint64_t base;
     uint8_t region;
 
-    if (!entry->valid || entry->ps < TARGET_PAGE_SIZE) {
-        return;
-    }
-
-    base = ia64_va_page_base(entry->va, entry->ps);
+    ps = MAX(ps, TARGET_PAGE_SIZE);
+    base = ia64_va_page_base(va, ps);
     for (region = 0; region <= IA64_REGION_MASK; region++) {
-        if (ia64_rr_rid(env->rr[region]) != entry->rid) {
+        if (ia64_rr_rid(env->rr[region]) != rid) {
             continue;
         }
 
-        uint64_t va = ((uint64_t)region << IA64_REGION_SHIFT) | base;
+        uint64_t region_va = ((uint64_t)region << IA64_REGION_SHIFT) | base;
 
         /*
-         * A range flush degrades to a full flush of every dirty translated
-         * MMU index whenever the range is longer than the softmmu table's
-         * byte span (upstream tlb_flush_range_locked: len > f->mask).  The
-         * tables sit at a few hundred entries, so even an 8 KiB Windows page
-         * or a 16 KiB Linux page always tripped that path -- discarding the
-         * whole softmmu TLB (and, for the instruction case, the jump cache)
-         * on every itc/purge/VHPT-walk completion and provoking a refill
-         * storm.  For pages small enough that a per-4 KiB-page walk is
-         * cheaper than rebuilding the table, flush each 4 KiB page
-         * individually; single-page flushes never degrade.  Genuinely large
-         * pages (TR-sized granules) keep the range flush, where a full flush
-         * really is the cheaper choice.
+         * The range flush tests every softmmu entry of each dirty translated
+         * MMU index once the range is longer than the table's byte span
+         * (tlb_flush_range_locked: len > f->mask), and the tables sit at a
+         * few hundred entries, so an 8 KiB Windows or 16 KiB Linux page
+         * would take that path.  Flushing each 4 KiB page is cheaper for
+         * pages up to IA64_TLB_PAGEWISE_FLUSH_MAX.
          */
-        if (entry->ps <= IA64_TLB_PAGEWISE_FLUSH_MAX) {
-            for (uint64_t off = 0; off < entry->ps; off += TARGET_PAGE_SIZE) {
+        if (ps <= IA64_TLB_PAGEWISE_FLUSH_MAX) {
+            for (uint64_t off = 0; off < ps; off += TARGET_PAGE_SIZE) {
                 if (is_data) {
                     tlb_flush_page_by_mmuidx_no_jmp_cache(
-                        env_cpu(env), va + off, MMU_IDX_TRANSLATED_MASK);
+                        env_cpu(env), region_va + off,
+                        MMU_IDX_TRANSLATED_MASK);
                 } else {
-                    tlb_flush_page_by_mmuidx(env_cpu(env), va + off,
+                    tlb_flush_page_by_mmuidx(env_cpu(env), region_va + off,
                                              MMU_IDX_TRANSLATED_MASK);
                 }
             }
@@ -188,13 +179,46 @@ static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
              * code block or its jump-cache hint.
              */
             tlb_flush_range_by_mmuidx_no_jmp_cache(
-                env_cpu(env), va, entry->ps, MMU_IDX_TRANSLATED_MASK,
+                env_cpu(env), region_va, ps, MMU_IDX_TRANSLATED_MASK,
                 TARGET_LONG_BITS);
         } else {
-            tlb_flush_range_by_mmuidx(env_cpu(env), va, entry->ps,
+            tlb_flush_range_by_mmuidx(env_cpu(env), region_va, ps,
                                       MMU_IDX_TRANSLATED_MASK,
                                       TARGET_LONG_BITS);
         }
+    }
+}
+
+static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
+                                      const IA64TlbEntry *entry,
+                                      bool is_data)
+{
+    if (!entry->valid || entry->ps < TARGET_PAGE_SIZE) {
+        return;
+    }
+    ia64_qemu_tlb_flush_range(env, entry->va, entry->ps, entry->rid,
+                              is_data);
+}
+
+/*
+ * The softmmu keeps the translation of a data TC entry that a new insertion
+ * displaces: the TC may hold a translation until it is purged, and software
+ * must purge before it changes one (SDM Vol 2, Translation Cache), so this
+ * behaves like a larger DTC.  Every purge therefore flushes its whole range,
+ * not only the TC entries it finds.  Still flushed: an instruction victim,
+ * because code must not run on without the ITC entry whose ED bit ld.s
+ * deferral reads (ia64_code_tlb_ed_lookup); a victim with a purge pending,
+ * which must be gone at the next serialization; and any victim while the
+ * firmware owns IVA, where a TC miss can fall back to the firmware identity
+ * window instead of faulting.
+ */
+static void ia64_qemu_tlb_flush_victim(CPUIA64State *env,
+                                       const IA64TlbEntry *entry,
+                                       bool is_data)
+{
+    if (!is_data || entry->pending_purge ||
+        ia64_firmware_owns_iva(&env->firmware, env->cr_iva)) {
+        ia64_qemu_tlb_flush_entry(env, entry, is_data);
     }
 }
 
@@ -307,39 +331,174 @@ static void ia64_discard_pending_purge(IA64TlbEntry *entry,
     (*pending_count)--;
 }
 
+static IA64TlbIndex *ia64_tlb_index_of(CPUIA64State *env,
+                                       const IA64TlbEntry *tlb)
+{
+    return tlb == env->mmu.tlb_data ? &env->mmu.tlb_data_index :
+                                      &env->mmu.tlb_inst_index;
+}
+
+static void ia64_tlb_index_add(IA64TlbIndex *index, const IA64TlbEntry *tlb,
+                               unsigned slot)
+{
+    const IA64TlbEntry *entry = &tlb[slot];
+    unsigned shift;
+    unsigned bucket;
+
+    g_assert(index->shift[slot] == 0);
+    if (!entry->valid || entry->ps == 0) {
+        return;
+    }
+    shift = ctz64(entry->ps);
+    bucket = ia64_tlb_index_bucket(entry->va, entry->rid, shift);
+    index->next[slot] = index->head[bucket];
+    index->head[bucket] = slot + 1;
+    index->shift[slot] = shift;
+    index->indexed[slot / 64] |= 1ULL << (slot % 64);
+    if (index->shift_count[shift]++ == 0) {
+        index->shift_mask |= 1ULL << shift;
+    }
+}
+
+/* Call before the slot's va, rid or ps change; clearing valid may precede. */
+static void ia64_tlb_index_remove(IA64TlbIndex *index,
+                                  const IA64TlbEntry *tlb, unsigned slot)
+{
+    unsigned shift = index->shift[slot];
+    uint8_t *link;
+
+    if (shift == 0) {
+        return;
+    }
+    link = &index->head[ia64_tlb_index_bucket(tlb[slot].va, tlb[slot].rid,
+                                              shift)];
+    while (*link != slot + 1) {
+        g_assert(*link != 0);
+        link = &index->next[*link - 1];
+    }
+    *link = index->next[slot];
+    index->shift[slot] = 0;
+    index->indexed[slot / 64] &= ~(1ULL << (slot % 64));
+    if (--index->shift_count[shift] == 0) {
+        index->shift_mask &= ~(1ULL << shift);
+    }
+}
+
+void ia64_tlb_index_rebuild(CPUIA64State *env)
+{
+    memset(&env->mmu.tlb_data_index, 0, sizeof(env->mmu.tlb_data_index));
+    memset(&env->mmu.tlb_inst_index, 0, sizeof(env->mmu.tlb_inst_index));
+    for (unsigned slot = 0; slot < IA64_TLB_MAX; slot++) {
+        ia64_tlb_index_add(&env->mmu.tlb_data_index, env->mmu.tlb_data, slot);
+        ia64_tlb_index_add(&env->mmu.tlb_inst_index, env->mmu.tlb_inst, slot);
+    }
+}
+
+/*
+ * Mark in *found every slot that may overlap [start, start + ps): an entry
+ * at least ps large must contain start; a smaller one lies inside the range.
+ * Returns false when the range spans too many smaller pages to probe, and
+ * the caller must scan.
+ */
+static bool ia64_tlb_index_overlap_candidates(const IA64TlbIndex *index,
+                                              uint64_t start, uint64_t ps,
+                                              uint32_t rid, uint64_t found[2])
+{
+    unsigned range_shift = ctz64(ps);
+    uint64_t shifts = index->shift_mask;
+
+    found[0] = 0;
+    found[1] = 0;
+    while (shifts != 0) {
+        unsigned shift = ctz64(shifts);
+        uint64_t pages = shift >= range_shift ?
+                         1 : 1ULL << (range_shift - shift);
+
+        shifts &= shifts - 1;
+        if (pages > 32) {
+            return false;
+        }
+        for (uint64_t page = 0; page < pages; page++) {
+            uint64_t va = start + (page << shift);
+            unsigned link = index->head[ia64_tlb_index_bucket(va, rid,
+                                                              shift)];
+
+            while (link != 0) {
+                found[(link - 1) / 64] |= 1ULL << ((link - 1) % 64);
+                link = index->next[link - 1];
+            }
+        }
+    }
+    return true;
+}
+
+static bool ia64_purge_tc_entry_if_overlapping(CPUIA64State *env,
+                                               IA64TlbEntry *tlb,
+                                               uint16_t *pending_count,
+                                               uint64_t start, uint64_t ps,
+                                               uint32_t rid, bool is_data,
+                                               uint16_t i)
+{
+    if (!tlb[i].valid || tlb[i].rid != rid || tlb[i].is_tr ||
+        !ia64_tlb_entry_overlaps(&tlb[i], start, ps, rid)) {
+        return false;
+    }
+    ia64_qemu_tlb_flush_entry(env, &tlb[i], is_data);
+    ia64_discard_pending_purge(&tlb[i], pending_count);
+    ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, i);
+    tlb[i].valid = 0;
+    ia64_tlb_bump_slot_generation(env, !is_data, i);
+    return true;
+}
+
 static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
                                   uint16_t *count,
                                   uint16_t *pending_count, uint64_t va,
                                   uint64_t ps, uint32_t rid, bool is_data,
                                   uint16_t *next_replace, int *insert_slot)
 {
+    const IA64TlbIndex *index = ia64_tlb_index_of(env, tlb);
     int empty = -1;
     uint64_t start = ia64_va_page_base(va, ps);
+    uint64_t found[2];
     uint16_t i;
     bool purged = false;
 
     if (insert_slot) {
         *insert_slot = -1;
     }
-    for (i = 0; i < *count; i++) {
-        if (!tlb[i].valid) {
-            if (insert_slot && empty < 0) {
-                empty = i;
+    if (ia64_tlb_index_overlap_candidates(index, start, ps, rid, found)) {
+        for (unsigned word = 0; word < 2; word++) {
+            while (found[word] != 0) {
+                i = word * 64 + ctz64(found[word]);
+                found[word] &= found[word] - 1;
+                purged |= ia64_purge_tc_entry_if_overlapping(
+                    env, tlb, pending_count, start, ps, rid, is_data, i);
             }
-            continue;
         }
-        if (tlb[i].rid != rid || tlb[i].is_tr) {
-            continue;
+    } else {
+        for (i = 0; i < *count; i++) {
+            purged |= ia64_purge_tc_entry_if_overlapping(
+                env, tlb, pending_count, start, ps, rid, is_data, i);
         }
-        if (ia64_tlb_entry_overlaps(&tlb[i], start, ps, rid)) {
-            ia64_qemu_tlb_flush_entry(env, &tlb[i], is_data);
-            ia64_discard_pending_purge(&tlb[i], pending_count);
-            tlb[i].valid = 0;
-            ia64_tlb_bump_slot_generation(env, !is_data, i);
-            if (insert_slot && empty < 0) {
-                empty = i;
+    }
+
+    /* The first free slot below the old count, as the scan used to find. */
+    if (insert_slot) {
+        for (unsigned word = 0; word * 64 < *count && empty < 0; word++) {
+            uint64_t unused = ~index->indexed[word];
+
+            while (unused != 0) {
+                i = word * 64 + ctz64(unused);
+                unused &= unused - 1;
+                if (i >= *count) {
+                    break;
+                }
+                if (!tlb[i].valid) {
+                    empty = i;
+                    break;
+                }
             }
-            purged = true;
         }
     }
 
@@ -476,6 +635,7 @@ static bool ia64_complete_pending_purges(CPUIA64State *env,
             tlb[i].pending_purge = 0;
             g_assert(*pending_count > 0);
             (*pending_count)--;
+            ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, i);
             tlb[i].valid = 0;
             ia64_tlb_bump_slot_generation(env, is_ifetch, i);
             purged = true;
@@ -609,12 +769,15 @@ static bool ia64_cache_replaced_tr(CPUIA64State *env, IA64TlbEntry *tlb,
                   " rid=0x%06" PRIx32 " pa=0x%016" PRIx64
                   " ps=0x%016" PRIx64 "\n",
                   slot, old_tr->va, old_tr->rid, old_tr->pa, old_tr->ps);
+    ia64_qemu_tlb_flush_victim(env, &tlb[slot], !is_ifetch);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
+    ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, slot);
     micro_generation = tlb[slot].micro_generation;
     tlb[slot] = *old_tr;
     tlb[slot].micro_generation = micro_generation;
     tlb[slot].is_tr = 0;
     tlb[slot].slot = slot;
+    ia64_tlb_index_add(ia64_tlb_index_of(env, tlb), tlb, slot);
     ia64_tlb_bump_slot_generation(env, is_ifetch, slot);
     if (slot >= *cnt) {
         *cnt = slot + 1;
@@ -702,6 +865,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
         ia64_discard_pending_purge(&tlb[slot], pending_count);
     }
 
+    ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, slot);
     tlb[slot].va = va;
     tlb[slot].pa = pa;
     tlb[slot].ps = ps;
@@ -716,6 +880,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     tlb[slot].rid = rid;
     tlb[slot].key = key;
     tlb[slot].slot = slot;
+    ia64_tlb_index_add(ia64_tlb_index_of(env, tlb), tlb, slot);
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
@@ -768,6 +933,7 @@ void ia64_mmu_ptr_purge(CPUIA64State *env, uint64_t ifa, uint64_t size_reg,
         is_data ? &env->mmu.pending_purge_data_count :
                   &env->mmu.pending_purge_inst_count,
         va, ps, rid, false, is_data ? 'd' : 'i');
+    ia64_qemu_tlb_flush_range(env, va, ps, rid, is_data);
     ia64_assert_pending_purge_counts(env);
 }
 
@@ -790,6 +956,15 @@ static void ia64_ptc_mark_global(CPUIA64State *env,
         env->mmu.tlb_inst, env->mmu.tlb_inst_count,
         &env->mmu.pending_purge_inst_count,
         work->va, work->ps, work->rid, true, 'i');
+    /*
+     * This flush drops the data translations the softmmu keeps without a TC
+     * entry (ia64_qemu_tlb_flush_victim).  Instruction translations exist
+     * only with an ITC or ITR entry (or in the firmware identity window,
+     * which no purge changes), and each ITC entry marked here is flushed
+     * with the jump cache when its purge completes, so the jump cache
+     * stays: clearing it for a 16 MiB range clears all of it.
+     */
+    ia64_qemu_tlb_flush_range(env, work->va, work->ps, work->rid, true);
     ia64_assert_pending_purge_counts(env);
 
     if (remote) {
@@ -874,6 +1049,7 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
         ia64_mark_pending_purge_all_tc(
             env->mmu.tlb_inst, env->mmu.tlb_inst_count,
             &env->mmu.pending_purge_inst_count, 'i');
+        tlb_flush_by_mmuidx(env_cpu(env), MMU_IDX_TRANSLATED_MASK);
     } else {
         ia64_mark_pending_purge_entries(
             env->mmu.tlb_data, env->mmu.tlb_data_count,
@@ -881,6 +1057,8 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
         ia64_mark_pending_purge_entries(
             env->mmu.tlb_inst, env->mmu.tlb_inst_count,
             &env->mmu.pending_purge_inst_count, va, ps, rid, true, 'i');
+        /* The jump cache stays, as in ia64_ptc_mark_global(). */
+        ia64_qemu_tlb_flush_range(env, va, ps, rid, true);
     }
     ia64_assert_pending_purge_counts(env);
 }
@@ -1639,7 +1817,14 @@ void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
 void ia64_mmu_check_semaphore_access(CPUIA64State *env, uint64_t va)
 {
     IA64DataReferenceResult translation = { 0 };
-    IA64Exception excp = ia64_data_reference_exception(
+    IA64Exception excp;
+    int mmu_idx = env->psr & IA64_PSR_DT ?
+                  MMU_IDX_VIRT_CPL(ia64_psr_cpl(env->psr)) : MMU_PHYS_IDX;
+
+    if (ia64_exec_semaphore_hit_writeback(env, va, mmu_idx)) {
+        return;
+    }
+    excp = ia64_data_reference_exception(
         env, va, true, true, ia64_psr_cpl(env->psr), true, &translation);
 
     /* A NaTPage translation already reports NaT Page Consumption here. */
@@ -1689,8 +1874,8 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
                                   uint32_t span)
 {
     bool alignment_fault;
-    bool itlb_ed;
-    bool itlb_ed_known;
+    bool itlb_ed = false;
+    bool itlb_ed_known = true;
     IA64Exception excp;
     IA64DataReferenceResult translation;
 
@@ -1698,9 +1883,24 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
         return 0;
     }
 
-    itlb_ed = ia64_code_tlb_ed_lookup(env, &itlb_ed_known);
     alignment_fault = ia64_speculative_alignment_fault(env, va, size,
                                                        window, span);
+    /*
+     * A naturally aligned load that hits a softmmu read entry has passed
+     * every data-reference check at this privilege level already; only the
+     * memory attribute can still defer it.  Physical accesses never allow
+     * control speculation (ia64_cpu_tlb_fill), so they skip the lookup.
+     */
+    if (!is_ifetch && !is_write && (env->psr & IA64_PSR_DT) &&
+        size != 0 && (va & (size - 1)) == 0) {
+        int mmu_idx = MMU_IDX_VIRT_CPL(ia64_psr_cpl(env->psr));
+        int speculation = ia64_exec_load_hit_speculation(env, va, mmu_idx);
+
+        if (speculation >= 0 &&
+            ia64_memory_allows_control_speculation(speculation)) {
+            return 1;
+        }
+    }
     if (is_ifetch) {
         if (alignment_fault) {
             excp = IA64_EXCP_UNALIGNED;
@@ -1724,6 +1924,10 @@ qualify:
      */
     if (excp == IA64_EXCP_UNIMPL_DATA_ADDR) {
         alignment_fault = false;
+    }
+    /* ITLB.ed only qualifies a condition; the success path needs no lookup. */
+    if (excp != IA64_EXCP_NONE || alignment_fault) {
+        itlb_ed = ia64_code_tlb_ed_lookup(env, &itlb_ed_known);
     }
     if (excp != IA64_EXCP_NONE &&
         !ia64_speculative_exception_deferrable(env, excp, itlb_ed,
@@ -2190,8 +2394,9 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
         return NULL;
     }
 
-    ia64_qemu_tlb_flush_entry(env, &tlb[slot], !is_ifetch);
+    ia64_qemu_tlb_flush_victim(env, &tlb[slot], !is_ifetch);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
+    ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, slot);
     tlb[slot].va = base_va;
     tlb[slot].pa = base_pa;
     tlb[slot].ps = page_size;
@@ -2206,6 +2411,7 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
     tlb[slot].rid = rid;
     tlb[slot].key = key;
     tlb[slot].slot = slot;
+    ia64_tlb_index_add(ia64_tlb_index_of(env, tlb), tlb, slot);
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
@@ -2521,8 +2727,9 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
     if (slot < 0) {
         return;
     }
-    ia64_qemu_tlb_flush_entry(env, &tlb[slot], is_data);
+    ia64_qemu_tlb_flush_victim(env, &tlb[slot], is_data);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
+    ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, slot);
 
     tlb[slot].va = va;
     tlb[slot].pa = pa;
@@ -2538,6 +2745,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
     tlb[slot].rid = rid;
     tlb[slot].key = key;
     tlb[slot].slot = slot;
+    ia64_tlb_index_add(ia64_tlb_index_of(env, tlb), tlb, slot);
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }

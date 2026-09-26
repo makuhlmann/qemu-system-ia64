@@ -26,6 +26,21 @@
 #define IA64_TB_FLAG_PSR_AC       (1u << 8)
 #define IA64_TB_FLAG_PSR_SS       (1u << 11)
 #define IA64_TB_FLAG_PSR_TB       (1u << 12)
+/* No GR NaT bit is set at TB entry. */
+#define IA64_TB_FLAG_NAT_CLEAR    (1u << 13)
+/* PSR.dfl (bit 18) at TB entry. */
+#define IA64_TB_FLAG_PSR_DFL      (1u << 14)
+
+/* The cs_base of an IA-64 TB holds CFM.sof and CFM.sol at entry. */
+#define IA64_TB_CS_BASE_SOL_SHIFT 8
+
+/* NaT bits of r0-r31 in the first word of the GR NaT file. */
+#define IA64_STATIC_GR_NAT_MASK   0xffffffffULL
+/*
+ * PSR.dt selects the memory index of an IA-32 TB (ia64_cpu_mmu_index).
+ * Bit 28 is HF_AVX_EN, which the IA-32 engine never sets.
+ */
+#define IA64_TB_FLAG_IA32_PSR_DT  (1u << 28)
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)
@@ -39,12 +54,22 @@ typedef struct IA64TranslationMemoryState {
     bool psr_ac;
     bool full_alat;
     uint64_t nat_known_clear[2];
+    /* nat_known_clear where the current instruction may leave the TB. */
+    uint64_t nat_known_at_exit[2];
+    /* nat_known_clear before the current instruction. */
+    uint64_t nat_known_before[2];
 } IA64TranslationMemoryState;
 
 typedef struct IA64TranslationRestartState {
     uint8_t start_slot;
+    /*
+     * PSR.ri as generated code has stored it (current_ri, when known), and
+     * the restart point it stands for (logical_ri): the next instruction
+     * boundary.  Only code that can observe PSR.ri gets the two synced.
+     */
     uint8_t current_ri;
     bool current_ri_known;
+    uint8_t logical_ri;
     bool track_iipa;
     /*
      * Set once an ssm/rsm/mov-psr in the current bundle may have changed
@@ -69,6 +94,15 @@ typedef struct IA64TranslationBranchState {
     TCGLabel *counted_self_label;
     TCGv_i64 counted_self_budget;
     uint64_t counted_self_ip;
+    /* NaT-known facts at the label, and whether the back edge rotates. */
+    uint64_t counted_self_nat_known[2];
+    bool counted_self_rotates;
+    /* The frame and PSR.dfl facts at the label. */
+    bool counted_self_frame_known;
+    uint8_t counted_self_frame_sof;
+    uint8_t counted_self_frame_sol;
+    bool counted_self_dfl_known;
+    bool counted_self_dfl;
     bool cloop_zero_st1_valid;
     bool cloop_zero_st1_release;
     uint8_t cloop_zero_st1_base;
@@ -104,6 +138,35 @@ typedef struct DisasContext {
      * branch or exception path.  Reset whenever CFM.SOF may change.
      */
     uint8_t cfm_sof_checked;
+    /*
+     * CFM.sof and CFM.sol here.  They are in the TB key, so they are known
+     * at entry and after alloc and cover.  Another instruction that can
+     * change the frame clears frame_known: from then on the frame checks
+     * load CFM.sof, and no exit takes a goto_tb link, because the TB it
+     * reaches was chosen for one frame.
+     */
+    bool frame_known;
+    uint8_t frame_sof;
+    uint8_t frame_sol;
+    /*
+     * Every instruction so far in the TB is one of
+     * ia64_insn_keeps_tb_key(): the key state at an exit is then fixed by
+     * the TB's own key, and a srlz.d may link to the next TB.
+     */
+    bool key_static;
+    /*
+     * An instruction in the TB set part of the TB key to a run-time value
+     * (ia64_insn_sets_tb_key_at_run_time()): exits after it look the next
+     * TB up, because a link was chosen for one value.
+     */
+    bool key_dynamic;
+    /*
+     * PSR.dfl here, while psr_dfl_known: it is in the TB key, and only
+     * ssm/rsm (followed exactly), mov psr.l and a break into firmware
+     * change it inside a TB.
+     */
+    bool psr_dfl_known;
+    bool psr_dfl;
     /*
      * PSR.ss and PSR.tb at TB entry.  Either one makes the TB translate a
      * single instruction, in slot trap_slot, and note its completion traps
@@ -158,6 +221,10 @@ TCGv_i64 ia64_fr_significand_src(uint8_t reg);
 TCGv_i64 ia64_gen_fr_nat_read(uint8_t reg);
 TCGv_i64 ia64_gen_gr_nat_read(uint8_t reg);
 void ia64_gen_gr_nat_clear(uint8_t reg);
+void ia64_gen_alloc(DisasContext *ctx, const Ia64Instruction *insn,
+                    uint8_t r1, uint32_t sof, uint32_t sol, uint32_t sor);
+void ia64_gen_br_call(DisasContext *ctx, uint8_t link, uint64_t next_ip,
+                      TCGv_i64 target);
 void ia64_gen_gr_nat_set(uint8_t reg);
 void ia64_gen_gr_nat_assign(uint8_t reg, TCGv_i64 bit);
 void ia64_gen_gr_nat_from_1(uint8_t dst, uint8_t src);
@@ -214,6 +281,15 @@ void ia64_gen_validate_ar_access(const Ia64Instruction *insn,
                                  TCGv_i64 value, bool write);
 bool ia64_ar_access_reads_clock(uint32_t ar_num);
 bool ia64_clock_access_needs_io(const DisasContext *ctx);
+void ia64_gen_check_pfs_write(const Ia64Instruction *insn, TCGv_i64 value);
+void ia64_gen_check_cr_read(const Ia64Instruction *insn);
+void ia64_gen_validate_tpr_write(TCGv_i64 result, const Ia64Instruction *insn,
+                                 TCGv_i64 value);
+bool ia64_gen_validate_interruption_cr_write(TCGv_i64 result,
+                                             const Ia64Instruction *insn,
+                                             TCGv_i64 value);
+void ia64_gen_check_rse_ar_mode(const Ia64Instruction *insn, TCGv_i64 value,
+                                bool write);
 void ia64_gen_validate_cr_access(TCGv_i64 result,
                                  const Ia64Instruction *insn,
                                  TCGv_i64 value, bool write);
@@ -233,6 +309,19 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
                                      uint8_t slot, uint64_t completed_ip,
                                      bool record_iipa,
                                      bool track_psr_suppression);
+void ia64_note_tb_key_effect(DisasContext *ctx, const Ia64Instruction *insn);
+void ia64_gen_link_or_exit_slot_completed(DisasContext *ctx, uint64_t ip,
+                                          uint8_t slot,
+                                          uint64_t completed_ip,
+                                          bool record_iipa,
+                                          bool track_psr_suppression,
+                                          TCGv_i32 main_loop);
+void ia64_gen_exit_or_lookup_slot_completed(DisasContext *ctx, uint64_t ip,
+                                            uint8_t slot,
+                                            uint64_t completed_ip,
+                                            bool record_iipa,
+                                            bool track_psr_suppression,
+                                            TCGv_i32 main_loop);
 bool ia64_insn_is_yielding_pause(const DisasContext *ctx,
                                  const Ia64Instruction *insn);
 void ia64_gen_yield_to_slot_completed(DisasContext *ctx, uint64_t ip,
@@ -262,6 +351,13 @@ void ia64_gen_save_fault_slot_for_exit(DisasContext *ctx);
 void ia64_gen_store_instruction_group_start(bool group_start);
 void ia64_gen_goto_tb_group(DisasContext *ctx, uint64_t dest,
                             bool group_start);
+typedef enum IA64PureKind {
+    IA64_PURE_NONE,
+    IA64_PURE_GR,
+    IA64_PURE_PR,
+} IA64PureKind;
+
+IA64PureKind ia64_integer_pure_kind(const Ia64Instruction *insn);
 void ia64_update_nat_known(DisasContext *ctx,
                            const Ia64Instruction *insn);
 bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,

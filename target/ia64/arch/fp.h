@@ -97,11 +97,7 @@ void ia64_fp_fpack(CPUIA64State *arg0, uint32_t arg1, uint32_t arg2,
                    uint32_t arg3);
 void ia64_fp_ldfe(CPUIA64State *arg0, uint32_t arg1, uint64_t arg2,
                   uintptr_t ra);
-void ia64_fp_ldf_fill(CPUIA64State *arg0, uint32_t arg1, uint64_t arg2,
-                      uintptr_t ra);
 void ia64_fp_stfe(CPUIA64State *arg0, uint64_t arg1, uint32_t arg2,
                   uintptr_t ra);
-void ia64_fp_stf_spill(CPUIA64State *arg0, uint64_t arg1, uint32_t arg2,
-                       uintptr_t ra);
 
 #endif /* TARGET_IA64_ARCH_FP_H */

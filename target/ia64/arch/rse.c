@@ -26,7 +26,8 @@
 
 static int ia64_rse_mmu_index(CPUIA64State *env)
 {
-    return env->psr & IA64_PSR_RT ? MMU_IDX_RSE : MMU_IDX_RSE_PHYS;
+    return env->psr & IA64_PSR_RT ? MMU_IDX_RSE_PL(ia64_rsc_pl(env->ar_rsc)) :
+                                    MMU_IDX_RSE_PHYS;
 }
 
 /*
@@ -65,6 +66,54 @@ static uint64_t ia64_rse_read_u64(CPUIA64State *env, uint64_t addr,
     return ia64_exec_load_mmuidx(env, addr, 8,
                                  (env->ar_rsc & IA64_RSC_BE) != 0,
                                  mmu_idx, ra);
+}
+
+/*
+ * The host view of one backing-store page, kept by the slot loops of a
+ * single helper.  The first access to each page takes the softmmu path with
+ * its faults, watchpoints, dirty tracking and plugin callbacks; when that
+ * shows plain RAM, the other slots of the page use its host address.  The
+ * translation, PSR.rt, RSC.pl and RSC.be cannot change inside the loop.
+ */
+typedef struct IA64RSEPage {
+    uint64_t page;
+    uint8_t *host;
+} IA64RSEPage;
+
+static uint64_t ia64_rse_read_slot(CPUIA64State *env, IA64RSEPage *pg,
+                                   uint64_t addr, uintptr_t ra)
+{
+    uint64_t value;
+
+    if (pg->host && (addr & TARGET_PAGE_MASK) == pg->page) {
+        uint64_t raw = qatomic_read__nocheck(
+            (uint64_t *)(pg->host + (addr & ~TARGET_PAGE_MASK)));
+
+        return env->ar_rsc & IA64_RSC_BE ? be64_to_cpu(raw) :
+                                           le64_to_cpu(raw);
+    }
+    value = ia64_rse_read_u64(env, addr, ra);
+    pg->page = addr & TARGET_PAGE_MASK;
+    pg->host = ia64_exec_direct_host(env, pg->page, MMU_DATA_LOAD,
+                                     ia64_rse_mmu_index(env));
+    return value;
+}
+
+static void ia64_rse_write_slot(CPUIA64State *env, IA64RSEPage *pg,
+                                uint64_t addr, uint64_t value, uintptr_t ra)
+{
+    if (pg->host && (addr & TARGET_PAGE_MASK) == pg->page) {
+        qatomic_set__nocheck(
+            (uint64_t *)(pg->host + (addr & ~TARGET_PAGE_MASK)),
+            env->ar_rsc & IA64_RSC_BE ? cpu_to_be64(value) :
+                                        cpu_to_le64(value));
+        return;
+    }
+    ia64_rse_write_u64(env, addr, value, ra);
+    /* The store above cleared TLB_NOTDIRTY unless the page holds code. */
+    pg->page = addr & TARGET_PAGE_MASK;
+    pg->host = ia64_exec_direct_host(env, pg->page, MMU_DATA_STORE,
+                                     ia64_rse_mmu_index(env));
 }
 
 uint64_t ia64_rse_current_cfm(const CPUIA64State *env)
@@ -207,24 +256,40 @@ static void ia64_copy_bit_range(uint64_t dst[2], uint32_t dst_bit,
     dst[1] = target >> 64;
 }
 
-static void ia64_clear_bit_range(uint64_t bits[2], uint32_t first,
-                                 uint32_t count)
+static inline void ia64_clear_bit_range(uint64_t bits[2], uint32_t first,
+                                        uint32_t count)
 {
-    uint32_t word = first / 64;
-    uint32_t shift = first % 64;
-    uint32_t n = MIN(count, 64 - shift);
-    uint64_t mask;
+    __uint128_t target = ((__uint128_t)bits[1] << 64) | bits[0];
+    __uint128_t mask;
 
     if (count == 0) {
         return;
     }
+    mask = count == 128 ? ~(__uint128_t)0 : (((__uint128_t)1 << count) - 1);
+    target &= ~(mask << first);
+    bits[0] = target;
+    bits[1] = target >> 64;
+}
 
-    mask = n == 64 ? UINT64_MAX : ((1ULL << n) - 1) << shift;
-    bits[word] &= ~mask;
-    count -= n;
-    if (count != 0) {
-        mask = count == 64 ? UINT64_MAX : (1ULL << count) - 1;
-        bits[word + 1] &= ~mask;
+/*
+ * br.call, br.ret, cover and alloc run these on every frame change; the
+ * checks below are the common case of the called functions, without the
+ * call.
+ */
+static inline void ia64_rse_invalidate_stacked_alat(CPUIA64State *env)
+{
+    if (env->alat_state.alat_active_count != 0) {
+        ia64_invalidate_stacked_alat(env);
+    }
+}
+
+static inline void ia64_rse_clear_rrb_fr_pr(CPUIA64State *env)
+{
+    if (env->cfm_rrb_fr != 0) {
+        ia64_set_cfm_rrb_fr(env, 0);
+    }
+    if (env->cfm_rrb_pr != 0) {
+        ia64_set_cfm_rrb_pr(env, 0);
     }
 }
 
@@ -443,7 +508,8 @@ static void ia64_rse_sync_frame_in(CPUIA64State *env)
  * collection (SDM Vol.2 6.5.2).  Returns 1 when a register was stored,
  * 0 for a NaT collection word.
  */
-static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
+static int ia64_rse_store_one(CPUIA64State *env, IA64RSEPage *pg,
+                              uintptr_t ra)
 {
     uint64_t bspstore = env->ar_bspstore;
     uint32_t ncb = ia64_rse_collect_bit(bspstore);
@@ -509,7 +575,7 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
                                                keep, env->ar_rnat,
                                                env->rse.rse_rnat_low);
         } else {
-            ia64_rse_write_u64(env, bspstore, word & INT64_MAX, ra);
+            ia64_rse_write_slot(env, pg, bspstore, word & INT64_MAX, ra);
         }
         env->ar_rnat = 0;
         trace_ia64_rse_rnat_floor(env_cpu(env)->cpu_index, "boundary-store",
@@ -525,7 +591,7 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
         uint32_t p = ia64_rse_wrap_phys((int32_t)env->rse.rse_bol -
                                         env->rse.rse_dirty);
 
-        ia64_rse_write_u64(env, bspstore, env->rse.rse_pgr[p], ra);
+        ia64_rse_write_slot(env, pg, bspstore, env->rse.rse_pgr[p], ra);
         trace_ia64_rse_spill(env_cpu(env)->cpu_index, bspstore,
                              env->rse.rse_pgr[p],
                              ia64_rse_pgr_nat_get(env, p));
@@ -546,8 +612,22 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
 }
 
 /*
- * Perform one mandatory RSE load from the first backing-store word
- * below the clean partition, filling either an invalid physical
+ * The first backing-store word below the clean partition.  Each mandatory
+ * load moves one word into the physical file, so a loop steps this down by
+ * 8 instead of summing the partition counters again: that 16-byte vector
+ * load right after the counters' 4-byte updates stalls on store forwarding.
+ */
+static uint64_t ia64_rse_next_load(const CPUIA64State *env)
+{
+    int64_t live = (int64_t)env->rse.rse_clean + env->rse.rse_clean_nat +
+                   env->rse.rse_dirty + env->rse.rse_dirty_nat;
+
+    return env->ar_bsp - (live + 1) * 8;
+}
+
+/*
+ * Perform one mandatory RSE load from bspload, the first backing-store
+ * word below the clean partition, filling either an invalid physical
  * register or reloading the RNAT collection when the load pointer sits
  * on a NaT collection word (SDM Vol.2 6.5.2).  Returns 1 when a
  * register was loaded, 0 for a NaT collection word.  When the load
@@ -555,15 +635,13 @@ static int ia64_rse_store_one(CPUIA64State *env, uintptr_t ra)
  * incomplete) the virtual view is updated alongside the physical file
  * so that a fault on a later load leaves a consistent frame.
  */
-static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
+static int ia64_rse_load_one(CPUIA64State *env, IA64RSEPage *pg,
+                             uint64_t bspload, uintptr_t ra)
 {
-    int64_t live = (int64_t)env->rse.rse_clean + env->rse.rse_clean_nat +
-                   env->rse.rse_dirty + env->rse.rse_dirty_nat;
-    uint64_t bspload = env->ar_bsp - (live + 1) * 8;
     uint32_t ncb = ia64_rse_collect_bit(bspload);
 
     if (ncb == 63) {
-        env->ar_rnat = ia64_rse_read_u64(env, bspload, ra) & INT64_MAX;
+        env->ar_rnat = ia64_rse_read_slot(env, pg, bspload, ra) & INT64_MAX;
         trace_ia64_rse_rnat_floor(env_cpu(env)->cpu_index, "collection-load",
                                   env->rse.rse_rnat_low, bspload - 0x1f8,
                                   env->ar_bspstore, env->ar_rnat);
@@ -572,7 +650,7 @@ static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
         env->psr &= ~(IA64_PSR_DA | IA64_PSR_DD);
         return 0;
     } else {
-        uint64_t value = ia64_rse_read_u64(env, bspload, ra);
+        uint64_t value = ia64_rse_read_slot(env, pg, bspload, ra);
         uint32_t p = ia64_rse_wrap_phys(
             (int32_t)env->rse.rse_bol -
             (env->rse.rse_clean + env->rse.rse_dirty + 1));
@@ -588,7 +666,8 @@ static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
          * committed it.
          */
         if (bspload < env->rse.rse_rnat_low) {
-            uint64_t word = ia64_rse_read_u64(env, bspload | 0x1f8, ra);
+            uint64_t word = ia64_rse_read_slot(env, pg, bspload | 0x1f8,
+                                               ra);
 
             nat = (word >> ncb) & 1;
         } else {
@@ -628,13 +707,17 @@ static int ia64_rse_load_one(CPUIA64State *env, uintptr_t ra)
  */
 static void ia64_rse_complete_frame_loads(CPUIA64State *env, uintptr_t ra)
 {
+    IA64RSEPage pg = { 0 };
+    uint64_t bspload;
+
     if (env->rse.rse_dirty >= 0 && env->rse.rse_dirty_nat >= 0) {
         return;
     }
 
     env->rse.rse_cfle = true;
+    bspload = ia64_rse_next_load(env);
     while (env->rse.rse_dirty < 0 || env->rse.rse_dirty_nat < 0) {
-        if (ia64_rse_load_one(env, ra)) {
+        if (ia64_rse_load_one(env, &pg, bspload, ra)) {
             env->rse.rse_clean--;
             env->rse.rse_dirty++;
         } else {
@@ -642,6 +725,7 @@ static void ia64_rse_complete_frame_loads(CPUIA64State *env, uintptr_t ra)
             env->rse.rse_dirty_nat++;
         }
         env->ar_bspstore -= 8;
+        bspload -= 8;
     }
     env->rse.rse_cfle = false;
 }
@@ -674,6 +758,8 @@ static void ia64_rse_preserve_frame(CPUIA64State *env, uint32_t nregs)
 static void ia64_rse_new_frame(CPUIA64State *env, int32_t growth,
                                uintptr_t ra)
 {
+    IA64RSEPage pg = { 0 };
+
     if (growth <= env->rse.rse_invalid) {
         env->rse.rse_invalid -= growth;
         return;
@@ -700,7 +786,7 @@ static void ia64_rse_new_frame(CPUIA64State *env, int32_t growth,
      * exactly the work that remains.
      */
     while (growth > 0) {
-        growth -= ia64_rse_store_one(env, ra);
+        growth -= ia64_rse_store_one(env, &pg, ra);
     }
     env->rse.rse_invalid = 0;
     env->rse.rse_clean = 0;
@@ -743,8 +829,7 @@ static void ia64_rse_restore_frame(CPUIA64State *env, uint32_t preserved,
         env->cfm_sol = 0;
         env->cfm_sor = 0;
         env->cfm_rrb_gr = 0;
-        ia64_set_cfm_rrb_fr(env, 0);
-        ia64_set_cfm_rrb_pr(env, 0);
+        ia64_rse_clear_rrb_fr_pr(env);
         return;
     }
 
@@ -868,17 +953,22 @@ static void ia64_rse_return_to_frame(CPUIA64State *env, uint64_t pfm,
 
     ia64_rse_restore_frame(env, preserved, growth, old_sof);
     ia64_rse_sync_frame_in(env);
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_invalidate_stacked_alat(env);
     ia64_rse_complete_frame_loads(env, 0);
     ia64_rse_check(env, "return");
 }
 
 void ia64_rse_delivery_check(CPUIA64State *env, int excp)
 {
+#ifdef CONFIG_DEBUG_TCG
     char site[32];
 
     snprintf(site, sizeof(site), "delivery excp=%d", excp);
     ia64_rse_check(env, site);
+#else
+    (void)env;
+    (void)excp;
+#endif
 }
 
 /*
@@ -1022,8 +1112,7 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
         env->cfm_sol = 0;
         env->cfm_sor = 0;
         env->cfm_rrb_gr = 0;
-        ia64_set_cfm_rrb_fr(env, 0);
-        ia64_set_cfm_rrb_pr(env, 0);
+        ia64_rse_clear_rrb_fr_pr(env);
         ia64_rse_invalidate_non_current(env);
         ia64_alat_invala(env);
         ia64_ia32_enter(env);
@@ -1102,17 +1191,30 @@ static void ia64_rotate_rotating_gr_right(CPUIA64State *env)
             (count - 1) * sizeof(*env->gr));
     env->gr[IA64_STACKED_GR_BASE] = last;
 
-    nat = (((__uint128_t)env->nat[1] << 32) | (env->nat[0] >> 32)) &
-          all_mask;
-    mask = (((__uint128_t)1 << count) - 1);
-    rotating_nat = nat & mask;
-    rotating_nat = ((rotating_nat << 1) |
-                    (rotating_nat >> (count - 1))) & mask;
-    nat = (nat & ~mask) | rotating_nat;
-    env->nat[0] = (env->nat[0] & UINT32_MAX) | (uint64_t)(nat << 32);
-    env->nat[1] = nat >> 32;
-    ia64_invalidate_alat_reg_range(env, IA64_STACKED_GR_BASE,
-                                   IA64_STACKED_GR_BASE + count, false);
+    if (count <= 32) {
+        /* r32..r63: bits 32..63 of the first NaT word. */
+        uint64_t mask64 = ((1ULL << count) - 1) << IA64_STACKED_GR_BASE;
+        uint64_t rot = env->nat[0] & mask64;
+
+        if (rot != 0) {
+            rot = ((rot << 1) | (rot >> (count - 1))) & mask64;
+            env->nat[0] = (env->nat[0] & ~mask64) | rot;
+        }
+    } else {
+        nat = (((__uint128_t)env->nat[1] << 32) | (env->nat[0] >> 32)) &
+              all_mask;
+        mask = (((__uint128_t)1 << count) - 1);
+        rotating_nat = nat & mask;
+        rotating_nat = ((rotating_nat << 1) |
+                        (rotating_nat >> (count - 1))) & mask;
+        nat = (nat & ~mask) | rotating_nat;
+        env->nat[0] = (env->nat[0] & UINT32_MAX) | (uint64_t)(nat << 32);
+        env->nat[1] = nat >> 32;
+    }
+    if (env->alat_state.alat_active_count != 0) {
+        ia64_invalidate_alat_reg_range(env, IA64_STACKED_GR_BASE,
+                                       IA64_STACKED_GR_BASE + count, false);
+    }
 }
 
 static void ia64_rotate_predicates_right(CPUIA64State *env)
@@ -1132,8 +1234,13 @@ static void ia64_rotate_predicates_right(CPUIA64State *env)
  */
 void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb)
 {
-    uint32_t shift = (new_rrb % 48 + 48 - env->cfm_rrb_pr % 48) % 48;
+    uint32_t shift;
 
+    /* Every br.call, br.ret, cover and rfi comes here, nearly always 0 -> 0. */
+    if (new_rrb == env->cfm_rrb_pr) {
+        return;
+    }
+    shift = (new_rrb % 48 + 48 - env->cfm_rrb_pr % 48) % 48;
     if (shift != 0) {
         uint64_t old[48];
 
@@ -1147,8 +1254,34 @@ void ia64_set_cfm_rrb_pr(CPUIA64State *env, uint32_t new_rrb)
 
 static void ia64_rotate_loop_regs(CPUIA64State *env)
 {
+    uint32_t sor_regs = (uint32_t)env->cfm_sor << 3;
+
     ia64_rse_check(env, "ctop");
-    ia64_rse_sync_frame_out(env);
+    /*
+     * rrb.gr' = rrb.gr - 1 and the value of v moves to v + 1 (mod sor * 8),
+     * so every value keeps its physical register: rotate the dirty bits
+     * with the data instead of syncing the frame out.  A rotating region
+     * clipped by sof maps differently and takes the sync.
+     */
+    if (sor_regs > env->cfm_sof || sor_regs > IA64_STACKED_GR_COUNT) {
+        ia64_rse_sync_frame_out(env);
+    } else if (sor_regs != 0 && sor_regs <= 64) {
+        uint64_t mask64 = sor_regs == 64 ? UINT64_MAX : (1ULL << sor_regs) - 1;
+        uint64_t rot = env->rse.rse_gr_dirty[0] & mask64;
+
+        rot = ((rot << 1) | (rot >> (sor_regs - 1))) & mask64;
+        env->rse.rse_gr_dirty[0] = (env->rse.rse_gr_dirty[0] & ~mask64) | rot;
+    } else if (sor_regs != 0) {
+        __uint128_t dirty = ((__uint128_t)env->rse.rse_gr_dirty[1] << 64) |
+                            env->rse.rse_gr_dirty[0];
+        __uint128_t mask = ((__uint128_t)1 << sor_regs) - 1;
+        __uint128_t rot = dirty & mask;
+
+        rot = ((rot << 1) | (rot >> (sor_regs - 1))) & mask;
+        dirty = (dirty & ~mask) | rot;
+        env->rse.rse_gr_dirty[0] = dirty;
+        env->rse.rse_gr_dirty[1] = dirty >> 64;
+    }
     ia64_rotate_rotating_gr_right(env);
     ia64_rotate_predicates_right(env);
     if (env->cfm_sor != 0) {
@@ -1157,9 +1290,15 @@ static void ia64_rotate_loop_regs(CPUIA64State *env)
         env->cfm_rrb_gr = env->cfm_rrb_gr ?
                           env->cfm_rrb_gr - 1 : count - 1;
     }
-    ia64_set_cfm_rrb_fr(env, env->cfm_rrb_fr ?
-                             env->cfm_rrb_fr - 1 :
-                             IA64_ROTATING_FR_COUNT - 1);
+    /* ia64_set_cfm_rrb_fr's own fast case, without the call. */
+    if (env->cfm_rrb_fr < IA64_ROTATING_FR_COUNT && !env->fp.rotating_fr_live) {
+        env->cfm_rrb_fr = env->cfm_rrb_fr ? env->cfm_rrb_fr - 1 :
+                                            IA64_ROTATING_FR_COUNT - 1;
+    } else {
+        ia64_set_cfm_rrb_fr(env, env->cfm_rrb_fr ?
+                                 env->cfm_rrb_fr - 1 :
+                                 IA64_ROTATING_FR_COUNT - 1);
+    }
     env->cfm_rrb_pr = env->cfm_rrb_pr ?
                       env->cfm_rrb_pr - 1 : 47;
 }
@@ -1191,12 +1330,11 @@ void ia64_rse_br_call(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sol = 0;
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
-    ia64_set_cfm_rrb_fr(env, 0);
-    ia64_set_cfm_rrb_pr(env, 0);
+    ia64_rse_clear_rrb_fr_pr(env);
     if (!move_outputs) {
         ia64_rse_sync_frame_in(env);
     }
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_invalidate_stacked_alat(env);
 
     env->ar_pfs = pfs;
     env->br[b_reg] = next_ip;
@@ -1239,8 +1377,7 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sol = 0;
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
-    ia64_set_cfm_rrb_fr(env, 0);
-    ia64_set_cfm_rrb_pr(env, 0);
+    ia64_rse_clear_rrb_fr_pr(env);
     ia64_rse_invalidate_non_current(env);
     ia64_alat_invala(env);
     ia64_ia32_enter(env);
@@ -1349,7 +1486,7 @@ void ia64_rse_alloc(CPUIA64State *env, uint32_t r1, uint32_t pfm,
     if (new_sof > old_sof) {
         ia64_rse_sync_frame_in_range(env, old_sof, new_sof - old_sof);
     }
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_invalidate_stacked_alat(env);
 
     if (r1 != 0) {
         env->gr[r1] = env->ar_pfs;
@@ -1371,15 +1508,15 @@ void ia64_rse_cover(CPUIA64State *env)
     env->cfm_sol = 0;
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
-    ia64_set_cfm_rrb_fr(env, 0);
-    ia64_set_cfm_rrb_pr(env, 0);
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_clear_rrb_fr_pr(env);
+    ia64_rse_invalidate_stacked_alat(env);
     ia64_rse_check(env, "cover");
     IA64_TRACE_RSE_STATE(env, "cover");
 }
 
 void ia64_rse_flush(CPUIA64State *env, uintptr_t ra)
 {
+    IA64RSEPage pg = { 0 };
 
     /*
      * Spill every dirty register and intervening NaT collection
@@ -1388,7 +1525,7 @@ void ia64_rse_flush(CPUIA64State *env, uintptr_t ra)
      * issuing instruction.
      */
     while (env->rse.rse_dirty + env->rse.rse_dirty_nat > 0) {
-        ia64_rse_store_one(env, ra);
+        ia64_rse_store_one(env, &pg, ra);
     }
     ia64_rse_check(env, "flushrs");
     IA64_TRACE_RSE_STATE(env, "flushrs");
@@ -1401,6 +1538,8 @@ void ia64_rse_load(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
                              IA64_RSC_LOADRS_MASK) & ~7ULL;
     int32_t words = loadrs_bytes >> 3;
     int32_t words_to_load;
+    IA64RSEPage pg = { 0 };
+    uint64_t bspload;
 
     if ((env->ar_rsc & IA64_RSC_MODE) != 0 ||
         (env->cfm_sof != 0 && loadrs_bytes != 0)) {
@@ -1430,19 +1569,15 @@ void ia64_rse_load(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
     if (words_to_load >= 0) {
         env->ar_bspstore = env->ar_bsp -
             (int64_t)(env->rse.rse_dirty + env->rse.rse_dirty_nat) * 8;
+        bspload = ia64_rse_next_load(env);
         while (words_to_load > 0) {
-            int64_t live = (int64_t)env->rse.rse_clean +
-                           env->rse.rse_clean_nat + env->rse.rse_dirty +
-                           env->rse.rse_dirty_nat;
-            uint64_t bspload = env->ar_bsp - (live + 1) * 8;
-
             if (env->rse.rse_dirty == IA64_STACKED_GR_COUNT &&
                 ia64_rse_collect_bit(bspload) != 63) {
                 /* More registers than fit in the physical file. */
                 ia64_raise_exception(env, IA64_EXCP_ILLEGAL, fault_ip,
                                        raw, slot);
             }
-            if (ia64_rse_load_one(env, ra)) {
+            if (ia64_rse_load_one(env, &pg, bspload, ra)) {
                 env->rse.rse_dirty++;
                 env->rse.rse_clean--;
             } else {
@@ -1451,6 +1586,7 @@ void ia64_rse_load(CPUIA64State *env, uint64_t fault_ip, uint64_t raw,
             }
             env->ar_bspstore = env->ar_bsp -
                 (int64_t)(env->rse.rse_dirty + env->rse.rse_dirty_nat) * 8;
+            bspload -= 8;
             words_to_load--;
         }
     } else {
@@ -1567,11 +1703,10 @@ void ia64_rse_clrrrb(CPUIA64State *env, uint32_t predicate_only)
         ia64_set_cfm_rrb_pr(env, 0);
     } else {
         env->cfm_rrb_gr = 0;
-        ia64_set_cfm_rrb_fr(env, 0);
-        ia64_set_cfm_rrb_pr(env, 0);
+        ia64_rse_clear_rrb_fr_pr(env);
     }
     ia64_rse_sync_frame_in(env);
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_invalidate_stacked_alat(env);
     ia64_rse_check(env, "clrrrb");
 }
 

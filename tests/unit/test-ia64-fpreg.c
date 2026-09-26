@@ -280,6 +280,61 @@ static const char *test_stale_tags(void)
     return NULL;
 }
 
+static uint64_t xorshift64(uint64_t *state)
+{
+    uint64_t x = *state;
+
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    return x;
+}
+
+/*
+ * Every spill image fills and spills back unchanged, in any register, and
+ * the inline accessor the FP helpers use reads the same value.
+ */
+static const char *test_random_spill_fill(void)
+{
+    static const uint32_t exps[] = {
+        0, 1, 0xfc01, 0xffff, IA64_FP_REG_INTEGER_EXP, 0x1fffd,
+        IA64_FP_REG_NATVAL_EXP, IA64_FP_REG_SPECIAL_EXP,
+    };
+    uint64_t state = 0x9e3779b97f4a7c15ULL;
+    CPUIA64State env;
+    unsigned n;
+
+    reset_env(&env);
+    for (n = 0; n < 200000; n++) {
+        uint64_t r = xorshift64(&state);
+        uint64_t low = xorshift64(&state);
+        unsigned reg = 2 + r % (IA64_FR_COUNT - 2);
+        uint32_t exp = (r >> 8) % 2 ? exps[(r >> 9) % G_N_ELEMENTS(exps)] :
+                       (uint32_t)(r >> 12) & 0x1ffff;
+        uint64_t high = exp | (((r >> 40) & 1) << 17);
+        uint64_t get_sig;
+        uint32_t get_exp;
+        bool get_sign;
+        const char *error;
+
+        if ((r >> 41) % 4 == 0) {
+            low = 0;
+        }
+        ia64_fpreg_from_spill(&env, reg, low, high | (r & 0xfffc0000ULL));
+        error = expect_spill(&env, reg, low, high);
+        if (error != NULL) {
+            return error;
+        }
+        ia64_fpreg_get(&env, reg, &get_sign, &get_exp, &get_sig);
+        if (get_sig != low || get_exp != exp ||
+            get_sign != ((high >> 17) & 1)) {
+            return fail_u64("inline read", get_sig, low);
+        }
+    }
+    return NULL;
+}
+
 int main(void)
 {
     static const TestCase tests[] = {
@@ -291,6 +346,7 @@ int main(void)
         { "NaTVal", test_natval },
         { "spill fill round-trip", test_spill_fill_round_trip },
         { "stale tag clearing", test_stale_tags },
+        { "random spill fill", test_random_spill_fill },
     };
     unsigned i;
     int status = 0;

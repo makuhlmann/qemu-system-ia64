@@ -22,6 +22,7 @@ from .encoding import (
     FPSR_SF_RESERVED_PC1,
     FPSR_SF_TD,
     HIGH_TR_BASE,
+    IA64_ALT_DTLB_VECTOR,
     IA64_DISABLED_FP_VECTOR,
     IA64_EXCP_BREAK,
     IA64_EXCP_ILLEGAL,
@@ -39,6 +40,7 @@ from .encoding import (
     IA64_PSR_BE,
     IA64_PSR_DFH,
     IA64_PSR_DFL,
+    IA64_PSR_DT,
     IA64_PSR_IC,
     IA64_PSR_MFH,
     IA64_PSR_MFL,
@@ -160,6 +162,7 @@ from .encoding import (
     mov_i_imm_ar,
     mov_lc_imm,
     mov_m_cr_gr,
+    mov_m_gr_cr,
     mov_m_gr_ar,
     mov_m_imm_ar,
     movl_mlx,
@@ -177,6 +180,7 @@ from .encoding import (
     spill_to_binary32,
     spill_to_binary64,
     srlz_d,
+    srlz_i,
     ssm,
     st1_postinc,
     st2,
@@ -758,6 +762,53 @@ test_stf_spill_postinc_decode = require_registers("stf_spill_postinc_decode", [
     (0x30, 0x10, nop_m(), nop_i(),
      br_cond(0x30, 0x30)),
 ], {"ip": 0x30, "r3": 0x280}, entry=0x10)
+
+def _fp_spill_fill_tlb_miss(name, insn, isr_access, expected):
+    """
+    stf.spill or ldf.fill in slot 1 through an unmapped address (walker off):
+    the Alternate Data TLB fault names the bundle, slot 1 and the access,
+    and keeps the slot-0 result; the base update, the store and the target
+    register do not happen.  IVA is on a private IVT, away from the firmware.
+    """
+    iva = 0x200000
+    handler = iva + IA64_ALT_DTLB_VECTOR
+    return require_registers(name, [
+        (0x10, *movl_mlx(3, iva)),
+        (0x20, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (0x30, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x40, *movl_mlx(16, 0x1122334455667788)),
+        (0x50, 0x01, setf_sig(6, 16), nop_i(), nop_i()),
+        (0x60, 0x01, setf_sig(7, 16), nop_i(), nop_i()),
+        (0x70, *movl_mlx(2, 0x08000000)),
+        (0x80, *movl_mlx(3, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x90, 0x01, mov_gr_psr_full(3), nop_i(), nop_i()),
+        (0xa0, 0x01, srlz_d(), nop_i(), nop_i()),
+        (0xb0, 0x09, adds(14, 1, 0), insn, nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        (handler, 0x01, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (handler + 0x10, 0x01, mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (handler + 0x20, 0x01, mov_m_cr_gr(10, 20), nop_i(), nop_i()),
+        (handler + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(handler + 0x30, handler + 0x30)),
+    ], {
+        "ip": handler + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r2": 0x08000000,
+        "r8": 0xb0,
+        "r9": isr_access | (1 << IA64_ISR_EI_SHIFT),
+        "r10": 0x08000000,
+        "r14": 1,
+        **expected,
+    }, entry=0x10)
+
+
+test_stf_spill_tlb_miss_faults_in_slot = _fp_spill_fill_tlb_miss(
+    "stf_spill_tlb_miss_faults_in_slot", stf_spill_postinc(2, 6, 16),
+    IA64_ISR_W, {})
+
+test_ldf_fill_tlb_miss_keeps_target = _fp_spill_fill_tlb_miss(
+    "ldf_fill_tlb_miss_keeps_target", ldf_fill_postinc(7, 2, 16), IA64_ISR_R,
+    {"f7": ExpectedFP(0x1122334455667788, 0x1003e)})
 
 test_stf8_postinc_imm9_decode = require_registers("stf8_postinc_imm9_decode", [
     (0x10, 0x00, addl(3, 0x200, 0), nop_i(),
@@ -3826,6 +3877,60 @@ test_disabled_fp_high_fault = require_registers(
         "r9": 2,
     }, entry=0x10)
 
+# setf.sig f8 at 0x80 runs first with PSR.dfl clear, then, after ssm psr.dfl,
+# again: the second run must fault although the same code ran before.
+test_disabled_fp_low_fault_after_clean_run_at_same_ip = require_registers(
+    "disabled_fp_low_fault_after_clean_run_at_same_ip", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x80)),
+        (0x80, 0x00, setf_sig(8, 3), nop_i(), nop_i()),
+        (0x90, 0x00, nop_m(), cmp_eq_imm(6, 7, 0, 10), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0x100, qp=7)),
+        (0xb0, 0x00, ssm(IA64_PSR_DFL), adds(10, 1, 0), nop_i()),
+        (0xc0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0x80)),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0x100)),
+        (IA64_DISABLED_FP_VECTOR, 0x00, mov_m_cr_gr(8, 19),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x20,
+                 IA64_DISABLED_FP_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_DISABLED_FP_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x80,
+        "r9": 1,
+        "r10": 1,
+    }, entry=0x10)
+
+# The translator follows ssm psr.dfl: setf.sig after it in the same bundle
+# takes the fault, as the live PSR says.
+test_disabled_fp_low_fault_after_ssm_in_same_bundle = require_registers(
+    "disabled_fp_low_fault_after_ssm_in_same_bundle", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x80)),
+        (0x80, 0x0a, ssm(IA64_PSR_DFL), setf_sig(8, 3), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (IA64_DISABLED_FP_VECTOR, 0x00, mov_m_cr_gr(8, 19),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x20,
+                 IA64_DISABLED_FP_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_DISABLED_FP_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x80,
+        "r9": 1 | (1 << IA64_ISR_EI_SHIFT),
+    }, entry=0x10)
+
 test_disabled_fp_low_fault = require_registers(
     "disabled_fp_low_fault", [
         (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DFL)),
@@ -4783,6 +4888,38 @@ test_fadd_unnormal_d_fault_rolls_back = require_registers(
         "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 2,
         "f8": ExpectedFP(*binary64_to_spill(0x4010000000000000)),
         "ar_fpsr": DEFAULT_FPSR & ~(1 << 1),
+    }, entry=0x10)
+
+# A D fault of fma restores only what fma itself changed.  The fmax before
+# it wrote f9 and set PSR.mfl in its own FP transaction; neither may be
+# rolled back by the fault of the next instruction (SDM Vol 1 5.4.1.2).
+test_fma_d_fault_keeps_earlier_fp_result = require_registers(
+    "fma_d_fault_keeps_earlier_fp_result", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 1))[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x10000, 0)),
+        (0x40, 0x05, *movl_mlx(22, 0x4000000000000000)[1:]),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x05, *movl_mlx(5, 0x4010000000000000)[1:]),
+        (0x80, 0x05, *movl_mlx(7, 0x3ff0000000000000)[1:]),
+        (0x90, 0x05, *movl_mlx(8, 0x4000000000000000)[1:]),
+        (0xa0, 0x09, setf_d(9, 5), setf_d(10, 7), nop_i()),
+        (0xb0, 0x09, setf_d(11, 8), rum(IA64_PSR_MFL), nop_i()),
+        (0xc0, 0x0d, nop_m(), fmax(9, 10, 11), nop_i()),
+        (0xd0, 0x0d, nop_m(), fma_s0(12, 6, 1, 1), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x10,
+                 IA64_FP_FAULT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 2,
+        "psr": ExpectedBits(mask=IA64_PSR_MFL, value=IA64_PSR_MFL),
+        "f9": ExpectedFP(*binary64_to_spill(0x4000000000000000)),
     }, entry=0x10)
 
 test_fnorm_ldf_fill_unnormal_sets_d = require_registers(
@@ -5884,10 +6021,13 @@ CASE_NAMES = (
     'disabled_fp_high_fault',
     'disabled_fp_load_sets_isr_r',
     'disabled_fp_low_fault',
+    'disabled_fp_low_fault_after_ssm_in_same_bundle',
+    'disabled_fp_low_fault_after_clean_run_at_same_ip',
     'disabled_fp_mixed_sets_reports_both',
     'disabled_fp_store_sets_isr_w',
     'fadd_static_range_and_rounding',
     'fadd_unnormal_d_fault_rolls_back',
+    'fma_d_fault_keeps_earlier_fp_result',
     'fand_f1_illegal_operation',
     'fchkf_branches_on_uncommitted_flag',
     'fchkf_negative_target_uses_bit36',
@@ -6157,6 +6297,8 @@ CASE_NAMES = (
     'stf8_stfe_convert_register_format',
     'stf_spill_ldf_fill_preserves_sig',
     'stf_spill_postinc_decode',
+    'stf_spill_tlb_miss_faults_in_slot',
+    'ldf_fill_tlb_miss_keeps_target',
     'stf_spill_preserves_natval',
     'stfd_natval_consumption',
     'stfe_natval_consumption',

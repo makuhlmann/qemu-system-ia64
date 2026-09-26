@@ -1813,6 +1813,43 @@ test_rse_uses_rsc_pl_for_access_rights = require_registers(
         "r31": 0,
     }, entry=0x10)
 
+# RSE stores at RSC.pl 0, then 3, then 0 again over a PL0-only page: each
+# level must get its own access-rights check, with no stale translation of
+# the other level (SDM Vol.2 6.5.1).
+test_rse_rsc_pl_change_checks_rights_at_new_level = require_registers(
+    "rse_rsc_pl_change_checks_rights_at_new_level", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+        (0x70, 0x00, mov_m_gr_ar(0, 16), nop_i(), nop_i()),
+        (0x80, *movl_mlx(3, HIGH_TR_BASE + 0x8000)),
+        (0x90, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_RT)),
+        (0xb0, 0x01, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0xc0, 0x00, nop_m(), alloc(1, 1, 0, 0, 0), nop_i()),
+        (0xd0, *movl_mlx(32, 0x1111111111111111)),
+        (0xe0, 0x18, nop_m(), nop_m(), cover_b()),
+        (0xf0, 0x01, flushrs_enc(), nop_i(), nop_i()),
+        (0x100, *movl_mlx(5, IA64_RSC_PL3)),
+        (0x110, 0x01, mov_m_gr_ar(5, 16), nop_i(), nop_i()),
+        (0x120, 0x00, nop_m(), alloc(1, 1, 0, 0, 0), nop_i()),
+        (0x130, *movl_mlx(32, 0x2222222222222222)),
+        (0x140, 0x18, nop_m(), nop_m(), cover_b()),
+        # Faults at pl 3; the handler returns to it at pl 0.
+        (0x150, 0x01, flushrs_enc(), nop_i(), nop_i()),
+        (0x160, 0x09, ld8(8, 3), mov_m_ar_gr(10, 16), adds(4, 8, 3)),
+        (0x170, 0x01, ld8(9, 4), nop_i(), nop_i()),
+        (0x180, 0x10, nop_m(), nop_i(), br_cond(0x180, 0x180)),
+        (IA64_DATA_ACCESS_VECTOR, 0x01, mov_m_gr_ar(0, 16),
+         adds(31, 1, 31), nop_i()),
+        (IA64_DATA_ACCESS_VECTOR + 0x10, 0x10, nop_m(), nop_i(), rfi_b()),
+    ], {
+        "ip": 0x180,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x1111111111111111,
+        "r9": 0x2222222222222222,
+        "r10": 0,
+        "r31": 1,
+    }, entry=0x10)
+
 test_rse_rt_enables_protection_key_checks = require_registers(
     "rse_rt_enables_protection_key_checks", [
         (0x10, *movl_mlx(18, 0x0010000000400661)),
@@ -3274,6 +3311,177 @@ test_rse_br_ret_fill_dtlb_miss_retries_atomically = require_registers(
         "cfm_sol": 57,
     }, entry=0x10)
 
+# As above, but the lower page is the purged one: the fills run downward
+# through the upper page first, and the load that crosses into the lower
+# page must still take the DTLB miss.
+test_rse_br_ret_fill_crosses_into_unmapped_page_after_direct_loads = \
+    require_registers(
+    "rse_br_ret_fill_crosses_into_unmapped_page_after_direct_loads", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (0x20, *movl_mlx(20, HIGH_TR_BASE)),
+        (0x30, *movl_mlx(7, EIGHT_K_ITIR)),
+        (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(20, 20), nop_i(),
+         nop_i()),
+        (0x60, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(18, LOW_VECTOR_TR_PTE + 0x2000)),
+        (0x80, *movl_mlx(20, HIGH_TR_BASE + 0x2000)),
+        (0x90, 0x00, mov_m_gr_cr(20, 20), nop_i(),
+         nop_i()),
+        (0xa0, 0x00, itc_d(18), nop_i(),
+         nop_i()),
+        (0xb0, *movl_mlx(19, (1 << 13) | (1 << 17) | (1 << 27))),
+        (0xc0, *movl_mlx(3, HIGH_TR_BASE + 0x1f00)),
+        (0xd0, 0x00, mov_ar(3, 18), nop_i(),
+         nop_i()),
+        (0xe0, 0x10, mov_gr_psr_full(19), nop_i(),
+         br_cond(0xe0, 0x100)),
+        (0x100, 0x00, nop_m(), alloc(2, 8, 0, 0, 0),
+         nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(),
+         br_call(0, 0x110, 0x200)),
+        (0x120, 0x10, nop_m(), nop_i(),
+         br_cond(0x120, 0x120)),
+        (0x200, 0x00, nop_m(), alloc(89, 62, 57, 0, 0),
+         nop_i()),
+        (0x210, *movl_mlx(40, 0x1111222233334444)),
+        (0x220, *movl_mlx(70, 0x5555666677778888)),
+        (0x230, *movl_mlx(87, 0x123456789abcdef0)),
+        (0x240, 0x10, nop_m(), nop_i(),
+         br_call(6, 0x240, 0x300)),
+        (0x250, 0x00, nop_m(), adds(8, 0, 40),
+         adds(9, 0, 70)),
+        (0x260, 0x00, nop_m(), adds(10, 0, 87),
+         adds(11, 0, 89)),
+        (0x270, 0x00, nop_m(), adds(14, 0, 90),
+         adds(15, 0, 91)),
+        (0x280, 0x10, nop_m(), nop_i(),
+         br_cond(0x280, 0x280)),
+        (0x300, 0x00, nop_m(), alloc(61, 36, 32, 0, 0),
+         nop_i()),
+        (0x310, 0x00, flushrs_enc(), nop_i(),
+         nop_i()),
+        (0x320, 0x00, loadrs_enc(), nop_i(),
+         nop_i()),
+        (0x330, *movl_mlx(3, HIGH_TR_BASE)),
+        (0x340, 0x00, ptr_d(3, 7), nop_i(),
+         nop_i()),
+        (0x350, 0x00, srlz_d(), nop_i(),
+         nop_i()),
+        (0x360, *movl_mlx(32, 0xa1a2a3a4a5a6a7a8)),
+        (0x370, *movl_mlx(33, 0xb1b2b3b4b5b6b7b8)),
+        (0x380, *movl_mlx(34, 0xc1c2c3c4c5c6c7c8)),
+        (0x390, *movl_mlx(35, 0xd1d2d3d4d5d6d7d8)),
+        (0x3a0, *movl_mlx(36, 0xe1e2e3e4e5e6e7e8)),
+        (0x3b0, 0x10, nop_m(), nop_i(),
+         br_ret(6)),
+        (IA64_ALT_DTLB_VECTOR, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x00,
+         adds(7, EIGHT_K_ITIR, 0), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x20, 0x00,
+         mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x30, 0x08,
+         itc_d(18), adds(29, 0x77, 0),
+         nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
+         rfi_b()),
+    ], {
+        "ip": 0x280,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x1111222233334444,
+        "r9": 0x5555666677778888,
+        "r10": 0x123456789abcdef0,
+        "r11": 0xa1a2a3a4a5a6a7a8,
+        "r14": 0xb1b2b3b4b5b6b7b8,
+        "r15": 0xc1c2c3c4c5c6c7c8,
+        "r29": 0x77,
+        "cfm_sof": 62,
+        "cfm_sol": 57,
+    }, entry=0x10)
+
+# flushrs spills a frame from a mapped page into an unmapped one: the store
+# that crosses must take the DTLB miss after the stores before it went to
+# the first page, and the retried flushrs must complete the second page.
+test_rse_flushrs_crosses_into_unmapped_page_after_direct_stores = \
+    require_registers(
+        "rse_flushrs_crosses_into_unmapped_page_after_direct_stores", [
+            (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE)),
+            (0x20, *movl_mlx(20, HIGH_TR_BASE)),
+            (0x30, *movl_mlx(7, EIGHT_K_ITIR)),
+            (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+            (0x50, 0x00, mov_m_gr_cr(20, 20), nop_i(), nop_i()),
+            (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
+            (0x70, *movl_mlx(19, (1 << 13) | (1 << 17) | (1 << 27))),
+            (0x80, *movl_mlx(3, HIGH_TR_BASE + 0x1f00)),
+            (0x90, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+            (0xa0, 0x10, mov_gr_psr_full(19), nop_i(),
+             br_cond(0xa0, 0x100)),
+            (0x100, 0x00, nop_m(), alloc(2, 8, 0, 0, 0), nop_i()),
+            (0x110, 0x10, nop_m(), nop_i(), br_call(0, 0x110, 0x200)),
+            (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+            (0x200, 0x00, nop_m(), alloc(89, 62, 57, 0, 0), nop_i()),
+            (0x210, *movl_mlx(40, 0x1111222233334444)),
+            (0x220, *movl_mlx(70, 0x5555666677778888)),
+            (0x230, *movl_mlx(87, 0x123456789abcdef0)),
+            (0x240, 0x10, nop_m(), nop_i(), br_call(6, 0x240, 0x300)),
+            (0x250, 0x10, nop_m(), nop_i(), br_cond(0x250, 0x250)),
+            (0x300, 0x00, nop_m(), alloc(61, 36, 32, 0, 0), nop_i()),
+            (0x310, 0x00, flushrs_enc(), nop_i(), nop_i()),
+            (0x320, *movl_mlx(3, HIGH_TR_BASE + 0x1f40)),
+            (0x330, *movl_mlx(4, HIGH_TR_BASE + 0x2038)),
+            (0x340, *movl_mlx(5, HIGH_TR_BASE + 0x20c0)),
+            (0x350, 0x09, ld8(8, 3), ld8(9, 4), nop_i()),
+            (0x360, 0x01, ld8(10, 5), nop_i(), nop_i()),
+            (0x370, 0x10, nop_m(), nop_i(), br_cond(0x370, 0x370)),
+            (IA64_ALT_DTLB_VECTOR,
+             *movl_mlx(18, LOW_VECTOR_TR_PTE + 0x2000)),
+            (IA64_ALT_DTLB_VECTOR + 0x10, 0x00,
+             adds(7, EIGHT_K_ITIR, 0), nop_i(), nop_i()),
+            (IA64_ALT_DTLB_VECTOR + 0x20, 0x00,
+             mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+            (IA64_ALT_DTLB_VECTOR + 0x30, 0x08,
+             itc_d(18), adds(29, 1, 29), nop_i()),
+            (IA64_ALT_DTLB_VECTOR + 0x40, 0x10, nop_m(), nop_i(),
+             rfi_b()),
+        ], {
+            "ip": 0x370,
+            "exception": IA64_EXCP_NONE,
+            "r8": 0x1111222233334444,
+            "r9": 0x5555666677778888,
+            "r10": 0x123456789abcdef0,
+            "r29": 1,
+        }, entry=0x10)
+
+# A spill that overwrites an already translated bundle in the same page must
+# invalidate its translation, as a store would.
+_SMC_NEW_BUNDLE = bundle_words(0x11, nop_m(), adds(8, 2, 0), br_ret(0))
+
+test_rse_flushrs_over_translated_code_invalidates_it = require_registers(
+    "rse_flushrs_over_translated_code_invalidates_it", [
+        (0x10, *movl_mlx(3, 0x8e0)),
+        (0x20, 0x01, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x30, 0x00, alloc(2, 6, 6, 0, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(32, 0x3232323232323232)),
+        (0x50, *movl_mlx(33, 0x3333333333333333)),
+        (0x60, *movl_mlx(34, 0x3434343434343434)),
+        (0x70, *movl_mlx(35, 0x3535353535353535)),
+        (0x80, *movl_mlx(36, _SMC_NEW_BUNDLE[0])),
+        (0x90, *movl_mlx(37, _SMC_NEW_BUNDLE[1])),
+        (0xa0, 0x11, nop_m(), nop_i(), br_call(0, 0xa0, 0x900)),
+        (0xb0, 0x11, nop_m(), adds(9, 0, 8), cover_b()),
+        (0xc0, 0x01, flushrs_enc(), nop_i(), nop_i()),
+        (0xd0, 0x11, nop_m(), nop_i(), br_call(0, 0xd0, 0x900)),
+        (0xe0, 0x10, nop_m(), nop_i(), br_cond(0xe0, 0xe0)),
+        (0x900, 0x11, nop_m(), adds(8, 1, 0), br_ret(0)),
+    ], {
+        "ip": 0xe0,
+        "exception": IA64_EXCP_NONE,
+        "r8": 2,
+        "r9": 1,
+    }, entry=0x10)
+
 test_rse_exception_loadrs_preserves_interrupted_call = require_registers(
     "rse_exception_loadrs_preserves_interrupted_call", [
         (0x10, *movl_mlx(2, 1 << 13)),
@@ -4548,6 +4756,137 @@ test_cover_rfi_rebases_rotating_general_registers = require_registers(
         "cfm_rrb_gr": 31,
     }, entry=0x10)
 
+# alloc growth takes each new register's value and NaT from its physical
+# register.  r38 holds a NaT when the frame shrinks; the callee then writes
+# 5 into the same physical register, so on return the virtual view above
+# the frame still shows the stale NaT and value while the physical file
+# holds no NaT.  Growing the frame again must show 5 without a NaT.
+test_rse_alloc_growth_reads_physical_value_and_nat = require_registers(
+    "rse_alloc_growth_reads_physical_value_and_nat", [
+        (0x10, 0x00, nop_m(), alloc(2, 8, 8, 0, 0), nop_i()),
+        (0x20, *movl_mlx(9, 0x300)),
+        (0x30, 0x01, nop_m(), adds(10, -1, 0), nop_i()),
+        (0x40, 0x01, mov_m_gr_ar(10, 36), nop_i(), nop_i()),
+        (0x50, 0x01, ld8_fill_postinc(38, 9, 0), nop_i(), nop_i()),
+        (0x60, 0x00, nop_m(), alloc(2, 4, 4, 0, 0), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_call(0, 0x70, 0x200)),
+        (0x80, 0x00, nop_m(), alloc(2, 8, 8, 0, 0), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (0x200, 0x00, nop_m(), alloc(3, 4, 4, 0, 0), nop_i()),
+        (0x210, 0x01, nop_m(), adds(34, 5, 0), nop_i()),
+        (0x220, 0x11, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x90,
+        "r38": 5,
+        "r38_nat": 0,
+    }, entry=0x10)
+
+# br.call saves the caller's CFM, ar.ec and CPL in ar.pfs (SDM Vol 3 br.call):
+# here a frame of 16 with 8 locals and one rotating group, ec 25, at CPL 3.
+test_br_call_pfs_holds_cfm_ec_and_cpl = require_registers(
+    "br_call_pfs_holds_cfm_ec_and_cpl", [
+        (0x10, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_CPL3)),
+        (0x40, 0x00, nop_m(), adds(31, 0x80, 0), nop_i()),
+        *rfi_to_gr(0x50, 19, 31),
+        (0x80, 0x01, alloc(2, 16, 8, 1, 0), nop_i(), nop_i()),
+        (0x90, 0x01, mov_m_imm_ar(66, 25), nop_i(), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_call(6, 0xa0, 0x200)),
+        (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
+        (0x200, 0x01, mov_m_ar_gr(3, 64), nop_i(), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_cond(0x210, 0x210)),
+    ], {
+        "ip": 0x210,
+        "r3": 16 | (8 << 7) | (1 << 14) | (25 << 52) | (3 << 62),
+    }, entry=0x10)
+
+# br.call moves BSP over the caller's locals and every NaT collection slot
+# between them (SDM Vol 2 Table 6-2): 64 locals from slot 62 cross two.
+test_br_call_bsp_crosses_two_nat_collections = require_registers(
+    "br_call_bsp_crosses_two_nat_collections", [
+        (0x10, *movl_mlx(3, 0x101f0)),
+        (0x20, 0x01, mov_m_gr_ar(0, 16), nop_i(), nop_i()),
+        (0x30, 0x01, mov_m_gr_ar(3, 18), nop_i(), nop_i()),
+        (0x40, 0x01, alloc(2, 64, 64, 0, 0), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_call(0, 0x50, 0x200)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+        (0x200, 0x01, mov_m_ar_gr(4, 17), nop_i(), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_cond(0x210, 0x210)),
+    ], {
+        "ip": 0x210,
+        "r4": 0x101f0 + (64 + 2) * 8,
+    }, entry=0x10)
+
+# A caller frame of 96 locals fills the physical file exactly; the call
+# wraps the bottom of the next frame to the first physical register, and
+# the return must bring back the caller's first and last register.
+test_br_call_full_frame_wraps_and_returns = require_registers(
+    "br_call_full_frame_wraps_and_returns", [
+        (0x10, 0x01, alloc(2, 96, 96, 0, 0), nop_i(), nop_i()),
+        (0x20, 0x01, adds(32, 0x111, 0), adds(127, 0x222, 0), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_call(0, 0x30, 0x200)),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+        (0x200, 0x01, alloc(3, 8, 8, 0, 0), nop_i(), nop_i()),
+        (0x210, 0x01, adds(32, 0x55, 0), adds(39, 0x66, 0), nop_i()),
+        (0x220, 0x01, mov_m_gr_ar(3, 64), nop_i(), nop_i()),
+        (0x230, 0x11, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x40,
+        "r32": 0x111,
+        "r127": 0x222,
+    }, entry=0x10)
+
+# br.ctop keeps every rotating value in its physical register.  Over more
+# rotations than the region holds, a value and a NaT written inside the loop
+# and the clean values from before it must each reach their own
+# backing-store slot and RNAT bit (SDM Vol.1 4.5.3, Vol.2 6.5).
+test_rse_ctop_rotation_flushes_each_value_to_its_physical_slot = \
+    require_registers(
+        "rse_ctop_rotation_flushes_each_value_to_its_physical_slot", [
+            (0x10, *movl_mlx(3, 0x100000)),
+            (0x20, 0x01, mov_ar(3, 18), nop_i(), nop_i()),
+            (0x30, 0x00, alloc(2, 12, 12, 1, 0), nop_i(), nop_i()),
+            (0x40, *movl_mlx(9, 1 << 32)),
+            (0x50, 0x01, mov_m_gr_ar(9, 36), addl(3, 0x300, 0), nop_i()),
+            (0x60, 0x08, ld8_fill_postinc(35, 3, 0), nop_i(), nop_i()),
+            (0x70, 0x00, adds(32, 0x320, 0), adds(33, 0x330, 0),
+             adds(34, 0x340, 0)),
+            (0x80, 0x01, adds(36, 0x360, 0), adds(37, 0x370, 0),
+             adds(38, 0x380, 0)),
+            # The call and return leave the whole frame clean.
+            (0x90, 0x10, adds(39, 0x390, 0), nop_i(),
+             br_call(0, 0x90, 0x400)),
+            (0xa0, 0x01, adds(4, 0, 0), mov_i_imm_ar(65, 19),
+             mov_i_imm_ar(66, 1)),
+            # 20 rotations; iteration 3 writes physical r6, iteration 10
+            # fills physical r0 with a NaT.
+            (0xb0, 0x02, cmp_eq_imm(1, 2, 2, 4), cmp_eq_imm(5, 6, 9, 4),
+             adds(32, 0x99, 0, qp=1)),
+            (0xc0, 0x11, ld8_fill_postinc(33, 3, 0, qp=5), adds(4, 1, 4),
+             br_ctop_many(0xc0, 0xb0)),
+            (0xd0, 0x01, nop_m(), adds(8, 0, 34), adds(9, 0, 39)),
+            (0xe0, 0x11, nop_m(), adds(13, 0, 36), cover_b()),
+            (0xf0, 0x01, flushrs_enc(), nop_i(), nop_i()),
+            (0x100, 0x01, mov_m_ar_gr(10, 19), addl(5, 0x100030, 0),
+             addl(6, 0x100008, 0)),
+            (0x110, 0x09, ld8(11, 5), ld8(12, 6), addl(7, 0x100010, 0)),
+            (0x120, 0x01, ld8(14, 7), nop_i(), nop_i()),
+            (0x130, 0x10, nop_m(), nop_i(), br_cond(0x130, 0x130)),
+            (0x400, 0x11, nop_m(), nop_i(), br_ret(0)),
+        ], {
+            "ip": 0x130,
+            "exception": IA64_EXCP_NONE,
+            "r4": 20,
+            "r8": 0x99,
+            "r9_nat": 1,
+            "r13_nat": 1,
+            "r10": (1 << 3) | (1 << 0),
+            "r11": 0x99,
+            "r12": 0x330,
+            "r14": 0x340,
+        }, entry=0x10)
+
 test_cover_rfi_restores_rotating_predicates_by_physical_number = \
     require_registers(
         "cover_rfi_restores_rotating_predicates_by_physical_number", [
@@ -4605,6 +4944,71 @@ test_mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates = \
             "r9": 0,
             "cfm_rrb_pr": 47,
         }, entry=0x10)
+
+
+def _pr_file_after_moves(rrb, writes):
+    """Physical predicates after mov pr = r, mask writes (bit 0 stays 1)."""
+    physical = 1
+    for value, mask in writes:
+        mask = mask & ~1 & ((1 << 64) - 1)
+        physical = (physical & ~mask) | (value & mask)
+    del rrb
+    return physical | 1
+
+
+def _pr_logical(physical, rrb, logical):
+    """Logical predicate `logical` of physical file `physical`."""
+    if logical < 16:
+        return (physical >> logical) & 1
+    return (physical >> (16 + (logical - 16 + rrb) % 48)) & 1
+
+
+# mov pr = r, mask and mov r = pr address the physical predicates (as though
+# CFM.rrb.pr were 0, SDM Vol 3 mov pr); qualifying predicates name the
+# logical ones.  Five rotations leave CFM.rrb.pr at 43.  A full write, a
+# write of static predicates only, and a write of p8-p15 and all rotating
+# predicates, each read back with mov r = pr, and three rotating logical
+# predicates observed through qualified adds.
+MOV_PR_RRB_A = 0xa5a55a5af0f00f0f
+MOV_PR_RRB_B = 0x123456789abcdef0
+MOV_PR_RRB_C = 0x0ff0e1d2c3b4a596
+MOV_PR_RRB = 43
+MOV_PR_RRB_1 = _pr_file_after_moves(MOV_PR_RRB, [(MOV_PR_RRB_A, -1)])
+MOV_PR_RRB_2 = _pr_file_after_moves(
+    MOV_PR_RRB, [(MOV_PR_RRB_A, -1), (MOV_PR_RRB_B, 0xaa)])
+MOV_PR_RRB_3 = _pr_file_after_moves(
+    MOV_PR_RRB, [(MOV_PR_RRB_A, -1), (MOV_PR_RRB_B, 0xaa),
+                 (MOV_PR_RRB_C, -256)])
+
+test_mov_pr_partial_masks_with_nonzero_rrb = require_registers(
+    "mov_pr_partial_masks_with_nonzero_rrb", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), mov_i_imm_ar(66, 1),
+         mov_i_imm_ar(65, 4)),
+        (0x30, 0x13, nop_m(), nop_b(), br_ctop_many(0x30, 0x30)),
+        (0x40, *movl_mlx(3, MOV_PR_RRB_A)),
+        (0x50, *movl_mlx(4, MOV_PR_RRB_B)),
+        (0x60, *movl_mlx(5, MOV_PR_RRB_C)),
+        (0x70, 0x00, nop_m(), mov_gr_pr(3, -1), nop_i()),
+        (0x80, 0x00, nop_m(), mov_pr_gr(8), nop_i()),
+        (0x90, 0x00, nop_m(), mov_gr_pr(4, 0xaa), nop_i()),
+        (0xa0, 0x00, nop_m(), mov_pr_gr(9), nop_i()),
+        (0xb0, 0x00, nop_m(), mov_gr_pr(5, -256), nop_i()),
+        (0xc0, 0x00, nop_m(), mov_pr_gr(10), nop_i()),
+        (0xd0, 0x00, nop_m(), adds(11, 1, 0, qp=16), adds(12, 1, 0, qp=40)),
+        (0xe0, 0x00, nop_m(), adds(13, 1, 0, qp=63), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+    ], {
+        "ip": 0xf0,
+        "exception": IA64_EXCP_NONE,
+        "cfm_rrb_pr": MOV_PR_RRB,
+        "r8": MOV_PR_RRB_1,
+        "r9": MOV_PR_RRB_2,
+        "r10": MOV_PR_RRB_3,
+        "r11": _pr_logical(MOV_PR_RRB_3, MOV_PR_RRB, 16),
+        "r12": _pr_logical(MOV_PR_RRB_3, MOV_PR_RRB, 40),
+        "r13": _pr_logical(MOV_PR_RRB_3, MOV_PR_RRB, 63),
+    }, entry=0x10)
 
 # br.call and br.ret, and clrrrb.pr, change CFM.rrb.pr without rotating: the
 # physical predicates keep their values under the new rename base.
@@ -4775,6 +5179,21 @@ test_mov_rnat_rsc_mode_precedes_source_nat = require_exception(
         (0x40, 0x00, mov_m_gr_ar(16, 19), nop_i(), nop_i()),
         (0x200, 0x00, 0, 0, 0),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x40)
+
+# Reads of RNAT and BSPSTORE fault as their writes do.
+test_mov_from_rnat_rsc_mode_illegal = require_exception(
+    "mov_from_rnat_rsc_mode_illegal", [
+        (0x10, 0x00, mov_m_ar_gr(5, 19), nop_i(), nop_i()),
+        (0x20, 0x00, mov_m_imm_ar(16, 3), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_ar_gr(6, 19), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x30)
+
+test_mov_from_bspstore_rsc_mode_illegal = require_exception(
+    "mov_from_bspstore_rsc_mode_illegal", [
+        (0x10, 0x00, mov_m_ar_gr(5, 18), nop_i(), nop_i()),
+        (0x20, 0x00, mov_m_imm_ar(16, 1), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_ar_gr(6, 18), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x30)
 
 test_loadrs_rejects_nonzero_rsc_mode = require_exception(
     "loadrs_rejects_nonzero_rsc_mode", [
@@ -5124,7 +5543,66 @@ test_rse_write_only_rnat_store_preserves_backed_prefix = require_registers(
         "r8": 1 << 2,
     }, entry=0x10)
 
+# A write to AR.PFS with a reserved field faults (SDM Vol 3 mov ar): the
+# reserved bits, sof above 96, sol or sor above sof, rrb.gr outside the
+# rotating region, rrb.fr and rrb.pr outside theirs.
+def _pfs_write_faults(name, value):
+    return require_exception(name, [
+        (0x10, *movl_mlx(3, value)),
+        (0x20, 0x00, mov_m_gr_ar(3, 64), nop_i(), nop_i()),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x20)
+
+
+def _pfs_write_keeps(name, value):
+    return require_registers(name, [
+        (0x10, *movl_mlx(3, value)),
+        (0x20, 0x00, mov_m_gr_ar(3, 64), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_ar_gr(4, 64), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {"ip": 0x40, "r4": value, "exception": IA64_EXCP_NONE})
+
+
+test_pfs_write_reserved_high_bits_fault = _pfs_write_faults(
+    "pfs_write_reserved_high_bits_fault", 1 << 58)
+test_pfs_write_reserved_middle_bits_fault = _pfs_write_faults(
+    "pfs_write_reserved_middle_bits_fault", 1 << 38)
+test_pfs_write_sof_above_96_faults = _pfs_write_faults(
+    "pfs_write_sof_above_96_faults", 97)
+test_pfs_write_sol_above_sof_faults = _pfs_write_faults(
+    "pfs_write_sol_above_sof_faults", (5 << 7) | 4)
+test_pfs_write_sor_above_sof_faults = _pfs_write_faults(
+    "pfs_write_sor_above_sof_faults", (1 << 14) | 7)
+test_pfs_write_rrb_gr_without_sor_faults = _pfs_write_faults(
+    "pfs_write_rrb_gr_without_sor_faults", (1 << 18) | 10)
+test_pfs_write_rrb_gr_at_sor_faults = _pfs_write_faults(
+    "pfs_write_rrb_gr_at_sor_faults", (8 << 18) | (1 << 14) | 8)
+test_pfs_write_rrb_fr_at_96_faults = _pfs_write_faults(
+    "pfs_write_rrb_fr_at_96_faults", 96 << 25)
+test_pfs_write_rrb_pr_at_48_faults = _pfs_write_faults(
+    "pfs_write_rrb_pr_at_48_faults", 48 << 32)
+# Every field at its largest valid value, with pec and ppl set.
+test_pfs_write_largest_valid_fields = _pfs_write_keeps(
+    "pfs_write_largest_valid_fields",
+    96 | (96 << 7) | (12 << 14) | (95 << 18) | (95 << 25) | (47 << 32) |
+    (63 << 52) | (3 << 62))
+test_pfs_write_rrb_gr_below_sor = _pfs_write_keeps(
+    "pfs_write_rrb_gr_below_sor", (7 << 18) | (1 << 14) | (9 << 7) | 9)
+test_pfs_write_frame_without_rotating_region = _pfs_write_keeps(
+    "pfs_write_frame_without_rotating_region", (5 << 7) | 10)
+
 CASE_NAMES = (
+    'pfs_write_reserved_high_bits_fault',
+    'pfs_write_reserved_middle_bits_fault',
+    'pfs_write_sof_above_96_faults',
+    'pfs_write_sol_above_sof_faults',
+    'pfs_write_sor_above_sof_faults',
+    'pfs_write_rrb_gr_without_sor_faults',
+    'pfs_write_rrb_gr_at_sor_faults',
+    'pfs_write_rrb_fr_at_96_faults',
+    'pfs_write_rrb_pr_at_48_faults',
+    'pfs_write_largest_valid_fields',
+    'pfs_write_rrb_gr_below_sor',
+    'pfs_write_frame_without_rotating_region',
 
     'predicated_off_stacked_write_keeps_following_write_valid',
 
@@ -5148,7 +5626,10 @@ CASE_NAMES = (
     'loadrs_rejects_nonzero_rsc_mode',
     'mov_bspstore_rsc_mode_precedes_source_nat',
     'mov_pr_rot_with_nonzero_rrb_tracks_logical_predicates',
+    'mov_pr_partial_masks_with_nonzero_rrb',
     'mov_rnat_rsc_mode_precedes_source_nat',
+    'mov_from_rnat_rsc_mode_illegal',
+    'mov_from_bspstore_rsc_mode_illegal',
     'postincrement_base_out_of_frame',
     'predicated_off_stacked_gr_destination_does_not_fault',
     'rsc_reserved_field_fault',
@@ -5187,6 +5668,14 @@ CASE_NAMES = (
     'rse_callee_alloc_stores_input_arg',
     'rse_cover_flushrs_spills_covered_frame',
     'rse_cover_skips_trailing_rnat_slot',
+    'rse_ctop_rotation_flushes_each_value_to_its_physical_slot',
+    'rse_alloc_growth_reads_physical_value_and_nat',
+    'br_call_pfs_holds_cfm_ec_and_cpl',
+    'br_call_bsp_crosses_two_nat_collections',
+    'br_call_full_frame_wraps_and_returns',
+    'rse_br_ret_fill_crosses_into_unmapped_page_after_direct_loads',
+    'rse_flushrs_crosses_into_unmapped_page_after_direct_stores',
+    'rse_flushrs_over_translated_code_invalidates_it',
     'rse_deep_call_chain_spills_parent_frames',
     'rse_evict_parent_frames_preserves_caller_local',
     'rse_exception_bspstore_restore_skips_unrelated_frame',
@@ -5261,6 +5750,7 @@ CASE_NAMES = (
     'rse_untracked_return_restores_high_caller_local',
     'rse_untracked_return_resyncs_trimmed_rnat',
     'rse_untracked_return_uses_each_rnat_collection',
+    'rse_rsc_pl_change_checks_rights_at_new_level',
     'rse_uses_rsc_pl_for_access_rights',
     'rse_write_only_rnat_store_preserves_backed_prefix',
     'rse_zero_sol_cover_return_restores_bsp_base',
