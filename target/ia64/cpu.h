@@ -1253,6 +1253,33 @@ ia64_key_exception_for_access(const CPUIA64State *env, uint32_t key,
     return ia64_key_exception_for_key(env, key, needed, is_ifetch);
 }
 
+/*
+ * The rights that the PKR of @key disables.  A softmmu fill caches every
+ * right of the page, not only the one it checked, so a load fill must not
+ * leave a store to a write-disabled key without its Key Permission fault.
+ */
+static inline uint8_t
+ia64_key_disabled_perm(const CPUIA64State *env, uint32_t key,
+                       bool is_ifetch, bool is_rse)
+{
+    const uint64_t pkr_key = (uint64_t)key << IA64_PKR_KEY_SHIFT;
+
+    if (!ia64_key_check_enabled(env, is_ifetch, is_rse)) {
+        return 0;
+    }
+    for (uint32_t i = 0; i < IA64_PKR_COUNT; i++) {
+        uint64_t pkr = env->pkr[i];
+
+        if ((pkr & IA64_PKR_VALID) &&
+            (pkr & ia64_pkr_key_mask(env)) == pkr_key) {
+            return (pkr & IA64_PKR_RD ? IA64_TLB_R : 0) |
+                   (pkr & IA64_PKR_WD ? IA64_TLB_W : 0) |
+                   (pkr & IA64_PKR_XD ? IA64_TLB_X : 0);
+        }
+    }
+    return IA64_TLB_R | IA64_TLB_W | IA64_TLB_X;
+}
+
 static inline IA64Exception
 ia64_translation_exception_for_access(const CPUIA64State *env, uint64_t pte,
                                       uint32_t key, uint8_t perm,

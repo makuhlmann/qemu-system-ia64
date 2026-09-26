@@ -530,6 +530,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                 excp = pte_excp;
                 goto raise_exception;
             }
+            perm &= ~ia64_key_disabled_perm(&cpu->env, entry->key,
+                                            is_ifetch, is_rse);
             prot = ia64_tlb_prot_for_pte(&cpu->env, entry->pte, perm,
                                          is_ifetch);
             ia64_record_suppressed_tlb_fill_if_needed(
@@ -574,6 +576,8 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
                 excp = pte_excp;
                 goto raise_exception;
             }
+            perm &= ~ia64_key_disabled_perm(
+                &cpu->env, new_entry ? new_entry->key : key, false, is_rse);
             prot = ia64_tlb_prot_for_pte(&cpu->env,
                                          new_entry ? new_entry->pte : pte,
                                          perm, false);
