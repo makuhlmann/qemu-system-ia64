@@ -526,12 +526,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
                                       insn->raw, insn->slot);
             return IA64_GEN_NORETURN;
         }
-        gen_helper_alloc_rse(tcg_env,
-                              tcg_constant_i32(op->destination),
-                              tcg_constant_i32(sof | (sol << 7) |
-                                               (sor << 14)),
-                              tcg_constant_i64(insn->address),
-                              tcg_constant_i32(insn->slot));
+        ia64_gen_alloc(ctx, insn, op->destination, sof, sol, sor);
         break;
     }
     case IA64_OP_COVER:

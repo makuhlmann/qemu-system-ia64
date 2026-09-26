@@ -4756,6 +4756,31 @@ test_cover_rfi_rebases_rotating_general_registers = require_registers(
         "cfm_rrb_gr": 31,
     }, entry=0x10)
 
+# alloc growth takes each new register's value and NaT from its physical
+# register.  r38 holds a NaT when the frame shrinks; the callee then writes
+# 5 into the same physical register, so on return the virtual view above
+# the frame still shows the stale NaT and value while the physical file
+# holds no NaT.  Growing the frame again must show 5 without a NaT.
+test_rse_alloc_growth_reads_physical_value_and_nat = require_registers(
+    "rse_alloc_growth_reads_physical_value_and_nat", [
+        (0x10, 0x00, nop_m(), alloc(2, 8, 8, 0, 0), nop_i()),
+        (0x20, *movl_mlx(9, 0x300)),
+        (0x30, 0x01, nop_m(), adds(10, -1, 0), nop_i()),
+        (0x40, 0x01, mov_m_gr_ar(10, 36), nop_i(), nop_i()),
+        (0x50, 0x01, ld8_fill_postinc(38, 9, 0), nop_i(), nop_i()),
+        (0x60, 0x00, nop_m(), alloc(2, 4, 4, 0, 0), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_call(0, 0x70, 0x200)),
+        (0x80, 0x00, nop_m(), alloc(2, 8, 8, 0, 0), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (0x200, 0x00, nop_m(), alloc(3, 4, 4, 0, 0), nop_i()),
+        (0x210, 0x01, nop_m(), adds(34, 5, 0), nop_i()),
+        (0x220, 0x11, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x90,
+        "r38": 5,
+        "r38_nat": 0,
+    }, entry=0x10)
+
 # br.ctop keeps every rotating value in its physical register.  Over more
 # rotations than the region holds, a value and a NaT written inside the loop
 # and the clean values from before it must each reach their own
@@ -5512,6 +5537,7 @@ CASE_NAMES = (
     'rse_cover_flushrs_spills_covered_frame',
     'rse_cover_skips_trailing_rnat_slot',
     'rse_ctop_rotation_flushes_each_value_to_its_physical_slot',
+    'rse_alloc_growth_reads_physical_value_and_nat',
     'rse_br_ret_fill_crosses_into_unmapped_page_after_direct_loads',
     'rse_flushrs_crosses_into_unmapped_page_after_direct_stores',
     'rse_flushrs_over_translated_code_invalidates_it',

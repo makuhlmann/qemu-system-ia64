@@ -216,6 +216,8 @@ TCGv_i64 ia64_fr_significand_src(uint8_t reg);
 TCGv_i64 ia64_gen_fr_nat_read(uint8_t reg);
 TCGv_i64 ia64_gen_gr_nat_read(uint8_t reg);
 void ia64_gen_gr_nat_clear(uint8_t reg);
+void ia64_gen_alloc(DisasContext *ctx, const Ia64Instruction *insn,
+                    uint8_t r1, uint32_t sof, uint32_t sol, uint32_t sor);
 void ia64_gen_gr_nat_set(uint8_t reg);
 void ia64_gen_gr_nat_assign(uint8_t reg, TCGv_i64 bit);
 void ia64_gen_gr_nat_from_1(uint8_t dst, uint8_t src);

@@ -15,6 +15,7 @@
 #include "decoder.h"
 #include "ia32/translate.h"
 #include "translate/translate.h"
+#include "trace.h"
 
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
@@ -2344,6 +2345,110 @@ void ia64_gen_gr_nat_clear(uint8_t reg)
     }
     tcg_gen_andi_i64(cpu_nat[reg / 64], cpu_nat[reg / 64],
                      ~(1ULL << (reg % 64)));
+}
+
+/*
+ * alloc without the helper in its common case.  With all rename bases zero
+ * the frame keeps its physical mapping, a changed sor cannot raise the
+ * Reserved Register/Field fault, and the dirty registers of the current
+ * frame need not be written back first.  The new registers must come from
+ * the invalid partition, with no NaT in the physical file and without
+ * wrapping around it, and no ALAT entry may be active; anything else, a
+ * shrink or an unknown frame calls the helper.  So does every alloc while
+ * the ia64_rse_state trace is on, which only the helper emits.
+ */
+void ia64_gen_alloc(DisasContext *ctx, const Ia64Instruction *insn,
+                    uint8_t r1, uint32_t sof, uint32_t sol, uint32_t sor)
+{
+    TCGv_i32 packed = tcg_constant_i32(sof | (sol << 7) | (sor << 14));
+    uint32_t old_sof = ctx->frame_sof;
+    uint32_t growth = sof - old_sof;
+    TCGLabel *slow;
+    TCGLabel *done;
+    TCGv_i32 t32;
+    TCGv_i32 acc;
+    TCGv_i32 base;
+
+    if (!ctx->frame_known || sof < old_sof || growth > 16 ||
+        trace_event_get_state_backends(TRACE_IA64_RSE_STATE)) {
+        gen_helper_alloc_rse(tcg_env, tcg_constant_i32(r1), packed,
+                             tcg_constant_i64(insn->address),
+                             tcg_constant_i32(insn->slot));
+        return;
+    }
+
+    slow = gen_new_label();
+    done = gen_new_label();
+    t32 = tcg_temp_new_i32();
+    acc = tcg_temp_new_i32();
+    base = tcg_temp_new_i32();
+
+    tcg_gen_ld8u_i32(acc, tcg_env, offsetof(CPUIA64State, cfm_rrb_gr));
+    tcg_gen_ld8u_i32(t32, tcg_env, offsetof(CPUIA64State, cfm_rrb_fr));
+    tcg_gen_or_i32(acc, acc, t32);
+    tcg_gen_ld8u_i32(t32, tcg_env, offsetof(CPUIA64State, cfm_rrb_pr));
+    tcg_gen_or_i32(acc, acc, t32);
+    tcg_gen_brcondi_i32(TCG_COND_NE, acc, 0, slow);
+    if (ctx->memory.full_alat) {
+        tcg_gen_ld_i32(acc, tcg_env,
+                       offsetof(CPUIA64State, alat_state.alat_active_count));
+        tcg_gen_brcondi_i32(TCG_COND_NE, acc, 0, slow);
+    }
+    tcg_gen_ld_i32(acc, tcg_env, offsetof(CPUIA64State, rse.rse_invalid));
+    tcg_gen_brcondi_i32(TCG_COND_LT, acc, growth, slow);
+    if (growth != 0) {
+        TCGv_i64 n0 = tcg_temp_new_i64();
+        TCGv_i64 n1 = tcg_temp_new_i64();
+
+        tcg_gen_ld_i64(n0, tcg_env,
+                       offsetof(CPUIA64State, rse.rse_pgr_nat[0]));
+        tcg_gen_ld_i64(n1, tcg_env,
+                       offsetof(CPUIA64State, rse.rse_pgr_nat[1]));
+        tcg_gen_or_i64(n0, n0, n1);
+        tcg_gen_brcondi_i64(TCG_COND_NE, n0, 0, slow);
+        tcg_gen_ld_i32(base, tcg_env, offsetof(CPUIA64State, rse.rse_bol));
+        tcg_gen_addi_i32(base, base, old_sof);
+        tcg_gen_brcondi_i32(TCG_COND_GTU, base,
+                            IA64_STACKED_GR_COUNT - growth, slow);
+    }
+
+    tcg_gen_subi_i32(acc, acc, growth);
+    tcg_gen_st_i32(acc, tcg_env, offsetof(CPUIA64State, rse.rse_invalid));
+    tcg_gen_st8_i32(tcg_constant_i32(sof), tcg_env,
+                    offsetof(CPUIA64State, cfm_sof));
+    tcg_gen_st8_i32(tcg_constant_i32(sol), tcg_env,
+                    offsetof(CPUIA64State, cfm_sol));
+    tcg_gen_st8_i32(tcg_constant_i32(sor), tcg_env,
+                    offsetof(CPUIA64State, cfm_sor));
+    if (growth != 0) {
+        TCGv_ptr slot = tcg_temp_new_ptr();
+        uint32_t first = IA64_STACKED_GR_BASE + old_sof;
+
+        /* The new registers take the values of their physical registers. */
+        tcg_gen_shli_i32(base, base, 3);
+        tcg_gen_ext_i32_ptr(slot, base);
+        tcg_gen_add_ptr(slot, slot, tcg_env);
+        for (uint32_t i = 0; i < growth; i++) {
+            tcg_gen_ld_i64(cpu_gr[first + i], slot,
+                           offsetof(CPUIA64State, rse.rse_pgr) + i * 8);
+        }
+        for (uint32_t reg = first; reg < first + growth; reg++) {
+            tcg_gen_andi_i64(cpu_nat[reg / 64], cpu_nat[reg / 64],
+                             ~(1ULL << (reg % 64)));
+        }
+    }
+    if (r1 != 0) {
+        tcg_gen_ld_i64(cpu_gr[r1], tcg_env,
+                       offsetof(CPUIA64State, ar[IA64_AR_PFS]));
+        ia64_gen_gr_nat_clear(r1);
+    }
+    tcg_gen_br(done);
+
+    gen_set_label(slow);
+    gen_helper_alloc_rse(tcg_env, tcg_constant_i32(r1), packed,
+                         tcg_constant_i64(insn->address),
+                         tcg_constant_i32(insn->slot));
+    gen_set_label(done);
 }
 
 void ia64_gen_gr_nat_set(uint8_t reg)
