@@ -2988,6 +2988,34 @@ test_srlz_d_after_mov_psr_rechooses_next_tb = require_registers(
         "r8": SRLZ_DT_SWITCH_PHYS,
     }, entry=0x10)
 
+# As above, but mov psr.l ends its own bundle (and TB) and srlz.d runs in the
+# next TB.  The mov psr.l exit must not link either: a TB entered through a
+# stale link would keep the first pass's PSR.dt past the srlz.d.
+test_srlz_d_after_mov_psr_bundle_rechooses_next_tb = require_registers(
+    "srlz_d_after_mov_psr_bundle_rechooses_next_tb", [
+        *dtr_setup_bundles(0x10, 0x0, 0x400000),
+        (0x70, *movl_mlx(6, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x80, *movl_mlx(3, IA64_PSR_IC)),
+        (0x90, 0x00, adds(11, 0, 0), addl(4, 0x9000, 0), adds(2, 0, 6)),
+        (0xa0, 0x18, mov_gr_psr_full(3), srlz_d(), br_cond(0xa0, 0xb0)),
+        (0xb0, 0x01, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0xc0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xd0, 0x00, ld8(5, 4), nop_i(), nop_i()),
+        (0xe0, 0x00, nop_m(), cmp_eq_imm(6, 7, 0, 11), nop_i()),
+        (0xf0, 0x00, adds(7, 0, 5, qp=6), adds(2, 0, 3, qp=6),
+         adds(11, 1, 0, qp=6)),
+        (0x100, 0x18, mov_gr_psr_full(3, qp=6), srlz_d(),
+         br_cond(0x100, 0xb0, qp=6)),
+        (0x110, 0x00, adds(8, 0, 5), nop_i(), nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+        (0x9000, 0x00, 0x2222, 0, 0),
+        (0x409000, 0x00, 0x1111, 0, 0),
+    ], {
+        "ip": 0x120,
+        "r7": SRLZ_DT_SWITCH_VIRT,
+        "r8": SRLZ_DT_SWITCH_PHYS,
+    }, entry=0x10)
+
 test_itc_d_key_write_disable_survives_load_fill = require_registers(
     "itc_d_key_write_disable_survives_load_fill", [
         (0x10, *movl_mlx(2, KEY_TEST_VA)),
@@ -7080,6 +7108,7 @@ CASE_NAMES = (
     'itc_d_evicted_refill_flushes_host_tlb',
     'itc_d_key_permission_store_raises_permission_vector',
     'srlz_d_after_mov_psr_rechooses_next_tb',
+    'srlz_d_after_mov_psr_bundle_rechooses_next_tb',
     'itc_d_key_write_disable_survives_load_fill',
     'itc_d_key_read_disable_survives_store_fill',
     'itc_d_key_read_disable_faults_cmpxchg',

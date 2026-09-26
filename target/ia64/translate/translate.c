@@ -1824,7 +1824,7 @@ static bool ia64_insn_keeps_tb_key(const Ia64Instruction *insn)
     case IA64_OP_MF_A:
     case IA64_OP_SSM:
     case IA64_OP_RSM:
-    case IA64_OP_SUM:
+    case IA64_OP_SUM_UM:
     case IA64_OP_RUM:
     case IA64_OP_MOV_PRGR:
     case IA64_OP_MOV_GRPR:
@@ -1839,10 +1839,35 @@ static bool ia64_insn_keeps_tb_key(const Ia64Instruction *insn)
     }
 }
 
+/*
+ * Instructions that change the TB key (PSR.dt/it/ic/be/ac, CPL) by a value
+ * known only at run time.  The bundle-end exit after them is a link today,
+ * which the SDM permits until a srlz makes the new PSR take effect.
+ */
+static bool ia64_insn_sets_tb_key_at_run_time(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_MOV_GRPSR:
+    case IA64_OP_MOV_GRUM:
+    case IA64_OP_EPC:
+        return true;
+    case IA64_OP_SSM:
+    case IA64_OP_RSM:
+    case IA64_OP_SUM_UM:
+    case IA64_OP_RUM:
+        return insn->qp != 0;
+    default:
+        return false;
+    }
+}
+
 void ia64_note_tb_key_effect(DisasContext *ctx, const Ia64Instruction *insn)
 {
     if (!ia64_insn_keeps_tb_key(insn)) {
         ctx->key_static = false;
+    }
+    if (ia64_insn_sets_tb_key_at_run_time(insn)) {
+        ctx->key_dynamic = true;
     }
 }
 
@@ -3384,6 +3409,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     ctx->cpl = (flags & IA64_TB_FLAG_CPL_MASK) >> IA64_TB_FLAG_CPL_SHIFT;
     ctx->cpl_known = true;
     ctx->key_static = true;
+    ctx->key_dynamic = false;
     ctx->frame_known = true;
     ctx->frame_sof = ctx->base.tb->cs_base & 0x7f;
     ctx->frame_sol = (ctx->base.tb->cs_base >> IA64_TB_CS_BASE_SOL_SHIFT) &
@@ -3746,7 +3772,7 @@ static void ia64_gen_link_or_lookup(DisasContext *ctx, uint64_t dest)
 {
     uint8_t slot = ctx->branch.goto_tb_slots;
 
-    if (slot < 2 && ctx->frame_known &&
+    if (slot < 2 && ctx->frame_known && !ctx->key_dynamic &&
         translator_use_goto_tb(&ctx->base, dest)) {
         uint64_t test0 = ~ctx->memory.nat_known_at_exit[0];
         uint64_t test1 = ~ctx->memory.nat_known_at_exit[1];

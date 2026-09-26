@@ -146,6 +146,12 @@ typedef struct DisasContext {
      */
     bool key_static;
     /*
+     * An instruction in the TB set part of the TB key to a run-time value
+     * (ia64_insn_sets_tb_key_at_run_time()): exits after it look the next
+     * TB up, because a link was chosen for one value.
+     */
+    bool key_dynamic;
+    /*
      * PSR.ss and PSR.tb at TB entry.  Either one makes the TB translate a
      * single instruction, in slot trap_slot, and note its completion traps
      * (ia64_completion_trap_note()).
