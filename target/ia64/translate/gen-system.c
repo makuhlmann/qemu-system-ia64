@@ -172,10 +172,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
     case IA64_OP_MOV_CRGR:
     {
         /* The CR access check applies even when the destination is r0. */
-        TCGv_i64 checked = tcg_temp_new_i64();
-
-        ia64_gen_validate_cr_access(checked, insn,
-                                    tcg_constant_i64(0), false);
+        ia64_gen_check_cr_read(insn);
         if (op->destination != 0) {
             TCGv_i64 val = tcg_temp_new_i64();
 
@@ -204,6 +201,18 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             break;
         }
         ia64_gen_check_nat_register(insn, op->destination);
+        if (op->source == IA64_CR_SAPIC_TPR) {
+            /*
+             * The new priority needs a srlz.d to take effect on interrupt
+             * masking (SDM Vol 2 serialization requirements); the srlz.d
+             * exit and the kick from the helper deliver an interrupt it
+             * unmasks, so the TB goes on.
+             */
+            ia64_gen_validate_tpr_write(checked, insn,
+                                        ia64_gr_src(op->destination));
+            gen_helper_write_tpr(tcg_env, checked);
+            break;
+        }
         ia64_gen_validate_cr_access(checked, insn,
                                     ia64_gr_src(op->destination), true);
         if (ia64_cr_write_is_plain_store(op->source)) {
@@ -231,9 +240,9 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
                                 checked);
         } else {
             /*
-             * ITM/IVA/PTA/TPR/EOI/ITV and any unlisted number: timer
-             * rearm, TLB/TB flush or interrupt re-evaluation -- keep the
-             * helper and end the TB so the pending-interrupt check runs.
+             * ITM/IVA/PTA/EOI/ITV and any unlisted number: timer rearm,
+             * TLB/TB flush or interrupt re-evaluation -- keep the helper
+             * and end the TB so the pending-interrupt check runs.
              */
             if (ia64_cr_write_reads_clock(op->source)) {
                 translator_io_start(&ctx->base);

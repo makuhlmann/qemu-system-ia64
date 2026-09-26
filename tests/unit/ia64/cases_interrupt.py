@@ -32,6 +32,7 @@ from .encoding import (
     IA64_EXCP_DISABLED_ISA_TRANSITION,
     IA64_EXCP_ILLEGAL,
     IA64_EXCP_NONE,
+    IA64_EXCP_RESERVED_REG_FIELD,
     IA64_EXCP_RESERVED_TEMPLATE,
     IA64_EXCP_UNALIGNED,
     IA64_GENERAL_VECTOR,
@@ -514,6 +515,16 @@ test_mov_to_irr_illegal = require_exception(
         (0x10, 0x00, mov_m_gr_cr(0, IA64_CR_SAPIC_IRR3), nop_i(),
          nop_i()),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x10)
+
+# TPR bits 15:8 are reserved: writing one is a Reserved Register/Field
+# fault, even though the value would be masked.
+test_mov_to_tpr_reserved_bits_fault = require_exception(
+    "mov_to_tpr_reserved_bits_fault", [
+        (0x10, 0x00, adds(3, 0x100, 0), nop_i(), nop_i()),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_SAPIC_TPR), nop_i(),
+         nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_cond(0x30, 0x30)),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x20)
 
 test_mov_to_read_only_cr_predicate_false = require_registers(
     "mov_to_read_only_cr_predicate_false", [
@@ -1294,6 +1305,45 @@ test_tpr_mmi_masks_timer_until_cleared = require_registers(
         "ip": 0x3010,
         "exception": IA64_EXCP_NONE,
         "r8": 0x2a,
+        "r31": 0x63,
+    }, entry=0x10)
+
+# A TPR write that unmasks a pending timer interrupt must have it
+# delivered once srlz.d completes, before the next instruction group
+# (SDM Vol 2 serialization requirements).  The write may deliver it
+# earlier; r8 shows whether the instruction after srlz.d ran first.
+test_tpr_unmask_delivers_by_srlz_d = require_registers(
+    "tpr_unmask_delivers_by_srlz_d", [
+        (0x10, *movl_mlx(3, IA64_TPR_MMI)),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_SAPIC_TPR), nop_i(),
+         nop_i()),
+        (0x30, 0x00, adds(4, 0xef, 0), nop_i(),
+         nop_i()),
+        (0x40, 0x00, mov_m_gr_cr(4, IA64_CR_ITV), nop_i(),
+         nop_i()),
+        (0x50, 0x00, mov_m_gr_ar(0, 44), nop_i(),
+         nop_i()),
+        (0x60, 0x00, mov_m_gr_cr(0, IA64_CR_ITM), nop_i(),
+         nop_i()),
+        (0x70, *movl_mlx(19, (1 << 13) | (1 << 14))),
+        (0x80, 0x01, mov_gr_psr_full(19), nop_i(),
+         nop_i()),
+        (0x90, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_TPR), nop_i(),
+         nop_i()),
+        (0xa0, 0x01, srlz_d(), nop_i(),
+         nop_i()),
+        (0xb0, 0x01, nop_m(), adds(8, 0x2a, 0),
+         nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(),
+         br_cond(0xc0, 0xc0)),
+        (0x3000, 0x10, nop_m(), adds(31, 0x63, 0),
+         br_cond(0x3000, 0x3010)),
+        (0x3010, 0x10, nop_m(), nop_i(),
+         br_cond(0x3010, 0x3010)),
+    ], {
+        "ip": 0x3010,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
         "r31": 0x63,
     }, entry=0x10)
 
@@ -5590,6 +5640,8 @@ CASE_NAMES = (
     'sapic_same_class_higher_vector_preempts',
     'timer_interrupt_exits_chained_loop_after_virtual_deadline',
     'tpr_mmi_masks_timer_until_cleared',
+    'tpr_unmask_delivers_by_srlz_d',
+    'mov_to_tpr_reserved_bits_fault',
     'tpr_preserves_mmi_and_mic',
     'unimplemented_physical_instruction_traps',
     'pending_interrupt_taken_after_ssm',

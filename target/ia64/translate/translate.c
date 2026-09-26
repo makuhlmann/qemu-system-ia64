@@ -2828,6 +2828,41 @@ void ia64_gen_validate_cr_access(TCGv_i64 result,
                                   tcg_constant_i32(insn->slot));
 }
 
+/*
+ * The part of ia64_system_validate_cr_access() a read needs: an
+ * interruption CR (cr16-cr25) read with PSR.ic set is an Illegal Operation
+ * fault (SDM Vol 3 mov cr).  The helper still raises it.
+ */
+void ia64_gen_check_cr_read(const Ia64Instruction *insn)
+{
+    uint32_t cr = insn->operands.common.source1;
+    TCGv_i64 ic;
+    TCGLabel *ok;
+
+    if (cr < IA64_CR_IPSR || cr > IA64_CR_IHA) {
+        return;
+    }
+    ic = tcg_temp_new_i64();
+    ok = gen_new_label();
+    tcg_gen_andi_i64(ic, cpu_psr, IA64_PSR_IC);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, ic, 0, ok);
+    ia64_gen_validate_cr_access(ic, insn, tcg_constant_i64(0), false);
+    gen_set_label(ok);
+}
+
+/* Of the TPR checks only the reserved bits 15:8 can fault a write. */
+void ia64_gen_validate_tpr_write(TCGv_i64 result, const Ia64Instruction *insn,
+                                 TCGv_i64 value)
+{
+    TCGLabel *ok = gen_new_label();
+
+    tcg_gen_andi_i64(result, value, 0xff00);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, result, 0, ok);
+    ia64_gen_validate_cr_access(result, insn, value, true);
+    gen_set_label(ok);
+    tcg_gen_andi_i64(result, value, IA64_TPR_WRITABLE_MASK);
+}
+
 void ia64_gen_check_nat_register(const Ia64Instruction *insn, uint8_t reg)
 {
     ia64_gen_check_nat_consumption(insn, reg, 0, IA64_NAT_ACCESS);

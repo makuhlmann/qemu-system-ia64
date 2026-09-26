@@ -314,6 +314,19 @@ test_mov_cr_to_r0_ic_set_illegal = require_exception(
         (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
     ], IA64_EXCP_ILLEGAL, fault_ip=0x30)
 
+# The same read into a real register: here only PSR.ic makes it illegal.
+# PSR.ic is set inside the TB, after the one the TB was entered with.
+test_mov_cr_iip_ic_set_illegal = require_exception(
+    "mov_cr_iip_ic_set_illegal", [
+        (0x10, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_cr_gr(4, 19), nop_i(), nop_i()),
+        (0x40, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x50, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x60, 0x00, mov_m_cr_gr(4, 19), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x60)
+
 test_mov_cr_lid_ignored_high_bits_read_zero = require_registers(
     "mov_cr_lid_ignored_high_bits_read_zero", [
         (0x10, *movl_mlx(2, 0xdeadbeef12340000)),
@@ -3616,6 +3629,7 @@ CASE_NAMES = (
     'mov_cpuid_madison_model',
     'mov_cr_lid_ignored_high_bits_read_zero',
     'mov_cr_to_r0_ic_set_illegal',
+    'mov_cr_iip_ic_set_illegal',
     'mov_pr_partial_masks_merge_bytes',
     'stacked_write_faults_in_smaller_frame_at_same_ip',
     'mov_dahr_indexed_decode',
