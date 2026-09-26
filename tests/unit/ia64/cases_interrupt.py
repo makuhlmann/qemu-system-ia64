@@ -1708,8 +1708,30 @@ test_masking_itv_preserves_pended_timer_irr = require_registers(
     }, entry=0x10)
 
 
+# These two cases replace an ITM deadline 5 ms ahead with a second write, and
+# they test that write only if it lands before ITC reaches the first deadline.
+# A loaded host can stop the vCPU for longer than that between the two writes;
+# the first deadline then matches first, and the interrupt it pends is right.
+# r10 reads ITC after the second write: a run in which it has already reached
+# the first deadline (r4) tests nothing, so it runs again.
+ITM_REPROGRAM_ATTEMPTS = 5
+
+
+def _run_itm_reprogram(qemu, name, bundles, terminal_ip):
+    for _ in range(ITM_REPROGRAM_ATTEMPTS):
+        result = run_program(qemu, bundles, entry=0x10,
+                             terminal_ip=terminal_ip)
+        if result.state.gr[10] < result.state.gr[4]:
+            return result
+    raise RuntimeError(
+        f"{name} failed: ITC reached the first deadline before the second "
+        f"ITM write in all {ITM_REPROGRAM_ATTEMPTS} runs\n"
+        f"{result.register_output}")
+
+
 def test_future_itm_rearm_uses_latest_deadline(qemu):
-    result = run_program(qemu, [
+    result = _run_itm_reprogram(
+        qemu, "future_itm_rearm_uses_latest_deadline", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
         (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(), nop_i()),
         (0x30, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
@@ -1719,15 +1741,16 @@ def test_future_itm_rearm_uses_latest_deadline(qemu):
         (0x60, *movl_mlx(6, IA64_ITC_ADDL_DELAY_TICKS)),
         (0x70, 0x00, nop_m(), add(5, 4, 6), nop_i()),
         (0x80, 0x00, mov_m_gr_cr(5, IA64_CR_ITM), nop_i(), nop_i()),
-        (0x90, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
-        (0xa0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
-        (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
+        (0x90, 0x02, mov_m_ar_gr(10, 44), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
+        (0xb0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
         (0x3000, 0x00, mov_m_cr_gr(6, IA64_CR_SAPIC_IVR),
          nop_i(), nop_i()),
         (0x3010, 0x02, mov_m_ar_gr(8, 44), nop_i(), nop_i()),
         (0x3020, 0x00, mov_m_cr_gr(9, IA64_CR_ITM), nop_i(), nop_i()),
         (0x3030, 0x10, nop_m(), nop_i(), br_cond(0x3030, 0x3030)),
-    ], entry=0x10, terminal_ip=0x3030)
+    ], terminal_ip=0x3030)
     state = result.state
     if (state.exception != IA64_EXCP_NONE or
         state.gr[6] != 0xef or
@@ -1742,7 +1765,8 @@ def test_future_itm_rearm_uses_latest_deadline(qemu):
 
 
 def test_past_itm_reprogram_cancels_future_deadline(qemu):
-    result = run_program(qemu, [
+    result = _run_itm_reprogram(
+        qemu, "past_itm_reprogram_cancels_future_deadline", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
         (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(), nop_i()),
         (0x30, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
@@ -1751,19 +1775,20 @@ def test_past_itm_reprogram_cancels_future_deadline(qemu):
         (0x50, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(), nop_i()),
         (0x60, 0x00, adds(5, -1, 3), nop_i(), nop_i()),
         (0x70, 0x00, mov_m_gr_cr(5, IA64_CR_ITM), nop_i(), nop_i()),
-        (0x80, *movl_mlx(7, IA64_ITC_ADDL_DELAY_TICKS)),
-        (0x90, 0x00, nop_m(), add(7, 4, 7), nop_i()),
-        (0xa0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
-        (0xb0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
-        (0xc0, 0x02, mov_m_ar_gr(6, 44), nop_i(), nop_i()),
-        (0xd0, 0x00, nop_m(), cmp_ltu_unc(6, 7, 6, 7), nop_i()),
-        (0xe0, 0x10, nop_m(), nop_i(), br_cond(0xe0, 0xc0, qp=6)),
-        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+        (0x80, 0x02, mov_m_ar_gr(10, 44), nop_i(), nop_i()),
+        (0x90, *movl_mlx(7, IA64_ITC_ADDL_DELAY_TICKS)),
+        (0xa0, 0x00, nop_m(), add(7, 4, 7), nop_i()),
+        (0xb0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
+        (0xc0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xd0, 0x02, mov_m_ar_gr(6, 44), nop_i(), nop_i()),
+        (0xe0, 0x00, nop_m(), cmp_ltu_unc(6, 7, 6, 7), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xd0, qp=6)),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0x100)),
         (0x3000, 0x00, mov_m_cr_gr(9, IA64_CR_SAPIC_IVR),
          nop_i(), nop_i()),
         (0x3010, 0x00, nop_m(), adds(8, 1, 8), nop_i()),
         (0x3020, 0x10, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), nop_i(), rfi_b()),
-    ], entry=0x10, terminal_ip=0xf0)
+    ], terminal_ip=0x100)
     state = result.state
     if (state.exception != IA64_EXCP_NONE or
         state.gr[6] < state.gr[7] or state.gr[8] != 0):
