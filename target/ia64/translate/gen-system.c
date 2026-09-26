@@ -885,7 +885,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
 
         gen_helper_tlb_serialize(main_loop, tcg_env, tcg_constant_i32(1),
                                  tcg_constant_i32(0));
-        ia64_gen_exit_or_lookup_slot_completed(ctx, insn->address,
+        ia64_gen_link_or_exit_slot_completed(ctx, insn->address,
                                                insn->slot + 1, insn->address,
                                                record_iipa,
                                                track_psr_suppression,

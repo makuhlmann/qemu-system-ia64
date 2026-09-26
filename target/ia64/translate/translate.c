@@ -1795,6 +1795,95 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
     tcg_gen_exit_tb(NULL, 0);
 }
 
+static void ia64_gen_link_or_lookup(DisasContext *ctx, uint64_t dest);
+
+/*
+ * Instructions whose change to the TB key, if any, is fixed by their
+ * encoding, and which change neither the frame nor how code is fetched.
+ */
+static bool ia64_insn_keeps_tb_key(const Ia64Instruction *insn)
+{
+    if (ia64_integer_pure_kind(insn) != IA64_PURE_NONE) {
+        return true;
+    }
+    switch (insn->opcode) {
+    case IA64_OP_NOP:
+    case IA64_OP_LD1:
+    case IA64_OP_LD2:
+    case IA64_OP_LD4:
+    case IA64_OP_LD8:
+    case IA64_OP_ST1:
+    case IA64_OP_ST2:
+    case IA64_OP_ST4:
+    case IA64_OP_ST8:
+    case IA64_OP_ST1REL:
+    case IA64_OP_ST2REL:
+    case IA64_OP_ST4REL:
+    case IA64_OP_ST8REL:
+    case IA64_OP_MF:
+    case IA64_OP_MF_A:
+    case IA64_OP_SSM:
+    case IA64_OP_RSM:
+    case IA64_OP_SUM:
+    case IA64_OP_RUM:
+    case IA64_OP_MOV_PRGR:
+    case IA64_OP_MOV_GRPR:
+    case IA64_OP_MOV_PR_ROT_IMM:
+    case IA64_OP_MOV_BRGR:
+    case IA64_OP_MOV_GRBR:
+        return true;
+    case IA64_OP_MOV_GRCR:
+        return insn->operands.system.source == IA64_CR_SAPIC_TPR;
+    default:
+        return false;
+    }
+}
+
+void ia64_note_tb_key_effect(DisasContext *ctx, const Ia64Instruction *insn)
+{
+    if (!ia64_insn_keeps_tb_key(insn)) {
+        ctx->key_static = false;
+    }
+}
+
+/*
+ * As ia64_gen_exit_or_lookup_slot_completed, but when the TB key at the
+ * exit is fixed (key_static, frame_known) link to the next TB instead of
+ * looking it up.
+ */
+void ia64_gen_link_or_exit_slot_completed(DisasContext *ctx, uint64_t ip,
+                                          uint8_t slot,
+                                          uint64_t completed_ip,
+                                          bool record_iipa,
+                                          bool track_psr_suppression,
+                                          TCGv_i32 main_loop)
+{
+    TCGLabel *link;
+
+    if (!ctx->key_static || ctx->restart.track_psr_suppression) {
+        ia64_gen_exit_or_lookup_slot_completed(ctx, ip, slot, completed_ip,
+                                               record_iipa,
+                                               track_psr_suppression,
+                                               main_loop);
+        return;
+    }
+    if (ctx->psr_ss || ctx->psr_tb) {
+        ia64_gen_exit_to_slot_completed(ctx, ip, slot, completed_ip,
+                                        record_iipa, track_psr_suppression);
+        return;
+    }
+    ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
+                                    track_psr_suppression);
+    ia64_gen_store_instruction_group_start(
+        ctx->restart.next_instruction_group_start);
+    ia64_gen_set_resume_slot(ip, slot);
+    link = gen_new_label();
+    tcg_gen_brcondi_i32(TCG_COND_EQ, main_loop, 0, link);
+    tcg_gen_exit_tb(NULL, 0);
+    gen_set_label(link);
+    ia64_gen_link_or_lookup(ctx, slot >= 3 ? ip + 16 : ip);
+}
+
 /*
  * As ia64_gen_exit_to_slot_completed, but leave to the main loop only when
  * @main_loop is nonzero; otherwise look the next TB up directly, which is
@@ -3294,6 +3383,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
         MMU_PHYS_IDX;
     ctx->cpl = (flags & IA64_TB_FLAG_CPL_MASK) >> IA64_TB_FLAG_CPL_SHIFT;
     ctx->cpl_known = true;
+    ctx->key_static = true;
     ctx->frame_known = true;
     ctx->frame_sof = ctx->base.tb->cs_base & 0x7f;
     ctx->frame_sol = (ctx->base.tb->cs_base >> IA64_TB_CS_BASE_SOL_SHIFT) &
@@ -3604,6 +3694,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
         ia64_gen_advance_restart_point(ctx, bundle_ip, slot, skip_x_slot);
         ia64_update_nat_known(ctx, &insn);
         ia64_update_frame_tracking(ctx, &insn);
+        ia64_note_tb_key_effect(ctx, &insn);
         ctx->restart.instruction_group_start =
             ctx->restart.next_instruction_group_start;
         if (ia64_insn_may_modify_psr_ri(&insn)) {
@@ -3650,15 +3741,11 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
     }
 }
 
-void ia64_gen_goto_tb_group(DisasContext *ctx, uint64_t dest,
-                            bool group_start)
+/* Leave for the TB at @dest, whose ip, RI and fault slot are stored. */
+static void ia64_gen_link_or_lookup(DisasContext *ctx, uint64_t dest)
 {
     uint8_t slot = ctx->branch.goto_tb_slots;
 
-    ia64_gen_store_instruction_group_start(group_start);
-    ia64_gen_save_fault_slot_for_exit(ctx);
-    ia64_gen_clear_ri();
-    tcg_gen_movi_i64(cpu_ip, dest);
     if (slot < 2 && ctx->frame_known &&
         translator_use_goto_tb(&ctx->base, dest)) {
         uint64_t test0 = ~ctx->memory.nat_known_at_exit[0];
@@ -3684,6 +3771,16 @@ void ia64_gen_goto_tb_group(DisasContext *ctx, uint64_t dest,
     } else {
         tcg_gen_lookup_and_goto_ptr();
     }
+}
+
+void ia64_gen_goto_tb_group(DisasContext *ctx, uint64_t dest,
+                            bool group_start)
+{
+    ia64_gen_store_instruction_group_start(group_start);
+    ia64_gen_save_fault_slot_for_exit(ctx);
+    ia64_gen_clear_ri();
+    tcg_gen_movi_i64(cpu_ip, dest);
+    ia64_gen_link_or_lookup(ctx, dest);
 }
 
 static void ia64_gen_goto_tb(DisasContext *ctx, uint64_t dest)

@@ -140,6 +140,12 @@ typedef struct DisasContext {
     uint8_t frame_sof;
     uint8_t frame_sol;
     /*
+     * Every instruction so far in the TB is one of
+     * ia64_insn_keeps_tb_key(): the key state at an exit is then fixed by
+     * the TB's own key, and a srlz.d may link to the next TB.
+     */
+    bool key_static;
+    /*
      * PSR.ss and PSR.tb at TB entry.  Either one makes the TB translate a
      * single instruction, in slot trap_slot, and note its completion traps
      * (ia64_completion_trap_note()).
@@ -268,6 +274,13 @@ void ia64_gen_exit_to_slot_completed(DisasContext *ctx, uint64_t ip,
                                      uint8_t slot, uint64_t completed_ip,
                                      bool record_iipa,
                                      bool track_psr_suppression);
+void ia64_note_tb_key_effect(DisasContext *ctx, const Ia64Instruction *insn);
+void ia64_gen_link_or_exit_slot_completed(DisasContext *ctx, uint64_t ip,
+                                          uint8_t slot,
+                                          uint64_t completed_ip,
+                                          bool record_iipa,
+                                          bool track_psr_suppression,
+                                          TCGv_i32 main_loop);
 void ia64_gen_exit_or_lookup_slot_completed(DisasContext *ctx, uint64_t ip,
                                             uint8_t slot,
                                             uint64_t completed_ip,

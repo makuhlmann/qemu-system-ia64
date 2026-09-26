@@ -90,6 +90,7 @@ from .encoding import (
     cmp4_eq_imm,
     cmpxchg4,
     cmpxchg4_acq,
+    cmp_eq_imm,
     cmpxchg_acq,
     dtr_setup_bundles,
     fc_i,
@@ -2955,6 +2956,36 @@ test_itc_d_key_permission_store_raises_permission_vector = require_registers(
         "r30": KEY_TEST_VA,
         "r31": IA64_ISR_W,
         "r28": KEY_TEST_RR,
+    }, entry=0x10)
+
+# The TB at 0xb0 runs twice with the same key (PSR.ic, entered by a branch):
+# mov psr.l sets PSR.dt to 1, then to 0, and its srlz.d leaves the TB.  The
+# load after it must use the new PSR.dt each time, so that exit cannot keep
+# a link to the TB chosen on the first pass.
+SRLZ_DT_SWITCH_VIRT = bundle_words(0x00, 0x1111, 0, 0)[0]
+SRLZ_DT_SWITCH_PHYS = bundle_words(0x00, 0x2222, 0, 0)[0]
+test_srlz_d_after_mov_psr_rechooses_next_tb = require_registers(
+    "srlz_d_after_mov_psr_rechooses_next_tb", [
+        *dtr_setup_bundles(0x10, 0x0, 0x400000),
+        (0x70, *movl_mlx(6, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x80, *movl_mlx(3, IA64_PSR_IC)),
+        (0x90, 0x00, adds(11, 0, 0), addl(4, 0x9000, 0), adds(2, 0, 6)),
+        (0xa0, 0x18, mov_gr_psr_full(3), srlz_d(), br_cond(0xa0, 0xb0)),
+        (0xb0, 0x08, mov_gr_psr_full(2), srlz_d(), nop_i()),
+        (0xc0, 0x00, ld8(5, 4), nop_i(), nop_i()),
+        (0xd0, 0x00, nop_m(), cmp_eq_imm(6, 7, 0, 11), nop_i()),
+        (0xe0, 0x00, adds(7, 0, 5, qp=6), adds(2, 0, 3, qp=6),
+         adds(11, 1, 0, qp=6)),
+        (0xf0, 0x08, mov_gr_psr_full(3, qp=6), srlz_d(), nop_i()),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0xb0, qp=6)),
+        (0x110, 0x00, adds(8, 0, 5), nop_i(), nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+        (0x9000, 0x00, 0x2222, 0, 0),
+        (0x409000, 0x00, 0x1111, 0, 0),
+    ], {
+        "ip": 0x120,
+        "r7": SRLZ_DT_SWITCH_VIRT,
+        "r8": SRLZ_DT_SWITCH_PHYS,
     }, entry=0x10)
 
 test_itc_d_key_write_disable_survives_load_fill = require_registers(
@@ -7048,6 +7079,7 @@ CASE_NAMES = (
     'itc_d_full_tc_replacement_rotates',
     'itc_d_evicted_refill_flushes_host_tlb',
     'itc_d_key_permission_store_raises_permission_vector',
+    'srlz_d_after_mov_psr_rechooses_next_tb',
     'itc_d_key_write_disable_survives_load_fill',
     'itc_d_key_read_disable_survives_store_fill',
     'itc_d_key_read_disable_faults_cmpxchg',
