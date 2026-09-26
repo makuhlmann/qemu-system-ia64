@@ -17,6 +17,14 @@ enum {
     IA64_IA32_SEG_ACCESS_WRITE = 2,
 };
 
+/*
+ * IA-32 TB flags from ia64_ia32_tb_state(), at x86 hflags bits the IA-32
+ * engine never sets: bit 2 (no hflags bit), and one bit per flat ES, SS and
+ * DS at bits 24, 26 and 27 (HF_IOBPT, HF_MPX_IU and HF_UMIP).
+ */
+#define IA64_IA32_TB_FAST        (1u << 2)
+#define IA64_IA32_TB_FLAT_SHIFT  24
+
 /* Private marker carried through QEMU's INT helper ABI. */
 #define IA64_IA32_INT_BREAKPOINT 0x100
 
@@ -30,8 +38,7 @@ void ia64_ia32_abort_sse_instruction(CPUIA64State *env);
 uint32_t ia64_ia32_virtual_ip(const CPUIA64State *env);
 bool ia64_ia32_code_fetch_valid(CPUX86State *xenv, uint32_t linear,
                                 unsigned size);
-bool ia64_ia32_tb_fast(CPUIA64State *env);
-uint32_t ia64_ia32_tb_flat_segs(CPUIA64State *env);
+uint32_t ia64_ia32_tb_state(CPUIA64State *env);
 bool ia64_ia32_code_fetch_fault_probes_second_page(CPUX86State *xenv,
                                                     uint32_t insn,
                                                     uint32_t linear,

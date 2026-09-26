@@ -11,9 +11,8 @@
 #include "cpu.h"
 #include "ia32/ia32.h"
 
-#define IA32_TB_FLAG_FAST   (1u << 2)
-#define IA32_TB_FLAG_FLAT_SHIFT 24
-#define IA32_TB_FLAG_FLAT_MASK  (0xfu << IA32_TB_FLAG_FLAT_SHIFT)
+#define IA32_TB_FLAG_FAST   IA64_IA32_TB_FAST
+#define IA32_TB_FLAG_FLAT_MASK  (0xfu << IA64_IA32_TB_FLAT_SHIFT)
 #define IA32_TB_FLAG_PSR_DT (1u << 28)
 #define IA32_TB_FLAG_PSR_DB (1u << 29)
 #define IA32_TB_FLAG_PSR_AC (1u << 30)
@@ -33,7 +32,7 @@
     ((flags) & ~(IA32_TB_FLAG_FAST | IA32_TB_FLAG_FLAT_MASK | \
                  IA32_TB_FLAG_PSR_DT | IA32_TB_FLAG_PSR_DB | \
                  IA32_TB_FLAG_PSR_AC | IA32_TB_FLAG_PSR_IS))
-/* ia64_ia32_tb_fast(): no check below can fail or trap in this TB. */
+/* ia64_ia32_tb_state(): no check below can fail or trap in this TB. */
 #define IA32_FAST(s) (((s)->base.tb->flags & IA32_TB_FLAG_FAST) != 0)
 /* Ordinary IA-32 #AC checks run after translation in the segment hook. */
 #define X86_MEMOP_ALIGNMENT(s, memop) MO_UNALN
@@ -81,10 +80,10 @@ static int ia64_ia32_iptrace_enabled = -1;
         tcg_env, (addr), tcg_constant_i32(seg),                      \
         tcg_constant_i32(size), tcg_constant_i32(access));           \
 } while (0)
-/* ia64_ia32_tb_flat_segs(): the check of seg can only probe the TLB. */
+/* ia64_ia32_tb_state(): the check of seg can only probe the TLB. */
 #define IA32_FLAT(s, seg)                                              \
     ((unsigned)(seg) <= R_DS &&                                        \
-     ((s)->base.tb->flags & (1u << (IA32_TB_FLAG_FLAT_SHIFT + (seg)))))
+     ((s)->base.tb->flags & (1u << (IA64_IA32_TB_FLAT_SHIFT + (seg)))))
 /* The access that directly follows raises the fault the probe would. */
 #define X86_GEN_SINGLE_ACCESS_CHECK(s, addr, seg, size, access) do {  \
     if (!IA32_FLAT(s, seg)) {                                          \
@@ -209,9 +208,15 @@ static int ia64_ia32_iptrace_enabled = -1;
                      (decode)->e.op0 == X86_TYPE_SS);                  \
                                                                        \
     if (IA32_FAST(s) && !ss_load_) {                                   \
-        /* Only a far transfer changes CPL, and every one ends the TB. */ \
-        if ((s)->base.is_jmp != DISAS_NEXT &&                          \
-            (s)->base.is_jmp != DISAS_NORETURN) {                      \
+        /*                                                             \
+         * Only a far transfer changes CPL (a gate or task switch      \
+         * intercepts), and every one ends the TB.                     \
+         */                                                            \
+        if ((decode)->e.gen == gen_CALLF ||                            \
+            (decode)->e.gen == gen_CALLF_m ||                          \
+            (decode)->e.gen == gen_JMPF ||                             \
+            (decode)->e.gen == gen_JMPF_m ||                           \
+            (decode)->e.gen == gen_RETF) {                             \
             gen_helper_ia32_sync_cpl(tcg_env);                         \
         }                                                              \
         break;                                                         \

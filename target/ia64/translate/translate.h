@@ -37,21 +37,10 @@
 /* NaT bits of r0-r31 in the first word of the GR NaT file. */
 #define IA64_STATIC_GR_NAT_MASK   0xffffffffULL
 /*
- * IA-32 TB whose instructions need no per-instruction check (see
- * ia64_ia32_tb_fast).  Bit 2 is no x86 hflags bit.
- */
-#define IA64_TB_FLAG_IA32_FAST    (1u << 2)
-/*
  * PSR.dt selects the memory index of an IA-32 TB (ia64_cpu_mmu_index).
  * Bit 28 is HF_AVX_EN, which the IA-32 engine never sets.
  */
 #define IA64_TB_FLAG_IA32_PSR_DT  (1u << 28)
-/*
- * One bit per data segment register that ia64_ia32_tb_flat_segs() reports:
- * ES, SS and DS at bits 24, 26 and 27 (HF_IOBPT, HF_MPX_IU and HF_UMIP,
- * which the IA-32 engine never sets).
- */
-#define IA64_TB_FLAG_IA32_FLAT_SHIFT 24
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)

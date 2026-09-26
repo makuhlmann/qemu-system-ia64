@@ -605,8 +605,8 @@ void helper_ia32_system_flag(CPUIA64State *env, target_ulong old_flags,
                              source_ip, next_ip, 0);
 }
 
-bool ia64_ia32_code_fetch_valid(CPUX86State *xenv, uint32_t linear,
-                                unsigned size)
+static inline bool ia32_code_fetch_valid(CPUX86State *xenv, uint32_t linear,
+                                         unsigned size)
 {
     SegmentCache *cs = &xenv->segs[R_CS];
     uint32_t eflags = ia32_control_eflags(xenv);
@@ -636,66 +636,73 @@ bool ia64_ia32_code_fetch_valid(CPUX86State *xenv, uint32_t linear,
     return true;
 }
 
-/*
- * Whether a TB can leave out the per-instruction checks: nothing that
- * instruction completion or a taken branch reports (PSR.ss, tb, db, id,
- * EFLAGS.TF, RF), PSR.dfh and dfl clear, and a code segment in which no
- * fetch can fault (4 GiB limit; the other conditions do not depend on EIP).
- * Each input ends the TB when it changes, and the TB key holds the result.
- */
-bool ia64_ia32_tb_fast(CPUIA64State *env)
+bool ia64_ia32_code_fetch_valid(CPUX86State *xenv, uint32_t linear,
+                                unsigned size)
 {
-    CPUX86State *xenv = &env->ia32;
+    return ia32_code_fetch_valid(xenv, linear, size);
+}
 
-    if ((env->psr & (IA64_PSR_SS | IA64_PSR_TB | IA64_PSR_DB | IA64_PSR_ID |
-                     IA64_PSR_DFH | IA64_PSR_DFL)) ||
-        (ia32_control_eflags(xenv) & (TF_MASK | RF_MASK)) ||
-        xenv->segs[R_CS].limit != UINT32_MAX) {
-        return false;
-    }
-    return ia64_ia32_code_fetch_valid(xenv, xenv->segs[R_CS].base, 1);
+static inline bool ia32_flat_data_seg(const SegmentCache *cache)
+{
+    const uint32_t need = DESC_S_MASK | DESC_P_MASK | DESC_A_MASK |
+                          DESC_W_MASK;
+
+    return (cache->flags & (need | DESC_CS_MASK | DESC_E_MASK)) == need &&
+           cache->limit == UINT32_MAX;
 }
 
 /*
- * ES, SS and DS (bit = segment number) in which
+ * The TB flags that depend on IA-32 state beyond hflags and EFLAGS; every
+ * TB lookup (each indirect branch) computes them.
+ *
+ * IA64_IA32_TB_FAST: no per-instruction check can act in the TB: PSR.ss,
+ * tb, db, id, dfh and dfl clear, EFLAGS.TF and RF clear, and a code segment
+ * in which no fetch can fault (4 GiB limit; the other conditions do not
+ * depend on EIP).
+ *
+ * Bit IA64_IA32_TB_FLAT_SHIFT + seg for ES, SS and DS in which
  * ia64_ia32_check_segment_access() can only probe the TLB: a present,
  * accessed, writable, expand-up 4 GiB data segment (SS also at DPL = CPL),
  * with no data breakpoint and no alignment check that could act.  The probe
- * matters only before a second access or an #AC.  Inputs end the TB when
- * they change: every SS load and far transfer does, a DS or ES load only in
- * 32-bit protected-mode code (gen_movl_seg), and a real-mode load changes
- * only the base.
+ * matters only before a second access or an #AC.
+ *
+ * Each input ends the TB when it changes: the PSR bits change only in IA-64
+ * code, EFLAGS.TF, RF, AC and VM only by instructions that end the TB, and
+ * CS, SS and the CPL only by far transfers.  A DS or ES load ends the TB in
+ * 32-bit protected-mode code only (gen_movl_seg), and a real-mode load
+ * changes only the base.
  */
-uint32_t ia64_ia32_tb_flat_segs(CPUIA64State *env)
+uint32_t ia64_ia32_tb_state(CPUIA64State *env)
 {
     CPUX86State *xenv = &env->ia32;
-    const uint32_t need = DESC_S_MASK | DESC_P_MASK | DESC_A_MASK |
-                          DESC_W_MASK;
+    uint64_t psr = env->psr;
     uint32_t eflags = ia32_control_eflags(xenv);
-    unsigned cpl = xenv->hflags & HF_CPL_MASK;
+    uint32_t hflags = xenv->hflags;
+    unsigned cpl = hflags & HF_CPL_MASK;
+    SegmentCache *ss = &xenv->segs[R_SS];
+    uint32_t state = 0;
     uint32_t segs = 0;
-    unsigned seg;
 
-    if ((env->psr & (IA64_PSR_DB | IA64_PSR_AC)) || (eflags & VM_MASK) ||
+    if (!(psr & (IA64_PSR_SS | IA64_PSR_TB | IA64_PSR_DB | IA64_PSR_ID |
+                 IA64_PSR_DFH | IA64_PSR_DFL)) &&
+        !(eflags & (TF_MASK | RF_MASK)) &&
+        xenv->segs[R_CS].limit == UINT32_MAX &&
+        ia32_code_fetch_valid(xenv, xenv->segs[R_CS].base, 1)) {
+        state |= IA64_IA32_TB_FAST;
+    }
+    if ((psr & (IA64_PSR_DB | IA64_PSR_AC)) || (eflags & VM_MASK) ||
         ((eflags & AC_MASK) && (xenv->cr[0] & CR0_AM_MASK) && cpl == 3)) {
-        return 0;
+        return state;
     }
-    for (seg = R_ES; seg <= R_DS; seg++) {
-        SegmentCache *cache = &xenv->segs[seg];
-
-        if (seg == R_CS ||
-            (cache->flags & (need | DESC_CS_MASK | DESC_E_MASK)) != need ||
-            cache->limit != UINT32_MAX) {
-            continue;
-        }
-        if (seg == R_SS
-            ? ((cache->flags & DESC_DPL_MASK) >> DESC_DPL_SHIFT) != cpl
-            : (xenv->hflags & (HF_PE_MASK | HF_CS32_MASK)) == HF_PE_MASK) {
-            continue;
-        }
-        segs |= 1u << seg;
+    if ((hflags & (HF_PE_MASK | HF_CS32_MASK)) != HF_PE_MASK) {
+        segs |= ia32_flat_data_seg(&xenv->segs[R_ES]) << R_ES;
+        segs |= ia32_flat_data_seg(&xenv->segs[R_DS]) << R_DS;
     }
-    return segs;
+    if (ia32_flat_data_seg(ss) &&
+        ((ss->flags & DESC_DPL_MASK) >> DESC_DPL_SHIFT) == cpl) {
+        segs |= 1u << R_SS;
+    }
+    return state | segs << IA64_IA32_TB_FLAT_SHIFT;
 }
 
 bool ia64_ia32_code_fetch_fault_probes_second_page(CPUX86State *xenv,
