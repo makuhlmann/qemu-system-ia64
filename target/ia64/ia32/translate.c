@@ -12,6 +12,8 @@
 #include "ia32/ia32.h"
 
 #define IA32_TB_FLAG_FAST   (1u << 2)
+#define IA32_TB_FLAG_FLAT_SHIFT 24
+#define IA32_TB_FLAG_FLAT_MASK  (0xfu << IA32_TB_FLAG_FLAT_SHIFT)
 #define IA32_TB_FLAG_PSR_DT (1u << 28)
 #define IA32_TB_FLAG_PSR_DB (1u << 29)
 #define IA32_TB_FLAG_PSR_AC (1u << 30)
@@ -28,9 +30,9 @@
 #define X86_GEN_HELPER_RAISE_EXCEPTION gen_helper_ia32_raise_exception
 #define X86_GEN_HELPER_RSM gen_helper_ia32_rsm
 #define X86_TB_FLAGS(flags) \
-    ((flags) & ~(IA32_TB_FLAG_FAST | IA32_TB_FLAG_PSR_DT | \
-                 IA32_TB_FLAG_PSR_DB | IA32_TB_FLAG_PSR_AC | \
-                 IA32_TB_FLAG_PSR_IS))
+    ((flags) & ~(IA32_TB_FLAG_FAST | IA32_TB_FLAG_FLAT_MASK | \
+                 IA32_TB_FLAG_PSR_DT | IA32_TB_FLAG_PSR_DB | \
+                 IA32_TB_FLAG_PSR_AC | IA32_TB_FLAG_PSR_IS))
 /* ia64_ia32_tb_fast(): no check below can fail or trap in this TB. */
 #define IA32_FAST(s) (((s)->base.tb->flags & IA32_TB_FLAG_FAST) != 0)
 /* Ordinary IA-32 #AC checks run after translation in the segment hook. */
@@ -78,6 +80,38 @@ static int ia64_ia32_iptrace_enabled = -1;
     gen_helper_ia32_segment_access(                                  \
         tcg_env, (addr), tcg_constant_i32(seg),                      \
         tcg_constant_i32(size), tcg_constant_i32(access));           \
+} while (0)
+/* ia64_ia32_tb_flat_segs(): the check of seg can only probe the TLB. */
+#define IA32_FLAT(s, seg)                                              \
+    ((unsigned)(seg) <= R_DS &&                                        \
+     ((s)->base.tb->flags & (1u << (IA32_TB_FLAG_FLAT_SHIFT + (seg)))))
+/* The access that directly follows raises the fault the probe would. */
+#define X86_GEN_SINGLE_ACCESS_CHECK(s, addr, seg, size, access) do {  \
+    if (!IA32_FLAT(s, seg)) {                                          \
+        X86_GEN_SEGMENT_ACCESS_CHECK(s, addr, seg, size, access);      \
+    }                                                                  \
+} while (0)
+/*
+ * The same holds when the first access of the instruction is the integer
+ * load of the operand, or the store of MOV.  A read-modify-write keeps the
+ * probe, which reports a write fault before the load; so does POP m, whose
+ * stack load comes first, and every vector operand, whose alignment fault
+ * would otherwise precede the TLB fault.
+ */
+#define X86_GEN_DECODED_ACCESS_CHECK(s, decode, addr, seg, size, access) do { \
+    bool first_ =                                                      \
+        (access) == X86_SEG_ACCESS_READ                                \
+        ? (((decode)->op[1].has_ea &&                                  \
+            (decode)->op[1].unit == X86_OP_INT) ||                     \
+           ((decode)->op[2].has_ea &&                                  \
+            (decode)->op[2].unit == X86_OP_INT))                       \
+        : (access) == X86_SEG_ACCESS_WRITE &&                          \
+          (decode)->e.gen == gen_MOV &&                                \
+          (decode)->op[0].unit == X86_OP_INT;                          \
+                                                                       \
+    if (!first_ || !IA32_FLAT(s, seg)) {                               \
+        X86_GEN_SEGMENT_ACCESS_CHECK(s, addr, seg, size, access);      \
+    }                                                                  \
 } while (0)
 #define X86_GEN_BOUND_ACCESS_CHECK(s, addr, seg, element_size) do {   \
     gen_helper_ia32_bound_access(                                    \

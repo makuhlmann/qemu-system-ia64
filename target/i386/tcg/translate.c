@@ -121,6 +121,13 @@
     (void)(access);                                                  \
 } while (0)
 #endif
+#ifndef X86_GEN_SINGLE_ACCESS_CHECK
+#define X86_GEN_SINGLE_ACCESS_CHECK X86_GEN_SEGMENT_ACCESS_CHECK
+#endif
+#ifndef X86_GEN_DECODED_ACCESS_CHECK
+#define X86_GEN_DECODED_ACCESS_CHECK(s, decode, addr, seg, size, access) \
+    X86_GEN_SEGMENT_ACCESS_CHECK(s, addr, seg, size, access)
+#endif
 #ifndef X86_GEN_BOUND_ACCESS_CHECK
 #define X86_GEN_BOUND_ACCESS_CHECK(s, addr, seg, element_size) do { \
     (void)(s);                                                        \
@@ -648,9 +655,9 @@ void gen_op_add_reg_im(DisasContext *s, MemOp size, int reg, int32_t val)
 static inline void gen_op_ld_v(DisasContext *s, int idx, TCGv t0, TCGv a0)
 {
     if (s->mem_seg >= 0) {
-        X86_GEN_SEGMENT_ACCESS_CHECK(s, a0, s->mem_seg,
-                                     1 << (idx & MO_SIZE),
-                                     X86_SEG_ACCESS_READ);
+        X86_GEN_SINGLE_ACCESS_CHECK(s, a0, s->mem_seg,
+                                    1 << (idx & MO_SIZE),
+                                    X86_SEG_ACCESS_READ);
     }
     tcg_gen_qemu_ld_tl(t0, a0, s->mem_index,
                        idx | MO_LE | X86_MEMOP_ALIGNMENT(s, idx));
@@ -659,9 +666,9 @@ static inline void gen_op_ld_v(DisasContext *s, int idx, TCGv t0, TCGv a0)
 static inline void gen_op_st_v(DisasContext *s, int idx, TCGv t0, TCGv a0)
 {
     if (s->mem_seg >= 0) {
-        X86_GEN_SEGMENT_ACCESS_CHECK(s, a0, s->mem_seg,
-                                     1 << (idx & MO_SIZE),
-                                     X86_SEG_ACCESS_WRITE);
+        X86_GEN_SINGLE_ACCESS_CHECK(s, a0, s->mem_seg,
+                                    1 << (idx & MO_SIZE),
+                                    X86_SEG_ACCESS_WRITE);
     }
     tcg_gen_qemu_st_tl(t0, a0, s->mem_index,
                        idx | MO_LE | X86_MEMOP_ALIGNMENT(s, idx));

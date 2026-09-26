@@ -3175,7 +3175,7 @@ static void disas_insn(DisasContext *s, CPUState *cpu)
         if (decode.e.gen != gen_BOUND &&
             decode.e.gen != gen_FXSAVE &&
             decode.e.gen != gen_FXRSTOR) {
-            X86_GEN_SEGMENT_ACCESS_CHECK(s, s->A0, s->mem_seg,
+            X86_GEN_DECODED_ACCESS_CHECK(s, &decode, s->A0, s->mem_seg,
                                          size, access);
         }
         if (s->prefix & PREFIX_LOCK) {

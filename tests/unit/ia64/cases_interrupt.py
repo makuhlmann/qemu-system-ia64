@@ -48,6 +48,7 @@ from .encoding import (
     IA64_ISR_IR,
     IA64_ISR_NI,
     IA64_ISR_R,
+    IA64_ISR_W,
     IA64_ISR_RS,
     IA64_ISR_X,
     IA64_ITC_TICKS_PER_MILLISECOND,
@@ -5777,6 +5778,190 @@ test_ia32_psr_dt_change_selects_new_tb = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
+# A flat data segment lets a TB leave out the segment check of an access
+# (ia64_ia32_tb_flat_segs).  Each case below breaks one condition of that
+# flag, or is an access whose check must stay, and expects the fault the
+# check raises.
+IA32_FLAT_DSD = IA32_TEST_DSD | (0xf << 48) | (1 << 62) | (1 << 63)
+IA32_FLAT_CODE = 0x9000
+
+
+def _dsd_type(desc, seg_type):
+    return (desc & ~(0xf << 52)) | (seg_type << 52)
+
+
+def _ia32_flat_data_case(name, code, vector, expected, dsd=IA32_FLAT_DSD,
+                         ssd=IA32_FLAT_DSD, csd=IA32_FLAT_CSD | (1 << 62),
+                         psr=0, eflags=2, cflg=None, esp=0xa800, dtrs=(),
+                         pre=(), data=()):
+    """Enter IA-32 code at 0x9000 by rfi with IPSR = ic, is and psr.
+
+    dtrs maps 4 KiB pages (va, pa) while PSR.ic is still clear; pre holds
+    further IA-64 bundles, or ("movl", gr, value); the handler at vector
+    records IIP, ISR and IFA in r20, r21 and r22.
+    """
+    bundles = list(ia32_environment_bundles(0x700, 0x10, csd=csd, dsd=dsd,
+                                            ssd=ssd))
+    addr = 0x10
+    for slot, (va, pa) in enumerate(dtrs):
+        bundles += dtr_setup_bundles(addr, va, pa, page_shift=12,
+                                     slot=5 + slot)
+        addr += 0x60
+    steps = [("movl", 3, eflags), (0x00, mov_m_gr_ar(3, 24), nop_i(), nop_i())]
+    if cflg is not None:
+        steps += [("movl", 3, cflg),
+                  (0x00, mov_m_gr_ar(3, 27), nop_i(), nop_i())]
+    steps += [("movl", 12, esp), *pre,
+              ("movl", 2, IA64_PSR_IC | IA64_PSR_IS | psr),
+              ("movl", 3, IA32_FLAT_CODE)]
+    for step in steps:
+        if step[0] == "movl":
+            bundles.append((addr, *movl_mlx(step[1], step[2])))
+        else:
+            bundles.append((addr, *step))
+        addr += 0x10
+    bundles += rfi_to_gr(addr, 2, 3)
+    assert addr + 0x20 <= 0x400
+    for offset in range(0, len(code), 16):
+        bundles.append(ia32_bundle(IA32_FLAT_CODE + offset,
+                                   code[offset:offset + 16]))
+    bundles += [ia32_bundle(address, payload) for address, payload in data]
+    bundles += [
+        (vector, 0x00, mov_m_cr_gr(20, 19), nop_i(), nop_i()),
+        (vector + 0x10, 0x00, mov_m_cr_gr(21, 17), nop_i(), nop_i()),
+        (vector + 0x20, 0x00, mov_m_cr_gr(22, 20), nop_i(), nop_i()),
+        (vector + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(vector + 0x30, vector + 0x30)),
+    ]
+    return require_registers(name, bundles, {
+        "ip": vector + 0x30, **expected, "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+
+_MOV_EAX_A000 = bytes.fromhex("a1 00 a0 00 00")      # mov eax,[0xa000]
+_MOV_A000_EAX = bytes.fromhex("a3 00 a0 00 00")      # mov [0xa000],eax
+
+test_ia32_flat_ds_psr_ac_faults = _ia32_flat_data_case(
+    "ia32_flat_ds_psr_ac_faults",
+    bytes.fromhex("a1 01 a0 00 00"), IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 17 << 16, "r22": 0xa001},
+    psr=IA64_PSR_AC)
+
+test_ia32_flat_ds_eflags_ac_faults_at_cpl3 = _ia32_flat_data_case(
+    "ia32_flat_ds_eflags_ac_faults_at_cpl3",
+    bytes.fromhex("a1 01 a0 00 00"), IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 17 << 16, "r22": 0xa001},
+    ssd=IA32_FLAT_DSD | (3 << 57), psr=3 << 32, eflags=2 | (1 << 18),
+    cflg=1 | (1 << 18))
+
+test_ia32_flat_ds_data_breakpoint_traps = _ia32_flat_data_case(
+    "ia32_flat_ds_data_breakpoint_traps",
+    _MOV_EAX_A000 + bytes.fromhex("0f 0b"), IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE + 5, "r21": (1 << 16) | (1 << 4)},
+    psr=IA64_PSR_DB, pre=[
+        ("movl", 4, 0),
+        ("movl", 5, 0xa000),
+        (0x00, mov_dbr_indexed_write(4, 5), adds(4, 1, 0), nop_i()),
+        ("movl", 5, 0x81000000ffffffff),
+        (0x00, mov_dbr_indexed_write(4, 5), nop_i(), nop_i()),
+    ])
+
+test_ia32_flat_read_only_ds_store_faults = _ia32_flat_data_case(
+    "ia32_flat_read_only_ds_store_faults",
+    _MOV_A000_EAX, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=_dsd_type(IA32_FLAT_DSD, 0x1))
+
+test_ia32_flat_expand_down_ds_load_faults = _ia32_flat_data_case(
+    "ia32_flat_expand_down_ds_load_faults",
+    _MOV_EAX_A000, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=_dsd_type(IA32_FLAT_DSD, 0x7))
+
+test_ia32_flat_code_ds_store_faults = _ia32_flat_data_case(
+    "ia32_flat_code_ds_store_faults",
+    _MOV_A000_EAX, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=_dsd_type(IA32_FLAT_DSD, 0xb))
+
+test_ia32_flat_ss_wrong_dpl_push_faults = _ia32_flat_data_case(
+    "ia32_flat_ss_wrong_dpl_push_faults",
+    bytes.fromhex("50"), IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 12 << 16},
+    ssd=IA32_FLAT_DSD | (3 << 57))
+
+test_ia32_flat_system_ds_load_faults = _ia32_flat_data_case(
+    "ia32_flat_system_ds_load_faults",
+    _MOV_EAX_A000, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=IA32_FLAT_DSD & ~(1 << 56))
+
+test_ia32_flat_not_present_ds_load_faults = _ia32_flat_data_case(
+    "ia32_flat_not_present_ds_load_faults",
+    _MOV_EAX_A000, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=IA32_FLAT_DSD & ~(1 << 59))
+
+test_ia32_flat_not_accessed_ds_load_faults = _ia32_flat_data_case(
+    "ia32_flat_not_accessed_ds_load_faults",
+    _MOV_EAX_A000, IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    dsd=_dsd_type(IA32_FLAT_DSD, 0x2))
+
+# 16-bit protected-mode code: MOV DS does not end the TB, so the new
+# 64 KiB DS must be checked in the same TB.
+test_ia32_16bit_mov_ds_limits_same_tb = _ia32_flat_data_case(
+    "ia32_16bit_mov_ds_limits_same_tb",
+    bytes.fromhex(
+        "b8 00 a0 "              # mov ax,0xa000
+        "8e d8 "                 # mov ds,ax
+        "67 a1 00 00 01 00"),    # mov ax,[0x10000]
+    IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE + 5, "r21": 13 << 16},
+    csd=IA32_FLAT_CSD, cflg=1,
+    data=[(0xa000, bytes.fromhex("ff ff 00 00 00 93 00 00"))])
+
+test_ia32_vm86_big_ss_push_faults = _ia32_flat_data_case(
+    "ia32_vm86_big_ss_push_faults",
+    bytes.fromhex("50"), IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 12 << 16},
+    csd=IA32_FLAT_CSD | (3 << 57), ssd=IA32_FLAT_DSD | (3 << 57),
+    psr=3 << 32, eflags=2 | (1 << 17), cflg=1)
+
+# FS and GS never take the flat path: their TB-flag positions hold PSR.dt
+# and PSR.db.
+test_ia32_fs_limit_checked_with_psr_dt = _ia32_flat_data_case(
+    "ia32_fs_limit_checked_with_psr_dt",
+    bytes.fromhex("64 a1 00 00 01 00"),  # mov eax,fs:[0x10000]
+    IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    psr=IA64_PSR_DT, dtrs=[(0x10000, 0x10000)],
+    pre=[("movl", 28, IA32_TEST_DSD)])
+
+# The probe of these operands comes first: a misaligned MOVAPS reports the
+# TLB miss, POP m the destination before the stack, and a read-modify-write
+# a write miss.
+test_ia32_flat_movaps_tlb_miss_precedes_alignment = _ia32_flat_data_case(
+    "ia32_flat_movaps_tlb_miss_precedes_alignment",
+    bytes.fromhex("0f 28 05 08 c0 00 00"),  # movaps xmm0,[0xc008]
+    IA64_ALT_DTLB_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_R, "r22": 0xc008},
+    psr=IA64_PSR_DT, cflg=(1 << 9) << 32)
+
+test_ia32_flat_pop_m_probes_destination_first = _ia32_flat_data_case(
+    "ia32_flat_pop_m_probes_destination_first",
+    bytes.fromhex("8f 05 00 c0 00 00"),  # pop dword [0xc000]
+    IA64_ALT_DTLB_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_W, "r22": 0xc000},
+    psr=IA64_PSR_DT, esp=0xb000)
+
+test_ia32_flat_rmw_reports_write_miss = _ia32_flat_data_case(
+    "ia32_flat_rmw_reports_write_miss",
+    bytes.fromhex("01 05 00 c0 00 00"),  # add [0xc000],eax
+    IA64_ALT_DTLB_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_W, "r22": 0xc000},
+    psr=IA64_PSR_DT)
+
 CASE_NAMES = (
     'ipis_during_break_faults_all_arrive',
 
@@ -5857,6 +6042,22 @@ CASE_NAMES = (
     'ia32_cs_limit_shrink_selects_checked_tb',
     'ia32_cs_not_accessed_selects_checked_tb',
     'ia32_psr_dt_change_selects_new_tb',
+    'ia32_flat_ds_psr_ac_faults',
+    'ia32_flat_ds_eflags_ac_faults_at_cpl3',
+    'ia32_flat_ds_data_breakpoint_traps',
+    'ia32_flat_read_only_ds_store_faults',
+    'ia32_flat_expand_down_ds_load_faults',
+    'ia32_flat_code_ds_store_faults',
+    'ia32_flat_ss_wrong_dpl_push_faults',
+    'ia32_flat_system_ds_load_faults',
+    'ia32_flat_not_present_ds_load_faults',
+    'ia32_flat_not_accessed_ds_load_faults',
+    'ia32_16bit_mov_ds_limits_same_tb',
+    'ia32_vm86_big_ss_push_faults',
+    'ia32_fs_limit_checked_with_psr_dt',
+    'ia32_flat_movaps_tlb_miss_precedes_alignment',
+    'ia32_flat_pop_m_probes_destination_first',
+    'ia32_flat_rmw_reports_write_miss',
     'ia32_gate_intercept_reports_concurrent_debug_traps',
     'ia32_gdt_descriptor_read_triggers_data_breakpoint',
     'ia32_gdt_descriptor_read_wraps_at_4g',

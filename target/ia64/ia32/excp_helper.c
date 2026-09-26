@@ -656,6 +656,48 @@ bool ia64_ia32_tb_fast(CPUIA64State *env)
     return ia64_ia32_code_fetch_valid(xenv, xenv->segs[R_CS].base, 1);
 }
 
+/*
+ * ES, SS and DS (bit = segment number) in which
+ * ia64_ia32_check_segment_access() can only probe the TLB: a present,
+ * accessed, writable, expand-up 4 GiB data segment (SS also at DPL = CPL),
+ * with no data breakpoint and no alignment check that could act.  The probe
+ * matters only before a second access or an #AC.  Inputs end the TB when
+ * they change: every SS load and far transfer does, a DS or ES load only in
+ * 32-bit protected-mode code (gen_movl_seg), and a real-mode load changes
+ * only the base.
+ */
+uint32_t ia64_ia32_tb_flat_segs(CPUIA64State *env)
+{
+    CPUX86State *xenv = &env->ia32;
+    const uint32_t need = DESC_S_MASK | DESC_P_MASK | DESC_A_MASK |
+                          DESC_W_MASK;
+    uint32_t eflags = ia32_control_eflags(xenv);
+    unsigned cpl = xenv->hflags & HF_CPL_MASK;
+    uint32_t segs = 0;
+    unsigned seg;
+
+    if ((env->psr & (IA64_PSR_DB | IA64_PSR_AC)) || (eflags & VM_MASK) ||
+        ((eflags & AC_MASK) && (xenv->cr[0] & CR0_AM_MASK) && cpl == 3)) {
+        return 0;
+    }
+    for (seg = R_ES; seg <= R_DS; seg++) {
+        SegmentCache *cache = &xenv->segs[seg];
+
+        if (seg == R_CS ||
+            (cache->flags & (need | DESC_CS_MASK | DESC_E_MASK)) != need ||
+            cache->limit != UINT32_MAX) {
+            continue;
+        }
+        if (seg == R_SS
+            ? ((cache->flags & DESC_DPL_MASK) >> DESC_DPL_SHIFT) != cpl
+            : (xenv->hflags & (HF_PE_MASK | HF_CS32_MASK)) == HF_PE_MASK) {
+            continue;
+        }
+        segs |= 1u << seg;
+    }
+    return segs;
+}
+
 bool ia64_ia32_code_fetch_fault_probes_second_page(CPUX86State *xenv,
                                                     uint32_t insn,
                                                     uint32_t linear,
