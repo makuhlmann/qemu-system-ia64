@@ -4781,6 +4781,62 @@ test_rse_alloc_growth_reads_physical_value_and_nat = require_registers(
         "r38_nat": 0,
     }, entry=0x10)
 
+# br.call saves the caller's CFM, ar.ec and CPL in ar.pfs (SDM Vol 3 br.call):
+# here a frame of 16 with 8 locals and one rotating group, ec 25, at CPL 3.
+test_br_call_pfs_holds_cfm_ec_and_cpl = require_registers(
+    "br_call_pfs_holds_cfm_ec_and_cpl", [
+        (0x10, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_CPL3)),
+        (0x40, 0x00, nop_m(), adds(31, 0x80, 0), nop_i()),
+        *rfi_to_gr(0x50, 19, 31),
+        (0x80, 0x01, alloc(2, 16, 8, 1, 0), nop_i(), nop_i()),
+        (0x90, 0x01, mov_m_imm_ar(66, 25), nop_i(), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_call(6, 0xa0, 0x200)),
+        (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
+        (0x200, 0x01, mov_m_ar_gr(3, 64), nop_i(), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_cond(0x210, 0x210)),
+    ], {
+        "ip": 0x210,
+        "r3": 16 | (8 << 7) | (1 << 14) | (25 << 52) | (3 << 62),
+    }, entry=0x10)
+
+# br.call moves BSP over the caller's locals and every NaT collection slot
+# between them (SDM Vol 2 Table 6-2): 64 locals from slot 62 cross two.
+test_br_call_bsp_crosses_two_nat_collections = require_registers(
+    "br_call_bsp_crosses_two_nat_collections", [
+        (0x10, *movl_mlx(3, 0x101f0)),
+        (0x20, 0x01, mov_m_gr_ar(0, 16), nop_i(), nop_i()),
+        (0x30, 0x01, mov_m_gr_ar(3, 18), nop_i(), nop_i()),
+        (0x40, 0x01, alloc(2, 64, 64, 0, 0), nop_i(), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_call(0, 0x50, 0x200)),
+        (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+        (0x200, 0x01, mov_m_ar_gr(4, 17), nop_i(), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_cond(0x210, 0x210)),
+    ], {
+        "ip": 0x210,
+        "r4": 0x101f0 + (64 + 2) * 8,
+    }, entry=0x10)
+
+# A caller frame of 96 locals fills the physical file exactly; the call
+# wraps the bottom of the next frame to the first physical register, and
+# the return must bring back the caller's first and last register.
+test_br_call_full_frame_wraps_and_returns = require_registers(
+    "br_call_full_frame_wraps_and_returns", [
+        (0x10, 0x01, alloc(2, 96, 96, 0, 0), nop_i(), nop_i()),
+        (0x20, 0x01, adds(32, 0x111, 0), adds(127, 0x222, 0), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_call(0, 0x30, 0x200)),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+        (0x200, 0x01, alloc(3, 8, 8, 0, 0), nop_i(), nop_i()),
+        (0x210, 0x01, adds(32, 0x55, 0), adds(39, 0x66, 0), nop_i()),
+        (0x220, 0x01, mov_m_gr_ar(3, 64), nop_i(), nop_i()),
+        (0x230, 0x11, nop_m(), nop_i(), br_ret(0)),
+    ], {
+        "ip": 0x40,
+        "r32": 0x111,
+        "r127": 0x222,
+    }, entry=0x10)
+
 # br.ctop keeps every rotating value in its physical register.  Over more
 # rotations than the region holds, a value and a NaT written inside the loop
 # and the clean values from before it must each reach their own
@@ -5538,6 +5594,9 @@ CASE_NAMES = (
     'rse_cover_skips_trailing_rnat_slot',
     'rse_ctop_rotation_flushes_each_value_to_its_physical_slot',
     'rse_alloc_growth_reads_physical_value_and_nat',
+    'br_call_pfs_holds_cfm_ec_and_cpl',
+    'br_call_bsp_crosses_two_nat_collections',
+    'br_call_full_frame_wraps_and_returns',
     'rse_br_ret_fill_crosses_into_unmapped_page_after_direct_loads',
     'rse_flushrs_crosses_into_unmapped_page_after_direct_stores',
     'rse_flushrs_over_translated_code_invalidates_it',

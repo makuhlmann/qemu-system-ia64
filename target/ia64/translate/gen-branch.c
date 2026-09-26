@@ -87,9 +87,7 @@ IA64GenResult ia64_gen_branch(DisasContext *ctx,
         const uint64_t target = insn->address + op->displacement;
 
         tcg_gen_movi_i64(cpu_ip, insn->address);
-        gen_helper_br_call_rse(tcg_env, tcg_constant_i32(op->link),
-                               tcg_constant_i64(next_ip),
-                               tcg_constant_i64(target));
+        ia64_gen_br_call(ctx, op->link, next_ip, tcg_constant_i64(target));
         return ia64_gen_complete_branch(
             ctx, skip, &(IA64BranchCompletion) {
                 .target_kind = IA64_BRANCH_TARGET_DIRECT,
@@ -104,8 +102,7 @@ IA64GenResult ia64_gen_branch(DisasContext *ctx,
 
         tcg_gen_mov_i64(target, cpu_br[op->target]);
         tcg_gen_movi_i64(cpu_ip, insn->address);
-        gen_helper_br_call_rse(tcg_env, tcg_constant_i32(op->link),
-                               tcg_constant_i64(next_ip), target);
+        ia64_gen_br_call(ctx, op->link, next_ip, target);
         return ia64_gen_complete_branch(
             ctx, skip, &(IA64BranchCompletion) {
                 .target_kind = IA64_BRANCH_TARGET_CURRENT,
