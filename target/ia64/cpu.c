@@ -131,6 +131,8 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,
+        .cs_base = cpu->env.cfm_sof |
+                   ((uint64_t)cpu->env.cfm_sol << IA64_TB_CS_BASE_SOL_SHIFT),
         .flags = flags,
     };
 }

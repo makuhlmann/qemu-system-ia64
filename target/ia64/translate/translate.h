@@ -29,6 +29,9 @@
 /* No GR NaT bit is set at TB entry. */
 #define IA64_TB_FLAG_NAT_CLEAR    (1u << 13)
 
+/* The cs_base of an IA-64 TB holds CFM.sof and CFM.sol at entry. */
+#define IA64_TB_CS_BASE_SOL_SHIFT 8
+
 /* NaT bits of r0-r31 in the first word of the GR NaT file. */
 #define IA64_STATIC_GR_NAT_MASK   0xffffffffULL
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
@@ -87,6 +90,10 @@ typedef struct IA64TranslationBranchState {
     /* NaT-known facts at the label, and whether the back edge rotates. */
     uint64_t counted_self_nat_known[2];
     bool counted_self_rotates;
+    /* The frame at the label, when frame_known held there. */
+    bool counted_self_frame_known;
+    uint8_t counted_self_frame_sof;
+    uint8_t counted_self_frame_sol;
     bool cloop_zero_st1_valid;
     bool cloop_zero_st1_release;
     uint8_t cloop_zero_st1_base;
@@ -122,6 +129,16 @@ typedef struct DisasContext {
      * branch or exception path.  Reset whenever CFM.SOF may change.
      */
     uint8_t cfm_sof_checked;
+    /*
+     * CFM.sof and CFM.sol here.  They are in the TB key, so they are known
+     * at entry and after alloc and cover.  Another instruction that can
+     * change the frame clears frame_known: from then on the frame checks
+     * load CFM.sof, and no exit takes a goto_tb link, because the TB it
+     * reaches was chosen for one frame.
+     */
+    bool frame_known;
+    uint8_t frame_sof;
+    uint8_t frame_sol;
     /*
      * PSR.ss and PSR.tb at TB entry.  Either one makes the TB translate a
      * single instruction, in slot trap_slot, and note its completion traps

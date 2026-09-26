@@ -694,6 +694,14 @@ void ia64_update_frame_tracking(DisasContext *ctx,
     if (ia64_insn_may_modify_cfm_sof(insn)) {
         ctx->cfm_sof_valid = false;
         ctx->cfm_sof_checked = 0;
+        ctx->frame_known = false;
+    }
+    if (insn->opcode == IA64_OP_COVER && insn->qp == 0) {
+        ctx->cfm_sof = tcg_constant_i32(0);
+        ctx->cfm_sof_valid = true;
+        ctx->frame_known = true;
+        ctx->frame_sof = 0;
+        ctx->frame_sol = 0;
     }
 
     /*
@@ -707,6 +715,9 @@ void ia64_update_frame_tracking(DisasContext *ctx,
         ctx->cfm_sof = tcg_constant_i32(new_sof);
         ctx->cfm_sof_checked = new_sof;
         ctx->cfm_sof_valid = true;
+        ctx->frame_known = true;
+        ctx->frame_sof = new_sof;
+        ctx->frame_sol = (insn->operands.common.immediate >> 7) & 0x7f;
     }
 }
 
@@ -2021,8 +2032,13 @@ void ia64_prepare_self_counted_loop(
      * (ia64_gen_self_counted_loop), and a br.ctop back edge rotates the
      * stacked registers, so those are dropped.
      */
-    ctx->cfm_sof_valid = false;
-    ctx->cfm_sof_checked = 0;
+    ctx->branch.counted_self_frame_known = ctx->frame_known;
+    ctx->branch.counted_self_frame_sof = ctx->frame_sof;
+    ctx->branch.counted_self_frame_sol = ctx->frame_sol;
+    if (!ctx->frame_known) {
+        ctx->cfm_sof_valid = false;
+        ctx->cfm_sof_checked = 0;
+    }
     if (ctx->branch.counted_self_rotates) {
         ctx->memory.nat_known_clear[0] &= IA64_STATIC_GR_NAT_MASK;
         ctx->memory.nat_known_clear[1] = 0;
@@ -2091,6 +2107,13 @@ bool ia64_gen_self_counted_loop(DisasContext *ctx, uint64_t target,
     if (ctx->branch.counted_self_label == NULL ||
         target != ctx->branch.counted_self_ip ||
         completed_ip != ctx->branch.counted_self_ip) {
+        return false;
+    }
+    /* The body after the label was translated for the frame there. */
+    if (ctx->branch.counted_self_frame_known &&
+        (!ctx->frame_known ||
+         ctx->frame_sof != ctx->branch.counted_self_frame_sof ||
+         ctx->frame_sol != ctx->branch.counted_self_frame_sol)) {
         return false;
     }
 
@@ -3271,8 +3294,13 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
         MMU_PHYS_IDX;
     ctx->cpl = (flags & IA64_TB_FLAG_CPL_MASK) >> IA64_TB_FLAG_CPL_SHIFT;
     ctx->cpl_known = true;
-    ctx->cfm_sof_valid = false;
-    ctx->cfm_sof_checked = 0;
+    ctx->frame_known = true;
+    ctx->frame_sof = ctx->base.tb->cs_base & 0x7f;
+    ctx->frame_sol = (ctx->base.tb->cs_base >> IA64_TB_CS_BASE_SOL_SHIFT) &
+                     0x7f;
+    ctx->cfm_sof = tcg_constant_i32(ctx->frame_sof);
+    ctx->cfm_sof_valid = true;
+    ctx->cfm_sof_checked = ctx->frame_sof;
     ctx->restart.start_slot = (ctx->base.tb->flags & IA64_TB_FLAG_RI_MASK) >>
                       IA64_TB_FLAG_RI_SHIFT;
     if (ctx->restart.start_slot > 2) {
@@ -3631,7 +3659,8 @@ void ia64_gen_goto_tb_group(DisasContext *ctx, uint64_t dest,
     ia64_gen_save_fault_slot_for_exit(ctx);
     ia64_gen_clear_ri();
     tcg_gen_movi_i64(cpu_ip, dest);
-    if (slot < 2 && translator_use_goto_tb(&ctx->base, dest)) {
+    if (slot < 2 && ctx->frame_known &&
+        translator_use_goto_tb(&ctx->base, dest)) {
         uint64_t test0 = ~ctx->memory.nat_known_at_exit[0];
         uint64_t test1 = ~ctx->memory.nat_known_at_exit[1];
         TCGLabel *unlinked = NULL;

@@ -263,6 +263,29 @@ test_mov_pr_rot_imm_sign_extends = require_registers(
         "pr_mask": 1 | (((1 << 21) - 1) << 43),
     }, entry=0x10)
 
+# The callee writes r34.  Its first caller passes four outputs, its second
+# two, so the second write must fault although the same code ran before.
+test_stacked_write_faults_in_smaller_frame_at_same_ip = require_registers(
+    "stacked_write_faults_in_smaller_frame_at_same_ip", [
+        (0x10, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
+        (0x20, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x30, 0x00, nop_m(), alloc(2, 5, 1, 0, 0), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, 0x200)),
+        (0x50, 0x00, nop_m(), alloc(2, 3, 1, 0, 0), adds(9, 1, 0)),
+        (0x60, 0x10, nop_m(), nop_i(), br_call(0, 0x60, 0x200)),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+        (0x200, 0x00, nop_m(), adds(34, 7, 0), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_ret(0)),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(20, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x10, IA64_GENERAL_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r9": 1,
+        "r20": 0x200,
+    }, entry=0x10)
+
 test_mov_cr_to_r0_ic_set_illegal = require_exception(
     "mov_cr_to_r0_ic_set_illegal", [
         (0x10, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
@@ -3575,6 +3598,7 @@ CASE_NAMES = (
     'mov_cpuid_madison_model',
     'mov_cr_lid_ignored_high_bits_read_zero',
     'mov_cr_to_r0_ic_set_illegal',
+    'stacked_write_faults_in_smaller_frame_at_same_ip',
     'mov_dahr_indexed_decode',
     'mov_dbr_ibr_indexed_decode',
     'mov_ip_current_bundle',
