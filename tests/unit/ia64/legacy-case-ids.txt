@@ -1598,3 +1598,4 @@ mov_to_cr_ifs_invalid_frame_fault
 mov_to_cr_iha_clears_low_bits
 mov_from_rnat_rsc_mode_illegal
 mov_from_bspstore_rsc_mode_illegal
+ipis_during_break_faults_all_arrive

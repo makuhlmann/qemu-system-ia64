@@ -724,10 +724,16 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
 #else
     if (replay_exception()) {
         const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
+        bool locked = !tcg_ops->do_interrupt_needs_bql ||
+                      tcg_ops->do_interrupt_needs_bql(cpu);
 
-        bql_lock();
+        if (locked) {
+            bql_lock();
+        }
         tcg_ops->do_interrupt(cpu);
-        bql_unlock();
+        if (locked) {
+            bql_unlock();
+        }
         cpu->exception_index = -1;
 
         if (unlikely(cpu->singlestep_enabled)) {

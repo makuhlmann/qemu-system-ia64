@@ -539,6 +539,18 @@ static bool ia64_frame_restore_fault_yields_to_completion_trap(
     }
 }
 
+/*
+ * Delivering a fault or trap writes only this CPU's state: CRs, PSR, the
+ * register banks, its own TLB and softmmu entries.  Guest memory that the
+ * firmware unaligned assist reads takes the BQL itself for MMIO.  An
+ * external interrupt reads the SAPIC IRR, which devices and other CPUs
+ * write under the BQL.
+ */
+bool ia64_cpu_do_interrupt_needs_bql(CPUState *cs)
+{
+    return cs->exception_index == IA64_EXCP_EXTINT;
+}
+
 void ia64_cpu_do_interrupt(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);

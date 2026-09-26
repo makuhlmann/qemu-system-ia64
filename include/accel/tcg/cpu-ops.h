@@ -170,6 +170,13 @@ struct TCGCPUOps {
 #else
     /** @do_interrupt: Callback for interrupt handling.  */
     void (*do_interrupt)(CPUState *cpu);
+    /**
+     * @do_interrupt_needs_bql: Whether @do_interrupt for the pending
+     * cpu->exception_index can touch state that other threads change under
+     * the BQL.  cpu_handle_exception() takes the BQL around the delivery
+     * only when this returns true or is not set.
+     */
+    bool (*do_interrupt_needs_bql)(CPUState *cpu);
     /** @cpu_exec_interrupt: Callback for processing interrupts in cpu_exec */
     bool (*cpu_exec_interrupt)(CPUState *cpu, int interrupt_request);
     /** @cpu_exec_reset: Callback for reset in cpu_exec.  */

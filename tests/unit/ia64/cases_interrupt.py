@@ -5490,7 +5490,76 @@ test_rfi_montecito_uncollected_transition_preserves_target = \
         }, entry=0x10)
 
 GROUP = 'interrupt'
+# CPU 1 sends 2000 IPIs to CPU 0, each after CPU 0 counted the one before,
+# while CPU 0 takes a Break fault in a loop with PSR.i set: faults, which are
+# delivered without the BQL, and interrupts, which read the IRR under it,
+# interleave on CPU 0 while CPU 1 writes that IRR.  A lost IPI hangs CPU 1.
+_IPI_COUNTER = 0x8000
+_IPI_DONE = 0x8008
+_IPI_IVA = 0x200000
+test_ipis_during_break_faults_all_arrive = require_registers(
+    "ipis_during_break_faults_all_arrive", [
+        (0x10, *movl_mlx(3, _IPI_IVA)),
+        (0x20, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (0x30, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x40, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_TPR), nop_i(), nop_i()),
+        (0x50, 0x01, srlz_d(), nop_i(), nop_i()),
+        (0x60, *movl_mlx(2, (1 << 63) | 0xfee01000)),
+        (0x70, 0x01, adds(3, 0xf0, 0), nop_i(), nop_i()),
+        (0x80, 0x01, st8(2, 3), nop_i(), nop_i()),  # wake CPU 1
+        (0x90, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I | IA64_PSR_BN)),
+        (0xa0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xb0, *movl_mlx(4, _IPI_DONE)),
+        (0xc0, 0x01, break_m(0x1234), nop_i(), nop_i()),
+        (0xd0, 0x01, ld8(9, 4), nop_i(), nop_i()),
+        (0xe0, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 9), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xc0, qp=6)),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0x100)),
+
+        # Break: resume at the next bundle (the break is in slot 0).
+        (_IPI_IVA + 0x2c00, 0x01, mov_m_cr_gr(17, 19), nop_i(), nop_i()),
+        (_IPI_IVA + 0x2c10, 0x01, adds(17, 16, 17), nop_i(), nop_i()),
+        (_IPI_IVA + 0x2c20, 0x01, mov_m_gr_cr(17, 19), nop_i(), nop_i()),
+        (_IPI_IVA + 0x2c30, 0x11, nop_m(), nop_i(), rfi_b()),
+
+        # External interrupt: acknowledge, count, EOI.
+        (_IPI_IVA + 0x3000, 0x01, mov_m_cr_gr(16, IA64_CR_SAPIC_IVR),
+         nop_i(), nop_i()),
+        (_IPI_IVA + 0x3010, *movl_mlx(18, _IPI_COUNTER)),
+        (_IPI_IVA + 0x3020, 0x01, ld8(19, 18), nop_i(), nop_i()),
+        (_IPI_IVA + 0x3030, 0x01, adds(19, 1, 19), nop_i(), nop_i()),
+        (_IPI_IVA + 0x3040, 0x01, st8(18, 19), nop_i(), nop_i()),
+        (_IPI_IVA + 0x3050, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI),
+         nop_i(), nop_i()),
+        (_IPI_IVA + 0x3060, 0x01, srlz_d(), nop_i(), nop_i()),
+        (_IPI_IVA + 0x3070, 0x11, nop_m(), nop_i(), rfi_b()),
+
+        # CPU 1, woken at the image base.
+        (0x100000, *movl_mlx(2, (1 << 63) | 0xfee00000)),
+        (0x100010, *movl_mlx(4, _IPI_COUNTER)),
+        (0x100020, *movl_mlx(8, _IPI_DONE)),
+        (0x100030, 0x01, adds(3, 0x40, 0), adds(5, 2000, 0), adds(6, 1, 0)),
+        (0x100040, 0x01, st8(2, 3), nop_i(), nop_i()),
+        (0x100050, 0x01, ld8(7, 4), nop_i(), nop_i()),
+        (0x100060, 0x01, nop_m(), cmp_ltu_unc(6, 7, 7, 6), nop_i()),
+        (0x100070, 0x10, nop_m(), nop_i(),
+         br_cond(0x100070, 0x100050, qp=6)),
+        (0x100080, 0x01, nop_m(), adds(6, 1, 6), adds(5, -1, 5)),
+        (0x100090, 0x01, nop_m(), cmp4_eq_imm(9, 10, 0, 5), nop_i()),
+        (0x1000a0, 0x10, nop_m(), nop_i(),
+         br_cond(0x1000a0, 0x100040, qp=10)),
+        (0x1000b0, 0x01, adds(9, 1, 0), nop_i(), nop_i()),
+        (0x1000c0, 0x01, st8(8, 9), nop_i(), nop_i()),
+        (0x1000d0, 0x10, nop_m(), nop_i(), br_cond(0x1000d0, 0x1000d0)),
+    ], {
+        "ip": 0x1000d0,
+        "exception": IA64_EXCP_NONE,
+        "r5": 0,
+        "r6": 2001,
+    }, entry=0x10, alat=None, smp="2", state_cpu=1)
+
 CASE_NAMES = (
+    'ipis_during_break_faults_all_arrive',
 
     'ar_itc_advances_in_guest_loop',
     'async_timer_interrupt_enters_ivt',

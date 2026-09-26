@@ -1113,6 +1113,7 @@ static const TCGCPUOps ia64_tcg_ops = {
     .cpu_exec_halt = ia64_cpu_has_work,
     .cpu_exec_reset = cpu_reset,
     .do_interrupt = ia64_cpu_do_interrupt,
+    .do_interrupt_needs_bql = ia64_cpu_do_interrupt_needs_bql,
 };
 
 /*
