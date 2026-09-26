@@ -790,10 +790,15 @@ static void tlb_flush_range_locked(CPUState *cpu, int midx,
      * working set, which a full flush made it refill every time.  A
      * mostly empty table still gets the full flush: there it costs less,
      * and only a full flush lets tlb_mmu_resize_locked() shrink the table.
+     * So does a table above the use rate at which that function grows it,
+     * or a working set larger than the table would thrash in it until the
+     * next full flush.
      */
     if (len > f->mask) {
-        if (bits < target_long_bits() ||
-            tlb_n_entries(f) > d->n_used_entries * 64) {
+        size_t n = tlb_n_entries(f);
+
+        if (bits < target_long_bits() || n > d->n_used_entries * 64 ||
+            MAX(d->window_max_entries, d->n_used_entries) * 100 / n > 70) {
             if (*full_flush_now < 0) {
                 *full_flush_now = get_clock_realtime();
             }
