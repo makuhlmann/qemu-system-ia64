@@ -1639,7 +1639,14 @@ void ia64_mmu_fc(CPUIA64State *env, uint64_t addr)
 void ia64_mmu_check_semaphore_access(CPUIA64State *env, uint64_t va)
 {
     IA64DataReferenceResult translation = { 0 };
-    IA64Exception excp = ia64_data_reference_exception(
+    IA64Exception excp;
+    int mmu_idx = env->psr & IA64_PSR_DT ?
+                  MMU_IDX_VIRT_CPL(ia64_psr_cpl(env->psr)) : MMU_PHYS_IDX;
+
+    if (ia64_exec_semaphore_hit_writeback(env, va, mmu_idx)) {
+        return;
+    }
+    excp = ia64_data_reference_exception(
         env, va, true, true, ia64_psr_cpl(env->psr), true, &translation);
 
     /* A NaTPage translation already reports NaT Page Consumption here. */

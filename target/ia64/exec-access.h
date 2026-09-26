@@ -55,6 +55,8 @@ void *ia64_exec_direct_host(CPUIA64State *env, uint64_t addr,
                             MMUAccessType access_type, int mmu_idx);
 int ia64_exec_load_hit_speculation(CPUIA64State *env, uint64_t addr,
                                    int mmu_idx);
+bool ia64_exec_semaphore_hit_writeback(CPUIA64State *env, uint64_t addr,
+                                       int mmu_idx);
 bool ia64_exec_probe_writeback_ram(CPUIA64State *env, uint64_t addr,
                                    int size, MMUAccessType access_type,
                                    bool *direct, uintptr_t ra);

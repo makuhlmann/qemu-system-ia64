@@ -10,6 +10,7 @@ from .encoding import (
     CHECK_LOAD_DATA,
     DTR_PTE_NATPAGE,
     DTR_PTE_UC,
+    DTR_PTE_WB,
     HIGH_TR_BASE,
     IA64_ALT_DTLB_VECTOR,
     IA64_BREAK_VECTOR,
@@ -73,6 +74,7 @@ from .encoding import (
     cmp_ge_or,
     cmpxchg4,
     cmpxchg4_acq,
+    cmpxchg_acq,
     cmpxchg_rel,
     czx1_r,
     dtr_setup_bundles,
@@ -454,6 +456,100 @@ test_ld8_s_after_filled_uc_entry_defers = require_registers(
     ], {"ip": 0xc0, "r4_nat": 1, "r5": ADV_UC_LOAD_DATA,
         "exception": IA64_EXCP_NONE}, entry=0x10)
 
+def advanced_load_after_filled_entry_test(name, pte_flags, expected_r4):
+    return require_registers(name, [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000, pte_flags=pte_flags),
+        (0x70, *movl_mlx(2, ADV_UC_LOAD_VA)),
+        (0x80, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x90, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xa0, 0x01, ld8(5, 2), adds(4, 7, 0), nop_i()),
+        (0xb0, 0x01, ld8_a(4, 2), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        ADV_UC_LOAD_BUNDLE,
+    ], {"ip": 0xc0, "r4": expected_r4, "r5": ADV_UC_LOAD_DATA,
+        "exception": IA64_EXCP_NONE}, entry=0x10)
+
+
+test_ld8_a_after_filled_uc_entry_zeroes_target = \
+    advanced_load_after_filled_entry_test(
+        "ld8_a_after_filled_uc_entry_zeroes_target", DTR_PTE_UC, 0)
+
+test_ld8_a_after_filled_wb_entry_loads = \
+    advanced_load_after_filled_entry_test(
+        "ld8_a_after_filled_wb_entry_loads", DTR_PTE_WB, ADV_UC_LOAD_DATA)
+
+test_cmpxchg8_after_filled_uc_entry_unsupported = require_registers(
+    "cmpxchg8_after_filled_uc_entry_unsupported", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000,
+                           pte_flags=DTR_PTE_UC),
+        (0x70, *movl_mlx(2, ADV_UC_LOAD_VA)),
+        (0x80, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x90, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xa0, 0x01, ld8(5, 2), nop_i(), nop_i()),
+        (0xb0, 0x01, cmpxchg_acq(3, 4, 2, 5), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        (IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR, 0x00,
+         mov_m_cr_gr(14, 20), nop_i(), nop_i()),
+        (IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(15, 17), nop_i(), nop_i()),
+        (IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20,
+                 IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20)),
+        ADV_UC_LOAD_BUNDLE,
+    ], {
+        "ip": IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_UNSUPPORTED_DATA_REFERENCE,
+        "fault_ip": 0xb0,
+        "r5": ADV_UC_LOAD_DATA,
+        "r14": ADV_UC_LOAD_VA,
+        "r15": IA64_ISR_R | IA64_ISR_W,
+    }, entry=0x10)
+
+# Memory at 0x200 holds 11 22 33 44 55 66 77 88.  cmpxchg1 and cmpxchg2
+# succeed, cmpxchg4 gets a ccv with bit 32 set and must not store, the first
+# cmpxchg8 fails and the second succeeds.
+CMPXCHG_SIZES_BUNDLES = [
+    (0x10, 0x00, addl(3, 0x200, 0), addl(7, 0x202, 0), addl(8, 0x204, 0)),
+    (0x20, *movl_mlx(4, 0x8877665544332211)),
+    (0x30, 0x00, st8(3, 4), addl(9, 0x11, 0), addl(6, 0xaa, 0)),
+    (0x40, 0x00, mov_m_gr_ar(9, 32), nop_i(), nop_i()),
+    (0x50, 0x00, cmpxchg_acq(0, 10, 3, 6), nop_i(), nop_i()),
+    (0x60, *movl_mlx(9, 0x4433)),
+    (0x70, 0x00, mov_m_gr_ar(9, 32), addl(6, 0xbbcc, 0), nop_i()),
+    (0x80, 0x00, cmpxchg_acq(1, 11, 7, 6), nop_i(), nop_i()),
+    (0x90, *movl_mlx(9, 0x188776655)),
+    (0xa0, 0x00, mov_m_gr_ar(9, 32), addl(6, 0xdead, 0), nop_i()),
+    (0xb0, 0x00, cmpxchg_acq(2, 12, 8, 6), nop_i(), nop_i()),
+    (0xc0, 0x00, ld4(16, 8), nop_i(), nop_i()),
+    (0xd0, 0x00, mov_m_imm_ar(32, 0), nop_i(), nop_i()),
+    (0xe0, 0x00, cmpxchg_acq(3, 13, 3, 6), nop_i(), nop_i()),
+    (0xf0, *movl_mlx(14, 0x0123456789abcdef)),
+    (0x100, 0x00, mov_m_gr_ar(13, 32), nop_i(), nop_i()),
+    (0x110, 0x00, cmpxchg_rel(3, 15, 3, 14), nop_i(), nop_i()),
+    (0x120, 0x00, ld8(17, 3), nop_i(), nop_i()),
+    (0x130, 0x10, nop_m(), nop_i(), br_cond(0x130, 0x130)),
+]
+CMPXCHG_SIZES_EXPECTED = {
+    "ip": 0x130,
+    "r10": 0x11,
+    "r11": 0x4433,
+    "r12": 0x88776655,
+    "r16": 0x88776655,
+    "r13": 0x88776655bbcc22aa,
+    "r15": 0x88776655bbcc22aa,
+    "r17": 0x0123456789abcdef,
+}
+
+test_cmpxchg_sizes_compare_zero_extended = require_registers(
+    "cmpxchg_sizes_compare_zero_extended", CMPXCHG_SIZES_BUNDLES,
+    CMPXCHG_SIZES_EXPECTED, entry=0x10)
+
+test_cmpxchg_sizes_compare_zero_extended_zero_alat = require_registers(
+    "cmpxchg_sizes_compare_zero_extended_zero_alat", CMPXCHG_SIZES_BUNDLES,
+    CMPXCHG_SIZES_EXPECTED, entry=0x10, alat=None)
+
 test_ld8_c_nc_address_mismatch_reloads = require_registers(
     "ld8_c_nc_address_mismatch_reloads", [
         (0x10, 0x00, addl(3, 0x100, 0), addl(5, 0x110, 0),
@@ -710,40 +806,48 @@ test_data_big_endian_load_store = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x10)
 
+DATA_BIG_ENDIAN_CMPXCHG4_BUNDLES = [
+    (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x201, 0),
+     addl(5, 0x202, 0)),
+    (0x20, 0x00, addl(6, 0x203, 0), nop_i(),
+     nop_i()),
+    (0x30, *movl_mlx(10, 0x01020304)),
+    (0x40, *movl_mlx(16, 0x01020304)),
+    (0x50, *movl_mlx(18, 0x11223344)),
+    (0x60, 0x00, sum_um(IA64_PSR_BE), nop_i(),
+     nop_i()),
+    (0x70, 0x00, st4(3, 16), nop_i(),
+     nop_i()),
+    (0x80, 0x00, mov_m_gr_ar(10, 32), nop_i(),
+     nop_i()),
+    (0x90, 0x00, cmpxchg4_acq(17, 3, 18), nop_i(),
+     nop_i()),
+    (0xa0, 0x00, rum(IA64_PSR_BE), nop_i(),
+     nop_i()),
+    (0xb0, 0x08, ld1(19, 3), ld1(20, 4),
+     nop_i()),
+    (0xc0, 0x08, ld1(21, 5), ld1(22, 6),
+     nop_i()),
+    (0xd0, 0x10, nop_m(), nop_i(),
+     br_cond(0xd0, 0xd0)),
+]
+DATA_BIG_ENDIAN_CMPXCHG4_EXPECTED = {
+    "ip": 0xd0,
+    "r17": 0x01020304,
+    "r19": 0x11,
+    "r20": 0x22,
+    "r21": 0x33,
+    "r22": 0x44,
+    "exception": IA64_EXCP_NONE,
+}
+
 test_data_big_endian_cmpxchg4 = require_registers(
-    "data_big_endian_cmpxchg4", [
-        (0x10, 0x00, addl(3, 0x200, 0), addl(4, 0x201, 0),
-         addl(5, 0x202, 0)),
-        (0x20, 0x00, addl(6, 0x203, 0), nop_i(),
-         nop_i()),
-        (0x30, *movl_mlx(10, 0x01020304)),
-        (0x40, *movl_mlx(16, 0x01020304)),
-        (0x50, *movl_mlx(18, 0x11223344)),
-        (0x60, 0x00, sum_um(IA64_PSR_BE), nop_i(),
-         nop_i()),
-        (0x70, 0x00, st4(3, 16), nop_i(),
-         nop_i()),
-        (0x80, 0x00, mov_m_gr_ar(10, 32), nop_i(),
-         nop_i()),
-        (0x90, 0x00, cmpxchg4_acq(17, 3, 18), nop_i(),
-         nop_i()),
-        (0xa0, 0x00, rum(IA64_PSR_BE), nop_i(),
-         nop_i()),
-        (0xb0, 0x08, ld1(19, 3), ld1(20, 4),
-         nop_i()),
-        (0xc0, 0x08, ld1(21, 5), ld1(22, 6),
-         nop_i()),
-        (0xd0, 0x10, nop_m(), nop_i(),
-         br_cond(0xd0, 0xd0)),
-    ], {
-        "ip": 0xd0,
-        "r17": 0x01020304,
-        "r19": 0x11,
-        "r20": 0x22,
-        "r21": 0x33,
-        "r22": 0x44,
-        "exception": IA64_EXCP_NONE,
-    }, entry=0x10)
+    "data_big_endian_cmpxchg4", DATA_BIG_ENDIAN_CMPXCHG4_BUNDLES,
+    DATA_BIG_ENDIAN_CMPXCHG4_EXPECTED, entry=0x10)
+
+test_data_big_endian_cmpxchg4_zero_alat = require_registers(
+    "data_big_endian_cmpxchg4_zero_alat", DATA_BIG_ENDIAN_CMPXCHG4_BUNDLES,
+    DATA_BIG_ENDIAN_CMPXCHG4_EXPECTED, entry=0x10, alat=None)
 
 test_store_invalidates_advanced_load = require_registers(
     "store_invalidates_advanced_load", [
@@ -3282,6 +3386,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'cmpxchg4_result_base_alias_success_invalidates_alat',
     'cmpxchg4_uses_ar_ccv',
     'data_big_endian_cmpxchg4',
+    'data_big_endian_cmpxchg4_zero_alat',
     'data_big_endian_load_store',
     'fc_invalidates_advanced_load',
     'fc_nat_source_consumes_non_access',
@@ -3325,6 +3430,11 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'ld8_s_uc_defers',
     'ld8_s_after_filled_wb_entry_loads',
     'ld8_s_after_filled_uc_entry_defers',
+    'ld8_a_after_filled_uc_entry_zeroes_target',
+    'ld8_a_after_filled_wb_entry_loads',
+    'cmpxchg8_after_filled_uc_entry_unsupported',
+    'cmpxchg_sizes_compare_zero_extended',
+    'cmpxchg_sizes_compare_zero_extended_zero_alat',
     'ld8_sa_failure_invalidates_old_entry',
     'ld_imm_postinc_same_target_illegal',
     'ld_postinc_same_target_predicated_false',

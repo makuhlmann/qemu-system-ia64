@@ -297,6 +297,25 @@ int ia64_exec_load_hit_speculation(CPUIA64State *env, uint64_t addr,
     return full ? full->extra.ia64.speculation : -1;
 }
 
+/*
+ * True when a softmmu entry for addr grants read and write at this mmu_idx
+ * and maps write-back memory.  full->prot holds the rights the fill computed
+ * from the access rights, the dirty and access bits and the protection key
+ * (before any MemoryRegion restriction), so such an entry exists only where
+ * the software walk of a semaphore access would find no fault either.
+ */
+bool ia64_exec_semaphore_hit_writeback(CPUIA64State *env, uint64_t addr,
+                                       int mmu_idx)
+{
+    CPUTLBEntryFull *full = tlb_lookup_full_nofill(env, addr, MMU_DATA_STORE,
+                                                   mmu_idx);
+
+    return full &&
+           (full->prot & (PAGE_READ | PAGE_WRITE)) ==
+               (PAGE_READ | PAGE_WRITE) &&
+           full->extra.ia64.memory_attribute == IA64_PTE_MA_WB;
+}
+
 bool ia64_exec_probe_writeback_ram(CPUIA64State *env, uint64_t addr,
                                    int size, MMUAccessType access_type,
                                    bool *direct, uintptr_t ra)
@@ -346,13 +365,17 @@ bool ia64_exec_probe_writeback(CPUIA64State *env, uint64_t addr,
 bool ia64_exec_advanced_load_allowed(CPUIA64State *env, uint64_t addr,
                                      int mmu_idx)
 {
-    CPUTLBEntryFull *full;
-    void *host;
-    int flags = probe_access_full(env, addr, 1, MMU_DATA_LOAD, mmu_idx, true,
-                                  &host, &full, 0);
+    CPUTLBEntryFull *full = tlb_lookup_full_nofill(env, addr, MMU_DATA_LOAD,
+                                                   mmu_idx);
 
-    if (flags & TLB_INVALID_MASK) {
-        return true;
+    if (!full) {
+        void *host;
+        int flags = probe_access_full(env, addr, 1, MMU_DATA_LOAD, mmu_idx,
+                                      true, &host, &full, 0);
+
+        if (flags & TLB_INVALID_MASK) {
+            return true;
+        }
     }
     return full->extra.ia64.speculation != IA64_MEM_NON_SPECULATIVE;
 }

@@ -167,6 +167,38 @@ static void ia64_gen_integer_load(DisasContext *ctx,
     ia64_gen_memory_plan_base_update(insn, &plan);
 }
 
+/*
+ * ar.ccv is compared with the zero-extended memory value, so a ccv wider than
+ * the access never matches and the instruction only reads.  The out-of-line
+ * helper adds only the invalidation of ALAT entries, and without a full ALAT
+ * there are none.
+ */
+static void ia64_gen_cmpxchg(DisasContext *ctx, TCGv_i64 dest,
+                             const IA64MemoryPlan *plan, TCGv_i64 ccv,
+                             TCGv_i64 value)
+{
+    TCGLabel *wide = NULL;
+    TCGLabel *done = NULL;
+
+    if (plan->size < 8) {
+        TCGv_i64 high = tcg_temp_new_i64();
+
+        wide = gen_new_label();
+        done = gen_new_label();
+        tcg_gen_shri_i64(high, ccv, plan->size * 8);
+        tcg_gen_brcondi_i64(TCG_COND_NE, high, 0, wide);
+    }
+    tcg_gen_atomic_cmpxchg_i64(dest, plan->address, ccv, value,
+                               ctx->memory.mmu_idx, plan->memop);
+    if (wide) {
+        tcg_gen_br(done);
+        gen_set_label(wide);
+        tcg_gen_qemu_ld_i64(dest, plan->address, ctx->memory.mmu_idx,
+                            plan->memop);
+        gen_set_label(done);
+    }
+}
+
 static void ia64_gen_check_nat_access(const Ia64Instruction *insn,
                                       uint8_t reg, bool is_write)
 {
@@ -998,8 +1030,12 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
         gen_helper_check_semaphore_access(tcg_env, plan.address);
         ia64_gen_read_simple_ar(ccv, 32);
         ia64_gen_memory_release(insn);
-        gen_helper_cmpxchg(cpu_gr[op->destination], tcg_env, plan.address, ccv,
-                           value, tcg_constant_i32(plan.size));
+        if (ctx->memory.full_alat) {
+            gen_helper_cmpxchg(cpu_gr[op->destination], tcg_env, plan.address,
+                               ccv, value, tcg_constant_i32(plan.size));
+        } else {
+            ia64_gen_cmpxchg(ctx, cpu_gr[op->destination], &plan, ccv, value);
+        }
         ia64_gen_memory_acquire(insn);
         ia64_gen_gr_nat_clear(op->destination);
         break;
