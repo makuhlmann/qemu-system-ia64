@@ -956,7 +956,15 @@ static void ia64_ptc_mark_global(CPUIA64State *env,
         env->mmu.tlb_inst, env->mmu.tlb_inst_count,
         &env->mmu.pending_purge_inst_count,
         work->va, work->ps, work->rid, true, 'i');
-    ia64_qemu_tlb_flush_range(env, work->va, work->ps, work->rid, false);
+    /*
+     * This flush drops the data translations the softmmu keeps without a TC
+     * entry (ia64_qemu_tlb_flush_victim).  Instruction translations exist
+     * only with an ITC or ITR entry (or in the firmware identity window,
+     * which no purge changes), and each ITC entry marked here is flushed
+     * with the jump cache when its purge completes, so the jump cache
+     * stays: clearing it for a 16 MiB range clears all of it.
+     */
+    ia64_qemu_tlb_flush_range(env, work->va, work->ps, work->rid, true);
     ia64_assert_pending_purge_counts(env);
 
     if (remote) {
@@ -1049,7 +1057,8 @@ void ia64_mmu_ptc_purge(CPUIA64State *env, uint64_t va, uint64_t size_reg,
         ia64_mark_pending_purge_entries(
             env->mmu.tlb_inst, env->mmu.tlb_inst_count,
             &env->mmu.pending_purge_inst_count, va, ps, rid, true, 'i');
-        ia64_qemu_tlb_flush_range(env, va, ps, rid, false);
+        /* The jump cache stays, as in ia64_ptc_mark_global(). */
+        ia64_qemu_tlb_flush_range(env, va, ps, rid, true);
     }
     ia64_assert_pending_purge_counts(env);
 }

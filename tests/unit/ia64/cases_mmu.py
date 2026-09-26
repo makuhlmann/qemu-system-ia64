@@ -10,6 +10,7 @@ from .encoding import (
     EIGHT_K_ITIR,
     HIGH_TR_BASE,
     IA64_ALT_DTLB_VECTOR,
+    IA64_ALT_ITLB_VECTOR,
     IA64_BREAK_VECTOR,
     IA64_CR_SAPIC_IRR3,
     IA64_DATA_ACCESS_BIT_VECTOR,
@@ -2465,6 +2466,88 @@ def test_ptc_g_16m_purges_displaced_translation_last_page(qemu):
     _large_page_purge_test(
         qemu, "ptc_g_16m_purges_displaced_translation_last_page",
         ptc_g(2, 8), (1 << 24) - 0x1000)
+
+
+def _itc_i_purge_stops_translated_code_test(qemu, name, purge, page_shift):
+    """
+    Code reached through an ITC entry runs once, which leaves its translated
+    block in the jump cache; after the purge and srlz.i the same indirect
+    branch must take an Alternate Instruction TLB fault instead of running
+    that block again.  An ITR maps the test code and the IVT one to one;
+    only r1-r15 are used, since rfi changes the register bank.
+    """
+    code_va = 0x08000000
+    code_pa = 0x05000000
+    iva = 0x200000
+    cursor = 0x100000
+    bundles = [
+        (cursor, *movl_mlx(3, iva)),
+        (cursor + 0x10, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (cursor + 0x20, *movl_mlx(4, DTR_PTE_WB)),
+        (cursor + 0x30, 0x00, mov_m_gr_cr(0, 20), adds(7, 24 << 2, 0),
+         adds(5, 0, 0)),
+        (cursor + 0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (cursor + 0x50, 0x00, itr_i(5, 4), nop_i(), nop_i()),
+        (cursor + 0x60, 0x01, srlz_i(), nop_i(), nop_i()),
+        (cursor + 0x70, *movl_mlx(15, IA64_PSR_IT)),
+        (cursor + 0x80, *movl_mlx(11, cursor + 0xb0)),
+        *rfi_to_gr(cursor + 0x90, 15, 11),
+    ]
+    cursor += 0xb0
+
+    def append_code(*code):
+        nonlocal cursor
+
+        for slot0 in code:
+            bundles.append((cursor, 0x01, slot0, nop_i(), nop_i()))
+            cursor += 0x10
+
+    bundles.extend([
+        (cursor, *movl_mlx(4, code_pa | DTR_PTE_WB)),
+        (cursor + 0x10, *movl_mlx(2, code_va)),
+    ])
+    cursor += 0x20
+    append_code(mov_m_gr_cr(2, 20), adds(8, page_shift << 2, 0),
+                mov_m_gr_cr(8, 21), itc_i(4), srlz_i())
+    bundles.extend([
+        (cursor, 0x01, nop_m(), nop_i(), mov_br_gr(1, 2)),
+        (cursor + 0x10, *movl_mlx(10, cursor + 0x40)),
+        (cursor + 0x20, 0x01, nop_m(), nop_i(), mov_br_gr(2, 10)),
+        (cursor + 0x30, 0x10, nop_m(), nop_i(), br_indirect(1)),
+    ])
+    cursor += 0x40
+    append_code(purge, srlz_d(), srlz_i())
+    bundles.extend([
+        (cursor, *movl_mlx(10, cursor + 0x30)),
+        (cursor + 0x10, 0x01, nop_m(), nop_i(), mov_br_gr(2, 10)),
+        (cursor + 0x20, 0x10, nop_m(), nop_i(), br_indirect(1)),
+        (cursor + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(cursor + 0x30, cursor + 0x30)),
+        (code_pa, 0x00, adds(14, 1, 14), nop_i(), nop_i()),
+        (code_pa + 0x10, 0x10, nop_m(), nop_i(), br_indirect(2)),
+        (iva + IA64_ALT_ITLB_VECTOR, 0x10, nop_m(), nop_i(),
+         br_cond(iva + IA64_ALT_ITLB_VECTOR, iva + IA64_ALT_ITLB_VECTOR)),
+    ])
+    run_program(qemu, bundles, entry=0x100000, expected={
+        "ip": iva + IA64_ALT_ITLB_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "r14": 1,
+    }, name=name, timeout=5.0)
+
+
+def test_ptc_l_stops_translated_code_4k(qemu):
+    _itc_i_purge_stops_translated_code_test(
+        qemu, "ptc_l_stops_translated_code_4k", ptc_l(2, 8), 12)
+
+
+def test_ptc_l_stops_translated_code_16m(qemu):
+    _itc_i_purge_stops_translated_code_test(
+        qemu, "ptc_l_stops_translated_code_16m", ptc_l(2, 8), 24)
+
+
+def test_ptc_g_stops_translated_code_16m(qemu):
+    _itc_i_purge_stops_translated_code_test(
+        qemu, "ptc_g_stops_translated_code_16m", ptc_g(2, 8), 24)
 
 
 def _mixed_page_itc_test(qemu, name, first, second, expect_fault):
@@ -7426,6 +7509,9 @@ CASE_NAMES = (
     'ptc_l_16m_purges_displaced_translation_in_table',
     'ptc_l_16m_purges_displaced_translation_in_victim',
     'ptc_g_16m_purges_displaced_translation_last_page',
+    'ptc_l_stops_translated_code_4k',
+    'ptc_l_stops_translated_code_16m',
+    'ptc_g_stops_translated_code_16m',
     'itc_d_key_permission_store_raises_permission_vector',
     'srlz_d_after_mov_psr_rechooses_next_tb',
     'srlz_d_after_mov_psr_bundle_rechooses_next_tb',
