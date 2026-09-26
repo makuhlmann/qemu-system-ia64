@@ -739,24 +739,19 @@ void ia64_system_st_spill_unat(CPUIA64State *env, uint32_t reg, uint64_t addr)
     }
 }
 
+/* Every interruption and rfi switch banks, so no per-register loop. */
 static void ia64_swap_banked_gr(CPUIA64State *env)
 {
-    uint32_t i;
+    uint64_t live[ARRAY_SIZE(env->banked_gr)];
+    uint16_t live_nat = extract64(env->nat[0], IA64_GR_BANKED_BASE,
+                                  ARRAY_SIZE(live));
 
-    for (i = 0; i < 16; i++) {
-        uint32_t reg = 16 + i;
-        uint64_t value = env->gr[reg];
-        bool nat = ia64_gr_nat_get(env, reg);
-
-        env->gr[reg] = env->banked_gr[i];
-        ia64_gr_nat_set(env, reg, (env->banked_nat >> i) & 1);
-        env->banked_gr[i] = value;
-        if (nat) {
-            env->banked_nat |= (uint16_t)(1U << i);
-        } else {
-            env->banked_nat &= (uint16_t)~(1U << i);
-        }
-    }
+    memcpy(live, &env->gr[IA64_GR_BANKED_BASE], sizeof(live));
+    memcpy(&env->gr[IA64_GR_BANKED_BASE], env->banked_gr, sizeof(live));
+    memcpy(env->banked_gr, live, sizeof(live));
+    env->nat[0] = deposit64(env->nat[0], IA64_GR_BANKED_BASE,
+                            ARRAY_SIZE(live), env->banked_nat);
+    env->banked_nat = live_nat;
 }
 
 void ia64_set_psr(CPUIA64State *env, uint64_t value)

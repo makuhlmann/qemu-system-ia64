@@ -520,6 +520,8 @@ typedef enum IA64GeneralRegisterIndex {
     IA64_GR_RETURN3 = 11,
     IA64_GR_STACK_POINTER = 12,
     IA64_GR_THREAD_POINTER = 13,
+    /* r16-r31 have two banks, selected by PSR.bn (SDM Vol 2 3.3.7). */
+    IA64_GR_BANKED_BASE = 16,
     /*
      * IA-32 execution model mapping (SDM volume 1, section 6.2): GR8-GR15
      * hold the IA-32 general registers, GR16/GR17 the packed data- and

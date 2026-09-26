@@ -2472,6 +2472,44 @@ test_bsw_restores_banked_nat = require_registers(
         "r16_nat": 1,
     }, entry=0x10)
 
+# Both banks keep their own values and NaT bits in every one of r16-r31:
+# bank 0 holds NaTs in r17 and r31, bank 1 one in r20 (SDM Vol 2 3.3.7).
+# The bank-0 values are copied out with their NaTs before the last bsw.1.
+test_bsw_swaps_every_banked_value_and_nat = require_registers(
+    "bsw_swaps_every_banked_value_and_nat", [
+        (0x10, *movl_mlx(16, 0x1111)),
+        (0x20, *movl_mlx(20, 0x2020)),
+        (0x30, 0x01, adds(10, -1, 0), addl(6, 0x200, 0), nop_i()),
+        (0x40, 0x01, mov_m_gr_ar(10, 36), nop_i(), nop_i()),
+        (0x50, 0x01, ld8_fill_postinc(17, 6, 0), nop_i(), nop_i()),
+        (0x60, 0x01, ld8_fill_postinc(31, 6, 0), nop_i(), nop_i()),
+        (0x70, 0x13, nop_m(), nop_b(), bsw1()),
+        (0x80, *movl_mlx(16, 0x16)),
+        (0x90, *movl_mlx(31, 0x31)),
+        (0xa0, 0x01, ld8_fill_postinc(20, 6, 0), nop_i(), nop_i()),
+        (0xb0, 0x13, nop_m(), nop_b(), bsw0()),
+        (0xc0, 0x01, adds(2, 0, 16), adds(3, 0, 17), nop_i()),
+        (0xd0, 0x01, adds(4, 0, 31), adds(5, 0, 20), nop_i()),
+        (0xe0, 0x13, nop_m(), nop_b(), bsw1()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+        (0x200, 0x00, 0, 0, 0),
+    ], {
+        "ip": 0xf0,
+        "exception": IA64_EXCP_NONE,
+        "r2": 0x1111,
+        "r2_nat": 0,
+        "r3_nat": 1,
+        "r4_nat": 1,
+        "r5": 0x2020,
+        "r5_nat": 0,
+        "r16": 0x16,
+        "r17": 0,
+        "r17_nat": 0,
+        "r20_nat": 1,
+        "r31": 0x31,
+        "r31_nat": 0,
+    }, entry=0x10)
+
 test_cloop_zero_st1_invalidates_alat_range = require_registers(
     "cloop_zero_st1_invalidates_alat_range", [
         (0x10, *movl_mlx(2, 0x8000)),
@@ -3385,6 +3423,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'alloc_clears_destination_nat',
     'br_ctop_long_speculative_load_pipeline',
     'bsw_restores_banked_nat',
+    'bsw_swaps_every_banked_value_and_nat',
     'chk_a_clr_removes_entry',
     'chk_a_m_branches_on_miss',
     'chk_a_m_hint_shaped_displacement_branches',
