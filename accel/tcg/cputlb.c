@@ -561,6 +561,8 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
     tlb_debug("page addr: %016" VADDR_PRIx " mmu_map:0x%x\n", addr, idxmap);
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    /* A clean index has no entry since its last full flush. */
+    idxmap &= cpu->neg.tlb.c.dirty;
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         if ((idxmap >> mmu_idx) & 1) {
             tlb_flush_page_locked(cpu, mmu_idx, addr);
