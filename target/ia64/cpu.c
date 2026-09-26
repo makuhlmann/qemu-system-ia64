@@ -126,7 +126,13 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
              IA64_TB_FLAG_PSR_SUPPRESS : 0;
     flags |= ((psr & IA64_PSR_SS) ? IA64_TB_FLAG_PSR_SS : 0) |
              ((psr & IA64_PSR_TB) ? IA64_TB_FLAG_PSR_TB : 0);
-    flags |= (cpu->env.nat[0] | cpu->env.nat[1]) == 0 ?
+    /*
+     * Two 8-byte loads: generated code has just stored the words one by
+     * one, and one 16-byte load of both (as compilers merge this) misses
+     * store forwarding on every TB lookup.
+     */
+    flags |= (qatomic_read(&cpu->env.nat[0]) |
+              qatomic_read(&cpu->env.nat[1])) == 0 ?
              IA64_TB_FLAG_NAT_CLEAR : 0;
     flags |= (psr & IA64_PSR_DFL) ? IA64_TB_FLAG_PSR_DFL : 0;
 
