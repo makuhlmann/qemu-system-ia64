@@ -26,6 +26,11 @@
 #define IA64_TB_FLAG_PSR_AC       (1u << 8)
 #define IA64_TB_FLAG_PSR_SS       (1u << 11)
 #define IA64_TB_FLAG_PSR_TB       (1u << 12)
+/* No GR NaT bit is set at TB entry. */
+#define IA64_TB_FLAG_NAT_CLEAR    (1u << 13)
+
+/* NaT bits of r0-r31 in the first word of the GR NaT file. */
+#define IA64_STATIC_GR_NAT_MASK   0xffffffffULL
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)
@@ -39,6 +44,8 @@ typedef struct IA64TranslationMemoryState {
     bool psr_ac;
     bool full_alat;
     uint64_t nat_known_clear[2];
+    /* nat_known_clear where the current instruction may leave the TB. */
+    uint64_t nat_known_at_exit[2];
 } IA64TranslationMemoryState;
 
 typedef struct IA64TranslationRestartState {
@@ -75,6 +82,9 @@ typedef struct IA64TranslationBranchState {
     TCGLabel *counted_self_label;
     TCGv_i64 counted_self_budget;
     uint64_t counted_self_ip;
+    /* NaT-known facts at the label, and whether the back edge rotates. */
+    uint64_t counted_self_nat_known[2];
+    bool counted_self_rotates;
     bool cloop_zero_st1_valid;
     bool cloop_zero_st1_release;
     uint8_t cloop_zero_st1_base;

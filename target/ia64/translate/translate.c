@@ -703,6 +703,41 @@ void ia64_update_frame_tracking(DisasContext *ctx,
     }
 }
 
+/*
+ * The RSE helpers of these instructions rename or reload the stacked
+ * registers, and bsw swaps r16-r31 with the other bank, before the TB goes
+ * on or the branch leaves it.
+ */
+static void ia64_drop_nat_known_renamed(const Ia64Instruction *insn,
+                                        uint64_t known[2])
+{
+    switch (insn->opcode) {
+    case IA64_OP_ALLOC:
+    case IA64_OP_COVER:
+    case IA64_OP_LOADRS:
+    case IA64_OP_CLRRRB:
+    case IA64_OP_CLRRRB_PR:
+    case IA64_OP_BR_CTOP:
+    case IA64_OP_BR_CEXIT:
+    case IA64_OP_BR_WTOP:
+    case IA64_OP_BR_WEXIT:
+    case IA64_OP_BR_CALL:
+    case IA64_OP_BR_CALL_INDIRECT:
+    case IA64_OP_BRL_CALL:
+    case IA64_OP_BR_RET:
+    case IA64_OP_RFI:
+        known[0] &= IA64_STATIC_GR_NAT_MASK;
+        known[1] = 0;
+        break;
+    case IA64_OP_BSW0:
+    case IA64_OP_BSW1:
+        known[0] &= ~(0xffffULL << 16);
+        break;
+    default:
+        break;
+    }
+}
+
 void ia64_update_nat_known(DisasContext *ctx,
                            const Ia64Instruction *insn)
 {
@@ -725,6 +760,16 @@ void ia64_update_nat_known(DisasContext *ctx,
                                  old_r3 && old_r2);
     }
     /* An immediate base update preserves the base register's NaT bit. */
+
+    ia64_drop_nat_known_renamed(insn, ctx->memory.nat_known_clear);
+}
+
+static void ia64_set_exit_nat_known(DisasContext *ctx,
+                                    const Ia64Instruction *insn)
+{
+    ctx->memory.nat_known_at_exit[0] = ctx->memory.nat_known_clear[0];
+    ctx->memory.nat_known_at_exit[1] = ctx->memory.nat_known_clear[1];
+    ia64_drop_nat_known_renamed(insn, ctx->memory.nat_known_at_exit);
 }
 
 static bool ia64_insn_is_privileged(const Ia64Instruction *insn)
@@ -1888,6 +1933,8 @@ static bool ia64_analyze_self_counted_loop(
               insn.operands.common.branch2 == 0 &&
               insn.address + insn.operands.common.immediate == bundle_ip))) {
             self_loop_slot = slot;
+            ctx->branch.counted_self_rotates =
+                insn.opcode == IA64_OP_BR_CTOP;
             if (insn.opcode != IA64_OP_BR_CLOOP || insn.qp != 0) {
                 zero_st1_exact = false;
             }
@@ -1944,15 +1991,22 @@ void ia64_prepare_self_counted_loop(
      * The counted self-loop places a TCG back edge at the loop label:
      * everything after it executes again with whatever the loop body
      * left behind.  Facts cached from code above the label (a CFM.sof
-     * load, NaT-known bits) would be re-consumed on the second
-     * iteration even if the body invalidated them later in translation
-     * order, so drop them before the label is planted.  Facts learned
-     * inside the body are re-established by the re-executed code.
+     * load) would be re-consumed on the second iteration even if the body
+     * invalidated them later in translation order, so drop them before
+     * the label is planted.  Facts learned inside the body are
+     * re-established by the re-executed code.  The NaT-known bits stay:
+     * the back edge tests the ones the body cannot prove again
+     * (ia64_gen_self_counted_loop), and a br.ctop back edge rotates the
+     * stacked registers, so those are dropped.
      */
     ctx->cfm_sof_valid = false;
     ctx->cfm_sof_checked = 0;
-    ctx->memory.nat_known_clear[0] = 1;
-    ctx->memory.nat_known_clear[1] = 0;
+    if (ctx->branch.counted_self_rotates) {
+        ctx->memory.nat_known_clear[0] &= IA64_STATIC_GR_NAT_MASK;
+        ctx->memory.nat_known_clear[1] = 0;
+    }
+    ctx->branch.counted_self_nat_known[0] = ctx->memory.nat_known_clear[0];
+    ctx->branch.counted_self_nat_known[1] = ctx->memory.nat_known_clear[1];
 
     /*
      * The budget temp is created and initialized once per TB in
@@ -1964,6 +2018,45 @@ void ia64_prepare_self_counted_loop(
     ctx->branch.counted_self_label = gen_new_label();
     ctx->branch.counted_self_ip = bundle_ip;
     gen_set_label(ctx->branch.counted_self_label);
+}
+
+/* Branch to set when any GR NaT bit selected by mask0/mask1 is set. */
+static void ia64_gen_brcond_nat_set(uint64_t mask0, uint64_t mask1,
+                                    TCGLabel *set)
+{
+    TCGv_i64 t = tcg_temp_new_i64();
+
+    tcg_gen_andi_i64(t, cpu_nat[0], mask0);
+    if (mask1 != 0) {
+        TCGv_i64 t1 = tcg_temp_new_i64();
+
+        tcg_gen_andi_i64(t1, cpu_nat[1], mask1);
+        tcg_gen_or_i64(t, t, t1);
+    }
+    tcg_gen_brcondi_i64(TCG_COND_NE, t, 0, set);
+}
+
+/*
+ * The self-loop label trusts the NaT facts it was planted with; the back
+ * edge takes it only when the bits the body cannot prove again are clear.
+ * A br.ctop back edge has renamed the stacked registers first.
+ */
+static void ia64_gen_self_loop_nat_check(DisasContext *ctx, TCGLabel *fail)
+{
+    uint64_t known0 = ctx->memory.nat_known_clear[0];
+    uint64_t known1 = ctx->memory.nat_known_clear[1];
+    uint64_t test0;
+    uint64_t test1;
+
+    if (ctx->branch.counted_self_rotates) {
+        known0 &= IA64_STATIC_GR_NAT_MASK;
+        known1 = 0;
+    }
+    test0 = ctx->branch.counted_self_nat_known[0] & ~known0;
+    test1 = ctx->branch.counted_self_nat_known[1] & ~known1;
+    if ((test0 | test1) != 0) {
+        ia64_gen_brcond_nat_set(test0, test1, fail);
+    }
 }
 
 bool ia64_gen_self_counted_loop(DisasContext *ctx, uint64_t target,
@@ -1982,6 +2075,7 @@ bool ia64_gen_self_counted_loop(DisasContext *ctx, uint64_t target,
     exit_to_tb = gen_new_label();
     tcg_gen_brcondi_i64(TCG_COND_EQ, ctx->branch.counted_self_budget,
                         0, exit_to_tb);
+    ia64_gen_self_loop_nat_check(ctx, exit_to_tb);
     tcg_gen_subi_i64(ctx->branch.counted_self_budget,
                      ctx->branch.counted_self_budget, 1);
     ia64_gen_note_successful_bundle(ctx, completed_ip, record_iipa,
@@ -3161,8 +3255,15 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     ctx->memory.be_data = ctx->base.tb->flags & IA64_TB_FLAG_BE;
     ctx->memory.psr_ac = ctx->base.tb->flags & IA64_TB_FLAG_PSR_AC;
     ctx->memory.full_alat = ctx->env->alat_state.alat_full;
-    ctx->memory.nat_known_clear[0] = 1;
-    ctx->memory.nat_known_clear[1] = 0;
+    if (ctx->base.tb->flags & IA64_TB_FLAG_NAT_CLEAR) {
+        ctx->memory.nat_known_clear[0] = UINT64_MAX;
+        ctx->memory.nat_known_clear[1] = UINT64_MAX;
+    } else {
+        ctx->memory.nat_known_clear[0] = 1;
+        ctx->memory.nat_known_clear[1] = 0;
+    }
+    ctx->memory.nat_known_at_exit[0] = ctx->memory.nat_known_clear[0];
+    ctx->memory.nat_known_at_exit[1] = ctx->memory.nat_known_clear[1];
     ctx->restart.instruction_group_start =
         ctx->base.tb->flags & IA64_TB_FLAG_GROUP_START;
     ctx->restart.next_instruction_group_start =
@@ -3432,6 +3533,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
                                            tcg_constant_i64(bundle_ip),
                                            tcg_constant_i32(slot));
         }
+        ia64_set_exit_nat_known(ctx, &insn);
         if (ia64_gen_insn(ctx, &insn, record_iipa && track_iipa_for_insn)) {
             db->is_jmp = DISAS_NORETURN;
             return;
@@ -3495,9 +3597,26 @@ void ia64_gen_goto_tb_group(DisasContext *ctx, uint64_t dest,
     ia64_gen_clear_ri();
     tcg_gen_movi_i64(cpu_ip, dest);
     if (slot < 2 && translator_use_goto_tb(&ctx->base, dest)) {
+        uint64_t test0 = ~ctx->memory.nat_known_at_exit[0];
+        uint64_t test1 = ~ctx->memory.nat_known_at_exit[1];
+        TCGLabel *unlinked = NULL;
+
+        /*
+         * A goto_tb link does not look at the flags again: take it only
+         * with no GR NaT set, so the TB it reaches may trust
+         * IA64_TB_FLAG_NAT_CLEAR.
+         */
+        if ((test0 | test1) != 0) {
+            unlinked = gen_new_label();
+            ia64_gen_brcond_nat_set(test0, test1, unlinked);
+        }
         ctx->branch.goto_tb_slots = slot + 1;
         tcg_gen_goto_tb(slot);
         tcg_gen_exit_tb(ctx->base.tb, slot);
+        if (unlinked != NULL) {
+            gen_set_label(unlinked);
+            tcg_gen_lookup_and_goto_ptr();
+        }
     } else {
         tcg_gen_lookup_and_goto_ptr();
     }
@@ -3515,6 +3634,8 @@ static void ia64_tr_tb_stop(DisasContextBase *db, CPUState *cs)
     switch (db->is_jmp) {
     case IA64_DISAS_EXIT:
     case DISAS_TOO_MANY:
+        ctx->memory.nat_known_at_exit[0] = ctx->memory.nat_known_clear[0];
+        ctx->memory.nat_known_at_exit[1] = ctx->memory.nat_known_clear[1];
         ia64_gen_goto_tb(ctx, db->pc_next);
         break;
     case DISAS_NORETURN:

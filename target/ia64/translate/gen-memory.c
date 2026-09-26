@@ -1052,10 +1052,21 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
     case IA64_OP_CHK_S:
         if (!insn->check_fp) {
             TCGv_i64 failed = ia64_gen_gr_nat_read(op->source);
+            uint64_t known0 = ctx->memory.nat_known_at_exit[0];
+            uint64_t known1 = ctx->memory.nat_known_at_exit[1];
 
+            /*
+             * The branch is taken only with a GR NaT set, so the TB it
+             * links to never trusts IA64_TB_FLAG_NAT_CLEAR: it needs no
+             * run-time test (ia64_gen_goto_tb_group).
+             */
+            ctx->memory.nat_known_at_exit[0] = UINT64_MAX;
+            ctx->memory.nat_known_at_exit[1] = UINT64_MAX;
             ia64_gen_check_branch(ctx, failed, insn->address + op->immediate,
                                   insn->address, record_iipa,
                                   track_psr_suppression);
+            ctx->memory.nat_known_at_exit[0] = known0;
+            ctx->memory.nat_known_at_exit[1] = known1;
         } else {
             ia64_gen_check_branch(ctx, ia64_gen_fr_nat_read(op->source),
                                   insn->address + op->immediate, insn->address,

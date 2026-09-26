@@ -51,6 +51,7 @@ from .encoding import (
     br_call,
     br_cloop,
     br_cond,
+    cmp_eq_imm,
     br_ctop_many,
     br_ret,
     break_m,
@@ -3087,9 +3088,121 @@ test_self_loop_nat_consumption_not_elided = require_exception(
          br_cloop(0x40, 0x40)),
     ], IA64_EXCP_NAT_CONSUMPTION, fault_ip=0x40, entry=0x10)
 
+# A TB translated with every GR NaT clear trusts that at entry.  The first
+# two passes link 0x30 to 0x100 to 0x200 while no NaT is set; the third
+# sets one before the linked branches, and 0x200 must fault in that pass,
+# with r7 still 1, not in a later one.
+test_nat_clear_tb_rechecks_chained_entry = require_registers(
+    "nat_clear_tb_rechecks_chained_entry", [
+        (0x10, 0x00, addl(5, 0x300, 0), addl(9, 0x300, 0), adds(7, 3, 0)),
+        (0x20, *movl_mlx(8, 1 << 32)),
+        (0x30, 0x09, cmp_eq_imm(6, 0, 1, 7), mov_m_gr_ar(8, 36), nop_i()),
+        # ld8.fill takes the NaT from AR.UNAT without leaving the TB.
+        (0x40, 0x10, ld8_fill_postinc(5, 9, 0, qp=6), nop_i(),
+         br_cond(0x40, 0x100)),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0x200)),
+        (0x200, 0x00, ld8(10, 5), adds(7, -1, 7), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_cond(0x210, 0x30)),
+        (IA64_NAT_CONSUMPTION_VECTOR, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_NAT_CONSUMPTION_VECTOR, IA64_NAT_CONSUMPTION_VECTOR)),
+    ], {
+        "ip": IA64_NAT_CONSUMPTION_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "r7": 1,
+    }, entry=0x10)
+
+# br.call renames the output registers before it leaves the TB: the NaT
+# that the second pass fills into output r40 is the callee's r32, although
+# the caller wrote its own r32 NaT-clear.  The linked call must not reach
+# the callee TB that trusts every NaT clear.
+test_nat_clear_call_link_rechecks_renamed_outputs = require_registers(
+    "nat_clear_call_link_rechecks_renamed_outputs", [
+        (0x10, 0x00, addl(9, 0x300, 0), adds(7, 2, 0), nop_i()),
+        (0x20, *movl_mlx(8, 1 << 32)),
+        (0x30, 0x19, nop_m(), mov_m_gr_ar(8, 36), br_cond(0x30, 0x40)),
+        (0x40, 0x01, alloc(2, 9, 8, 0, 0), cmp_eq_imm(6, 0, 1, 7), nop_i()),
+        (0x50, 0x09, addl(32, 0x300, 0), ld8_fill_postinc(40, 9, 0, qp=6),
+         nop_i()),
+        (0x60, 0x11, nop_m(), nop_i(), br_call(0, 0x60, 0x200)),
+        (0x70, 0x11, nop_m(), adds(7, -1, 7), br_cond(0x70, 0x40)),
+        (0x200, 0x00, ld8(10, 32), nop_i(), nop_i()),
+        (0x210, 0x11, nop_m(), nop_i(), br_ret(0)),
+        (IA64_NAT_CONSUMPTION_VECTOR, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_NAT_CONSUMPTION_VECTOR, IA64_NAT_CONSUMPTION_VECTOR)),
+    ], {
+        "ip": IA64_NAT_CONSUMPTION_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "r7": 1,
+    }, entry=0x10)
+
+# A taken br.ctop rotates before it leaves the TB: the NaT that the fourth
+# pass fills into r39 is r32 in the next pass, while r39 is NaT-clear
+# again.  The linked back edge must not reach the loop TB that trusts every
+# NaT clear.
+test_nat_clear_ctop_link_rechecks_rotated_registers = require_registers(
+    "nat_clear_ctop_link_rechecks_rotated_registers", [
+        (0x10, 0x00, addl(9, 0x300, 0), adds(7, 3, 0), nop_i()),
+        (0x20, *movl_mlx(8, 1 << 32)),
+        (0x30, 0x19, nop_m(), mov_m_gr_ar(8, 36), br_cond(0x30, 0x40)),
+        (0x40, 0x01, alloc(2, 8, 8, 1, 0), mov_i_imm_ar(66, 1),
+         mov_i_imm_ar(65, 100)),
+    ] + [
+        (0x50 + 0x10 * i, 0x00, addl(32 + 3 * i, 0x300, 0),
+         addl(33 + 3 * i, 0x300, 0), addl(34 + 3 * i, 0x300, 0))
+        for i in range(2)
+    ] + [
+        (0x70, 0x11, addl(38, 0x300, 0), addl(39, 0x300, 0),
+         br_cond(0x70, 0x80)),
+        (0x80, 0x09, ld8(10, 32), ld8_fill_postinc(39, 9, 0, qp=6),
+         nop_i()),
+        (0x90, 0x11, cmp_eq_imm(6, 0, 1, 7), adds(7, -1, 7),
+         br_ctop_many(0x90, 0x80)),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+        (IA64_NAT_CONSUMPTION_VECTOR, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_NAT_CONSUMPTION_VECTOR, IA64_NAT_CONSUMPTION_VECTOR)),
+    ], {
+        "ip": IA64_NAT_CONSUMPTION_VECTOR,
+        "exception": IA64_EXCP_NONE,
+        "r7": (1 << 64) - 1,
+    }, entry=0x10)
+
+# A br.ctop that falls through has still rotated the stacked registers: the
+# NaT that ld8.s leaves in r39 is in r32 afterwards, although r32 was
+# written NaT-clear earlier in the same TB.
+test_br_ctop_fallthrough_rotation_drops_nat_facts = require_exception(
+    "br_ctop_fallthrough_rotation_drops_nat_facts", [
+        (0x10, *movl_mlx(3, 1 << 61)),
+        (0x20, 0x11, nop_m(), nop_i(), br_cond(0x20, 0x30)),
+        (0x30, 0x01, alloc(2, 8, 8, 1, 0), mov_i_imm_ar(66, 1),
+         mov_i_imm_ar(65, 0)),
+        (0x40, 0x01, addl(32, 0x300, 0), nop_i(), nop_i()),
+        (0x50, 0x11, ld8_s(39, 3), nop_i(), br_ctop_many(0x50, 0x30)),
+        (0x60, 0x00, ld8(10, 32), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], IA64_EXCP_NAT_CONSUMPTION, fault_ip=0x60, entry=0x10)
+
+# The bank that a predicated bsw brings in holds a NaT in r16 that the r16
+# written before it did not have.
+test_predicated_bsw_drops_banked_nat_facts = require_exception(
+    "predicated_bsw_drops_banked_nat_facts", [
+        (0x10, *movl_mlx(3, 1 << 61)),
+        (0x20, 0x11, nop_m(), nop_i(), bsw0()),
+        (0x30, 0x01, ld8_s(16, 3), nop_i(), nop_i()),
+        (0x40, 0x11, nop_m(), nop_i(), bsw1()),
+        (0x50, 0x01, addl(16, 0x300, 0), cmp_eq_imm(1, 0, 0, 0), nop_i()),
+        (0x60, 0x11, nop_m(), nop_i(), bsw0(qp=1)),
+        (0x70, 0x00, ld8(10, 16), nop_i(), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], IA64_EXCP_NAT_CONSUMPTION, fault_ip=0x70, entry=0x10)
+
 CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
 
     'self_loop_nat_consumption_not_elided',
+    'nat_clear_tb_rechecks_chained_entry',
+    'nat_clear_call_link_rechecks_renamed_outputs',
+    'nat_clear_ctop_link_rechecks_rotated_registers',
+    'br_ctop_fallthrough_rotation_drops_nat_facts',
+    'predicated_bsw_drops_banked_nat_facts',
 
 
     'alat_reloading_register_does_not_leave_duplicate',
