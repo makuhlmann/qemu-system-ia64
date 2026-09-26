@@ -286,6 +286,24 @@ test_stacked_write_faults_in_smaller_frame_at_same_ip = require_registers(
         "r20": 0x200,
     }, entry=0x10)
 
+# mov pr= with every predicate, then with a mask of low predicates only
+# (0x0f3c), then with the rotating predicates only.
+test_mov_pr_partial_masks_merge_bytes = require_registers(
+    "mov_pr_partial_masks_merge_bytes", [
+        (0x10, *movl_mlx(2, 0x0123456789abcdef)),
+        (0x20, *movl_mlx(3, 0xfedcba9876543210)),
+        (0x30, 0x01, nop_m(), mov_gr_pr(2, -2), nop_i()),
+        (0x40, 0x01, nop_m(), mov_gr_pr(3, 0x0f3c), nop_i()),
+        (0x50, 0x01, nop_m(), mov_pr_gr(4), adds(5, -1, 0)),
+        (0x60, 0x01, nop_m(), mov_gr_pr(5, 0x10000), nop_i()),
+        (0x70, 0x01, nop_m(), mov_pr_gr(6), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+    ], {
+        "ip": 0x80,
+        "r4": 0x0123456789abc2d3,
+        "r6": 0xffffffffffffc2d3,
+    }, entry=0x10)
+
 test_mov_cr_to_r0_ic_set_illegal = require_exception(
     "mov_cr_to_r0_ic_set_illegal", [
         (0x10, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
@@ -3598,6 +3616,7 @@ CASE_NAMES = (
     'mov_cpuid_madison_model',
     'mov_cr_lid_ignored_high_bits_read_zero',
     'mov_cr_to_r0_ic_set_illegal',
+    'mov_pr_partial_masks_merge_bytes',
     'stacked_write_faults_in_smaller_frame_at_same_ip',
     'mov_dahr_indexed_decode',
     'mov_dbr_ibr_indexed_decode',

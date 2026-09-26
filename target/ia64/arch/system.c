@@ -40,12 +40,45 @@ static uint64_t ia64_pr_rotl48(uint64_t bits, uint32_t count)
            IA64_PR_ROTATING_MASK48;
 }
 
+/*
+ * Eight predicates per step with constant shifts: one loop with a variable
+ * shift and a single dependency chain cost about 1 ns per predicate.
+ */
+static inline uint64_t ia64_pr_pack8(const uint64_t *p)
+{
+    return ((p[0] & 1) | ((p[1] & 1) << 1)) |
+           (((p[2] & 1) << 2) | ((p[3] & 1) << 3)) |
+           (((p[4] & 1) << 4) | ((p[5] & 1) << 5)) |
+           (((p[6] & 1) << 6) | ((p[7] & 1) << 7));
+}
+
+static inline void ia64_pr_unpack8(uint64_t *p, uint64_t bits)
+{
+    p[0] = bits & 1;
+    p[1] = (bits >> 1) & 1;
+    p[2] = (bits >> 2) & 1;
+    p[3] = (bits >> 3) & 1;
+    p[4] = (bits >> 4) & 1;
+    p[5] = (bits >> 5) & 1;
+    p[6] = (bits >> 6) & 1;
+    p[7] = (bits >> 7) & 1;
+}
+
+static inline void ia64_pr_merge8(uint64_t *p, uint64_t bits, uint64_t mask)
+{
+    for (uint32_t k = 0; k < 8; k++) {
+        uint64_t take = -((mask >> k) & 1);
+
+        p[k] ^= (p[k] ^ ((bits >> k) & 1)) & take;
+    }
+}
+
 uint64_t ia64_system_read_pr(CPUIA64State *env)
 {
     uint64_t logical = 0;
 
-    for (uint32_t i = 0; i < IA64_PR_COUNT; i++) {
-        logical |= (env->pr[i] & 1) << i;
+    for (uint32_t j = 0; j < IA64_PR_COUNT; j += 8) {
+        logical |= ia64_pr_pack8(&env->pr[j]) << j;
     }
     return (logical & ((1ULL << IA64_PR_ROTATING_BASE) - 1)) |
            (ia64_pr_rotl48(logical >> IA64_PR_ROTATING_BASE,
@@ -138,12 +171,18 @@ void ia64_system_write_pr(CPUIA64State *env, uint64_t value, uint64_t mask)
     value = (value & static_mask) |
             (ia64_pr_rotl48(value >> IA64_PR_ROTATING_BASE, back) <<
              IA64_PR_ROTATING_BASE);
-    mask = ((mask & static_mask) |
-            (ia64_pr_rotl48(mask >> IA64_PR_ROTATING_BASE, back) <<
-             IA64_PR_ROTATING_BASE)) & ~1ULL;
-    for (uint32_t i = 1; i < IA64_PR_COUNT; i++) {
-        if (mask & (1ULL << i)) {
-            env->pr[i] = (value >> i) & 1;
+    mask = (mask & static_mask) |
+           (ia64_pr_rotl48(mask >> IA64_PR_ROTATING_BASE, back) <<
+            IA64_PR_ROTATING_BASE);
+    /* p0 is written below, so its mask bit need not stop the fast case. */
+    mask |= 1;
+    for (uint32_t j = 0; j < IA64_PR_COUNT; j += 8) {
+        uint64_t m = (mask >> j) & 0xff;
+
+        if (m == 0xff) {
+            ia64_pr_unpack8(&env->pr[j], value >> j);
+        } else if (m != 0) {
+            ia64_pr_merge8(&env->pr[j], value >> j, m);
         }
     }
     env->pr[IA64_PR_TRUE] = 1;
