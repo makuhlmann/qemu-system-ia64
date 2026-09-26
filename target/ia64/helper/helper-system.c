@@ -436,11 +436,6 @@ void helper_write_pmd_indexed(CPUIA64State *env, uint64_t index,
     ia64_system_write_pmd_indexed(env, index, value);
 }
 
-void helper_st_spill_unat(CPUIA64State *env, uint32_t reg, uint64_t addr)
-{
-    ia64_system_st_spill_unat(env, reg, addr);
-}
-
 void helper_clear_psr_fault_suppression(CPUIA64State *env)
 {
     ia64_system_clear_psr_fault_suppression(env);

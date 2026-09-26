@@ -1814,6 +1814,25 @@ test_st8_spill_updates_unat_bit = require_registers(
          br_cond(0x50, 0x50)),
     ], {"ip": 0x50, "ar_unat": 0}, entry=0x10)
 
+# UNAT starts with bits 63 and 7:4.  r16 gets its NaT from the fill of
+# bit 63; the spills set bit 1, clear bit 63, keep bit 4, clear bit 5 and
+# (from r0) clear bit 6.
+test_st8_spill_sets_and_clears_unat_bits = require_registers(
+    "st8_spill_sets_and_clears_unat_bits", [
+        (0x10, *movl_mlx(9, (1 << 63) | 0xf0)),
+        (0x20, 0x00, mov_m_gr_ar(9, 36), addl(3, 0x1f8, 0),
+         addl(17, 5, 0)),
+        (0x30, 0x00, ld8_fill_postinc(16, 3, 0), addl(4, 0x208, 0),
+         addl(5, 0x220, 0)),
+        (0x40, 0x00, st8_spill_postinc(4, 16, 0), addl(6, 0x228, 0),
+         addl(7, 0x230, 0)),
+        (0x50, 0x00, st8_spill_postinc(3, 17, 0), nop_i(), nop_i()),
+        (0x60, 0x00, st8_spill_postinc(5, 16, 0), nop_i(), nop_i()),
+        (0x70, 0x00, st8_spill_postinc(6, 17, 0), nop_i(), nop_i()),
+        (0x80, 0x00, st8_spill_postinc(7, 0, 0), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {"ip": 0x90, "r16_nat": 1, "ar_unat": 0x92}, entry=0x10)
+
 test_integer_postinc_imm9_decode = require_registers(
     "integer_postinc_imm9_decode", [
         (0x10, 0x00, addl(3, 0x300, 0), nop_i(),
@@ -3509,6 +3528,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'st4_variants_preserve_adjacent_halfword',
     'st8_postinc_same_base_value_uses_old_base',
     'st8_spill_updates_unat_bit',
+    'st8_spill_sets_and_clears_unat_bits',
     'store_invalidates_advanced_load',
     'store_postinc_x6_38_reserved_illegal_operation',
     'store_postinc_x6_39_reserved_illegal_operation',

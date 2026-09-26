@@ -300,6 +300,23 @@ static void ia64_gen_ld_fill_nat(uint8_t reg, TCGv_i64 addr)
     ia64_gen_gr_nat_assign(reg, natbit);
 }
 
+/* The mirror of ia64_gen_ld_fill_nat: UNAT bit addr{8:3} takes the NaT. */
+static void ia64_gen_st_spill_unat(uint8_t reg, TCGv_i64 addr)
+{
+    TCGv_i64 unat = tcg_temp_new_i64();
+    TCGv_i64 bitpos = tcg_temp_new_i64();
+    TCGv_i64 mask = tcg_temp_new_i64();
+    TCGv_i64 nat = ia64_gen_gr_nat_read(reg);
+
+    ia64_gen_read_simple_ar(unat, IA64_AR_UNAT);
+    tcg_gen_extract_i64(bitpos, addr, 3, 6);
+    tcg_gen_shl_i64(mask, tcg_constant_i64(1), bitpos);
+    tcg_gen_andc_i64(unat, unat, mask);
+    tcg_gen_shl_i64(nat, nat, bitpos);
+    tcg_gen_or_i64(unat, unat, nat);
+    ia64_gen_write_simple_ar(IA64_AR_UNAT, unat);
+}
+
 static void ia64_gen_speculative_probe(const Ia64Instruction *insn,
                                        TCGv_i64 ok, TCGv_i64 addr,
                                        uint32_t size)
@@ -890,8 +907,7 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
         }
         ia64_gen_invalidate_alat_store(ctx, plan.address, plan.size);
         if (spill) {
-            gen_helper_st_spill_unat(tcg_env, tcg_constant_i32(op->source),
-                                     plan.address);
+            ia64_gen_st_spill_unat(op->source, plan.address);
         }
         if (insn->imm_base_update && op->base != 0) {
             tcg_gen_addi_i64(cpu_gr[op->base], plan.address, op->immediate);
