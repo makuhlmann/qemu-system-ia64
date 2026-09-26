@@ -1191,17 +1191,30 @@ static void ia64_rotate_rotating_gr_right(CPUIA64State *env)
             (count - 1) * sizeof(*env->gr));
     env->gr[IA64_STACKED_GR_BASE] = last;
 
-    nat = (((__uint128_t)env->nat[1] << 32) | (env->nat[0] >> 32)) &
-          all_mask;
-    mask = (((__uint128_t)1 << count) - 1);
-    rotating_nat = nat & mask;
-    rotating_nat = ((rotating_nat << 1) |
-                    (rotating_nat >> (count - 1))) & mask;
-    nat = (nat & ~mask) | rotating_nat;
-    env->nat[0] = (env->nat[0] & UINT32_MAX) | (uint64_t)(nat << 32);
-    env->nat[1] = nat >> 32;
-    ia64_invalidate_alat_reg_range(env, IA64_STACKED_GR_BASE,
-                                   IA64_STACKED_GR_BASE + count, false);
+    if (count <= 32) {
+        /* r32..r63: bits 32..63 of the first NaT word. */
+        uint64_t mask64 = ((1ULL << count) - 1) << IA64_STACKED_GR_BASE;
+        uint64_t rot = env->nat[0] & mask64;
+
+        if (rot != 0) {
+            rot = ((rot << 1) | (rot >> (count - 1))) & mask64;
+            env->nat[0] = (env->nat[0] & ~mask64) | rot;
+        }
+    } else {
+        nat = (((__uint128_t)env->nat[1] << 32) | (env->nat[0] >> 32)) &
+              all_mask;
+        mask = (((__uint128_t)1 << count) - 1);
+        rotating_nat = nat & mask;
+        rotating_nat = ((rotating_nat << 1) |
+                        (rotating_nat >> (count - 1))) & mask;
+        nat = (nat & ~mask) | rotating_nat;
+        env->nat[0] = (env->nat[0] & UINT32_MAX) | (uint64_t)(nat << 32);
+        env->nat[1] = nat >> 32;
+    }
+    if (env->alat_state.alat_active_count != 0) {
+        ia64_invalidate_alat_reg_range(env, IA64_STACKED_GR_BASE,
+                                       IA64_STACKED_GR_BASE + count, false);
+    }
 }
 
 static void ia64_rotate_predicates_right(CPUIA64State *env)
@@ -1252,6 +1265,12 @@ static void ia64_rotate_loop_regs(CPUIA64State *env)
      */
     if (sor_regs > env->cfm_sof || sor_regs > IA64_STACKED_GR_COUNT) {
         ia64_rse_sync_frame_out(env);
+    } else if (sor_regs != 0 && sor_regs <= 64) {
+        uint64_t mask64 = sor_regs == 64 ? UINT64_MAX : (1ULL << sor_regs) - 1;
+        uint64_t rot = env->rse.rse_gr_dirty[0] & mask64;
+
+        rot = ((rot << 1) | (rot >> (sor_regs - 1))) & mask64;
+        env->rse.rse_gr_dirty[0] = (env->rse.rse_gr_dirty[0] & ~mask64) | rot;
     } else if (sor_regs != 0) {
         __uint128_t dirty = ((__uint128_t)env->rse.rse_gr_dirty[1] << 64) |
                             env->rse.rse_gr_dirty[0];
@@ -1271,9 +1290,15 @@ static void ia64_rotate_loop_regs(CPUIA64State *env)
         env->cfm_rrb_gr = env->cfm_rrb_gr ?
                           env->cfm_rrb_gr - 1 : count - 1;
     }
-    ia64_set_cfm_rrb_fr(env, env->cfm_rrb_fr ?
-                             env->cfm_rrb_fr - 1 :
-                             IA64_ROTATING_FR_COUNT - 1);
+    /* ia64_set_cfm_rrb_fr's own fast case, without the call. */
+    if (env->cfm_rrb_fr < IA64_ROTATING_FR_COUNT && !env->fp.rotating_fr_live) {
+        env->cfm_rrb_fr = env->cfm_rrb_fr ? env->cfm_rrb_fr - 1 :
+                                            IA64_ROTATING_FR_COUNT - 1;
+    } else {
+        ia64_set_cfm_rrb_fr(env, env->cfm_rrb_fr ?
+                                 env->cfm_rrb_fr - 1 :
+                                 IA64_ROTATING_FR_COUNT - 1);
+    }
     env->cfm_rrb_pr = env->cfm_rrb_pr ?
                       env->cfm_rrb_pr - 1 : 47;
 }
