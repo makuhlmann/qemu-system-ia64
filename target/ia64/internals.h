@@ -60,6 +60,7 @@ typedef struct IA64TlbIndex {
     uint8_t shift[IA64_TLB_MAX];
     uint8_t shift_count[64];
     uint64_t shift_mask;
+    uint64_t indexed[IA64_TLB_MAX / 64];
 } IA64TlbIndex;
 
 typedef struct IA64MMUState {

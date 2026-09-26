@@ -361,6 +361,7 @@ static void ia64_tlb_index_add(IA64TlbIndex *index, const IA64TlbEntry *tlb,
     index->next[slot] = index->head[bucket];
     index->head[bucket] = slot + 1;
     index->shift[slot] = shift;
+    index->indexed[slot / 64] |= 1ULL << (slot % 64);
     if (index->shift_count[shift]++ == 0) {
         index->shift_mask |= 1ULL << shift;
     }
@@ -384,6 +385,7 @@ static void ia64_tlb_index_remove(IA64TlbIndex *index,
     }
     *link = index->next[slot];
     index->shift[slot] = 0;
+    index->indexed[slot / 64] &= ~(1ULL << (slot % 64));
     if (--index->shift_count[shift] == 0) {
         index->shift_mask &= ~(1ULL << shift);
     }
@@ -490,10 +492,19 @@ static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
 
     /* The first free slot below the old count, as the scan used to find. */
     if (insert_slot) {
-        for (i = 0; i < *count; i++) {
-            if (index->shift[i] == 0 && !tlb[i].valid) {
-                empty = i;
-                break;
+        for (unsigned word = 0; word * 64 < *count && empty < 0; word++) {
+            uint64_t unused = ~index->indexed[word];
+
+            while (unused != 0) {
+                i = word * 64 + ctz64(unused);
+                unused &= unused - 1;
+                if (i >= *count) {
+                    break;
+                }
+                if (!tlb[i].valid) {
+                    empty = i;
+                    break;
+                }
             }
         }
     }
