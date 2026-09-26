@@ -99,6 +99,7 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
         uint32_t flags = xenv->hflags |
             (xenv->eflags &
              (IOPL_MASK | TF_MASK | RF_MASK | VM_MASK | AC_MASK)) |
+            (ia64_ia32_tb_fast(&cpu->env) ? IA64_TB_FLAG_IA32_FAST : 0) |
             ((psr & IA64_PSR_DB) ? IA64_TB_FLAG_IA32_PSR_DB : 0) |
             ((psr & IA64_PSR_AC) ? IA64_TB_FLAG_IA32_PSR_AC : 0) |
             ((psr & IA64_PSR_SS) ? TF_MASK : 0);

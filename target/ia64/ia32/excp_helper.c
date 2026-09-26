@@ -41,6 +41,7 @@ G_NORETURN void helper_ia32_instruction_intercept(CPUIA64State *env,
 void helper_ia32_complete_instruction(CPUIA64State *env,
                                       target_ulong next_eip);
 void helper_ia32_rep_iteration(CPUIA64State *env);
+void helper_ia32_sync_cpl(CPUIA64State *env);
 void helper_ia32_check_disabled_fp(CPUIA64State *env,
                                    uint32_t fp_instruction);
 void helper_ia32_sse_exception_begin(CPUIA64State *env);
@@ -635,6 +636,26 @@ bool ia64_ia32_code_fetch_valid(CPUX86State *xenv, uint32_t linear,
     return true;
 }
 
+/*
+ * Whether a TB can leave out the per-instruction checks: nothing that
+ * instruction completion or a taken branch reports (PSR.ss, tb, db, id,
+ * EFLAGS.TF, RF), PSR.dfh and dfl clear, and a code segment in which no
+ * fetch can fault (4 GiB limit; the other conditions do not depend on EIP).
+ * Each input ends the TB when it changes, and the TB key holds the result.
+ */
+bool ia64_ia32_tb_fast(CPUIA64State *env)
+{
+    CPUX86State *xenv = &env->ia32;
+
+    if ((env->psr & (IA64_PSR_SS | IA64_PSR_TB | IA64_PSR_DB | IA64_PSR_ID |
+                     IA64_PSR_DFH | IA64_PSR_DFL)) ||
+        (ia32_control_eflags(xenv) & (TF_MASK | RF_MASK)) ||
+        xenv->segs[R_CS].limit != UINT32_MAX) {
+        return false;
+    }
+    return ia64_ia32_code_fetch_valid(xenv, xenv->segs[R_CS].base, 1);
+}
+
 bool ia64_ia32_code_fetch_fault_probes_second_page(CPUX86State *xenv,
                                                     uint32_t insn,
                                                     uint32_t linear,
@@ -907,6 +928,11 @@ G_NORETURN void helper_ia32_instruction_intercept(CPUIA64State *env,
     env->cr_iim = iim;
     ia64_ia32_raise_intercept(&env->ia32,
                               IA64_IA32_INTERCEPT_INSTRUCTION, code, 0);
+}
+
+void helper_ia32_sync_cpl(CPUIA64State *env)
+{
+    ia64_ia32_sync_psr_cpl(env);
 }
 
 void helper_ia32_complete_instruction(CPUIA64State *env,

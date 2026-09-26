@@ -36,6 +36,11 @@
 
 /* NaT bits of r0-r31 in the first word of the GR NaT file. */
 #define IA64_STATIC_GR_NAT_MASK   0xffffffffULL
+/*
+ * IA-32 TB whose instructions need no per-instruction check (see
+ * ia64_ia32_tb_fast).  Bit 2 is no x86 hflags bit.
+ */
+#define IA64_TB_FLAG_IA32_FAST    (1u << 2)
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)

@@ -30,6 +30,7 @@ void ia64_ia32_abort_sse_instruction(CPUIA64State *env);
 uint32_t ia64_ia32_virtual_ip(const CPUIA64State *env);
 bool ia64_ia32_code_fetch_valid(CPUX86State *xenv, uint32_t linear,
                                 unsigned size);
+bool ia64_ia32_tb_fast(CPUIA64State *env);
 bool ia64_ia32_code_fetch_fault_probes_second_page(CPUX86State *xenv,
                                                     uint32_t insn,
                                                     uint32_t linear,

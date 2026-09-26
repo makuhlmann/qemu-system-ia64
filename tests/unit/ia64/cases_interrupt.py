@@ -27,6 +27,7 @@ from .encoding import (
     IA64_DCR_BE,
     IA64_DCR_LC,
     IA64_DCR_PP,
+    IA64_DATA_ACCESS_VECTOR,
     IA64_DISABLED_FP_VECTOR,
     IA64_EXCP_BREAK,
     IA64_EXCP_DISABLED_ISA_TRANSITION,
@@ -5558,6 +5559,191 @@ test_ipis_during_break_faults_all_arrive = require_registers(
         "r6": 2001,
     }, entry=0x10, alat=None, smp="2", state_cpu=1)
 
+# A 4 GiB code segment lets a TB leave out the per-instruction checks
+# (ia64_ia32_tb_fast).  These variants rerun debug and disabled-FP cases
+# with such a segment: each condition must still select the checked TB.
+IA32_FLAT_CSD = IA32_TEST_CSD | (0xf << 48) | (1 << 63)
+
+
+def _ia32_flat_cs_variant(name, case, csd=IA32_FLAT_CSD):
+    bundles = [b for b in case.bundles if b[0] != 0x750]
+    return require_registers(name, [*bundles, (0x750, *movl_mlx(31, csd))],
+                             dict(case.expected), entry=0x700, cpu="madison")
+
+
+test_ia32_flat_cs_psr_ss_traps_after_one_instruction = _ia32_flat_cs_variant(
+    "ia32_flat_cs_psr_ss_traps_after_one_instruction",
+    test_ia32_psr_ss_traps_after_one_instruction_and_resumes,
+    IA32_FLAT_CSD | (1 << 62))
+
+test_ia32_flat_cs_eflag_tf_traps_after_one_instruction = \
+    _ia32_flat_cs_variant(
+        "ia32_flat_cs_eflag_tf_traps_after_one_instruction",
+        test_ia32_eflag_tf_traps_after_one_instruction_and_resumes,
+        IA32_FLAT_CSD | (1 << 62))
+
+test_ia32_flat_cs_ibr_instruction_breakpoint_fault = _ia32_flat_cs_variant(
+    "ia32_flat_cs_ibr_instruction_breakpoint_fault",
+    test_ia32_ibr_instruction_breakpoint_fault)
+
+test_ia32_flat_cs_taken_branch_clears_rf_and_psr_id = _ia32_flat_cs_variant(
+    "ia32_flat_cs_taken_branch_clears_rf_and_psr_id",
+    test_ia32_taken_branch_clears_rf_and_psr_id)
+
+test_ia32_flat_cs_not_taken_branch_clears_rf_and_psr_id = \
+    _ia32_flat_cs_variant(
+        "ia32_flat_cs_not_taken_branch_clears_rf_and_psr_id",
+        test_ia32_not_taken_branch_clears_rf_and_psr_id)
+
+test_ia32_flat_cs_gate_intercept_reports_concurrent_debug_traps = \
+    _ia32_flat_cs_variant(
+        "ia32_flat_cs_gate_intercept_reports_concurrent_debug_traps",
+        test_ia32_gate_intercept_reports_concurrent_debug_traps)
+
+test_ia32_flat_cs_dfh_faults_first_target_instruction = _ia32_flat_cs_variant(
+    "ia32_flat_cs_dfh_faults_first_target_instruction",
+    test_ia32_dfh_faults_first_target_instruction)
+
+test_ia32_flat_cs_dfl_faults_first_x87_instruction = _ia32_flat_cs_variant(
+    "ia32_flat_cs_dfl_faults_first_x87_instruction",
+    test_ia32_dfl_faults_first_x87_instruction)
+
+test_ia32_flat_cs_taken_branch_trap = _ia32_flat_cs_variant(
+    "ia32_flat_cs_taken_branch_trap",
+    test_rfi_to_ia32_taken_branch_trap_records_byte_ips)
+
+
+def _ia32_flat_cs_first_completion_clears(name, eflags, psr):
+    """RF or PSR.id alone: the first completed instruction clears it."""
+    return require_registers(name, [
+        *ia32_environment_bundles(0x700, 0x10, csd=IA32_FLAT_CSD),
+        (0x10, *movl_mlx(3, eflags)),
+        (0x20, 0x00, mov_m_gr_ar(3, 24), nop_i(), nop_i()),
+        (0x30, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_IS | psr)),
+        (0x40, *movl_mlx(3, 0x100)),
+        *rfi_to_gr(0x50, 2, 3),
+        ia32_bundle(0x100, bytes.fromhex(
+            "90 "
+            "0f 0b")),     # ud2 -> instruction intercept
+        (IA64_IA32_INTERCEPT_VECTOR, 0x00,
+         mov_m_ar_gr(8, 24), nop_i(), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 16), nop_i(), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x20, 0x00,
+         nop_m(), extr_u(9, 9, 37, 1), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x30, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_INTERCEPT_VECTOR + 0x30,
+                 IA64_IA32_INTERCEPT_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_IA32_INTERCEPT_VECTOR + 0x30,
+        "r8": 2,
+        "r9": 0,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+
+test_ia32_flat_cs_first_completion_clears_rf = \
+    _ia32_flat_cs_first_completion_clears(
+        "ia32_flat_cs_first_completion_clears_rf", (1 << 16) | 2, 0)
+
+test_ia32_flat_cs_first_completion_clears_psr_id = \
+    _ia32_flat_cs_first_completion_clears(
+        "ia32_flat_cs_first_completion_clears_psr_id", 2, 1 << 37)
+
+# RETF to CPL 3 in a TB without per-instruction checks: PSR.cpl must follow
+# before the next TB, whose loads are translated for PSR.cpl.  The page is
+# PL0 only, so the CPL 3 stack read takes a data access rights fault.
+test_ia32_flat_cs_retf_to_cpl3_updates_psr_cpl = require_registers(
+    "ia32_flat_cs_retf_to_cpl3_updates_psr_cpl", [
+        *ia32_environment_bundles(
+            0x700, 0x10, csd=IA32_FLAT_CSD | (1 << 62)),
+        (0x10, *movl_mlx(3, 1)),  # CFLG.pe
+        (0x20, 0x00, mov_m_gr_ar(3, 27), nop_i(), nop_i()),
+        *dtr_setup_bundles(0x30, 0, 0, page_shift=12, slot=5),
+        (0x90, *movl_mlx(12, 0x400)),
+        (0xa0, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_IS | IA64_PSR_DT)),
+        (0xb0, *movl_mlx(3, 0x100)),
+        *rfi_to_gr(0xc0, 2, 3),
+        ia32_bundle(0x100, bytes.fromhex(
+            "68 0b 04 00 00 "   # push 0x40b (SS)
+            "68 00 03 00 00 "   # push 0x300 (ESP)
+            "68 03 04 00 00 "   # push 0x403 (CS)
+            "68")),             # push 0x120 (EIP)
+        ia32_bundle(0x110, bytes.fromhex(
+            "20 01 00 00 "
+            "cb")),             # retf
+        ia32_bundle(0x120, bytes.fromhex(
+            "8b 04 24 "         # mov eax,[esp]
+            "0f 0b")),
+        # Flat DPL 3 code and data descriptors at GDT offsets 0x400, 0x408.
+        ia32_bundle(0x400, bytes.fromhex(
+            "ff ff 00 00 00 fb cf 00 "
+            "ff ff 00 00 00 f3 cf 00")),
+        (IA64_DATA_ACCESS_VECTOR, 0x00,
+         mov_m_cr_gr(8, 20), nop_i(), nop_i()),
+        (IA64_DATA_ACCESS_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 16), nop_i(), nop_i()),
+        (IA64_DATA_ACCESS_VECTOR + 0x20, 0x00,
+         nop_m(), extr_u(9, 9, 32, 2), nop_i()),
+        (IA64_DATA_ACCESS_VECTOR + 0x30, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_DATA_ACCESS_VECTOR + 0x30,
+                 IA64_DATA_ACCESS_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_DATA_ACCESS_VECTOR + 0x30,
+        "r8": 0x300,
+        "r9": 3,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+
+def _ia32_second_entry_checked_tb(name, second_csd, fault_eip):
+    """Run IA-32 code under a 4 GiB CS, then again under second_csd.
+
+    The first TB has no fetch check.  The second entry must not reuse it,
+    so the fetch at fault_eip raises #GP instead of reaching JMPE again.
+    """
+    return require_registers(name, [
+        *ia32_environment_bundles(0x700, 0x10, csd=IA32_FLAT_CSD),
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, *movl_mlx(8, 0x100)),
+        (0x50, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "90 90 "
+            "0f b8 00 02")),  # jmpe 0x200
+        (0x200, *movl_mlx(3, second_csd)),
+        (0x210, 0x00, mov_m_gr_ar(3, 25), adds(20, 1, 20), nop_i()),
+        (0x220, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        (IA64_IA32_EXCEPTION_VECTOR, 0x00,
+         mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_EXCEPTION_VECTOR + 0x20,
+                 IA64_IA32_EXCEPTION_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_IA32_EXCEPTION_VECTOR + 0x20,
+        "r8": fault_eip,
+        "r9": 13 << 16,
+        "r20": 1,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+
+# A 0x100-byte limit: the second NOP is beyond it.
+test_ia32_cs_limit_shrink_selects_checked_tb = _ia32_second_entry_checked_tb(
+    "ia32_cs_limit_shrink_selects_checked_tb", 0x09b0010000000000, 0x101)
+
+# Still 4 GiB, but not accessed (type 0xa): the first fetch faults.
+test_ia32_cs_not_accessed_selects_checked_tb = _ia32_second_entry_checked_tb(
+    "ia32_cs_not_accessed_selects_checked_tb",
+    IA32_FLAT_CSD & ~(1 << 52), 0x100)
+
 CASE_NAMES = (
     'ipis_during_break_faults_all_arrive',
 
@@ -5623,6 +5809,20 @@ CASE_NAMES = (
     'ia32_cross_page_tlb_precedes_later_cs_limit',
     'ia32_dfl_faults_first_x87_instruction',
     'ia32_ds_operand_crossing_limit_faults',
+    'ia32_flat_cs_psr_ss_traps_after_one_instruction',
+    'ia32_flat_cs_eflag_tf_traps_after_one_instruction',
+    'ia32_flat_cs_ibr_instruction_breakpoint_fault',
+    'ia32_flat_cs_taken_branch_clears_rf_and_psr_id',
+    'ia32_flat_cs_not_taken_branch_clears_rf_and_psr_id',
+    'ia32_flat_cs_gate_intercept_reports_concurrent_debug_traps',
+    'ia32_flat_cs_dfh_faults_first_target_instruction',
+    'ia32_flat_cs_dfl_faults_first_x87_instruction',
+    'ia32_flat_cs_taken_branch_trap',
+    'ia32_flat_cs_first_completion_clears_rf',
+    'ia32_flat_cs_first_completion_clears_psr_id',
+    'ia32_flat_cs_retf_to_cpl3_updates_psr_cpl',
+    'ia32_cs_limit_shrink_selects_checked_tb',
+    'ia32_cs_not_accessed_selects_checked_tb',
     'ia32_gate_intercept_reports_concurrent_debug_traps',
     'ia32_gdt_descriptor_read_triggers_data_breakpoint',
     'ia32_gdt_descriptor_read_wraps_at_4g',

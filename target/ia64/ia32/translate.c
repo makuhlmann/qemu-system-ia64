@@ -11,6 +11,7 @@
 #include "cpu.h"
 #include "ia32/ia32.h"
 
+#define IA32_TB_FLAG_FAST   (1u << 2)
 #define IA32_TB_FLAG_PSR_DB (1u << 29)
 #define IA32_TB_FLAG_PSR_AC (1u << 30)
 #define IA32_TB_FLAG_PSR_IS (1u << 31)
@@ -26,8 +27,10 @@
 #define X86_GEN_HELPER_RAISE_EXCEPTION gen_helper_ia32_raise_exception
 #define X86_GEN_HELPER_RSM gen_helper_ia32_rsm
 #define X86_TB_FLAGS(flags) \
-    ((flags) & ~(IA32_TB_FLAG_PSR_DB | IA32_TB_FLAG_PSR_AC | \
-                 IA32_TB_FLAG_PSR_IS))
+    ((flags) & ~(IA32_TB_FLAG_FAST | IA32_TB_FLAG_PSR_DB | \
+                 IA32_TB_FLAG_PSR_AC | IA32_TB_FLAG_PSR_IS))
+/* ia64_ia32_tb_fast(): no check below can fail or trap in this TB. */
+#define IA32_FAST(s) (((s)->base.tb->flags & IA32_TB_FLAG_FAST) != 0)
 /* Ordinary IA-32 #AC checks run after translation in the segment hook. */
 #define X86_MEMOP_ALIGNMENT(s, memop) MO_UNALN
 /*
@@ -51,8 +54,11 @@ static int ia64_ia32_iptrace_enabled = -1;
 } while (0)
 #define X86_INT3_VECTOR(vector) ((vector) | 0x100)
 #define X86_IA32_SYSTEM_ENV 1
-#define X86_GEN_CODE_FETCH_CHECK(s) \
-    gen_helper_ia32_code_fetch_check(tcg_env)
+#define X86_GEN_CODE_FETCH_CHECK(s) do {                              \
+    if (!IA32_FAST(s)) {                                               \
+        gen_helper_ia32_code_fetch_check(tcg_env);                     \
+    }                                                                  \
+} while (0)
 #define X86_GEN_CPUID_SERIALIZE(s) do {                               \
     tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);                              \
     (s)->base.is_jmp = DISAS_EOB_NEXT;                                \
@@ -83,11 +89,23 @@ static int ia64_ia32_iptrace_enabled = -1;
 } while (0)
 #define X86_GEN_LOCK_INTERCEPT_CHECK(s, addr, size)                   \
     gen_helper_ia32_lock_check(tcg_env, (addr), tcg_constant_i32(size))
-#define X86_GEN_TAKEN_BRANCH(s) gen_helper_ia32_taken_branch(tcg_env)
-#define X86_GEN_NOT_TAKEN_BRANCH(s)                                   \
-    gen_helper_ia32_complete_instruction(tcg_env, eip_next_tl(s))
+#define X86_GEN_TAKEN_BRANCH(s) do {                                  \
+    if (!IA32_FAST(s)) {                                               \
+        gen_helper_ia32_taken_branch(tcg_env);                         \
+    }                                                                  \
+} while (0)
+#define X86_GEN_NOT_TAKEN_BRANCH(s) do {                              \
+    if (!IA32_FAST(s)) {                                               \
+        gen_helper_ia32_complete_instruction(tcg_env, eip_next_tl(s)); \
+    }                                                                  \
+} while (0)
 #define X86_GEN_DISABLED_FP_CHECK(s, decode) do {                      \
-    bool fp_instruction_ =                                            \
+    bool fp_instruction_;                                             \
+                                                                      \
+    if (IA32_FAST(s)) {                                                \
+        break;                                                         \
+    }                                                                  \
+    fp_instruction_ =                                                 \
         (decode)->e.gen == gen_x87 ||                                 \
         (decode)->e.gen == gen_WAIT ||                                \
         (decode)->e.gen == gen_EMMS ||                                \
@@ -131,10 +149,16 @@ static int ia64_ia32_iptrace_enabled = -1;
     (!((s)->base.tb->flags & IA32_TB_FLAG_PSR_DB))
 #define X86_REP_FAULT_SETS_RF(s) true
 #define X86_REP_FINAL_ITERATION_COMPLETES(s) true
-#define X86_GEN_REP_ITERATION(s)                                       \
-    gen_helper_ia32_rep_iteration(tcg_env)
-#define X86_GEN_REP_COMPLETE(s)                                        \
-    gen_helper_ia32_complete_instruction(tcg_env, eip_next_tl(s))
+#define X86_GEN_REP_ITERATION(s) do {                                  \
+    if (!IA32_FAST(s)) {                                               \
+        gen_helper_ia32_rep_iteration(tcg_env);                        \
+    }                                                                  \
+} while (0)
+#define X86_GEN_REP_COMPLETE(s) do {                                   \
+    if (!IA32_FAST(s)) {                                               \
+        gen_helper_ia32_complete_instruction(tcg_env, eip_next_tl(s)); \
+    }                                                                  \
+} while (0)
 /*
  * An indirect branch commits its runtime target to cpu_eip and invalidates
  * pc_save.  That target is the next IP for instruction-completion traps.
@@ -142,13 +166,23 @@ static int ia64_ia32_iptrace_enabled = -1;
 #define X86_IA32_COMPLETION_EIP(s)                                     \
     ((s)->pc_save == -1 ? cpu_eip : eip_next_tl(s))
 #define X86_AFTER_INSN_WRITEBACK(s, decode) do {                       \
+    bool ss_load_ = ((decode)->e.gen == gen_MOV &&                     \
+                     (decode)->e.op0 == X86_TYPE_S &&                  \
+                     (decode)->op[0].n == R_SS) ||                     \
+                    ((decode)->e.gen == gen_POP &&                     \
+                     (decode)->e.op0 == X86_TYPE_SS);                  \
+                                                                       \
+    if (IA32_FAST(s) && !ss_load_) {                                   \
+        /* Only a far transfer changes CPL, and every one ends the TB. */ \
+        if ((s)->base.is_jmp != DISAS_NEXT &&                          \
+            (s)->base.is_jmp != DISAS_NORETURN) {                      \
+            gen_helper_ia32_sync_cpl(tcg_env);                         \
+        }                                                              \
+        break;                                                         \
+    }                                                                  \
     /* Helpers inspect lazy flags through CPUX86State.cc_op. */         \
     gen_update_cc_op(s);                                               \
-    if (((decode)->e.gen == gen_MOV &&                                 \
-         (decode)->e.op0 == X86_TYPE_S &&                              \
-         (decode)->op[0].n == R_SS) ||                                 \
-        ((decode)->e.gen == gen_POP &&                                 \
-         (decode)->e.op0 == X86_TYPE_SS)) {                            \
+    if (ss_load_) {                                                    \
         TCGv old_eflags_ = tcg_temp_new();                             \
         gen_helper_read_eflags(old_eflags_, tcg_env);                  \
         assume_cc_op(s, CC_OP_EFLAGS);                                 \
