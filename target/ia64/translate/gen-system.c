@@ -169,7 +169,9 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             break;
         }
         if (ia64_ar_is_simple(op->source)) {
-            if (op->source == 40 || op->source == 64) {
+            if (op->source == 64) {
+                ia64_gen_check_pfs_write(insn, ia64_gr_src(op->destination));
+            } else if (op->source == 40) {
                 ia64_gen_validate_ar_access(insn, ia64_gr_src(op->destination),
                                             true);
             }
@@ -191,7 +193,10 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
             break;
         }
         if (ia64_ar_is_simple(op->source)) {
-            if (op->source == 40 || op->source == 64) {
+            if (op->source == 64) {
+                ia64_gen_check_pfs_write(insn,
+                                         tcg_constant_i64(op->immediate));
+            } else if (op->source == 40) {
                 ia64_gen_validate_ar_access(
                     insn, tcg_constant_i64(op->immediate), true);
             }

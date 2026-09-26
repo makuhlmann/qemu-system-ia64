@@ -2981,6 +2981,48 @@ void ia64_gen_validate_cr_access(TCGv_i64 result,
  * interruption CR (cr16-cr25) read with PSR.ic set is an Illegal Operation
  * fault (SDM Vol 3 mov cr).  The helper still raises it.
  */
+/*
+ * The part of ia64_system_validate_ar_access() a write to AR.PFS needs: a
+ * reserved field faults (ia64_reserved_pfs_field()).  Every non-leaf
+ * function writes AR.PFS before it returns, so the test is inline and the
+ * full check runs on the faulting path only.
+ */
+void ia64_gen_check_pfs_write(const Ia64Instruction *insn, TCGv_i64 value)
+{
+    TCGv_i64 bad = tcg_temp_new_i64();
+    TCGv_i64 sof = tcg_temp_new_i64();
+    TCGv_i64 field = tcg_temp_new_i64();
+    TCGv_i64 t = tcg_temp_new_i64();
+    TCGLabel *ok = gen_new_label();
+
+    tcg_gen_andi_i64(bad, value, (0xfULL << 58) | (0x3fffULL << 38));
+    tcg_gen_setcondi_i64(TCG_COND_NE, bad, bad, 0);
+    tcg_gen_extract_i64(sof, value, 0, 7);
+    tcg_gen_setcondi_i64(TCG_COND_GTU, t, sof, IA64_STACKED_GR_COUNT);
+    tcg_gen_or_i64(bad, bad, t);
+    tcg_gen_extract_i64(field, value, 7, 7);            /* sol */
+    tcg_gen_setcond_i64(TCG_COND_GTU, t, field, sof);
+    tcg_gen_or_i64(bad, bad, t);
+    tcg_gen_extract_i64(field, value, 14, 4);
+    tcg_gen_shli_i64(field, field, 3);                  /* sor */
+    tcg_gen_setcond_i64(TCG_COND_GTU, t, field, sof);
+    tcg_gen_or_i64(bad, bad, t);
+    /* rrb.gr must be 0 without a rotating region, else below sor. */
+    tcg_gen_umax_i64(field, field, tcg_constant_i64(1));
+    tcg_gen_extract_i64(t, value, 18, 7);
+    tcg_gen_setcond_i64(TCG_COND_GEU, t, t, field);
+    tcg_gen_or_i64(bad, bad, t);
+    tcg_gen_extract_i64(t, value, 25, 7);               /* rrb.fr */
+    tcg_gen_setcondi_i64(TCG_COND_GEU, t, t, 96);
+    tcg_gen_or_i64(bad, bad, t);
+    tcg_gen_extract_i64(t, value, 32, 6);               /* rrb.pr */
+    tcg_gen_setcondi_i64(TCG_COND_GEU, t, t, 48);
+    tcg_gen_or_i64(bad, bad, t);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, bad, 0, ok);
+    ia64_gen_validate_ar_access(insn, value, true);
+    gen_set_label(ok);
+}
+
 void ia64_gen_check_cr_read(const Ia64Instruction *insn)
 {
     uint32_t cr = insn->operands.common.source1;

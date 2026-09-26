@@ -5543,7 +5543,66 @@ test_rse_write_only_rnat_store_preserves_backed_prefix = require_registers(
         "r8": 1 << 2,
     }, entry=0x10)
 
+# A write to AR.PFS with a reserved field faults (SDM Vol 3 mov ar): the
+# reserved bits, sof above 96, sol or sor above sof, rrb.gr outside the
+# rotating region, rrb.fr and rrb.pr outside theirs.
+def _pfs_write_faults(name, value):
+    return require_exception(name, [
+        (0x10, *movl_mlx(3, value)),
+        (0x20, 0x00, mov_m_gr_ar(3, 64), nop_i(), nop_i()),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x20)
+
+
+def _pfs_write_keeps(name, value):
+    return require_registers(name, [
+        (0x10, *movl_mlx(3, value)),
+        (0x20, 0x00, mov_m_gr_ar(3, 64), nop_i(), nop_i()),
+        (0x30, 0x00, mov_m_ar_gr(4, 64), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {"ip": 0x40, "r4": value, "exception": IA64_EXCP_NONE})
+
+
+test_pfs_write_reserved_high_bits_fault = _pfs_write_faults(
+    "pfs_write_reserved_high_bits_fault", 1 << 58)
+test_pfs_write_reserved_middle_bits_fault = _pfs_write_faults(
+    "pfs_write_reserved_middle_bits_fault", 1 << 38)
+test_pfs_write_sof_above_96_faults = _pfs_write_faults(
+    "pfs_write_sof_above_96_faults", 97)
+test_pfs_write_sol_above_sof_faults = _pfs_write_faults(
+    "pfs_write_sol_above_sof_faults", (5 << 7) | 4)
+test_pfs_write_sor_above_sof_faults = _pfs_write_faults(
+    "pfs_write_sor_above_sof_faults", (1 << 14) | 7)
+test_pfs_write_rrb_gr_without_sor_faults = _pfs_write_faults(
+    "pfs_write_rrb_gr_without_sor_faults", (1 << 18) | 10)
+test_pfs_write_rrb_gr_at_sor_faults = _pfs_write_faults(
+    "pfs_write_rrb_gr_at_sor_faults", (8 << 18) | (1 << 14) | 8)
+test_pfs_write_rrb_fr_at_96_faults = _pfs_write_faults(
+    "pfs_write_rrb_fr_at_96_faults", 96 << 25)
+test_pfs_write_rrb_pr_at_48_faults = _pfs_write_faults(
+    "pfs_write_rrb_pr_at_48_faults", 48 << 32)
+# Every field at its largest valid value, with pec and ppl set.
+test_pfs_write_largest_valid_fields = _pfs_write_keeps(
+    "pfs_write_largest_valid_fields",
+    96 | (96 << 7) | (12 << 14) | (95 << 18) | (95 << 25) | (47 << 32) |
+    (63 << 52) | (3 << 62))
+test_pfs_write_rrb_gr_below_sor = _pfs_write_keeps(
+    "pfs_write_rrb_gr_below_sor", (7 << 18) | (1 << 14) | (9 << 7) | 9)
+test_pfs_write_frame_without_rotating_region = _pfs_write_keeps(
+    "pfs_write_frame_without_rotating_region", (5 << 7) | 10)
+
 CASE_NAMES = (
+    'pfs_write_reserved_high_bits_fault',
+    'pfs_write_reserved_middle_bits_fault',
+    'pfs_write_sof_above_96_faults',
+    'pfs_write_sol_above_sof_faults',
+    'pfs_write_sor_above_sof_faults',
+    'pfs_write_rrb_gr_without_sor_faults',
+    'pfs_write_rrb_gr_at_sor_faults',
+    'pfs_write_rrb_fr_at_96_faults',
+    'pfs_write_rrb_pr_at_48_faults',
+    'pfs_write_largest_valid_fields',
+    'pfs_write_rrb_gr_below_sor',
+    'pfs_write_frame_without_rotating_region',
 
     'predicated_off_stacked_write_keeps_following_write_valid',
 
