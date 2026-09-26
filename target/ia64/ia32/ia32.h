@@ -19,10 +19,12 @@ enum {
 
 /*
  * IA-32 TB flags from ia64_ia32_tb_state(), at x86 hflags bits the IA-32
- * engine never sets: bit 2 (no hflags bit), and one bit per flat ES, SS and
- * DS at bits 24, 26 and 27 (HF_IOBPT, HF_MPX_IU and HF_UMIP).
+ * engine never sets: bit 2 (no hflags bit), bit 23 (HF_SMAP), and one bit
+ * per flat ES, SS and DS at bits 24, 26 and 27 (HF_IOBPT, HF_MPX_IU and
+ * HF_UMIP).
  */
 #define IA64_IA32_TB_FAST        (1u << 2)
+#define IA64_IA32_TB_SIMD_MASKED (1u << 23)
 #define IA64_IA32_TB_FLAT_SHIFT  24
 
 /* Private marker carried through QEMU's INT helper ABI. */

@@ -660,6 +660,10 @@ static inline bool ia32_flat_data_seg(const SegmentCache *cache)
  * in which no fetch can fault (4 GiB limit; the other conditions do not
  * depend on EIP).
  *
+ * IA64_IA32_TB_SIMD_MASKED: no SIMD floating-point exception can be
+ * delivered (every MXCSR mask set, or CFLG.mmxex clear), so SSE
+ * instructions need no backup of the registers they write.
+ *
  * Bit IA64_IA32_TB_FLAT_SHIFT + seg for ES, SS and DS in which
  * ia64_ia32_check_segment_access() can only probe the TLB: a present,
  * accessed, writable, expand-up 4 GiB data segment (SS also at DPL = CPL),
@@ -667,7 +671,8 @@ static inline bool ia32_flat_data_seg(const SegmentCache *cache)
  * matters only before a second access or an #AC.
  *
  * Each input ends the TB when it changes: the PSR bits change only in IA-64
- * code, EFLAGS.TF, RF, AC and VM only by instructions that end the TB, and
+ * code, EFLAGS.TF, RF, AC and VM only by instructions that end the TB, as
+ * do LDMXCSR, FXRSTOR and XRSTOR for MXCSR and MOV CR4 (an intercept), and
  * CS, SS and the CPL only by far transfers.  A DS or ES load ends the TB in
  * 32-bit protected-mode code only (gen_movl_seg), and a real-mode load
  * changes only the base.
@@ -689,6 +694,10 @@ uint32_t ia64_ia32_tb_state(CPUIA64State *env)
         xenv->segs[R_CS].limit == UINT32_MAX &&
         ia32_code_fetch_valid(xenv, xenv->segs[R_CS].base, 1)) {
         state |= IA64_IA32_TB_FAST;
+    }
+    if (((xenv->mxcsr >> 7) & 0x3f) == 0x3f ||
+        !(xenv->cr[4] & CR4_OSXMMEXCPT_MASK)) {
+        state |= IA64_IA32_TB_SIMD_MASKED;
     }
     if ((psr & (IA64_PSR_DB | IA64_PSR_AC)) || (eflags & VM_MASK) ||
         ((eflags & AC_MASK) && (xenv->cr[0] & CR0_AM_MASK) && cpl == 3)) {

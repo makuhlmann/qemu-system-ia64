@@ -5962,6 +5962,60 @@ test_ia32_flat_rmw_reports_write_miss = _ia32_flat_data_case(
     {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_W, "r22": 0xc000},
     psr=IA64_PSR_DT)
 
+# A TB entered with every SIMD exception masked leaves out the SSE
+# exception bracket; LDMXCSR and FXRSTOR end it, so an exception they unmask
+# is still precise in the next instruction.
+def _ia32_simd_unmask_case(name, code, data, expected):
+    return require_registers(name, [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(3, 0x1f80 << 32)),
+        (0x20, 0x00, mov_m_gr_ar(3, 21), nop_i(), nop_i()),
+        (0x30, *movl_mlx(4, ((1 << 9) | (1 << 10)) << 32)),
+        (0x40, 0x00, mov_m_gr_ar(4, 27), nop_i(), nop_i()),
+        (0x50, *movl_mlx(5, 0x112233443f800000)),
+        (0x60, 0x00, setf_sig(16, 5), nop_i(), nop_i()),
+        (0x70, 0x00, setf_sig(18, 0), nop_i(), nop_i()),
+        (0x80, *movl_mlx(2, IA64_PSR_IC)),
+        (0x90, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0xa0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xb0, *movl_mlx(8, 0x100)),
+        (0xc0, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, code),
+        ia32_bundle(*data),
+        (IA64_IA32_EXCEPTION_VECTOR, 0x00,
+         mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_EXCEPTION_VECTOR + 0x20,
+                 IA64_IA32_EXCEPTION_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_IA32_EXCEPTION_VECTOR + 0x20,
+        **expected,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+
+test_ia32_ldmxcsr_unmasked_exception_faults_in_same_tb = \
+    _ia32_simd_unmask_case(
+        "ia32_ldmxcsr_unmasked_exception_faults_in_same_tb",
+        bytes.fromhex(
+            "0f ae 16 00 a0 "   # ldmxcsr [0xa000]: divide-by-zero unmasked
+            "f3 0f 5e c1"),     # divss xmm0,xmm1 (1.0 / 0)
+        (0xa000, bytes.fromhex("80 1d 00 00")),
+        {"r8": 0x105, "r9": 19 << 16})
+
+test_ia32_fxrstor_unmasked_exception_faults_in_same_tb = \
+    _ia32_simd_unmask_case(
+        "ia32_fxrstor_unmasked_exception_faults_in_same_tb",
+        bytes.fromhex(
+            "0f ae 0e 00 a0 "   # fxrstor [0xa000]: MXCSR 0x1f00, XMM zero
+            "f3 0f 5e c1"),     # divss xmm0,xmm1 (0 / 0: invalid unmasked)
+        (0xa010, bytes.fromhex("00 00 00 00 00 00 00 00 00 1f 00 00")),
+        {"r8": 0x105, "r9": 19 << 16})
+
 CASE_NAMES = (
     'ipis_during_break_faults_all_arrive',
 
@@ -6058,6 +6112,8 @@ CASE_NAMES = (
     'ia32_flat_movaps_tlb_miss_precedes_alignment',
     'ia32_flat_pop_m_probes_destination_first',
     'ia32_flat_rmw_reports_write_miss',
+    'ia32_ldmxcsr_unmasked_exception_faults_in_same_tb',
+    'ia32_fxrstor_unmasked_exception_faults_in_same_tb',
     'ia32_gate_intercept_reports_concurrent_debug_traps',
     'ia32_gdt_descriptor_read_triggers_data_breakpoint',
     'ia32_gdt_descriptor_read_wraps_at_4g',

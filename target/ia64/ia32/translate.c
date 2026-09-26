@@ -12,6 +12,7 @@
 #include "ia32/ia32.h"
 
 #define IA32_TB_FLAG_FAST   IA64_IA32_TB_FAST
+#define IA32_TB_FLAG_SIMD_MASKED IA64_IA32_TB_SIMD_MASKED
 #define IA32_TB_FLAG_FLAT_MASK  (0xfu << IA64_IA32_TB_FLAT_SHIFT)
 #define IA32_TB_FLAG_PSR_DT (1u << 28)
 #define IA32_TB_FLAG_PSR_DB (1u << 29)
@@ -29,9 +30,10 @@
 #define X86_GEN_HELPER_RAISE_EXCEPTION gen_helper_ia32_raise_exception
 #define X86_GEN_HELPER_RSM gen_helper_ia32_rsm
 #define X86_TB_FLAGS(flags) \
-    ((flags) & ~(IA32_TB_FLAG_FAST | IA32_TB_FLAG_FLAT_MASK | \
-                 IA32_TB_FLAG_PSR_DT | IA32_TB_FLAG_PSR_DB | \
-                 IA32_TB_FLAG_PSR_AC | IA32_TB_FLAG_PSR_IS))
+    ((flags) & ~(IA32_TB_FLAG_FAST | IA32_TB_FLAG_SIMD_MASKED | \
+                 IA32_TB_FLAG_FLAT_MASK | IA32_TB_FLAG_PSR_DT | \
+                 IA32_TB_FLAG_PSR_DB | IA32_TB_FLAG_PSR_AC | \
+                 IA32_TB_FLAG_PSR_IS))
 /* ia64_ia32_tb_state(): no check below can fail or trap in this TB. */
 #define IA32_FAST(s) (((s)->base.tb->flags & IA32_TB_FLAG_FAST) != 0)
 /* Ordinary IA-32 #AC checks run after translation in the segment hook. */
@@ -170,13 +172,16 @@ static int ia64_ia32_iptrace_enabled = -1;
     ((decode)->op[0].unit == X86_OP_SSE ||                             \
      (decode)->op[1].unit == X86_OP_SSE ||                             \
      (decode)->op[2].unit == X86_OP_SSE)
+/* ia64_ia32_tb_state(): no SIMD exception can be delivered in this TB. */
+#define IA32_SIMD_MASKED(s)                                            \
+    (((s)->base.tb->flags & IA32_TB_FLAG_SIMD_MASKED) != 0)
 #define X86_GEN_SSE_EXCEPTION_BEGIN(s, decode) do {                    \
-    if (X86_IA32_SSE_INSTRUCTION(decode)) {                            \
+    if (X86_IA32_SSE_INSTRUCTION(decode) && !IA32_SIMD_MASKED(s)) {    \
         gen_helper_ia32_sse_exception_begin(tcg_env);                  \
     }                                                                  \
 } while (0)
 #define X86_GEN_SSE_EXCEPTION_END(s, decode) do {                      \
-    if (X86_IA32_SSE_INSTRUCTION(decode)) {                            \
+    if (X86_IA32_SSE_INSTRUCTION(decode) && !IA32_SIMD_MASKED(s)) {    \
         gen_helper_ia32_sse_exception_end(tcg_env);                    \
     }                                                                  \
 } while (0)
@@ -207,6 +212,13 @@ static int ia64_ia32_iptrace_enabled = -1;
                     ((decode)->e.gen == gen_POP &&                     \
                      (decode)->e.op0 == X86_TYPE_SS);                  \
                                                                        \
+    /* The MXCSR masks are part of the TB key (IA32_SIMD_MASKED). */    \
+    if (((decode)->e.gen == gen_LDMXCSR ||                             \
+         (decode)->e.gen == gen_FXRSTOR ||                             \
+         (decode)->e.gen == gen_XRSTOR) &&                             \
+        (s)->base.is_jmp == DISAS_NEXT) {                              \
+        (s)->base.is_jmp = DISAS_EOB_NEXT;                             \
+    }                                                                  \
     if (IA32_FAST(s) && !ss_load_) {                                   \
         /*                                                             \
          * Only a far transfer changes CPL (a gate or task switch      \
