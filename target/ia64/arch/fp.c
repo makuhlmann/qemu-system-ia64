@@ -109,8 +109,7 @@ static void ia64_fr_write_ext(CPUIA64State *env, uint32_t reg, bool sign,
                               uint32_t exp, uint64_t mant)
 {
     ia64_fp_backup_fr(env, reg);
-    ia64_fpreg_from_spill(env, reg, mant,
-                          (exp & 0x1ffff) | ((uint64_t)sign << 17));
+    ia64_fpreg_set(env, reg, sign, exp & 0x1ffff, mant);
 }
 
 static bool ia64_fr_ext_get(const CPUIA64State *env, uint32_t reg,
@@ -456,15 +455,14 @@ void ia64_set_cfm_rrb_fr(CPUIA64State *env, uint32_t new_rrb)
 
 static IA64FPReg ia64_fr_reg(CPUIA64State *env, uint32_t reg)
 {
-    uint64_t low;
-    uint64_t high;
+    IA64FPReg value;
+    bool sign;
+    uint32_t exp;
 
-    ia64_fpreg_to_spill(env, reg, &low, &high);
-    return (IA64FPReg){
-        .sign = (high >> 17) & 1,
-        .exp = high & IA64_FP_WRE_EXP_MASK,
-        .sig = low,
-    };
+    ia64_fpreg_get(env, reg, &sign, &exp, &value.sig);
+    value.sign = sign;
+    value.exp = exp & IA64_FP_WRE_EXP_MASK;
+    return value;
 }
 
 static void ia64_fr_write_reg(CPUIA64State *env, uint32_t reg,
@@ -2266,35 +2264,25 @@ static void ia64_fp_begin(CPUIA64State *env, uint32_t sf,
     set_float_exception_flags(0, &env->fp.fp_status);
 }
 
-static void ia64_fp_end(CPUIA64State *env, uint32_t sf)
+/*
+ * Record the flags of the finished instruction in FPSR.sfX and deliver its
+ * trap, if any.  Traps arrive with the instruction complete (SDM Vol 1
+ * 5.4.1.3).
+ */
+static void ia64_fp_commit(CPUIA64State *env, uint32_t sf, uint64_t flags,
+                           uint32_t trap_code)
 {
-    int soft = get_float_exception_flags(&env->fp.fp_status);
-    uint64_t flags;
-    uint64_t traps;
-    uint64_t enabled;
-    uint32_t trap_code;
     uint32_t shift;
 
-    if (soft == 0 && env->fp.transaction.flags == 0 &&
-        env->fp.transaction.trap == 0) {
-        env->fp.transaction.active = false;
+    flags |= env->fp.transaction.flags;
+    trap_code |= env->fp.transaction.trap;
+    if (flags == 0 && trap_code == 0) {
         return;
     }
 
-    flags = ia64_fp_soft_flags_to_ia64(soft);
-    traps = ia64_fp_active_traps(env, sf);
-    enabled = flags & ~traps;
-    if (enabled & 0x7) {
-        ia64_raise_fp_fault(env, enabled & 0x7);
-    }
-
-    env->fp.transaction.active = false;
-
-    flags |= env->fp.transaction.flags;
     shift = ia64_fpsr_sf_shift(sf) + IA64_FPSR_SF_FLAGS_SHIFT;
     env->ar_fpsr |= flags << shift;
 
-    trap_code = ((enabled & 0x38) << 8) | env->fp.transaction.trap;
     if (trap_code) {
         uint32_t slot = (env->psr & IA64_PSR_RI_MASK) >>
                         IA64_PSR_RI_SHIFT;
@@ -2316,6 +2304,41 @@ static void ia64_fp_end(CPUIA64State *env, uint32_t sf)
         ia64_raise_exception(env, IA64_EXCP_FP_TRAP, next_ip, trap_ip,
                                slot);
     }
+}
+
+static void ia64_fp_end(CPUIA64State *env, uint32_t sf)
+{
+    int soft = get_float_exception_flags(&env->fp.fp_status);
+    uint64_t flags = 0;
+    uint64_t enabled = 0;
+
+    if (soft != 0) {
+        flags = ia64_fp_soft_flags_to_ia64(soft);
+        enabled = flags & ~ia64_fp_active_traps(env, sf);
+        if (enabled & 0x7) {
+            ia64_raise_fp_fault(env, enabled & 0x7);
+        }
+    }
+    env->fp.transaction.active = false;
+    ia64_fp_commit(env, sf, flags, (enabled & 0x38) << 8);
+}
+
+/*
+ * For the instructions computed without softfloat that write their results
+ * after the last fault check (Vol 1 Figure 5-11): the multiply-add family
+ * (fma, fms, fnma and their pseudo-ops), frcpa and fcvt.fx.  They need
+ * neither the softfloat set-up nor a backup of their targets; a V, D, Z or
+ * SWA fault only restores PSR.mfl/mfh, which no write has changed yet.
+ */
+static void ia64_fp_begin_native(CPUIA64State *env)
+{
+    env->fp.transaction.backup_fr_mask[0] = 0;
+    env->fp.transaction.backup_fr_mask[1] = 0;
+    env->fp.transaction.backup_pr_mask = 0;
+    env->fp.transaction.backup_psr_mf =
+        env->psr & (IA64_PSR_MFL | IA64_PSR_MFH);
+    env->fp.transaction.flags = 0;
+    env->fp.transaction.trap = 0;
 }
 
 void ia64_fp_fsetc(CPUIA64State *env, uint32_t sf,
@@ -2668,44 +2691,43 @@ static void ia64_fp_end_context(CPUIA64State *env, uint32_t context)
     ia64_fp_end(env, ia64_fp_context_sf(context));
 }
 
+static void ia64_fp_muladd_insn(CPUIA64State *env, uint32_t r1, uint32_t f3,
+                                uint32_t f4, uint32_t f2, bool negate_product,
+                                bool negate_addend, uint32_t context)
+{
+    uint32_t sf = ia64_fp_context_sf(context);
+
+    ia64_fp_begin_native(env);
+    ia64_fp_muladd(env, r1, f3, f4, f2, negate_product, negate_addend, sf,
+                   ia64_fp_context_precision(context));
+    ia64_fp_commit(env, sf, 0, 0);
+}
+
 void ia64_fp_fadd(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3,
                  uint32_t context)
 {
-    ia64_fp_begin_context(env, context);
-    ia64_fp_muladd(env, r1, r3, IA64_FR_ONE_INDEX, r2, false, false,
-                   ia64_fp_context_sf(context),
-                   ia64_fp_context_precision(context));
-    ia64_fp_end_context(env, context);
+    ia64_fp_muladd_insn(env, r1, r3, IA64_FR_ONE_INDEX, r2, false, false,
+                        context);
 }
 
 void ia64_fp_fsub(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3,
                  uint32_t context)
 {
-    ia64_fp_begin_context(env, context);
-    ia64_fp_muladd(env, r1, r2, IA64_FR_ONE_INDEX, r3, false, true,
-                   ia64_fp_context_sf(context),
-                   ia64_fp_context_precision(context));
-    ia64_fp_end_context(env, context);
+    ia64_fp_muladd_insn(env, r1, r2, IA64_FR_ONE_INDEX, r3, false, true,
+                        context);
 }
 
 void ia64_fp_fmpy(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3,
                  uint32_t context)
 {
-    ia64_fp_begin_context(env, context);
-    ia64_fp_muladd(env, r1, r2, r3, IA64_FR_ZERO_INDEX, false, false,
-                   ia64_fp_context_sf(context),
-                   ia64_fp_context_precision(context));
-    ia64_fp_end_context(env, context);
+    ia64_fp_muladd_insn(env, r1, r2, r3, IA64_FR_ZERO_INDEX, false, false,
+                        context);
 }
 
 void ia64_fp_fma4(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3,
                  uint32_t r4, uint32_t context)
 {
-    ia64_fp_begin_context(env, context);
-    ia64_fp_muladd(env, r1, r3, r4, r2, false, false,
-                   ia64_fp_context_sf(context),
-                   ia64_fp_context_precision(context));
-    ia64_fp_end_context(env, context);
+    ia64_fp_muladd_insn(env, r1, r3, r4, r2, false, false, context);
 }
 
 void ia64_fp_fcmp(CPUIA64State *env, uint32_t p1, uint32_t p2, uint32_t r2,
@@ -2736,9 +2758,11 @@ IA64_DEFINE_FP_BINARY_WRAPPER(famax)
 void ia64_fp_frcpa(CPUIA64State *env, uint32_t r1, uint32_t p2, uint32_t r2,
                   uint32_t r3, uint32_t context)
 {
-    ia64_fp_begin_context(env, context);
-    ia64_do_frcpa(env, r1, p2, r2, r3, ia64_fp_context_sf(context));
-    ia64_fp_end_context(env, context);
+    uint32_t sf = ia64_fp_context_sf(context);
+
+    ia64_fp_begin_native(env);
+    ia64_do_frcpa(env, r1, p2, r2, r3, sf);
+    ia64_fp_commit(env, sf, 0, 0);
 }
 
 void ia64_fp_fprcpa(CPUIA64State *env, uint32_t r1, uint32_t p2, uint32_t r2,
@@ -2789,41 +2813,31 @@ void ia64_fp_fpma(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3,
 void ia64_fp_fms(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3,
                 uint32_t r4, uint32_t context)
 {
-    ia64_fp_begin_context(env, context);
-    ia64_fp_muladd(env, r1, r3, r4, r2, false, true,
-                   ia64_fp_context_sf(context),
-                   ia64_fp_context_precision(context));
-    ia64_fp_end_context(env, context);
+    ia64_fp_muladd_insn(env, r1, r3, r4, r2, false, true, context);
 }
 
 void ia64_fp_fnma4(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3,
                   uint32_t r4, uint32_t context)
 {
-    ia64_fp_begin_context(env, context);
-    ia64_fp_muladd(env, r1, r3, r4, r2, true, false,
-                   ia64_fp_context_sf(context),
-                   ia64_fp_context_precision(context));
-    ia64_fp_end_context(env, context);
+    ia64_fp_muladd_insn(env, r1, r3, r4, r2, true, false, context);
 }
 
 void ia64_fp_fnorm(CPUIA64State *env, uint32_t r1, uint32_t r2, uint32_t r3,
                   uint32_t context)
 {
-    ia64_fp_begin_context(env, context);
-    ia64_fp_muladd(env, r1, r3, IA64_FR_ONE_INDEX, IA64_FR_ZERO_INDEX,
-                   false, false, ia64_fp_context_sf(context),
-                   ia64_fp_context_precision(context));
-    ia64_fp_end_context(env, context);
+    ia64_fp_muladd_insn(env, r1, r3, IA64_FR_ONE_INDEX, IA64_FR_ZERO_INDEX,
+                        false, false, context);
 }
 
 void ia64_fp_fcvt_fx(CPUIA64State *env, uint32_t r1, uint32_t r2,
                     uint32_t is_unsigned, uint32_t is_trunc,
                     uint32_t context)
 {
-    ia64_fp_begin_context(env, context);
-    ia64_do_fcvt_fx(env, r1, r2, is_unsigned, is_trunc,
-                    ia64_fp_context_sf(context));
-    ia64_fp_end_context(env, context);
+    uint32_t sf = ia64_fp_context_sf(context);
+
+    ia64_fp_begin_native(env);
+    ia64_do_fcvt_fx(env, r1, r2, is_unsigned, is_trunc, sf);
+    ia64_fp_commit(env, sf, 0, 0);
 }
 
 void ia64_fp_fprsqrta(CPUIA64State *env, uint32_t r1, uint32_t p2,

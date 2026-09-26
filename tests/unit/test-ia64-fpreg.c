@@ -291,91 +291,45 @@ static uint64_t xorshift64(uint64_t *state)
     return x;
 }
 
-/* The conversion ia64_fpreg_from_spill caches in fr[], done by softfloat. */
-static uint64_t reference_binary64(const float_status *fp_status, bool sign,
-                                   uint32_t exp, uint64_t mant)
+/*
+ * Every spill image fills and spills back unchanged, in any register, and
+ * the inline accessor the FP helpers use reads the same value.
+ */
+static const char *test_random_spill_fill(void)
 {
-    float_status status = *fp_status;
-    uint16_t ext_exp;
-
-    if (exp == IA64_FP_REG_SPECIAL_EXP) {
-        ext_exp = 0x7fff;
-    } else if (exp == 0) {
-        ext_exp = 0;
-    } else if (exp > 0xc000 && exp - 0xc000 < 0x7fff) {
-        ext_exp = exp - 0xc000;
-    } else {
-        ext_exp = exp < 0xc000 ? 0 : 0x7fff;
-    }
-    return floatx80_to_float64(
-        ia64_make_floatx80(((uint16_t)sign << 15) | ext_exp, mant), &status);
-}
-
-static const char *test_extended_binary64_cache(void)
-{
-    static const FloatRoundMode modes[] = {
-        float_round_nearest_even, float_round_to_zero,
-        float_round_up, float_round_down,
+    static const uint32_t exps[] = {
+        0, 1, 0xfc01, 0xffff, IA64_FP_REG_INTEGER_EXP, 0x1fffd,
+        IA64_FP_REG_NATVAL_EXP, IA64_FP_REG_SPECIAL_EXP,
     };
-    static const uint64_t low_bits[] = { 0, 0x3ff, 0x400, 0x401, 0x7ff };
     uint64_t state = 0x9e3779b97f4a7c15ULL;
     CPUIA64State env;
-    unsigned m, ftz, n;
+    unsigned n;
 
     reset_env(&env);
-    for (m = 0; m < G_N_ELEMENTS(modes); m++) {
-        for (ftz = 0; ftz < 2; ftz++) {
-            set_float_rounding_mode(modes[m], &env.fp.fp_status);
-            set_flush_to_zero(ftz, &env.fp.fp_status);
-            for (n = 0; n < 100000; n++) {
-                uint64_t r = xorshift64(&state);
-                uint64_t mant = xorshift64(&state);
-                bool sign = r & 1;
-                uint32_t exp;
-                uint64_t expected;
+    for (n = 0; n < 200000; n++) {
+        uint64_t r = xorshift64(&state);
+        uint64_t low = xorshift64(&state);
+        unsigned reg = 2 + r % (IA64_FR_COUNT - 2);
+        uint32_t exp = (r >> 8) % 2 ? exps[(r >> 9) % G_N_ELEMENTS(exps)] :
+                       (uint32_t)(r >> 12) & 0x1ffff;
+        uint64_t high = exp | (((r >> 40) & 1) << 17);
+        uint64_t get_sig;
+        uint32_t get_exp;
+        bool get_sign;
+        const char *error;
 
-                switch ((r >> 1) % 4) {
-                case 0:
-                    exp = 0xffff - 1100 + (uint32_t)((r >> 3) % 2201);
-                    break;
-                case 1:
-                    exp = 0xffff - 1022 - 2 + (uint32_t)((r >> 3) % 5);
-                    break;
-                case 2:
-                    exp = 0xffff + 1023 - 2 + (uint32_t)((r >> 3) % 5);
-                    break;
-                default:
-                    exp = (uint32_t)(r >> 3) & 0x1ffff;
-                    break;
-                }
-                if ((r >> 24) % 10 != 0) {
-                    mant |= IA64_FP_SIGNIFICAND_INTEGER_BIT;
-                }
-                if ((r >> 32) % 8 == 0) {
-                    mant |= 0x7ffffffffffff800ULL;
-                }
-                if ((r >> 40) % 2 == 0) {
-                    mant = (mant & ~0x7ffULL) |
-                           low_bits[(r >> 44) % G_N_ELEMENTS(low_bits)];
-                }
-
-                if (!sign && (exp == IA64_FP_REG_INTEGER_EXP ||
-                              exp == IA64_FP_REG_NATVAL_EXP)) {
-                    continue;
-                }
-                ia64_fpreg_from_spill(&env, 2, mant,
-                                      exp | ((uint64_t)sign << 17));
-                expected = reference_binary64(&env.fp.fp_status, sign, exp,
-                                              mant);
-                if (env.fp.fr[2] != expected) {
-                    snprintf(failure, sizeof(failure),
-                             "mode %u ftz %u sign %d exp %05x mant %016"
-                             PRIx64 ": expected %016" PRIx64 " got %016"
-                             PRIx64, m, ftz, sign, exp, mant, expected,
-                             env.fp.fr[2]);
-                    return failure;
-                }
-            }
+        if ((r >> 41) % 4 == 0) {
+            low = 0;
+        }
+        ia64_fpreg_from_spill(&env, reg, low, high | (r & 0xfffc0000ULL));
+        error = expect_spill(&env, reg, low, high);
+        if (error != NULL) {
+            return error;
+        }
+        ia64_fpreg_get(&env, reg, &get_sign, &get_exp, &get_sig);
+        if (get_sig != low || get_exp != exp ||
+            get_sign != ((high >> 17) & 1)) {
+            return fail_u64("inline read", get_sig, low);
         }
     }
     return NULL;
@@ -392,8 +346,7 @@ int main(void)
         { "NaTVal", test_natval },
         { "spill fill round-trip", test_spill_fill_round_trip },
         { "stale tag clearing", test_stale_tags },
-        { "binary64 cache of extended values",
-          test_extended_binary64_cache },
+        { "random spill fill", test_random_spill_fill },
     };
     unsigned i;
     int status = 0;

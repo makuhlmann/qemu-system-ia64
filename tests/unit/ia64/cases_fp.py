@@ -4839,6 +4839,38 @@ test_fadd_unnormal_d_fault_rolls_back = require_registers(
         "ar_fpsr": DEFAULT_FPSR & ~(1 << 1),
     }, entry=0x10)
 
+# A D fault of fma restores only what fma itself changed.  The fmax before
+# it wrote f9 and set PSR.mfl in its own FP transaction; neither may be
+# rolled back by the fault of the next instruction (SDM Vol 1 5.4.1.2).
+test_fma_d_fault_keeps_earlier_fp_result = require_registers(
+    "fma_d_fault_keeps_earlier_fp_result", [
+        (0x10, 0x05, *movl_mlx(2, DEFAULT_FPSR & ~(1 << 1))[1:]),
+        (0x20, 0x01, mov_m_gr_ar(2, 40), nop_i(), nop_i()),
+        (0x30, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
+         addl(21, 0x10000, 0)),
+        (0x40, 0x05, *movl_mlx(22, 0x4000000000000000)[1:]),
+        (0x50, 0x09, st8(3, 22), st8(4, 21), nop_i()),
+        (0x60, 0x01, ldf_fill_postinc(6, 3, 0), nop_i(), nop_i()),
+        (0x70, 0x05, *movl_mlx(5, 0x4010000000000000)[1:]),
+        (0x80, 0x05, *movl_mlx(7, 0x3ff0000000000000)[1:]),
+        (0x90, 0x05, *movl_mlx(8, 0x4000000000000000)[1:]),
+        (0xa0, 0x09, setf_d(9, 5), setf_d(10, 7), nop_i()),
+        (0xb0, 0x09, setf_d(11, 8), rum(IA64_PSR_MFL), nop_i()),
+        (0xc0, 0x0d, nop_m(), fmax(9, 10, 11), nop_i()),
+        (0xd0, 0x0d, nop_m(), fma_s0(12, 6, 1, 1), nop_i()),
+        (IA64_FP_FAULT_VECTOR, 0x00, mov_m_cr_gr(10, 17),
+         nop_i(), nop_i()),
+        (IA64_FP_FAULT_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_FP_FAULT_VECTOR + 0x10,
+                 IA64_FP_FAULT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_FP_FAULT_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r10": IA64_ISR_NI | (1 << IA64_ISR_EI_SHIFT) | 2,
+        "psr": ExpectedBits(mask=IA64_PSR_MFL, value=IA64_PSR_MFL),
+        "f9": ExpectedFP(*binary64_to_spill(0x4000000000000000)),
+    }, entry=0x10)
+
 test_fnorm_ldf_fill_unnormal_sets_d = require_registers(
     "fnorm_ldf_fill_unnormal_sets_d", [
         (0x10, 0x01, addl(3, 0x200, 0), addl(4, 0x208, 0),
@@ -5944,6 +5976,7 @@ CASE_NAMES = (
     'disabled_fp_store_sets_isr_w',
     'fadd_static_range_and_rounding',
     'fadd_unnormal_d_fault_rolls_back',
+    'fma_d_fault_keeps_earlier_fp_result',
     'fand_f1_illegal_operation',
     'fchkf_branches_on_uncommitted_flag',
     'fchkf_negative_target_uses_bit36',
