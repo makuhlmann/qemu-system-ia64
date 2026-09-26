@@ -1689,8 +1689,8 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
                                   uint32_t span)
 {
     bool alignment_fault;
-    bool itlb_ed;
-    bool itlb_ed_known;
+    bool itlb_ed = false;
+    bool itlb_ed_known = true;
     IA64Exception excp;
     IA64DataReferenceResult translation;
 
@@ -1698,9 +1698,24 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
         return 0;
     }
 
-    itlb_ed = ia64_code_tlb_ed_lookup(env, &itlb_ed_known);
     alignment_fault = ia64_speculative_alignment_fault(env, va, size,
                                                        window, span);
+    /*
+     * A naturally aligned load that hits a softmmu read entry has passed
+     * every data-reference check at this privilege level already; only the
+     * memory attribute can still defer it.  Physical accesses never allow
+     * control speculation (ia64_cpu_tlb_fill), so they skip the lookup.
+     */
+    if (!is_ifetch && !is_write && (env->psr & IA64_PSR_DT) &&
+        size != 0 && (va & (size - 1)) == 0) {
+        int mmu_idx = MMU_IDX_VIRT_CPL(ia64_psr_cpl(env->psr));
+        int speculation = ia64_exec_load_hit_speculation(env, va, mmu_idx);
+
+        if (speculation >= 0 &&
+            ia64_memory_allows_control_speculation(speculation)) {
+            return 1;
+        }
+    }
     if (is_ifetch) {
         if (alignment_fault) {
             excp = IA64_EXCP_UNALIGNED;
@@ -1724,6 +1739,10 @@ qualify:
      */
     if (excp == IA64_EXCP_UNIMPL_DATA_ADDR) {
         alignment_fault = false;
+    }
+    /* ITLB.ed only qualifies a condition; the success path needs no lookup. */
+    if (excp != IA64_EXCP_NONE || alignment_fault) {
+        itlb_ed = ia64_code_tlb_ed_lookup(env, &itlb_ed_known);
     }
     if (excp != IA64_EXCP_NONE &&
         !ia64_speculative_exception_deferrable(env, excp, itlb_ed,

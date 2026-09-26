@@ -1601,6 +1601,22 @@ void *probe_access(CPUArchState *env, vaddr addr, int size,
     return host;
 }
 
+CPUTLBEntryFull *tlb_lookup_full_nofill(CPUArchState *env, vaddr addr,
+                                        MMUAccessType access_type,
+                                        int mmu_idx)
+{
+    CPUState *cpu = env_cpu(env);
+    uintptr_t index = tlb_index(cpu, mmu_idx, addr);
+    CPUTLBEntry *entry = tlb_entry(cpu, mmu_idx, addr);
+    vaddr page_addr = addr & TARGET_PAGE_MASK;
+
+    if (!tlb_hit_page(tlb_read_idx(entry, access_type), page_addr) &&
+        !victim_tlb_hit(cpu, mmu_idx, index, access_type, page_addr)) {
+        return NULL;
+    }
+    return &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
+}
+
 void *tlb_vaddr_to_host(CPUArchState *env, vaddr addr,
                         MMUAccessType access_type, int mmu_idx)
 {

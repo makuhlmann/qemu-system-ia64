@@ -282,6 +282,21 @@ void *ia64_exec_direct_host(CPUIA64State *env, uint64_t addr,
     return tlb_vaddr_to_host(env, addr, access_type, mmu_idx);
 }
 
+/*
+ * The IA64MemorySpeculation of a softmmu read entry for addr, or -1 without
+ * one.  The entry was filled only after the translation, its access rights
+ * and keys passed for this mmu_idx; a miss is not filled here, because a fill
+ * runs the VHPT walker.
+ */
+int ia64_exec_load_hit_speculation(CPUIA64State *env, uint64_t addr,
+                                   int mmu_idx)
+{
+    CPUTLBEntryFull *full = tlb_lookup_full_nofill(env, addr, MMU_DATA_LOAD,
+                                                   mmu_idx);
+
+    return full ? full->extra.ia64.speculation : -1;
+}
+
 bool ia64_exec_probe_writeback_ram(CPUIA64State *env, uint64_t addr,
                                    int size, MMUAccessType access_type,
                                    bool *direct, uintptr_t ra)

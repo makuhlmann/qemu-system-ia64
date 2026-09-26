@@ -424,6 +424,36 @@ test_ld8_s_uc_defers = require_registers(
     ], {"ip": 0xd0, "r4_nat": 1,
         "exception": IA64_EXCP_NONE}, entry=0x10)
 
+# ld8.s after a plain ld8 of the same page: the softmmu entry is filled, so
+# the speculative probe answers from it.  Write-back memory loads the value;
+# uncacheable memory still defers, whatever the entry allows the plain load.
+test_ld8_s_after_filled_wb_entry_loads = require_registers(
+    "ld8_s_after_filled_wb_entry_loads", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+        (0x70, *movl_mlx(2, ADV_UC_LOAD_VA)),
+        (0x80, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x90, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xa0, 0x01, ld8(5, 2), nop_i(), nop_i()),
+        (0xb0, 0x01, ld8_s(4, 2), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        ADV_UC_LOAD_BUNDLE,
+    ], {"ip": 0xc0, "r4": ADV_UC_LOAD_DATA, "r4_nat": 0,
+        "r5": ADV_UC_LOAD_DATA, "exception": IA64_EXCP_NONE}, entry=0x10)
+
+test_ld8_s_after_filled_uc_entry_defers = require_registers(
+    "ld8_s_after_filled_uc_entry_defers", [
+        *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000,
+                           pte_flags=DTR_PTE_UC),
+        (0x70, *movl_mlx(2, ADV_UC_LOAD_VA)),
+        (0x80, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x90, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xa0, 0x01, ld8(5, 2), nop_i(), nop_i()),
+        (0xb0, 0x01, ld8_s(4, 2), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        ADV_UC_LOAD_BUNDLE,
+    ], {"ip": 0xc0, "r4_nat": 1, "r5": ADV_UC_LOAD_DATA,
+        "exception": IA64_EXCP_NONE}, entry=0x10)
+
 test_ld8_c_nc_address_mismatch_reloads = require_registers(
     "ld8_c_nc_address_mismatch_reloads", [
         (0x10, 0x00, addl(3, 0x100, 0), addl(5, 0x110, 0),
@@ -3293,6 +3323,8 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'ld8_nt1_postinc_decode',
     'ld8_s_d2_hint_decode',
     'ld8_s_uc_defers',
+    'ld8_s_after_filled_wb_entry_loads',
+    'ld8_s_after_filled_uc_entry_defers',
     'ld8_sa_failure_invalidates_old_entry',
     'ld_imm_postinc_same_target_illegal',
     'ld_postinc_same_target_predicated_false',
