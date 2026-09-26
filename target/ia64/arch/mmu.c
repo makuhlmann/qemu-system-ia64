@@ -208,20 +208,22 @@ static void ia64_qemu_tlb_flush_entry(CPUIA64State *env,
 }
 
 /*
- * The softmmu keeps the translation of a TC entry that a new insertion
+ * The softmmu keeps the translation of a data TC entry that a new insertion
  * displaces: the TC may hold a translation until it is purged, and software
  * must purge before it changes one (SDM Vol 2, Translation Cache), so this
- * behaves like a larger TC.  Every purge therefore flushes its whole range,
- * not only the TC entries it finds.  Two victims are still flushed: one with
- * a purge pending, which must be gone at the next serialization, and any
- * while the firmware owns IVA, where a TC miss can fall back to the
- * firmware identity window instead of faulting.
+ * behaves like a larger DTC.  Every purge therefore flushes its whole range,
+ * not only the TC entries it finds.  Still flushed: an instruction victim,
+ * because code must not run on without the ITC entry whose ED bit ld.s
+ * deferral reads (ia64_code_tlb_ed_lookup); a victim with a purge pending,
+ * which must be gone at the next serialization; and any victim while the
+ * firmware owns IVA, where a TC miss can fall back to the firmware identity
+ * window instead of faulting.
  */
 static void ia64_qemu_tlb_flush_victim(CPUIA64State *env,
                                        const IA64TlbEntry *entry,
                                        bool is_data)
 {
-    if (entry->pending_purge ||
+    if (!is_data || entry->pending_purge ||
         ia64_firmware_owns_iva(&env->firmware, env->cr_iva)) {
         ia64_qemu_tlb_flush_entry(env, entry, is_data);
     }
