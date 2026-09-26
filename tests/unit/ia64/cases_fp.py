@@ -3826,6 +3826,60 @@ test_disabled_fp_high_fault = require_registers(
         "r9": 2,
     }, entry=0x10)
 
+# setf.sig f8 at 0x80 runs first with PSR.dfl clear, then, after ssm psr.dfl,
+# again: the second run must fault although the same code ran before.
+test_disabled_fp_low_fault_after_clean_run_at_same_ip = require_registers(
+    "disabled_fp_low_fault_after_clean_run_at_same_ip", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x80)),
+        (0x80, 0x00, setf_sig(8, 3), nop_i(), nop_i()),
+        (0x90, 0x00, nop_m(), cmp_eq_imm(6, 7, 0, 10), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0x100, qp=7)),
+        (0xb0, 0x00, ssm(IA64_PSR_DFL), adds(10, 1, 0), nop_i()),
+        (0xc0, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0x80)),
+        (0x100, 0x10, nop_m(), nop_i(), br_cond(0x100, 0x100)),
+        (IA64_DISABLED_FP_VECTOR, 0x00, mov_m_cr_gr(8, 19),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x20,
+                 IA64_DISABLED_FP_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_DISABLED_FP_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x80,
+        "r9": 1,
+        "r10": 1,
+    }, entry=0x10)
+
+# The translator follows ssm psr.dfl: setf.sig after it in the same bundle
+# takes the fault, as the live PSR says.
+test_disabled_fp_low_fault_after_ssm_in_same_bundle = require_registers(
+    "disabled_fp_low_fault_after_ssm_in_same_bundle", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x80)),
+        (0x80, 0x0a, ssm(IA64_PSR_DFL), setf_sig(8, 3), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (IA64_DISABLED_FP_VECTOR, 0x00, mov_m_cr_gr(8, 19),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_DISABLED_FP_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DISABLED_FP_VECTOR + 0x20,
+                 IA64_DISABLED_FP_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_DISABLED_FP_VECTOR + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x80,
+        "r9": 1 | (1 << IA64_ISR_EI_SHIFT),
+    }, entry=0x10)
+
 test_disabled_fp_low_fault = require_registers(
     "disabled_fp_low_fault", [
         (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DFL)),
@@ -5884,6 +5938,8 @@ CASE_NAMES = (
     'disabled_fp_high_fault',
     'disabled_fp_load_sets_isr_r',
     'disabled_fp_low_fault',
+    'disabled_fp_low_fault_after_ssm_in_same_bundle',
+    'disabled_fp_low_fault_after_clean_run_at_same_ip',
     'disabled_fp_mixed_sets_reports_both',
     'disabled_fp_store_sets_isr_w',
     'fadd_static_range_and_rounding',

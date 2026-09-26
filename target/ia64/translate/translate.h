@@ -28,6 +28,8 @@
 #define IA64_TB_FLAG_PSR_TB       (1u << 12)
 /* No GR NaT bit is set at TB entry. */
 #define IA64_TB_FLAG_NAT_CLEAR    (1u << 13)
+/* PSR.dfl (bit 18) at TB entry. */
+#define IA64_TB_FLAG_PSR_DFL      (1u << 14)
 
 /* The cs_base of an IA-64 TB holds CFM.sof and CFM.sol at entry. */
 #define IA64_TB_CS_BASE_SOL_SHIFT 8
@@ -90,10 +92,12 @@ typedef struct IA64TranslationBranchState {
     /* NaT-known facts at the label, and whether the back edge rotates. */
     uint64_t counted_self_nat_known[2];
     bool counted_self_rotates;
-    /* The frame at the label, when frame_known held there. */
+    /* The frame and PSR.dfl facts at the label. */
     bool counted_self_frame_known;
     uint8_t counted_self_frame_sof;
     uint8_t counted_self_frame_sol;
+    bool counted_self_dfl_known;
+    bool counted_self_dfl;
     bool cloop_zero_st1_valid;
     bool cloop_zero_st1_release;
     uint8_t cloop_zero_st1_base;
@@ -151,6 +155,13 @@ typedef struct DisasContext {
      * TB up, because a link was chosen for one value.
      */
     bool key_dynamic;
+    /*
+     * PSR.dfl here, while psr_dfl_known: it is in the TB key, and only
+     * ssm/rsm (followed exactly), mov psr.l and a break into firmware
+     * change it inside a TB.
+     */
+    bool psr_dfl_known;
+    bool psr_dfl;
     /*
      * PSR.ss and PSR.tb at TB entry.  Either one makes the TB translate a
      * single instruction, in slot trap_slot, and note its completion traps

@@ -1869,6 +1869,25 @@ void ia64_note_tb_key_effect(DisasContext *ctx, const Ia64Instruction *insn)
     if (ia64_insn_sets_tb_key_at_run_time(insn)) {
         ctx->key_dynamic = true;
     }
+    switch (insn->opcode) {
+    case IA64_OP_SSM:
+    case IA64_OP_RSM:
+        if (!(insn->operands.system.immediate & IA64_PSR_DFL)) {
+            break;
+        }
+        if (insn->qp != 0) {
+            ctx->psr_dfl_known = false;
+        } else {
+            ctx->psr_dfl = insn->opcode == IA64_OP_SSM;
+        }
+        break;
+    case IA64_OP_MOV_GRPSR:
+    case IA64_OP_BREAK:
+        ctx->psr_dfl_known = false;
+        break;
+    default:
+        break;
+    }
 }
 
 /*
@@ -2149,6 +2168,8 @@ void ia64_prepare_self_counted_loop(
     ctx->branch.counted_self_frame_known = ctx->frame_known;
     ctx->branch.counted_self_frame_sof = ctx->frame_sof;
     ctx->branch.counted_self_frame_sol = ctx->frame_sol;
+    ctx->branch.counted_self_dfl_known = ctx->psr_dfl_known;
+    ctx->branch.counted_self_dfl = ctx->psr_dfl;
     if (!ctx->frame_known) {
         ctx->cfm_sof_valid = false;
         ctx->cfm_sof_checked = 0;
@@ -2228,6 +2249,11 @@ bool ia64_gen_self_counted_loop(DisasContext *ctx, uint64_t target,
         (!ctx->frame_known ||
          ctx->frame_sof != ctx->branch.counted_self_frame_sof ||
          ctx->frame_sol != ctx->branch.counted_self_frame_sol)) {
+        return false;
+    }
+    if (ctx->branch.counted_self_dfl_known &&
+        (!ctx->psr_dfl_known ||
+         ctx->psr_dfl != ctx->branch.counted_self_dfl)) {
         return false;
     }
 
@@ -3021,10 +3047,12 @@ static uint64_t ia64_insn_disabled_fp_isr_flags(
 
 static void ia64_gen_check_disabled_fp(const Ia64Instruction *insn)
 {
+    const DisasContext *ctx = insn->ctx;
     uint32_t reads = ia64_insn_fp_read_sets(insn);
     uint32_t writes = ia64_insn_fp_write_sets(insn);
     uint32_t sets = reads | writes;
     uint64_t disabled_mask;
+    uint64_t test_mask;
     uint64_t isr_flags;
     TCGv_i64 disabled;
     TCGv_i64 isr;
@@ -3035,18 +3063,27 @@ static void ia64_gen_check_disabled_fp(const Ia64Instruction *insn)
     }
 
     /*
-     * Check the live PSR: a mask instruction earlier in the same bundle can
-     * change dfl/dfh after the TB was translated.
+     * Test the live PSR: an ssm or rsm earlier in the same bundle can change
+     * dfl/dfh after the TB was translated.  A PSR.dfl the translator knows
+     * to be clear needs no test.
      */
+    disabled_mask = ((sets & 1) ? IA64_PSR_DFL : 0) |
+                    ((sets & 2) ? IA64_PSR_DFH : 0);
+    test_mask = disabled_mask;
+    if (ctx && ctx->psr_dfl_known && !ctx->psr_dfl) {
+        test_mask &= ~IA64_PSR_DFL;
+    }
+    if (test_mask == 0) {
+        return;
+    }
     done = gen_new_label();
     disabled = tcg_temp_new_i64();
     isr = tcg_temp_new_i64();
-    disabled_mask = ((sets & 1) ? IA64_PSR_DFL : 0) |
-                    ((sets & 2) ? IA64_PSR_DFH : 0);
     isr_flags = ia64_insn_disabled_fp_isr_flags(insn);
 
-    tcg_gen_andi_i64(disabled, cpu_psr, disabled_mask);
+    tcg_gen_andi_i64(disabled, cpu_psr, test_mask);
     tcg_gen_brcondi_i64(TCG_COND_EQ, disabled, 0, done);
+    tcg_gen_andi_i64(disabled, cpu_psr, disabled_mask);
     tcg_gen_shri_i64(isr, disabled, 18);
     if (isr_flags != 0) {
         tcg_gen_ori_i64(isr, isr, isr_flags);
@@ -3410,6 +3447,8 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     ctx->cpl_known = true;
     ctx->key_static = true;
     ctx->key_dynamic = false;
+    ctx->psr_dfl_known = true;
+    ctx->psr_dfl = flags & IA64_TB_FLAG_PSR_DFL;
     ctx->frame_known = true;
     ctx->frame_sof = ctx->base.tb->cs_base & 0x7f;
     ctx->frame_sol = (ctx->base.tb->cs_base >> IA64_TB_CS_BASE_SOL_SHIFT) &
