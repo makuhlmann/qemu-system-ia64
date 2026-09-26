@@ -124,6 +124,7 @@ from .encoding import (
     mov_lc_gr,
     mov_m_ar_gr,
     mov_m_cr_gr,
+    mov_i_imm_ar,
     mov_m_gr_ar,
     mov_m_gr_cr,
     mov_m_psr_gr,
@@ -2338,6 +2339,82 @@ test_unaligned_ac_set_no_page_cross_faults = require_exception(
     ],
     IA64_EXCP_UNALIGNED, fault_ip=0x40,
 )
+
+# PSR.ri is stored only before code that can observe it.  Each case takes a
+# data TLB fault, which reports the slot from PSR.ri, after slots that do not
+# observe it, and reads the slot back from IPSR.ri and ISR.ei (SDM Vol.2
+# 3.3.5).
+_RI_DTLB_SETUP = [
+    *dtr_setup_bundles(0x10, HIGH_TR_BASE, 0x400000),
+    (0x70, *movl_mlx(3, HIGH_TR_BASE)),
+    (0x80, *movl_mlx(5, HIGH_TR_BASE + 0x100000)),
+    (0x90, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DT)),
+    (0xa0, 0x01, mov_gr_psr_full(2), nop_i(), nop_i()),
+    # srlz resumes at slot 1; the branch starts the tested TB at slot 0.
+    (0xb0, 0x11, srlz_d(), nop_i(), br_cond(0xb0, 0xc0)),
+]
+_RI_DTLB_HANDLER = [
+    (IA64_ALT_DTLB_VECTOR, 0x09, mov_m_cr_gr(31, 16),
+     mov_m_cr_gr(30, 17), nop_i()),
+    (IA64_ALT_DTLB_VECTOR + 0x10, 0x09, mov_m_cr_gr(29, 19),
+     nop_m(), extr_u(31, 31, 41, 2)),
+    (IA64_ALT_DTLB_VECTOR + 0x20, 0x01, nop_m(),
+     extr_u(30, 30, 41, 2), nop_i()),
+    (IA64_ALT_DTLB_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+     br_cond(IA64_ALT_DTLB_VECTOR + 0x30,
+             IA64_ALT_DTLB_VECTOR + 0x30)),
+]
+
+test_ri_fault_in_slot1_after_unobserving_slot = require_registers(
+    "ri_fault_in_slot1_after_unobserving_slot", [
+        *_RI_DTLB_SETUP,
+        (0xc0, 0x00, ld8(9, 3), adds(10, 1, 0), adds(11, 2, 0)),
+        (0xd0, 0x08, adds(12, 3, 0), ld8(14, 5), nop_i()),
+        *_RI_DTLB_HANDLER,
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r12": 3,
+        "r29": 0xd0,
+        "r30": 1,
+        "r31": 1,
+    }, entry=0x10)
+
+# Slot 1 of the first bundle leaves PSR.ri at 1; the faulting slot 1 of the
+# next bundle may reuse it, but only because it is the same slot.
+test_ri_fault_in_slot1_reuses_stored_slot = require_registers(
+    "ri_fault_in_slot1_reuses_stored_slot", [
+        *_RI_DTLB_SETUP,
+        (0xc0, 0x08, ld8(9, 3), ld8(10, 3), adds(11, 2, 0)),
+        (0xd0, 0x08, adds(12, 3, 0), ld8(14, 5), nop_i()),
+        *_RI_DTLB_HANDLER,
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r12": 3,
+        "r29": 0xd0,
+        "r30": 1,
+        "r31": 1,
+    }, entry=0x10)
+
+# The counted self-loop's back edge stores RI 0 on the path that loops; the
+# path that leaves the loop still holds the br.cloop slot, so a fault in slot
+# 0 of the next bundle must store its own slot.
+test_ri_fault_after_counted_self_loop_exit = require_registers(
+    "ri_fault_after_counted_self_loop_exit", [
+        *_RI_DTLB_SETUP,
+        (0xc0, 0x01, nop_m(), mov_i_imm_ar(65, 3), nop_i()),
+        (0xd0, 0x11, nop_m(), adds(8, 1, 8), br_cloop(0xd0, 0xd0)),
+        (0xe0, 0x00, ld8(14, 5), nop_i(), nop_i()),
+        *_RI_DTLB_HANDLER,
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 4,
+        "r29": 0xe0,
+        "r30": 0,
+        "r31": 0,
+    }, entry=0x10)
 
 test_counted_self_loop_fault_has_slot1_ri = require_registers(
     "counted_self_loop_fault_has_slot1_ri", [
@@ -5385,6 +5462,9 @@ CASE_NAMES = (
     'break_preserves_ifa_and_records_iim_isr',
     'cloop_zero_st1_timer_interrupts_batched_loop',
     'counted_self_loop_fault_has_slot1_ri',
+    'ri_fault_in_slot1_after_unobserving_slot',
+    'ri_fault_in_slot1_reuses_stored_slot',
+    'ri_fault_after_counted_self_loop_exit',
     'cover_saves_interrupted_cfm_to_ifs',
     'exception_break',
     'exception_break_f',

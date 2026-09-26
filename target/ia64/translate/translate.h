@@ -43,8 +43,14 @@ typedef struct IA64TranslationMemoryState {
 
 typedef struct IA64TranslationRestartState {
     uint8_t start_slot;
+    /*
+     * PSR.ri as generated code has stored it (current_ri, when known), and
+     * the restart point it stands for (logical_ri): the next instruction
+     * boundary.  Only code that can observe PSR.ri gets the two synced.
+     */
     uint8_t current_ri;
     bool current_ri_known;
+    uint8_t logical_ri;
     bool track_iipa;
     /*
      * Set once an ssm/rsm/mov-psr in the current bundle may have changed
@@ -268,6 +274,13 @@ void ia64_gen_save_fault_slot_for_exit(DisasContext *ctx);
 void ia64_gen_store_instruction_group_start(bool group_start);
 void ia64_gen_goto_tb_group(DisasContext *ctx, uint64_t dest,
                             bool group_start);
+typedef enum IA64PureKind {
+    IA64_PURE_NONE,
+    IA64_PURE_GR,
+    IA64_PURE_PR,
+} IA64PureKind;
+
+IA64PureKind ia64_integer_pure_kind(const Ia64Instruction *insn);
 void ia64_update_nat_known(DisasContext *ctx,
                            const Ia64Instruction *insn);
 bool ia64_gen_insn(DisasContext *ctx, const Ia64Instruction *insn,

@@ -609,6 +609,147 @@ static void ia64_gen_native_integer_nat(const Ia64Instruction *insn)
     }
 }
 
+/*
+ * Integer instructions whose code only writes r1 and its NaT bit (GR) or
+ * predicates (PR): no helper, no memory access, no fault.  Callers still
+ * exclude encodings that the prepare step can refuse.
+ */
+IA64PureKind ia64_integer_pure_kind(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_ADDS:
+    case IA64_OP_ADDL:
+    case IA64_OP_SHLADD:
+    case IA64_OP_ADD:
+    case IA64_OP_ADD_ONE:
+    case IA64_OP_SUB:
+    case IA64_OP_SUB_ONE:
+    case IA64_OP_AND:
+    case IA64_OP_ANDCM:
+    case IA64_OP_OR:
+    case IA64_OP_XOR:
+    case IA64_OP_SUB_IMM:
+    case IA64_OP_AND_IMM:
+    case IA64_OP_ANDCM_IMM:
+    case IA64_OP_OR_IMM:
+    case IA64_OP_XOR_IMM:
+    case IA64_OP_SHL:
+    case IA64_OP_SHRU:
+    case IA64_OP_SHR:
+    case IA64_OP_SHL_IMM:
+    case IA64_OP_SHRU_IMM:
+    case IA64_OP_SHR_IMM:
+    case IA64_OP_DEPZ:
+    case IA64_OP_DEPZ_IMM:
+    case IA64_OP_EXTRU:
+    case IA64_OP_SHRP_IMM:
+    case IA64_OP_DEP:
+    case IA64_OP_DEP_IMM:
+    case IA64_OP_EXTR:
+    case IA64_OP_SXT1:
+    case IA64_OP_SXT2:
+    case IA64_OP_SXT4:
+    case IA64_OP_ZXT1:
+    case IA64_OP_ZXT2:
+    case IA64_OP_ZXT4:
+    case IA64_OP_SHLADDP4:
+    case IA64_OP_MPY4:
+    case IA64_OP_MPYSHL4:
+    case IA64_OP_MPYSH:
+    case IA64_OP_MPYUH:
+    case IA64_OP_MUX:
+    case IA64_OP_POPCNT:
+    case IA64_OP_CLZ:
+    case IA64_OP_MOVL:
+    case IA64_OP_ADDP4:
+    case IA64_OP_ADDP4_IMM:
+        return IA64_PURE_GR;
+    case IA64_OP_CMP_EQ:
+    case IA64_OP_CMP_LT:
+    case IA64_OP_CMP_LE:
+    case IA64_OP_CMP_GT:
+    case IA64_OP_CMP_GE:
+    case IA64_OP_CMP_LTU:
+    case IA64_OP_CMP_LEU:
+    case IA64_OP_CMP_GTU:
+    case IA64_OP_CMP_GEU:
+    case IA64_OP_CMP_NE:
+    case IA64_OP_CMP_EQ_AND:
+    case IA64_OP_CMP_NE_AND:
+    case IA64_OP_CMP_GT_AND:
+    case IA64_OP_CMP_LE_AND:
+    case IA64_OP_CMP_GE_AND:
+    case IA64_OP_CMP_LT_AND:
+    case IA64_OP_CMP_EQ_OR:
+    case IA64_OP_CMP_NE_OR:
+    case IA64_OP_CMP_GT_OR:
+    case IA64_OP_CMP_LE_OR:
+    case IA64_OP_CMP_GE_OR:
+    case IA64_OP_CMP_LT_OR:
+    case IA64_OP_CMP_EQ_OR_ANDCM:
+    case IA64_OP_CMP_NE_OR_ANDCM:
+    case IA64_OP_CMP_GT_OR_ANDCM:
+    case IA64_OP_CMP_LE_OR_ANDCM:
+    case IA64_OP_CMP_GE_OR_ANDCM:
+    case IA64_OP_CMP_LT_OR_ANDCM:
+    case IA64_OP_CMP_EQ_IMM:
+    case IA64_OP_CMP_LT_IMM:
+    case IA64_OP_CMP_EQ_AND_IMM:
+    case IA64_OP_CMP_NE_AND_IMM:
+    case IA64_OP_CMP_EQ_OR_IMM:
+    case IA64_OP_CMP_NE_OR_IMM:
+    case IA64_OP_CMP_EQ_OR_ANDCM_IMM:
+    case IA64_OP_CMP_NE_OR_ANDCM_IMM:
+    case IA64_OP_CMP4_EQ_AND:
+    case IA64_OP_CMP4_NE_AND:
+    case IA64_OP_CMP4_EQ_OR:
+    case IA64_OP_CMP4_NE_OR:
+    case IA64_OP_CMP4_EQ_OR_ANDCM:
+    case IA64_OP_CMP4_NE_OR_ANDCM:
+    case IA64_OP_CMP4_GT_AND:
+    case IA64_OP_CMP4_LE_AND:
+    case IA64_OP_CMP4_GE_AND:
+    case IA64_OP_CMP4_LT_AND:
+    case IA64_OP_CMP4_GT_OR:
+    case IA64_OP_CMP4_LE_OR:
+    case IA64_OP_CMP4_GE_OR:
+    case IA64_OP_CMP4_LT_OR:
+    case IA64_OP_CMP4_GT_OR_ANDCM:
+    case IA64_OP_CMP4_LE_OR_ANDCM:
+    case IA64_OP_CMP4_GE_OR_ANDCM:
+    case IA64_OP_CMP4_LT_OR_ANDCM:
+    case IA64_OP_CMP4_EQ_OR_ANDCM_IMM:
+    case IA64_OP_CMP4_NE_OR_ANDCM_IMM:
+    case IA64_OP_CMP_LTU_IMM:
+    case IA64_OP_CMP4_EQ:
+    case IA64_OP_CMP4_LT:
+    case IA64_OP_CMP4_LE:
+    case IA64_OP_CMP4_GT:
+    case IA64_OP_CMP4_GE:
+    case IA64_OP_CMP4_LTU:
+    case IA64_OP_CMP4_LEU:
+    case IA64_OP_CMP4_GTU:
+    case IA64_OP_CMP4_GEU:
+    case IA64_OP_CMP4_EQ_IMM:
+    case IA64_OP_CMP4_LT_IMM:
+    case IA64_OP_CMP4_LTU_IMM:
+    case IA64_OP_CMP4_EQ_AND_IMM:
+    case IA64_OP_CMP4_NE_AND_IMM:
+    case IA64_OP_CMP4_EQ_OR_IMM:
+    case IA64_OP_CMP4_NE_OR_IMM:
+    case IA64_OP_TBIT_Z:
+    case IA64_OP_TBIT_NZ:
+    case IA64_OP_TBIT_Z_OR_ANDCM:
+    case IA64_OP_TBIT_NZ_OR_ANDCM:
+    case IA64_OP_TNAT_Z:
+    case IA64_OP_TNAT_NZ:
+    case IA64_OP_TNAT_NZ_AND:
+        return IA64_PURE_PR;
+    default:
+        return IA64_PURE_NONE;
+    }
+}
+
 IA64GenResult ia64_gen_integer(DisasContext *ctx,
                                const Ia64Instruction *insn)
 {

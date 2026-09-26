@@ -1516,13 +1516,11 @@ static void ia64_gen_force_ri_tracked(DisasContext *ctx, uint8_t slot)
 }
 
 /*
- * Keep the architecturally visible restart point at the next instruction
- * boundary after an instruction completes.  In particular, a vCPU kick can
- * make TCG leave a translated block between the end of one instruction and
- * the generated code for the next one.  Leaving PSR.ri at the slot that just
- * completed makes an asynchronous interruption replay that instruction; at
- * the end of a bundle it can also pair the following bundle address with a
- * stale slot number.
+ * Move the restart point to the next instruction boundary after an
+ * instruction completes.  PSR.ri itself is stored only before code that can
+ * observe it (ia64_gen_sync_ri): under TCG a TB is left only at its exits, at
+ * a helper that raises or longjmps, or at a softmmu fault or I/O recompile,
+ * and a pending interrupt is only taken at TB entry.
  *
  * An MLX L+X instruction occupies slots 1 and 2, so its successor is slot 0
  * of the next bundle rather than slot 2 of the current bundle.  SDM Vol. 2,
@@ -1533,10 +1531,27 @@ void ia64_gen_advance_restart_point(DisasContext *ctx, uint64_t bundle_ip,
                                     uint8_t slot, bool mlx_long)
 {
     if (slot == 2 || (slot == 1 && mlx_long)) {
-        ia64_gen_force_ri_tracked(ctx, 0);
+        ctx->restart.logical_ri = 0;
         tcg_gen_movi_i64(cpu_ip, bundle_ip + 16);
     } else {
-        ia64_gen_force_ri_tracked(ctx, slot + 1);
+        ctx->restart.logical_ri = slot + 1;
+    }
+}
+
+static void ia64_gen_sync_ri(DisasContext *ctx)
+{
+    ia64_gen_set_ri_tracked(ctx, ctx->restart.logical_ri);
+}
+
+/*
+ * An exit path branches off code that goes on, so it must leave the
+ * translation-time view of PSR.ri as it is.
+ */
+static void ia64_gen_sync_ri_for_exit(const DisasContext *ctx)
+{
+    if (!ctx->restart.current_ri_known ||
+        ctx->restart.current_ri != ctx->restart.logical_ri) {
+        ia64_gen_set_ri(ctx->restart.logical_ri);
     }
 }
 
@@ -1560,11 +1575,7 @@ static void ia64_gen_save_fault_slot_from_ri(void)
 
 void ia64_gen_save_fault_slot_for_exit(DisasContext *ctx)
 {
-    if (ctx->restart.current_ri_known) {
-        ia64_gen_set_fault_slot(ctx->restart.current_ri);
-    } else {
-        ia64_gen_save_fault_slot_from_ri();
-    }
+    ia64_gen_set_fault_slot(ctx->restart.logical_ri);
 }
 
 static void ia64_gen_note_successful_bundle(const DisasContext *ctx,
@@ -1947,7 +1958,9 @@ void ia64_prepare_self_counted_loop(
      * The budget temp is created and initialized once per TB in
      * ia64_tr_tb_start (see there for why it cannot be initialized here);
      * multiple self-loops in one TB share it, which only tightens the cap.
+     * Both paths into the label hold RI 0: the back edge stores it.
      */
+    ia64_gen_sync_ri(ctx);
     ctx->branch.counted_self_label = gen_new_label();
     ctx->branch.counted_self_ip = bundle_ip;
     gen_set_label(ctx->branch.counted_self_label);
@@ -3141,6 +3154,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     }
     ctx->restart.current_ri = ctx->restart.start_slot;
     ctx->restart.current_ri_known = true;
+    ctx->restart.logical_ri = ctx->restart.start_slot;
     ctx->restart.track_iipa = ctx->base.tb->flags & IA64_TB_FLAG_PSR_IC;
     ctx->restart.track_psr_suppression =
         ctx->base.tb->flags & IA64_TB_FLAG_PSR_SUPPRESS;
@@ -3179,6 +3193,36 @@ static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cs)
     ctx->branch.counted_self_budget = tcg_temp_new_i64();
     tcg_gen_movi_i64(ctx->branch.counted_self_budget,
                      IA64_COUNTED_SELF_BUDGET);
+}
+
+/*
+ * Whether the code for insn can observe PSR.ri: through a helper, a memory
+ * access that may fault, an exception or a TB exit.  The rest runs with a
+ * stale PSR.ri, which nothing reads before the next sync.
+ */
+static bool ia64_insn_observes_ri(DisasContext *ctx,
+                                  const Ia64Instruction *insn)
+{
+    uint8_t dst = insn->operands.common.destination;
+
+    if (ctx->psr_ss || ctx->psr_tb || ctx->restart.track_psr_suppression ||
+        ctx->base.plugin_enabled || !insn->valid ||
+        insn->placement_illegal || insn->reserved_field ||
+        (ia64_insn_cpuid4_feature(insn) &
+         ~ia64_env_cpu_class(ctx->env)->cpuid_features)) {
+        return true;
+    }
+    switch (ia64_integer_pure_kind(insn)) {
+    case IA64_PURE_GR:
+        /* r0 and an unproven stacked target take the frame check's fault. */
+        return dst == 0 ||
+               (dst >= IA64_STACKED_GR_BASE &&
+                dst - IA64_STACKED_GR_BASE + 1 > ctx->cfm_sof_checked);
+    case IA64_PURE_PR:
+        return ia64_compare_has_equal_targets(insn);
+    default:
+        return true;
+    }
 }
 
 static void ia64_tr_insn_start(DisasContextBase *db, CPUState *cs)
@@ -3329,6 +3373,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
             slot);
         bool stop_after;
         bool track_iipa_for_insn;
+        bool ri_synced;
 
         ia64_apply_mlx_long_fixup(template_code, slots, slot, &insn,
                                   &skip_x_slot);
@@ -3376,7 +3421,11 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
                                     exception_state.
                                     psr_suppression_before_insn));
         }
-        ia64_gen_set_ri_tracked(ctx, slot);
+        ctx->restart.logical_ri = slot;
+        ri_synced = ia64_insn_observes_ri(ctx, &insn);
+        if (ri_synced) {
+            ia64_gen_sync_ri(ctx);
+        }
         ctx->trap_slot = slot;
         if (ctx->psr_ss) {
             gen_helper_completion_trap_arm(tcg_env,
@@ -3394,6 +3443,13 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
             ctx->restart.next_instruction_group_start;
         if (ia64_insn_may_modify_psr_ri(&insn)) {
             ctx->restart.current_ri_known = false;
+        } else if (ri_synced) {
+            /*
+             * Code that stored another slot (a self-loop back edge) left the
+             * TB there; the path that goes on still holds the synced slot.
+             */
+            ctx->restart.current_ri = slot;
+            ctx->restart.current_ri_known = true;
         }
         if (track_iipa_for_insn && !psr_ic_modified) {
             record_iipa = false;
@@ -3407,6 +3463,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
              */
             ia64_gen_store_instruction_group_start(
                 ctx->restart.instruction_group_start);
+            ia64_gen_sync_ri_for_exit(ctx);
             ia64_gen_save_fault_slot_for_exit(ctx);
             tcg_gen_exit_tb(NULL, 0);
             db->is_jmp = DISAS_NORETURN;
