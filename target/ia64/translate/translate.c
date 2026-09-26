@@ -494,6 +494,13 @@ static bool ia64_insn_writes_gr_r1(const Ia64Instruction *insn)
     }
 }
 
+/*
+ * The TB this thread translates: NaT reads fold to 0 where its facts know a
+ * bit clear, and a TCG write that may set a NaT bit forgets the fact.  The
+ * policy in ia64_update_nat_known() then states what the instruction proved.
+ */
+static __thread DisasContext *ia64_nat_ctx;
+
 static bool ia64_nat_is_known_clear(const DisasContext *ctx, uint8_t reg)
 {
     return reg == 0 ||
@@ -741,13 +748,26 @@ static void ia64_drop_nat_known_renamed(const Ia64Instruction *insn,
 void ia64_update_nat_known(DisasContext *ctx,
                            const Ia64Instruction *insn)
 {
-    bool old_r1 = ia64_nat_is_known_clear(
-        ctx, insn->operands.common.destination);
-    bool old_r2 = ia64_nat_is_known_clear(ctx, insn->operands.common.source1);
-    bool old_r3 = ia64_nat_is_known_clear(ctx, insn->operands.common.source2);
+    const uint64_t *before = ctx->memory.nat_known_before;
+    uint8_t r1 = insn->operands.common.destination;
+    uint8_t r2 = insn->operands.common.source1;
+    uint8_t r3 = insn->operands.common.source2;
+    bool old_r1 = r1 == 0 || (before[r1 / 64] >> (r1 % 64)) & 1;
+    bool old_r2 = r2 == 0 || (before[r2 / 64] >> (r2 % 64)) & 1;
+    bool old_r3 = r3 == 0 || (before[r3 / 64] >> (r3 % 64)) & 1;
+    uint64_t after[2] = {
+        ctx->memory.nat_known_clear[0], ctx->memory.nat_known_clear[1]
+    };
+    bool result;
+
+    /* The policy judges the sources as they were before the instruction. */
+    ctx->memory.nat_known_clear[0] = before[0];
+    ctx->memory.nat_known_clear[1] = before[1];
+    result = ia64_nat_result_is_known_clear(ctx, insn);
+    ctx->memory.nat_known_clear[0] = after[0];
+    ctx->memory.nat_known_clear[1] = after[1];
 
     if (ia64_insn_writes_gr_r1(insn)) {
-        bool result = ia64_nat_result_is_known_clear(ctx, insn);
 
         /* A predicated-off instruction preserves the old destination. */
         ia64_nat_set_known_clear(ctx, insn->operands.common.destination,
@@ -767,6 +787,8 @@ void ia64_update_nat_known(DisasContext *ctx,
 static void ia64_set_exit_nat_known(DisasContext *ctx,
                                     const Ia64Instruction *insn)
 {
+    ctx->memory.nat_known_before[0] = ctx->memory.nat_known_clear[0];
+    ctx->memory.nat_known_before[1] = ctx->memory.nat_known_clear[1];
     ctx->memory.nat_known_at_exit[0] = ctx->memory.nat_known_clear[0];
     ctx->memory.nat_known_at_exit[1] = ctx->memory.nat_known_clear[1];
     ia64_drop_nat_known_renamed(insn, ctx->memory.nat_known_at_exit);
@@ -2154,6 +2176,9 @@ void ia64_gen_gr_nat_clear(uint8_t reg)
     }
 
     ia64_gen_note_stacked_gr_write(reg);
+    if (ia64_nat_ctx && ia64_nat_is_known_clear(ia64_nat_ctx, reg)) {
+        return;
+    }
     tcg_gen_andi_i64(cpu_nat[reg / 64], cpu_nat[reg / 64],
                      ~(1ULL << (reg % 64)));
 }
@@ -2165,6 +2190,9 @@ void ia64_gen_gr_nat_set(uint8_t reg)
     }
 
     ia64_gen_note_stacked_gr_write(reg);
+    if (ia64_nat_ctx) {
+        ia64_nat_set_known_clear(ia64_nat_ctx, reg, false);
+    }
     tcg_gen_ori_i64(cpu_nat[reg / 64], cpu_nat[reg / 64],
                     1ULL << (reg % 64));
 }
@@ -2187,6 +2215,9 @@ void ia64_gen_gr_nat_assign(uint8_t reg, TCGv_i64 bit)
     }
 
     ia64_gen_note_stacked_gr_write(reg);
+    if (ia64_nat_ctx) {
+        ia64_nat_set_known_clear(ia64_nat_ctx, reg, false);
+    }
     shifted = tcg_temp_new_i64();
     tcg_gen_andi_i64(shifted, bit, 1);
     tcg_gen_shli_i64(shifted, shifted, reg % 64);
@@ -2199,7 +2230,8 @@ TCGv_i64 ia64_gen_gr_nat_read(uint8_t reg)
 {
     TCGv_i64 bit = tcg_temp_new_i64();
 
-    if (reg == 0) {
+    if (reg == 0 ||
+        (ia64_nat_ctx && ia64_nat_is_known_clear(ia64_nat_ctx, reg))) {
         tcg_gen_movi_i64(bit, 0);
         return bit;
     }
@@ -3264,6 +3296,9 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
     }
     ctx->memory.nat_known_at_exit[0] = ctx->memory.nat_known_clear[0];
     ctx->memory.nat_known_at_exit[1] = ctx->memory.nat_known_clear[1];
+    ctx->memory.nat_known_before[0] = ctx->memory.nat_known_clear[0];
+    ctx->memory.nat_known_before[1] = ctx->memory.nat_known_clear[1];
+    ia64_nat_ctx = ctx;
     ctx->restart.instruction_group_start =
         ctx->base.tb->flags & IA64_TB_FLAG_GROUP_START;
     ctx->restart.next_instruction_group_start =
@@ -3643,6 +3678,7 @@ static void ia64_tr_tb_stop(DisasContextBase *db, CPUState *cs)
     default:
         g_assert_not_reached();
     }
+    ia64_nat_ctx = NULL;
 }
 
 static const char *ia64_unit_log_name(IA64SlotUnit unit)

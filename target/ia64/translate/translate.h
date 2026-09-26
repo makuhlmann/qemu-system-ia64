@@ -46,6 +46,8 @@ typedef struct IA64TranslationMemoryState {
     uint64_t nat_known_clear[2];
     /* nat_known_clear where the current instruction may leave the TB. */
     uint64_t nat_known_at_exit[2];
+    /* nat_known_clear before the current instruction. */
+    uint64_t nat_known_before[2];
 } IA64TranslationMemoryState;
 
 typedef struct IA64TranslationRestartState {

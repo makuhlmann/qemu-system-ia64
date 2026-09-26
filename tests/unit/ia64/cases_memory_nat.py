@@ -52,6 +52,8 @@ from .encoding import (
     br_cloop,
     br_cond,
     cmp_eq_imm,
+    mov_pr_gr,
+    tnat_z,
     br_ctop_many,
     br_ret,
     break_m,
@@ -3166,6 +3168,26 @@ test_nat_clear_ctop_link_rechecks_rotated_registers = require_registers(
         "r7": (1 << 64) - 1,
     }, entry=0x10)
 
+# A TB entered with every GR NaT clear still sees the NaT that ld8.fill
+# gives r5: the compare writes 0 to both targets and tnat.z finds the NaT.
+test_nat_clear_tb_compare_sees_filled_nat = require_registers(
+    "nat_clear_tb_compare_sees_filled_nat", [
+        (0x10, 0x00, addl(9, 0x300, 0), nop_i(), nop_i()),
+        (0x20, *movl_mlx(8, 1 << 32)),
+        (0x30, 0x09, nop_m(), mov_m_gr_ar(8, 36), nop_i()),
+        (0x40, 0x11, cmp_eq_imm(6, 0, 0, 0), cmp_eq_imm(7, 0, 0, 0),
+         br_cond(0x40, 0x50)),
+        (0x50, 0x09, ld8_fill_postinc(5, 9, 0), nop_m(), nop_i()),
+        (0x60, 0x01, cmp_eq_imm(6, 7, 0, 5), tnat_z(8, 9, 5), nop_i()),
+        (0x70, 0x01, nop_m(), mov_pr_gr(10), nop_i()),
+        (0x80, 0x00, nop_m(), extr_u(11, 10, 6, 4), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+    ], {
+        "ip": 0x90,
+        "exception": IA64_EXCP_NONE,
+        "r11": 0b1000,
+    }, entry=0x10)
+
 # A br.ctop that falls through has still rotated the stacked registers: the
 # NaT that ld8.s leaves in r39 is in r32 afterwards, although r32 was
 # written NaT-clear earlier in the same TB.
@@ -3201,6 +3223,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'nat_clear_tb_rechecks_chained_entry',
     'nat_clear_call_link_rechecks_renamed_outputs',
     'nat_clear_ctop_link_rechecks_rotated_registers',
+    'nat_clear_tb_compare_sees_filled_nat',
     'br_ctop_fallthrough_rotation_drops_nat_facts',
     'predicated_bsw_drops_banked_nat_facts',
 
