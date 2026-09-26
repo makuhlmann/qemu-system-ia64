@@ -256,24 +256,40 @@ static void ia64_copy_bit_range(uint64_t dst[2], uint32_t dst_bit,
     dst[1] = target >> 64;
 }
 
-static void ia64_clear_bit_range(uint64_t bits[2], uint32_t first,
-                                 uint32_t count)
+static inline void ia64_clear_bit_range(uint64_t bits[2], uint32_t first,
+                                        uint32_t count)
 {
-    uint32_t word = first / 64;
-    uint32_t shift = first % 64;
-    uint32_t n = MIN(count, 64 - shift);
-    uint64_t mask;
+    __uint128_t target = ((__uint128_t)bits[1] << 64) | bits[0];
+    __uint128_t mask;
 
     if (count == 0) {
         return;
     }
+    mask = count == 128 ? ~(__uint128_t)0 : (((__uint128_t)1 << count) - 1);
+    target &= ~(mask << first);
+    bits[0] = target;
+    bits[1] = target >> 64;
+}
 
-    mask = n == 64 ? UINT64_MAX : ((1ULL << n) - 1) << shift;
-    bits[word] &= ~mask;
-    count -= n;
-    if (count != 0) {
-        mask = count == 64 ? UINT64_MAX : (1ULL << count) - 1;
-        bits[word + 1] &= ~mask;
+/*
+ * br.call, br.ret, cover and alloc run these on every frame change; the
+ * checks below are the common case of the called functions, without the
+ * call.
+ */
+static inline void ia64_rse_invalidate_stacked_alat(CPUIA64State *env)
+{
+    if (env->alat_state.alat_active_count != 0) {
+        ia64_invalidate_stacked_alat(env);
+    }
+}
+
+static inline void ia64_rse_clear_rrb_fr_pr(CPUIA64State *env)
+{
+    if (env->cfm_rrb_fr != 0) {
+        ia64_set_cfm_rrb_fr(env, 0);
+    }
+    if (env->cfm_rrb_pr != 0) {
+        ia64_set_cfm_rrb_pr(env, 0);
     }
 }
 
@@ -813,8 +829,7 @@ static void ia64_rse_restore_frame(CPUIA64State *env, uint32_t preserved,
         env->cfm_sol = 0;
         env->cfm_sor = 0;
         env->cfm_rrb_gr = 0;
-        ia64_set_cfm_rrb_fr(env, 0);
-        ia64_set_cfm_rrb_pr(env, 0);
+        ia64_rse_clear_rrb_fr_pr(env);
         return;
     }
 
@@ -938,7 +953,7 @@ static void ia64_rse_return_to_frame(CPUIA64State *env, uint64_t pfm,
 
     ia64_rse_restore_frame(env, preserved, growth, old_sof);
     ia64_rse_sync_frame_in(env);
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_invalidate_stacked_alat(env);
     ia64_rse_complete_frame_loads(env, 0);
     ia64_rse_check(env, "return");
 }
@@ -1097,8 +1112,7 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
         env->cfm_sol = 0;
         env->cfm_sor = 0;
         env->cfm_rrb_gr = 0;
-        ia64_set_cfm_rrb_fr(env, 0);
-        ia64_set_cfm_rrb_pr(env, 0);
+        ia64_rse_clear_rrb_fr_pr(env);
         ia64_rse_invalidate_non_current(env);
         ia64_alat_invala(env);
         ia64_ia32_enter(env);
@@ -1291,12 +1305,11 @@ void ia64_rse_br_call(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sol = 0;
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
-    ia64_set_cfm_rrb_fr(env, 0);
-    ia64_set_cfm_rrb_pr(env, 0);
+    ia64_rse_clear_rrb_fr_pr(env);
     if (!move_outputs) {
         ia64_rse_sync_frame_in(env);
     }
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_invalidate_stacked_alat(env);
 
     env->ar_pfs = pfs;
     env->br[b_reg] = next_ip;
@@ -1339,8 +1352,7 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
     env->cfm_sol = 0;
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
-    ia64_set_cfm_rrb_fr(env, 0);
-    ia64_set_cfm_rrb_pr(env, 0);
+    ia64_rse_clear_rrb_fr_pr(env);
     ia64_rse_invalidate_non_current(env);
     ia64_alat_invala(env);
     ia64_ia32_enter(env);
@@ -1449,7 +1461,7 @@ void ia64_rse_alloc(CPUIA64State *env, uint32_t r1, uint32_t pfm,
     if (new_sof > old_sof) {
         ia64_rse_sync_frame_in_range(env, old_sof, new_sof - old_sof);
     }
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_invalidate_stacked_alat(env);
 
     if (r1 != 0) {
         env->gr[r1] = env->ar_pfs;
@@ -1471,9 +1483,8 @@ void ia64_rse_cover(CPUIA64State *env)
     env->cfm_sol = 0;
     env->cfm_sor = 0;
     env->cfm_rrb_gr = 0;
-    ia64_set_cfm_rrb_fr(env, 0);
-    ia64_set_cfm_rrb_pr(env, 0);
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_clear_rrb_fr_pr(env);
+    ia64_rse_invalidate_stacked_alat(env);
     ia64_rse_check(env, "cover");
     IA64_TRACE_RSE_STATE(env, "cover");
 }
@@ -1667,11 +1678,10 @@ void ia64_rse_clrrrb(CPUIA64State *env, uint32_t predicate_only)
         ia64_set_cfm_rrb_pr(env, 0);
     } else {
         env->cfm_rrb_gr = 0;
-        ia64_set_cfm_rrb_fr(env, 0);
-        ia64_set_cfm_rrb_pr(env, 0);
+        ia64_rse_clear_rrb_fr_pr(env);
     }
     ia64_rse_sync_frame_in(env);
-    ia64_invalidate_stacked_alat(env);
+    ia64_rse_invalidate_stacked_alat(env);
     ia64_rse_check(env, "clrrrb");
 }
 
