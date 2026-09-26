@@ -46,6 +46,16 @@ void helper_ia32_check_disabled_fp(CPUIA64State *env,
 void helper_ia32_sse_exception_begin(CPUIA64State *env);
 void helper_ia32_sse_exception_end(CPUIA64State *env);
 
+/*
+ * TF, RF, VM, AC, VIF and VIP live in xenv->eflags itself; only the
+ * arithmetic flags are computed lazily, and cpu_compute_eflags() costs a
+ * cc_compute_all() for them.  Checks that read only the former use this.
+ */
+static inline uint32_t ia32_control_eflags(const CPUX86State *xenv)
+{
+    return xenv->eflags;
+}
+
 static G_NORETURN void ia32_raise_disabled_fp(CPUIA64State *env,
                                               uint64_t disabled)
 {
@@ -55,7 +65,7 @@ static G_NORETURN void ia32_raise_disabled_fp(CPUIA64State *env,
 
 static uint32_t ia32_trap_code(CPUIA64State *env)
 {
-    uint32_t eflags = cpu_compute_eflags(&env->ia32);
+    uint32_t eflags = ia32_control_eflags(&env->ia32);
     uint32_t code = (env->ia32_data_breakpoints & 0xf) << 4;
 
     return code |
@@ -430,7 +440,7 @@ static void ia32_check_block_alignment(CPUX86State *xenv, vaddr addr,
         if (!allow_eflags_ac) {
             return;
         }
-        eflags = cpu_compute_eflags(xenv);
+        eflags = ia32_control_eflags(xenv);
         if (!(eflags & AC_MASK) || !(xenv->cr[0] & CR0_AM_MASK) ||
             (xenv->hflags & HF_CPL_MASK) != 3) {
             return;
@@ -598,7 +608,7 @@ bool ia64_ia32_code_fetch_valid(CPUX86State *xenv, uint32_t linear,
                                 unsigned size)
 {
     SegmentCache *cs = &xenv->segs[R_CS];
-    uint32_t eflags = cpu_compute_eflags(xenv);
+    uint32_t eflags = ia32_control_eflags(xenv);
     uint32_t eip = linear - (uint32_t)cs->base;
     uint32_t last = eip + size - 1;
     unsigned type = (cs->flags >> DESC_TYPE_SHIFT) & 0xf;
@@ -654,7 +664,7 @@ void ia64_ia32_check_fetch_fault_priority(CPUIA64State *env,
                                           uintptr_t retaddr)
 {
     CPUX86State *xenv = &env->ia32;
-    uint32_t eflags = cpu_compute_eflags(xenv);
+    uint32_t eflags = ia32_control_eflags(xenv);
 
     if ((env->psr & IA64_PSR_DB) && !(env->psr & IA64_PSR_ID) &&
         !(eflags & RF_MASK) &&
@@ -680,7 +690,7 @@ void ia64_ia32_check_segment_access(CPUX86State *xenv, uint32_t linear,
 {
     CPUIA64State *env = (CPUIA64State *)xenv;
     SegmentCache *cache;
-    uint32_t eflags = cpu_compute_eflags(xenv);
+    uint32_t eflags = ia32_control_eflags(xenv);
     uint32_t offset;
     uint32_t last;
     uint32_t upper;
@@ -824,7 +834,7 @@ void helper_ia32_lock_check(CPUIA64State *env, target_ulong linear,
     /* IA-32 Alignment Check has priority over Locked Data Reference. */
     if (size > 1 && (addr & (size - 1)) &&
         ((env->psr & IA64_PSR_AC) ||
-         ((cpu_compute_eflags(xenv) & AC_MASK) &&
+         ((ia32_control_eflags(xenv) & AC_MASK) &&
           (xenv->cr[0] & CR0_AM_MASK) &&
           (xenv->hflags & HF_CPL_MASK) == 3))) {
         env->cr_ifa = addr;
@@ -839,7 +849,7 @@ void helper_ia32_virtual_sti_check(CPUIA64State *env)
 {
     CPUX86State *xenv = &env->ia32;
 
-    if (cpu_compute_eflags(xenv) & VIP_MASK) {
+    if (ia32_control_eflags(xenv) & VIP_MASK) {
         ia32_raise_fault(xenv, EXCP0D_GPF, 0, GETPC());
     }
 }
@@ -847,7 +857,7 @@ void helper_ia32_virtual_sti_check(CPUIA64State *env)
 void helper_ia32_virtual_popf(CPUIA64State *env, target_ulong value)
 {
     CPUX86State *xenv = &env->ia32;
-    uint32_t old = cpu_compute_eflags(xenv);
+    uint32_t old = ia32_control_eflags(xenv);
 
     if ((value & TF_MASK) || ((old & VIP_MASK) && (value & IF_MASK))) {
         ia32_raise_fault(xenv, EXCP0D_GPF, 0, GETPC());
@@ -870,7 +880,7 @@ void helper_ia32_taken_branch(CPUIA64State *env)
     ia64_ia32_sync_psr_cpl(env);
     xenv->eflags &= ~RF_MASK;
     env->psr &= ~IA64_PSR_ID;
-    eflags = cpu_compute_eflags(xenv);
+    eflags = ia32_control_eflags(xenv);
     code = (env->ia32_data_breakpoints & 0xf) << 4;
     if (env->psr & IA64_PSR_TB) {
         code |= 1 << 2;
@@ -903,7 +913,7 @@ void helper_ia32_complete_instruction(CPUIA64State *env,
                                       target_ulong next_eip)
 {
     CPUX86State *xenv = &env->ia32;
-    uint32_t eflags = cpu_compute_eflags(xenv);
+    uint32_t eflags = ia32_control_eflags(xenv);
     uint32_t code = (env->ia32_data_breakpoints & 0xf) << 4;
     uint32_t next_ip =
         (uint32_t)(xenv->segs[R_CS].base + (uint32_t)next_eip);
@@ -926,7 +936,7 @@ void helper_ia32_complete_instruction(CPUIA64State *env,
 void helper_ia32_rep_iteration(CPUIA64State *env)
 {
     CPUX86State *xenv = &env->ia32;
-    uint32_t eflags = cpu_compute_eflags(xenv);
+    uint32_t eflags = ia32_control_eflags(xenv);
     uint32_t code = (env->ia32_data_breakpoints & 0xf) << 4;
     uint32_t ip;
 
@@ -975,7 +985,7 @@ G_NORETURN void helper_single_step(CPUX86State *xenv)
 
 void helper_rechecking_single_step(CPUX86State *xenv)
 {
-    if (cpu_compute_eflags(xenv) & TF_MASK) {
+    if (ia32_control_eflags(xenv) & TF_MASK) {
         helper_single_step(xenv);
     }
 }
