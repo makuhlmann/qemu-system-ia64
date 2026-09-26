@@ -1172,6 +1172,7 @@ static inline uint64_t ia64_pkr_mask(const CPUIA64State *env)
 }
 
 void ia64_tlb_bump_generation(CPUIA64State *env, bool is_ifetch);
+void ia64_tlb_index_rebuild(CPUIA64State *env);
 void ia64_tlb_bump_slot_generation(CPUIA64State *env, bool is_ifetch,
                                    uint16_t slot);
 const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
@@ -1352,6 +1353,41 @@ static inline bool ia64_tlb_match(const IA64TlbEntry *entry, uint64_t va,
     }
 
     return ((va ^ entry->va) & entry->page_mask) == 0;
+}
+
+static inline unsigned ia64_tlb_index_bucket(uint64_t va, uint32_t rid,
+                                             unsigned shift)
+{
+    uint64_t key = ((va & IA64_REGION7_PHYS_MASK) >> shift) ^
+                   ((uint64_t)rid << 40) ^ shift;
+
+    return (key * 0x9e3779b97f4a7c15ULL) >> (64 - IA64_TLB_INDEX_BITS);
+}
+
+/* The lowest slot whose entry maps va under rid, or -1: as a scan finds it. */
+static inline int ia64_tlb_index_find(const IA64TlbIndex *index,
+                                      const IA64TlbEntry *tlb, uint64_t va,
+                                      uint32_t rid)
+{
+    uint64_t shifts = index->shift_mask;
+    int best = -1;
+
+    while (shifts != 0) {
+        unsigned shift = ctz64(shifts);
+        unsigned link = index->head[ia64_tlb_index_bucket(va, rid, shift)];
+
+        shifts &= shifts - 1;
+        while (link != 0) {
+            int slot = link - 1;
+
+            if ((best < 0 || slot < best) &&
+                ia64_tlb_match(&tlb[slot], va, rid)) {
+                best = slot;
+            }
+            link = index->next[slot];
+        }
+    }
+    return best;
 }
 
 static inline QEMU_ALWAYS_INLINE uint16_t

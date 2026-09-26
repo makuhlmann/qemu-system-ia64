@@ -45,6 +45,23 @@ typedef struct IA64ExceptionState {
     bool suppressed_tlb_overflow;
 } IA64ExceptionState;
 
+/*
+ * A hash index over one TC array, keyed by (RID, VPN, page shift), so a TLB
+ * miss or an insertion does not scan all IA64_TLB_MAX entries.  Slots are
+ * stored as slot + 1 so that a zeroed index (after reset) is empty; shift 0
+ * marks an unindexed slot.  Derived from the array: rebuilt after migration.
+ */
+#define IA64_TLB_INDEX_BITS 8
+#define IA64_TLB_INDEX_BUCKETS (1 << IA64_TLB_INDEX_BITS)
+
+typedef struct IA64TlbIndex {
+    uint8_t head[IA64_TLB_INDEX_BUCKETS];
+    uint8_t next[IA64_TLB_MAX];
+    uint8_t shift[IA64_TLB_MAX];
+    uint8_t shift_count[64];
+    uint64_t shift_mask;
+} IA64TlbIndex;
+
 typedef struct IA64MMUState {
     /* Derived translation caches; all entries are reconstructible. */
     IA64TlbEntry tlb_data[IA64_TLB_MAX];
@@ -58,6 +75,8 @@ typedef struct IA64MMUState {
     IA64MicroTlbEntry tlb_data_micro[IA64_MICRO_TLB_SIZE];
     IA64MicroTlbEntry tlb_inst_micro[IA64_MICRO_TLB_SIZE];
     IA64CodeTlbEdCache code_tlb_ed;
+    IA64TlbIndex tlb_data_index;
+    IA64TlbIndex tlb_inst_index;
 
     /* Transient bookkeeping for architected purge operations. */
     uint16_t pending_purge_data_count;

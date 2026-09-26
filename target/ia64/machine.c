@@ -209,6 +209,7 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
     memset(&env->mmu.code_tlb_ed, 0, sizeof(env->mmu.code_tlb_ed));
     env->mmu.tlb_data_generation = 1;
     env->mmu.tlb_inst_generation = 1;
+    ia64_tlb_index_rebuild(env);
 
     /*
      * The host softmmu TLB is rebuilt after migration.  Any entries recorded

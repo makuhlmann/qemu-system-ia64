@@ -174,31 +174,29 @@ const IA64TlbEntry *ia64_tlb_find_slow(CPUIA64State *env, uint64_t va,
                                        uint32_t rid, bool is_ifetch)
 {
     IA64TlbEntry *tlb = is_ifetch ? env->mmu.tlb_inst : env->mmu.tlb_data;
+    const IA64TlbIndex *index = is_ifetch ? &env->mmu.tlb_inst_index :
+                                            &env->mmu.tlb_data_index;
     IA64MicroTlbEntry *micro = is_ifetch ? env->mmu.tlb_inst_micro :
                                            env->mmu.tlb_data_micro;
-    uint16_t tlb_count = is_ifetch ? env->mmu.tlb_inst_count :
-                                     env->mmu.tlb_data_count;
     uint32_t generation = is_ifetch ? env->mmu.tlb_inst_generation :
                                       env->mmu.tlb_data_generation;
-    uint16_t i;
+    int slot = ia64_tlb_index_find(index, tlb, va, rid);
+    IA64TlbEntry *entry;
 
-    for (i = 0; i < tlb_count; i++) {
-        IA64TlbEntry *entry = &tlb[i];
-
-        if (ia64_tlb_match(entry, va, rid)) {
-            micro[ia64_micro_tlb_index(va, rid)] = (IA64MicroTlbEntry) {
-                .va = entry->va,
-                .page_mask = entry->page_mask,
-                .rid = entry->rid,
-                .generation = generation,
-                .slot_generation = entry->micro_generation,
-                .slot = i,
-                .valid = true,
-            };
-            return entry;
-        }
+    if (slot < 0) {
+        return NULL;
     }
-    return NULL;
+    entry = &tlb[slot];
+    micro[ia64_micro_tlb_index(va, rid)] = (IA64MicroTlbEntry) {
+        .va = entry->va,
+        .page_mask = entry->page_mask,
+        .rid = entry->rid,
+        .generation = generation,
+        .slot_generation = entry->micro_generation,
+        .slot = slot,
+        .valid = true,
+    };
+    return entry;
 }
 
 static void ia64_cpu_synchronize_from_tb(CPUState *cs,

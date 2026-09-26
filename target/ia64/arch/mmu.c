@@ -338,39 +338,163 @@ static void ia64_discard_pending_purge(IA64TlbEntry *entry,
     (*pending_count)--;
 }
 
+static IA64TlbIndex *ia64_tlb_index_of(CPUIA64State *env,
+                                       const IA64TlbEntry *tlb)
+{
+    return tlb == env->mmu.tlb_data ? &env->mmu.tlb_data_index :
+                                      &env->mmu.tlb_inst_index;
+}
+
+static void ia64_tlb_index_add(IA64TlbIndex *index, const IA64TlbEntry *tlb,
+                               unsigned slot)
+{
+    const IA64TlbEntry *entry = &tlb[slot];
+    unsigned shift;
+    unsigned bucket;
+
+    g_assert(index->shift[slot] == 0);
+    if (!entry->valid || entry->ps == 0) {
+        return;
+    }
+    shift = ctz64(entry->ps);
+    bucket = ia64_tlb_index_bucket(entry->va, entry->rid, shift);
+    index->next[slot] = index->head[bucket];
+    index->head[bucket] = slot + 1;
+    index->shift[slot] = shift;
+    if (index->shift_count[shift]++ == 0) {
+        index->shift_mask |= 1ULL << shift;
+    }
+}
+
+/* Call before the slot's va, rid or ps change; clearing valid may precede. */
+static void ia64_tlb_index_remove(IA64TlbIndex *index,
+                                  const IA64TlbEntry *tlb, unsigned slot)
+{
+    unsigned shift = index->shift[slot];
+    uint8_t *link;
+
+    if (shift == 0) {
+        return;
+    }
+    link = &index->head[ia64_tlb_index_bucket(tlb[slot].va, tlb[slot].rid,
+                                              shift)];
+    while (*link != slot + 1) {
+        g_assert(*link != 0);
+        link = &index->next[*link - 1];
+    }
+    *link = index->next[slot];
+    index->shift[slot] = 0;
+    if (--index->shift_count[shift] == 0) {
+        index->shift_mask &= ~(1ULL << shift);
+    }
+}
+
+void ia64_tlb_index_rebuild(CPUIA64State *env)
+{
+    memset(&env->mmu.tlb_data_index, 0, sizeof(env->mmu.tlb_data_index));
+    memset(&env->mmu.tlb_inst_index, 0, sizeof(env->mmu.tlb_inst_index));
+    for (unsigned slot = 0; slot < IA64_TLB_MAX; slot++) {
+        ia64_tlb_index_add(&env->mmu.tlb_data_index, env->mmu.tlb_data, slot);
+        ia64_tlb_index_add(&env->mmu.tlb_inst_index, env->mmu.tlb_inst, slot);
+    }
+}
+
+/*
+ * Mark in *found every slot that may overlap [start, start + ps): an entry
+ * at least ps large must contain start; a smaller one lies inside the range.
+ * Returns false when the range spans too many smaller pages to probe, and
+ * the caller must scan.
+ */
+static bool ia64_tlb_index_overlap_candidates(const IA64TlbIndex *index,
+                                              uint64_t start, uint64_t ps,
+                                              uint32_t rid, uint64_t found[2])
+{
+    unsigned range_shift = ctz64(ps);
+    uint64_t shifts = index->shift_mask;
+
+    found[0] = 0;
+    found[1] = 0;
+    while (shifts != 0) {
+        unsigned shift = ctz64(shifts);
+        uint64_t pages = shift >= range_shift ?
+                         1 : 1ULL << (range_shift - shift);
+
+        shifts &= shifts - 1;
+        if (pages > 32) {
+            return false;
+        }
+        for (uint64_t page = 0; page < pages; page++) {
+            uint64_t va = start + (page << shift);
+            unsigned link = index->head[ia64_tlb_index_bucket(va, rid,
+                                                              shift)];
+
+            while (link != 0) {
+                found[(link - 1) / 64] |= 1ULL << ((link - 1) % 64);
+                link = index->next[link - 1];
+            }
+        }
+    }
+    return true;
+}
+
+static bool ia64_purge_tc_entry_if_overlapping(CPUIA64State *env,
+                                               IA64TlbEntry *tlb,
+                                               uint16_t *pending_count,
+                                               uint64_t start, uint64_t ps,
+                                               uint32_t rid, bool is_data,
+                                               uint16_t i)
+{
+    if (!tlb[i].valid || tlb[i].rid != rid || tlb[i].is_tr ||
+        !ia64_tlb_entry_overlaps(&tlb[i], start, ps, rid)) {
+        return false;
+    }
+    ia64_qemu_tlb_flush_entry(env, &tlb[i], is_data);
+    ia64_discard_pending_purge(&tlb[i], pending_count);
+    ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, i);
+    tlb[i].valid = 0;
+    ia64_tlb_bump_slot_generation(env, !is_data, i);
+    return true;
+}
+
 static bool ia64_purge_tc_entries(CPUIA64State *env, IA64TlbEntry *tlb,
                                   uint16_t *count,
                                   uint16_t *pending_count, uint64_t va,
                                   uint64_t ps, uint32_t rid, bool is_data,
                                   uint16_t *next_replace, int *insert_slot)
 {
+    const IA64TlbIndex *index = ia64_tlb_index_of(env, tlb);
     int empty = -1;
     uint64_t start = ia64_va_page_base(va, ps);
+    uint64_t found[2];
     uint16_t i;
     bool purged = false;
 
     if (insert_slot) {
         *insert_slot = -1;
     }
-    for (i = 0; i < *count; i++) {
-        if (!tlb[i].valid) {
-            if (insert_slot && empty < 0) {
-                empty = i;
+    if (ia64_tlb_index_overlap_candidates(index, start, ps, rid, found)) {
+        for (unsigned word = 0; word < 2; word++) {
+            while (found[word] != 0) {
+                i = word * 64 + ctz64(found[word]);
+                found[word] &= found[word] - 1;
+                purged |= ia64_purge_tc_entry_if_overlapping(
+                    env, tlb, pending_count, start, ps, rid, is_data, i);
             }
-            continue;
         }
-        if (tlb[i].rid != rid || tlb[i].is_tr) {
-            continue;
+    } else {
+        for (i = 0; i < *count; i++) {
+            purged |= ia64_purge_tc_entry_if_overlapping(
+                env, tlb, pending_count, start, ps, rid, is_data, i);
         }
-        if (ia64_tlb_entry_overlaps(&tlb[i], start, ps, rid)) {
-            ia64_qemu_tlb_flush_entry(env, &tlb[i], is_data);
-            ia64_discard_pending_purge(&tlb[i], pending_count);
-            tlb[i].valid = 0;
-            ia64_tlb_bump_slot_generation(env, !is_data, i);
-            if (insert_slot && empty < 0) {
+    }
+
+    /* The first free slot below the old count, as the scan used to find. */
+    if (insert_slot) {
+        for (i = 0; i < *count; i++) {
+            if (index->shift[i] == 0 && !tlb[i].valid) {
                 empty = i;
+                break;
             }
-            purged = true;
         }
     }
 
@@ -507,6 +631,7 @@ static bool ia64_complete_pending_purges(CPUIA64State *env,
             tlb[i].pending_purge = 0;
             g_assert(*pending_count > 0);
             (*pending_count)--;
+            ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, i);
             tlb[i].valid = 0;
             ia64_tlb_bump_slot_generation(env, is_ifetch, i);
             purged = true;
@@ -642,11 +767,13 @@ static bool ia64_cache_replaced_tr(CPUIA64State *env, IA64TlbEntry *tlb,
                   slot, old_tr->va, old_tr->rid, old_tr->pa, old_tr->ps);
     ia64_qemu_tlb_flush_victim(env, &tlb[slot], !is_ifetch);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
+    ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, slot);
     micro_generation = tlb[slot].micro_generation;
     tlb[slot] = *old_tr;
     tlb[slot].micro_generation = micro_generation;
     tlb[slot].is_tr = 0;
     tlb[slot].slot = slot;
+    ia64_tlb_index_add(ia64_tlb_index_of(env, tlb), tlb, slot);
     ia64_tlb_bump_slot_generation(env, is_ifetch, slot);
     if (slot >= *cnt) {
         *cnt = slot + 1;
@@ -734,6 +861,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
         ia64_discard_pending_purge(&tlb[slot], pending_count);
     }
 
+    ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, slot);
     tlb[slot].va = va;
     tlb[slot].pa = pa;
     tlb[slot].ps = ps;
@@ -748,6 +876,7 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     tlb[slot].rid = rid;
     tlb[slot].key = key;
     tlb[slot].slot = slot;
+    ia64_tlb_index_add(ia64_tlb_index_of(env, tlb), tlb, slot);
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
@@ -2254,6 +2383,7 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
 
     ia64_qemu_tlb_flush_victim(env, &tlb[slot], !is_ifetch);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
+    ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, slot);
     tlb[slot].va = base_va;
     tlb[slot].pa = base_pa;
     tlb[slot].ps = page_size;
@@ -2268,6 +2398,7 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
     tlb[slot].rid = rid;
     tlb[slot].key = key;
     tlb[slot].slot = slot;
+    ia64_tlb_index_add(ia64_tlb_index_of(env, tlb), tlb, slot);
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
@@ -2585,6 +2716,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
     }
     ia64_qemu_tlb_flush_victim(env, &tlb[slot], is_data);
     ia64_discard_pending_purge(&tlb[slot], pending_count);
+    ia64_tlb_index_remove(ia64_tlb_index_of(env, tlb), tlb, slot);
 
     tlb[slot].va = va;
     tlb[slot].pa = pa;
@@ -2600,6 +2732,7 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
     tlb[slot].rid = rid;
     tlb[slot].key = key;
     tlb[slot].slot = slot;
+    ia64_tlb_index_add(ia64_tlb_index_of(env, tlb), tlb, slot);
     if (slot >= *cnt) {
         *cnt = slot + 1;
     }
