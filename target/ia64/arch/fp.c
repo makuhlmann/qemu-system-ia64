@@ -3142,25 +3142,6 @@ void ia64_fp_ldfe(CPUIA64State *env, uint32_t r1, uint64_t addr, uintptr_t ra)
     ia64_fr_write_ext(env, r1, sign, exp, low);
 }
 
-void ia64_fp_ldf_fill(CPUIA64State *env, uint32_t r1, uint64_t addr,
-                      uintptr_t ra)
-{
-    int mmu_idx = ia64_exec_mmu_index(env, false);
-    /*
-     * ldf.fill is not an atomic operation (SDM Vol.3 ldf), so the 16-byte
-     * spill slot needs no single-copy 16-byte atomicity -- only the natural
-     * 8-byte halves.  MO_ATOM_IFALIGN_PAIR keeps those atomic and avoids the
-     * cmpxchg16b/atomic16 path a default MO_128 access would take.
-     */
-    MemOpIdx oi = make_memop_idx(
-        ia64_runtime_data_memop(env, MO_UO | MO_ATOM_IFALIGN_PAIR), mmu_idx);
-    Int128 pair = ia64_exec_load_16(env, addr, oi, ra);
-    uint64_t low = int128_getlo(pair);
-    uint64_t high = int128_gethi(pair);
-
-    ia64_fpreg_from_spill(env, r1, low, high);
-}
-
 void ia64_fp_stfe(CPUIA64State *env, uint64_t addr, uint32_t r2, uintptr_t ra)
 {
     uint64_t high;
@@ -3195,18 +3176,4 @@ void ia64_fp_stfe(CPUIA64State *env, uint64_t addr, uint32_t r2, uintptr_t ra)
         ia64_exec_store_data(env, addr + 8,
                              ((uint16_t)sign << 15) | ext_exp, 2, false, ra);
     }
-}
-
-void ia64_fp_stf_spill(CPUIA64State *env, uint64_t addr, uint32_t r2,
-                       uintptr_t ra)
-{
-    int mmu_idx = ia64_exec_mmu_index(env, false);
-    /* stf.spill is not atomic; pair-atomicity suffices (see ia64_fp_ldf_fill). */
-    MemOpIdx oi = make_memop_idx(
-        ia64_runtime_data_memop(env, MO_UO | MO_ATOM_IFALIGN_PAIR), mmu_idx);
-    uint64_t low;
-    uint64_t high;
-
-    ia64_fpreg_to_spill(env, r2, &low, &high);
-    ia64_exec_store_16(env, addr, int128_make128(low, high), oi, ra);
 }

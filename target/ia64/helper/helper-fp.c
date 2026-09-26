@@ -4,6 +4,7 @@
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "arch/fp.h"
+#include "fpreg.h"
 
 void helper_fpswa_dispatch(CPUIA64State *arg0)
 {
@@ -275,9 +276,9 @@ void helper_ldfe(CPUIA64State *arg0, uint32_t arg1, uint64_t arg2)
     ia64_fp_ldfe(arg0, arg1, arg2, GETPC());
 }
 
-void helper_ldf_fill(CPUIA64State *arg0, uint32_t arg1, uint64_t arg2)
+void helper_fr_from_spill(CPUIA64State *env, uint32_t reg, Int128 value)
 {
-    ia64_fp_ldf_fill(arg0, arg1, arg2, GETPC());
+    ia64_fpreg_from_spill(env, reg, int128_getlo(value), int128_gethi(value));
 }
 
 void helper_stfe(CPUIA64State *arg0, uint64_t arg1, uint32_t arg2)
@@ -285,7 +286,11 @@ void helper_stfe(CPUIA64State *arg0, uint64_t arg1, uint32_t arg2)
     ia64_fp_stfe(arg0, arg1, arg2, GETPC());
 }
 
-void helper_stf_spill(CPUIA64State *arg0, uint64_t arg1, uint32_t arg2)
+Int128 helper_fr_to_spill(CPUIA64State *env, uint32_t reg)
 {
-    ia64_fp_stf_spill(arg0, arg1, arg2, GETPC());
+    uint64_t low;
+    uint64_t high;
+
+    ia64_fpreg_to_spill(env, reg, &low, &high);
+    return int128_make128(low, high);
 }

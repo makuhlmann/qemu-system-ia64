@@ -22,6 +22,7 @@ from .encoding import (
     FPSR_SF_RESERVED_PC1,
     FPSR_SF_TD,
     HIGH_TR_BASE,
+    IA64_ALT_DTLB_VECTOR,
     IA64_DISABLED_FP_VECTOR,
     IA64_EXCP_BREAK,
     IA64_EXCP_ILLEGAL,
@@ -39,6 +40,7 @@ from .encoding import (
     IA64_PSR_BE,
     IA64_PSR_DFH,
     IA64_PSR_DFL,
+    IA64_PSR_DT,
     IA64_PSR_IC,
     IA64_PSR_MFH,
     IA64_PSR_MFL,
@@ -160,6 +162,7 @@ from .encoding import (
     mov_i_imm_ar,
     mov_lc_imm,
     mov_m_cr_gr,
+    mov_m_gr_cr,
     mov_m_gr_ar,
     mov_m_imm_ar,
     movl_mlx,
@@ -177,6 +180,7 @@ from .encoding import (
     spill_to_binary32,
     spill_to_binary64,
     srlz_d,
+    srlz_i,
     ssm,
     st1_postinc,
     st2,
@@ -758,6 +762,53 @@ test_stf_spill_postinc_decode = require_registers("stf_spill_postinc_decode", [
     (0x30, 0x10, nop_m(), nop_i(),
      br_cond(0x30, 0x30)),
 ], {"ip": 0x30, "r3": 0x280}, entry=0x10)
+
+def _fp_spill_fill_tlb_miss(name, insn, isr_access, expected):
+    """
+    stf.spill or ldf.fill in slot 1 through an unmapped address (walker off):
+    the Alternate Data TLB fault names the bundle, slot 1 and the access,
+    and keeps the slot-0 result; the base update, the store and the target
+    register do not happen.  IVA is on a private IVT, away from the firmware.
+    """
+    iva = 0x200000
+    handler = iva + IA64_ALT_DTLB_VECTOR
+    return require_registers(name, [
+        (0x10, *movl_mlx(3, iva)),
+        (0x20, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (0x30, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x40, *movl_mlx(16, 0x1122334455667788)),
+        (0x50, 0x01, setf_sig(6, 16), nop_i(), nop_i()),
+        (0x60, 0x01, setf_sig(7, 16), nop_i(), nop_i()),
+        (0x70, *movl_mlx(2, 0x08000000)),
+        (0x80, *movl_mlx(3, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x90, 0x01, mov_gr_psr_full(3), nop_i(), nop_i()),
+        (0xa0, 0x01, srlz_d(), nop_i(), nop_i()),
+        (0xb0, 0x09, adds(14, 1, 0), insn, nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        (handler, 0x01, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (handler + 0x10, 0x01, mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (handler + 0x20, 0x01, mov_m_cr_gr(10, 20), nop_i(), nop_i()),
+        (handler + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(handler + 0x30, handler + 0x30)),
+    ], {
+        "ip": handler + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r2": 0x08000000,
+        "r8": 0xb0,
+        "r9": isr_access | (1 << IA64_ISR_EI_SHIFT),
+        "r10": 0x08000000,
+        "r14": 1,
+        **expected,
+    }, entry=0x10)
+
+
+test_stf_spill_tlb_miss_faults_in_slot = _fp_spill_fill_tlb_miss(
+    "stf_spill_tlb_miss_faults_in_slot", stf_spill_postinc(2, 6, 16),
+    IA64_ISR_W, {})
+
+test_ldf_fill_tlb_miss_keeps_target = _fp_spill_fill_tlb_miss(
+    "ldf_fill_tlb_miss_keeps_target", ldf_fill_postinc(7, 2, 16), IA64_ISR_R,
+    {"f7": ExpectedFP(0x1122334455667788, 0x1003e)})
 
 test_stf8_postinc_imm9_decode = require_registers("stf8_postinc_imm9_decode", [
     (0x10, 0x00, addl(3, 0x200, 0), nop_i(),
@@ -6246,6 +6297,8 @@ CASE_NAMES = (
     'stf8_stfe_convert_register_format',
     'stf_spill_ldf_fill_preserves_sig',
     'stf_spill_postinc_decode',
+    'stf_spill_tlb_miss_faults_in_slot',
+    'ldf_fill_tlb_miss_keeps_target',
     'stf_spill_preserves_natval',
     'stfd_natval_consumption',
     'stfe_natval_consumption',

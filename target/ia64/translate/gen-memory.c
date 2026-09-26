@@ -412,6 +412,16 @@ static uint32_t ia64_fp_load_size(Ia64Opcode opcode)
     }
 }
 
+/*
+ * stf.spill and ldf.fill are not atomic (SDM Vol 3 ldf, stf), so the 16-byte
+ * slot needs only the atomicity of its aligned 8-byte halves; a default
+ * 16-byte access would take the cmpxchg16b path.
+ */
+static MemOp ia64_fp_spill_memop(DisasContext *ctx)
+{
+    return ia64_data_memop(ctx, MO_UO | MO_ATOM_IFALIGN_PAIR);
+}
+
 static void ia64_gen_fp_load_value(DisasContext *ctx,
                                    const Ia64Instruction *insn,
                                    TCGv_i64 addr)
@@ -437,9 +447,15 @@ static void ia64_gen_fp_load_value(DisasContext *ctx,
                          ia64_data_memop(ctx, MO_LEUQ),
                          IA64_FP_REGISTER_LOAD_SIGNIFICAND);
         break;
-    case IA64_OP_LDF_FILL:
-        gen_helper_ldf_fill(tcg_env, tcg_constant_i32(op->destination), addr);
+    case IA64_OP_LDF_FILL: {
+        TCGv_i128 value = tcg_temp_new_i128();
+
+        tcg_gen_qemu_ld_i128(value, addr, ctx->memory.mmu_idx,
+                             ia64_fp_spill_memop(ctx));
+        gen_helper_fr_from_spill(tcg_env, tcg_constant_i32(op->destination),
+                                 value);
         break;
+    }
     case IA64_OP_LDFE:
         gen_helper_ldfe(tcg_env, tcg_constant_i32(op->destination), addr);
         break;
@@ -964,11 +980,14 @@ IA64GenResult ia64_gen_memory(DisasContext *ctx,
         break;
     }
     case IA64_OP_STF_SPILL: {
+        TCGv_i128 value = tcg_temp_new_i128();
+
         ia64_gen_check_nat_access(insn, op->base, true);
         ia64_gen_check_alignment(insn, ia64_gr_src(op->base), 16, false,
                                  true);
-        gen_helper_stf_spill(tcg_env, ia64_gr_src(op->base),
-                             tcg_constant_i32(op->source));
+        gen_helper_fr_to_spill(value, tcg_env, tcg_constant_i32(op->source));
+        tcg_gen_qemu_st_i128(value, ia64_gr_src(op->base), ctx->memory.mmu_idx,
+                             ia64_fp_spill_memop(ctx));
         ia64_gen_invalidate_alat_store(ctx, ia64_gr_src(op->base), 16);
         if (insn->imm_base_update && op->base != 0) {
             tcg_gen_addi_i64(cpu_gr[op->base], cpu_gr[op->base], op->immediate);
