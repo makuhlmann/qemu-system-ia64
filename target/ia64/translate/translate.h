@@ -41,6 +41,11 @@
  * ia64_ia32_tb_fast).  Bit 2 is no x86 hflags bit.
  */
 #define IA64_TB_FLAG_IA32_FAST    (1u << 2)
+/*
+ * PSR.dt selects the memory index of an IA-32 TB (ia64_cpu_mmu_index).
+ * Bit 28 is HF_AVX_EN, which the IA-32 engine never sets.
+ */
+#define IA64_TB_FLAG_IA32_PSR_DT  (1u << 28)
 #define IA64_TB_FLAG_IA32_PSR_DB  (1u << 29)
 #define IA64_TB_FLAG_IA32_PSR_AC  (1u << 30)
 #define IA64_TB_FLAG_PSR_IS       (1u << 31)

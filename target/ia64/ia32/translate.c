@@ -12,6 +12,7 @@
 #include "ia32/ia32.h"
 
 #define IA32_TB_FLAG_FAST   (1u << 2)
+#define IA32_TB_FLAG_PSR_DT (1u << 28)
 #define IA32_TB_FLAG_PSR_DB (1u << 29)
 #define IA32_TB_FLAG_PSR_AC (1u << 30)
 #define IA32_TB_FLAG_PSR_IS (1u << 31)
@@ -27,8 +28,9 @@
 #define X86_GEN_HELPER_RAISE_EXCEPTION gen_helper_ia32_raise_exception
 #define X86_GEN_HELPER_RSM gen_helper_ia32_rsm
 #define X86_TB_FLAGS(flags) \
-    ((flags) & ~(IA32_TB_FLAG_FAST | IA32_TB_FLAG_PSR_DB | \
-                 IA32_TB_FLAG_PSR_AC | IA32_TB_FLAG_PSR_IS))
+    ((flags) & ~(IA32_TB_FLAG_FAST | IA32_TB_FLAG_PSR_DT | \
+                 IA32_TB_FLAG_PSR_DB | IA32_TB_FLAG_PSR_AC | \
+                 IA32_TB_FLAG_PSR_IS))
 /* ia64_ia32_tb_fast(): no check below can fail or trap in this TB. */
 #define IA32_FAST(s) (((s)->base.tb->flags & IA32_TB_FLAG_FAST) != 0)
 /* Ordinary IA-32 #AC checks run after translation in the segment hook. */

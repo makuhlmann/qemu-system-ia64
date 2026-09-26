@@ -5744,6 +5744,39 @@ test_ia32_cs_not_accessed_selects_checked_tb = _ia32_second_entry_checked_tb(
     "ia32_cs_not_accessed_selects_checked_tb",
     IA32_FLAT_CSD & ~(1 << 52), 0x100)
 
+# The IA-32 memory index depends on PSR.dt (ia64_cpu_mmu_index), so the TB
+# key must too: the second entry reads the DTR-mapped page, not physical
+# 0x2000 through the TB of the first entry.
+test_ia32_psr_dt_change_selects_new_tb = require_registers(
+    "ia32_psr_dt_change_selects_new_tb", [
+        *ia32_environment_bundles(0x700, 0x10),
+        *dtr_setup_bundles(0x10, 0x2000, 0x5000, page_shift=12, slot=5),
+        (0x70, *movl_mlx(2, IA64_PSR_IC)),
+        (0x80, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x90, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(8, 0x100)),
+        (0xb0, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "66 a1 00 20 "     # mov eax,[0x2000]
+            "0f b8 00 02")),   # jmpe 0x200
+        ia32_bundle(0x2000, bytes.fromhex("44 33 22 11")),
+        ia32_bundle(0x5000, bytes.fromhex("88 77 66 55")),
+        (0x200, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 20), nop_i()),
+        (0x210, 0x10, nop_m(), nop_i(), br_cond(0x210, 0x300, qp=7)),
+        (0x220, 0x00, nop_m(), adds(20, 1, 20), adds(21, 0, 8)),
+        (0x230, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x240, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x250, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x260, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        (0x300, 0x10, nop_m(), nop_i(), br_cond(0x300, 0x300)),
+    ], {
+        "ip": 0x300,
+        "r8": 0x55667788,
+        "r21": 0x11223344,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
 CASE_NAMES = (
     'ipis_during_break_faults_all_arrive',
 
@@ -5823,6 +5856,7 @@ CASE_NAMES = (
     'ia32_flat_cs_retf_to_cpl3_updates_psr_cpl',
     'ia32_cs_limit_shrink_selects_checked_tb',
     'ia32_cs_not_accessed_selects_checked_tb',
+    'ia32_psr_dt_change_selects_new_tb',
     'ia32_gate_intercept_reports_concurrent_debug_traps',
     'ia32_gdt_descriptor_read_triggers_data_breakpoint',
     'ia32_gdt_descriptor_read_wraps_at_4g',
