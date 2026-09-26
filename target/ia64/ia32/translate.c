@@ -92,26 +92,46 @@ static int ia64_ia32_iptrace_enabled = -1;
         X86_GEN_SEGMENT_ACCESS_CHECK(s, addr, seg, size, access);      \
     }                                                                  \
 } while (0)
+#define IA32_VECTOR_EA(decode, n)                                      \
+    ((decode)->op[n].has_ea &&                                         \
+     ((decode)->op[n].unit == X86_OP_SSE ||                            \
+      (decode)->op[n].unit == X86_OP_MMX))
 /*
- * The same holds when the first access of the instruction is the integer
- * load of the operand, or the store of MOV.  A read-modify-write keeps the
- * probe, which reports a write fault before the load; so does POP m, whose
- * stack load comes first, and every vector operand, whose alignment fault
- * would otherwise precede the TLB fault.
+ * The same holds when the first access of the instruction is the load of
+ * the operand (gen_load()), or the store of MOV or MOVDQ.  A
+ * read-modify-write keeps the probe, which reports a write fault before
+ * the load, and so does POP m, whose stack load comes first.  An aligned
+ * vector access checks alignment before the TLB, so a misaligned one still
+ * takes the helper, whose probe reports the TLB miss first.
  */
 #define X86_GEN_DECODED_ACCESS_CHECK(s, decode, addr, seg, size, access) do { \
-    bool first_ =                                                      \
-        (access) == X86_SEG_ACCESS_READ                                \
-        ? (((decode)->op[1].has_ea &&                                  \
-            (decode)->op[1].unit == X86_OP_INT) ||                     \
-           ((decode)->op[2].has_ea &&                                  \
-            (decode)->op[2].unit == X86_OP_INT))                       \
-        : (access) == X86_SEG_ACCESS_WRITE &&                          \
-          (decode)->e.gen == gen_MOV &&                                \
-          (decode)->op[0].unit == X86_OP_INT;                          \
+    bool first_ = false;                                               \
+    int vec_ = -1;                                                     \
                                                                        \
-    if (!first_ || !IA32_FLAT(s, seg)) {                               \
+    if ((access) == X86_SEG_ACCESS_READ) {                             \
+        first_ = ((decode)->op[1].has_ea &&                            \
+                  (decode)->op[1].unit == X86_OP_INT) ||               \
+                 ((decode)->op[2].has_ea &&                            \
+                  (decode)->op[2].unit == X86_OP_INT);                 \
+        vec_ = IA32_VECTOR_EA(decode, 1) ? 1 :                         \
+               IA32_VECTOR_EA(decode, 2) ? 2 : -1;                     \
+    } else if ((access) == X86_SEG_ACCESS_WRITE) {                     \
+        first_ = (decode)->e.gen == gen_MOV &&                         \
+                 (decode)->op[0].unit == X86_OP_INT;                   \
+        vec_ = (decode)->e.gen == gen_MOVDQ &&                         \
+               IA32_VECTOR_EA(decode, 0) ? 0 : -1;                     \
+    }                                                                  \
+    if (!IA32_FLAT(s, seg) || (!first_ && vec_ < 0)) {                 \
         X86_GEN_SEGMENT_ACCESS_CHECK(s, addr, seg, size, access);      \
+    } else if (vec_ >= 0 &&                                            \
+               sse_needs_alignment(s, decode, (decode)->op[vec_].ot)) { \
+        TCGLabel *aligned_ = gen_new_label();                          \
+        TCGv low_ = tcg_temp_new();                                    \
+                                                                       \
+        tcg_gen_andi_tl(low_, (addr), (size) - 1);                     \
+        tcg_gen_brcondi_tl(TCG_COND_EQ, low_, 0, aligned_);            \
+        X86_GEN_SEGMENT_ACCESS_CHECK(s, addr, seg, size, access);      \
+        gen_set_label(aligned_);                                       \
     }                                                                  \
 } while (0)
 #define X86_GEN_BOUND_ACCESS_CHECK(s, addr, seg, element_size) do {   \

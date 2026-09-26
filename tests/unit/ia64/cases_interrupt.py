@@ -5948,6 +5948,35 @@ test_ia32_flat_movaps_tlb_miss_precedes_alignment = _ia32_flat_data_case(
     {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_R, "r22": 0xc008},
     psr=IA64_PSR_DT, cflg=(1 << 9) << 32)
 
+test_ia32_flat_movaps_store_tlb_miss_precedes_alignment = \
+    _ia32_flat_data_case(
+        "ia32_flat_movaps_store_tlb_miss_precedes_alignment",
+        bytes.fromhex("0f 29 05 08 c0 00 00"),  # movaps [0xc008],xmm0
+        IA64_ALT_DTLB_VECTOR,
+        {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_W, "r22": 0xc008},
+        psr=IA64_PSR_DT, cflg=(1 << 9) << 32)
+
+test_ia32_flat_aligned_movaps_tlb_miss = _ia32_flat_data_case(
+    "ia32_flat_aligned_movaps_tlb_miss",
+    bytes.fromhex("0f 28 05 00 c0 00 00"),  # movaps xmm0,[0xc000]
+    IA64_ALT_DTLB_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_R, "r22": 0xc000},
+    psr=IA64_PSR_DT, cflg=(1 << 9) << 32)
+
+test_ia32_flat_misaligned_mapped_movaps_faults = _ia32_flat_data_case(
+    "ia32_flat_misaligned_mapped_movaps_faults",
+    bytes.fromhex("0f 28 05 08 c0 00 00"),  # movaps xmm0,[0xc008]
+    IA64_IA32_EXCEPTION_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": 13 << 16},
+    psr=IA64_PSR_DT, cflg=(1 << 9) << 32, dtrs=[(0xc000, 0xc000)])
+
+test_ia32_flat_movups_tlb_miss = _ia32_flat_data_case(
+    "ia32_flat_movups_tlb_miss",
+    bytes.fromhex("0f 10 05 08 c0 00 00"),  # movups xmm0,[0xc008]
+    IA64_ALT_DTLB_VECTOR,
+    {"r20": IA32_FLAT_CODE, "r21": IA64_ISR_R, "r22": 0xc008},
+    psr=IA64_PSR_DT, cflg=(1 << 9) << 32)
+
 test_ia32_flat_pop_m_probes_destination_first = _ia32_flat_data_case(
     "ia32_flat_pop_m_probes_destination_first",
     bytes.fromhex("8f 05 00 c0 00 00"),  # pop dword [0xc000]
@@ -6112,6 +6141,10 @@ CASE_NAMES = (
     'ia32_flat_movaps_tlb_miss_precedes_alignment',
     'ia32_flat_pop_m_probes_destination_first',
     'ia32_flat_rmw_reports_write_miss',
+    'ia32_flat_movaps_store_tlb_miss_precedes_alignment',
+    'ia32_flat_aligned_movaps_tlb_miss',
+    'ia32_flat_misaligned_mapped_movaps_faults',
+    'ia32_flat_movups_tlb_miss',
     'ia32_ldmxcsr_unmasked_exception_faults_in_same_tb',
     'ia32_fxrstor_unmasked_exception_faults_in_same_tb',
     'ia32_gate_intercept_reports_concurrent_debug_traps',
