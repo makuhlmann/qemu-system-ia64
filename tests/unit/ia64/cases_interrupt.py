@@ -6003,6 +6003,66 @@ test_ia32_pop_m_destination_checked_against_ds = _ia32_flat_data_case(
     ssd=IA32_TEST_DSD,
     data=[(0xa800, bytes.fromhex("78 56 34 12"))])
 
+# PAUSE leaves for the main loop; it must still complete like any other
+# instruction: a PSR.ss trap after it, and PSR.id cleared.
+test_ia32_pause_psr_ss_traps_after_it = require_registers(
+    "ia32_pause_psr_ss_traps_after_it", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_IS | IA64_PSR_SS)),
+        (0x20, *movl_mlx(3, 0x100)),
+        *rfi_to_gr(0x30, 2, 3),
+        ia32_bundle(0x100, bytes.fromhex(
+            "f3 90 "        # pause
+            "0f 0b")),      # ud2
+        (IA64_IA32_EXCEPTION_VECTOR, 0x00,
+         mov_m_cr_gr(5, 19), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(6, 17), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_EXCEPTION_VECTOR + 0x20,
+                 IA64_IA32_EXCEPTION_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_IA32_EXCEPTION_VECTOR + 0x20,
+        "r5": 0x102,
+        "r6": (1 << 16) | (1 << 3),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_pause_clears_psr_id = require_registers(
+    "ia32_pause_clears_psr_id", [
+        *ia32_environment_bundles(0x700, 0x10),
+        # Break on the NOP after PAUSE; PSR.id suppresses only PAUSE's fetch.
+        (0x10, *movl_mlx(4, 0)),
+        (0x20, *movl_mlx(5, 0x102)),
+        (0x30, 0x00, mov_ibr_indexed_write(4, 5), nop_i(), nop_i()),
+        (0x40, 0x00, nop_m(), adds(4, 1, 0), nop_i()),
+        (0x50, *movl_mlx(5, 0x81000000ffffffff)),
+        (0x60, 0x00, mov_ibr_indexed_write(4, 5), nop_i(), nop_i()),
+        (0x70, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0x80, *movl_mlx(
+            2, IA64_PSR_IC | IA64_PSR_IS | IA64_PSR_DB | (1 << 37))),
+        (0x90, *movl_mlx(3, 0x100)),
+        *rfi_to_gr(0xa0, 2, 3),
+        ia32_bundle(0x100, bytes.fromhex(
+            "f3 90 "        # pause
+            "90 "           # breakpoint
+            "0f 0b")),      # ud2
+        (IA64_IA32_EXCEPTION_VECTOR, 0x00,
+         mov_m_cr_gr(5, 19), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(6, 17), nop_i(), nop_i()),
+        (IA64_IA32_EXCEPTION_VECTOR + 0x20, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_EXCEPTION_VECTOR + 0x20,
+                 IA64_IA32_EXCEPTION_VECTOR + 0x20)),
+    ], {
+        "ip": IA64_IA32_EXCEPTION_VECTOR + 0x20,
+        "r5": 0x102,
+        "r6": (1 << 32) | (1 << 16),
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
 # A TB entered with every SIMD exception masked leaves out the SSE
 # exception bracket; LDMXCSR and FXRSTOR end it, so an exception they unmask
 # is still precise in the next instruction.
@@ -6154,6 +6214,8 @@ CASE_NAMES = (
     'ia32_flat_pop_m_probes_destination_first',
     'ia32_flat_rmw_reports_write_miss',
     'ia32_pop_m_destination_checked_against_ds',
+    'ia32_pause_psr_ss_traps_after_it',
+    'ia32_pause_clears_psr_id',
     'ia32_flat_movaps_store_tlb_miss_precedes_alignment',
     'ia32_flat_aligned_movaps_tlb_miss',
     'ia32_flat_misaligned_mapped_movaps_faults',

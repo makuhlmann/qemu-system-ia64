@@ -2917,6 +2917,7 @@ static void gen_PAUSE(DisasContext *s, X86DecodedInsn *decode)
 {
     gen_update_cc_op(s);
     gen_update_eip_next(s);
+    X86_GEN_BEFORE_PAUSE(s);
     gen_helper_pause(tcg_env);
     s->base.is_jmp = DISAS_NORETURN;
 }

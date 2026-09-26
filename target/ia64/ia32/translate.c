@@ -209,6 +209,15 @@ static int ia64_ia32_iptrace_enabled = -1;
     (!((s)->base.tb->flags & IA32_TB_FLAG_PSR_DB))
 #define X86_REP_FAULT_SETS_RF(s) true
 #define X86_REP_FINAL_ITERATION_COMPLETES(s) true
+/*
+ * helper_pause() leaves for the main loop and does not return, so the
+ * completion (PSR.ss and EFLAGS.TF traps, RF and PSR.id cleared) runs first.
+ */
+#define X86_GEN_BEFORE_PAUSE(s) do {                                   \
+    if (!IA32_FAST(s)) {                                               \
+        gen_helper_ia32_complete_instruction(tcg_env, eip_next_tl(s)); \
+    }                                                                  \
+} while (0)
 #define X86_GEN_REP_ITERATION(s) do {                                  \
     if (!IA32_FAST(s)) {                                               \
         gen_helper_ia32_rep_iteration(tcg_env);                        \

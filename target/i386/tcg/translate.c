@@ -121,6 +121,9 @@
     (void)(access);                                                  \
 } while (0)
 #endif
+#ifndef X86_GEN_BEFORE_PAUSE
+#define X86_GEN_BEFORE_PAUSE(s) ((void)0)
+#endif
 #ifndef X86_GEN_SINGLE_ACCESS_CHECK
 #define X86_GEN_SINGLE_ACCESS_CHECK X86_GEN_SEGMENT_ACCESS_CHECK
 #endif
