@@ -332,6 +332,10 @@ void helper_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
 
 uint64_t helper_read_cr(CPUIA64State *env, uint32_t cr_num)
 {
+    if (cr_num == IA64_CR_SAPIC_IVR ||
+        (cr_num >= IA64_CR_SAPIC_IRR0 && cr_num <= IA64_CR_SAPIC_IRR3)) {
+        ia64_itc_check_timer(env);
+    }
     return ia64_system_read_cr(env, cr_num);
 }
 

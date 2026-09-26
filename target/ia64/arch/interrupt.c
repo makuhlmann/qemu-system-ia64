@@ -485,19 +485,24 @@ void ia64_itc_sync(CPUIA64State *env)
     }
 }
 
+/*
+ * ITC equal to ITM pends the interval timer interrupt at that moment (SDM
+ * Vol 2 3.3.4.2, 5.8.3.6), but the QEMU timer callback that pends it here
+ * reaches this vCPU later.  An ITM, ITV or ITC write (before the new value)
+ * and a guest IVR or IRR read first pend an armed deadline that ITC has
+ * reached: a write in that window dropped the match, and a read did not show
+ * it.  The callback then finds the timer disarmed.
+ */
 void ia64_itc_check_timer(CPUIA64State *env)
 {
-    bool was_armed;
-
     ia64_itc_advance_pending_itm(env);
-    was_armed = env->interrupt.itm_armed &&
-                env->interrupt.itm_armed_value == env->cr_itm;
-
-    if (was_armed && (int64_t)(env->cr_itm - env->ar_itc) <= 0) {
-        env->interrupt.itm_armed = false;
+    if (!env->interrupt.itm_armed ||
+        (int64_t)(env->interrupt.itm_armed_value - env->ar_itc) > 0) {
+        return;
     }
-    ia64_itm_update_pending(env, env->ar_itc, env->cr_itm, was_armed);
-    ia64_itc_advance_pending_itm(env);
+    env->interrupt.itm_armed = false;
+    ia64_itm_update_pending(env, env->ar_itc, env->interrupt.itm_armed_value,
+                            true);
 }
 
 void ia64_itc_enter_halt(CPUIA64State *env)

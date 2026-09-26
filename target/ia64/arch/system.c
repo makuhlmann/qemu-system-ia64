@@ -286,6 +286,7 @@ void ia64_system_write_ar(CPUIA64State *env, uint32_t ar_num, uint64_t value)
     if (ar_num == 44) {
         bool match = env->cr[IA64_CR_ITM] == value;
 
+        ia64_itc_check_timer(env);
         ia64_itc_write(env, value);
         env->interrupt.itm_last_match_valid = false;
         if (match) {
@@ -573,6 +574,7 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
     }
     switch (cr_num) {
     case 1:
+        ia64_itc_check_timer(env);
         env->cr[IA64_CR_ITM] = value;
         ia64_itm_update(env, value);
         break;
@@ -621,6 +623,7 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
     case IA64_CR_SAPIC_IRR3:
         break;
     case IA64_CR_ITV:
+        ia64_itc_check_timer(env);
         env->cr[cr_num] = value;
         ia64_itm_update(env, env->cr[IA64_CR_ITM]);
         break;

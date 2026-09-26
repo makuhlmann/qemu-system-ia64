@@ -1708,29 +1708,29 @@ test_masking_itv_preserves_pended_timer_irr = require_registers(
     }, entry=0x10)
 
 
-# These two cases replace an ITM deadline 5 ms ahead with a second write, and
-# they test that write only if it lands before ITC reaches the first deadline.
-# A loaded host can stop the vCPU for longer than that between the two writes;
-# the first deadline then matches first, and the interrupt it pends is right.
-# r10 reads ITC after the second write: a run in which it has already reached
-# the first deadline (r4) tests nothing, so it runs again.
-ITM_REPROGRAM_ATTEMPTS = 5
+# The ITM deadline cases below need one write to land before ITC reaches the
+# deadline in r4, and a loaded host can stop the vCPU for longer than the
+# deadline is ahead.  r10 reads ITC after that write: a run in which it has
+# already reached r4 tests nothing, so it runs again.  The reprogram cases
+# replace a deadline 5 ms ahead with a second write; if that write comes late,
+# the first deadline matches first, and the interrupt it pends is right.
+ITM_DEADLINE_ATTEMPTS = 5
 
 
-def _run_itm_reprogram(qemu, name, bundles, terminal_ip):
-    for _ in range(ITM_REPROGRAM_ATTEMPTS):
+def _run_itm_deadline_case(qemu, name, bundles, terminal_ip):
+    for _ in range(ITM_DEADLINE_ATTEMPTS):
         result = run_program(qemu, bundles, entry=0x10,
                              terminal_ip=terminal_ip)
         if result.state.gr[10] < result.state.gr[4]:
             return result
     raise RuntimeError(
-        f"{name} failed: ITC reached the first deadline before the second "
-        f"ITM write in all {ITM_REPROGRAM_ATTEMPTS} runs\n"
+        f"{name} failed: ITC reached the deadline before the ITM write "
+        f"in all {ITM_DEADLINE_ATTEMPTS} runs\n"
         f"{result.register_output}")
 
 
 def test_future_itm_rearm_uses_latest_deadline(qemu):
-    result = _run_itm_reprogram(
+    result = _run_itm_deadline_case(
         qemu, "future_itm_rearm_uses_latest_deadline", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
         (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(), nop_i()),
@@ -1765,7 +1765,7 @@ def test_future_itm_rearm_uses_latest_deadline(qemu):
 
 
 def test_past_itm_reprogram_cancels_future_deadline(qemu):
-    result = _run_itm_reprogram(
+    result = _run_itm_deadline_case(
         qemu, "past_itm_reprogram_cancels_future_deadline", [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
         (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(), nop_i()),
@@ -1798,6 +1798,120 @@ def test_past_itm_reprogram_cancels_future_deadline(qemu):
             f"cancel_itm={state.gr[5]!r} "
             f"wait_itc={state.gr[7]!r} final_itc={state.gr[6]!r} "
             f"interrupts={state.gr[8]!r}\n"
+            f"{result.register_output}")
+
+
+# ITC equal to ITM raises an Interval Timer interrupt (SDM Vol 2 3.3.4.2), and
+# with ITV.m clear the occurrence is pended (5.8.3.6, Table 5-12), whatever the
+# guest writes to ITM or ITV afterwards.  The model pends it from a QEMU timer
+# whose callback reaches the vCPU later, so a write or a read in between must
+# pend it first (ia64_itc_check_timer()).  Each case arms ITM 1 ms ahead, reads ITC
+# after the arm (r10), and waits with PSR.i = 0 until an ITC read (r11) is at
+# the deadline; the steps after the wait start at 0xa0.
+def _itm_match_program(after_wait):
+    return [
+        (0x10, 0x00, adds(3, 0xef, 0), nop_i(), nop_i()),
+        (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(), nop_i()),
+        (0x30, 0x02, mov_m_ar_gr(3, 44), nop_i(), nop_i()),
+        (0x40, 0x00, addl(4, IA64_ITC_TICKS_PER_MILLISECOND, 3),
+         nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(), nop_i()),
+        (0x60, 0x02, mov_m_ar_gr(10, 44), nop_i(), nop_i()),
+        (0x70, 0x02, mov_m_ar_gr(11, 44), nop_i(), nop_i()),
+        (0x80, 0x00, nop_m(), cmp_ltu_unc(6, 7, 11, 4), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x70, qp=6)),
+        *after_wait,
+    ]
+
+
+ITV_VECTOR_IRR3_BIT = 1 << (0xef - 192)
+
+
+def test_armed_itm_match_pends_before_past_itm_write(qemu):
+    result = _run_itm_deadline_case(
+        qemu, "armed_itm_match_pends_before_past_itm_write",
+        _itm_match_program([
+            (0xa0, 0x00, adds(5, -1, 3), nop_i(), nop_i()),
+            (0xb0, 0x00, mov_m_gr_cr(5, IA64_CR_ITM), nop_i(), nop_i()),
+            (0xc0, *movl_mlx(7, IA64_ITC_TICKS_PER_MILLISECOND)),
+            (0xd0, 0x00, nop_m(), add(7, 4, 7), nop_i()),
+            (0xe0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I)),
+            (0xf0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+            (0x100, 0x02, mov_m_ar_gr(6, 44), nop_i(), nop_i()),
+            (0x110, 0x00, nop_m(), cmp_ltu_unc(6, 7, 6, 7), nop_i()),
+            (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x100, qp=6)),
+            (0x130, 0x10, nop_m(), nop_i(), br_cond(0x130, 0x130)),
+            (0x3000, 0x00, mov_m_cr_gr(9, IA64_CR_SAPIC_IVR),
+             nop_i(), nop_i()),
+            (0x3010, 0x00, nop_m(), adds(8, 1, 8), nop_i()),
+            (0x3020, 0x10, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), nop_i(),
+             rfi_b()),
+        ]), terminal_ip=0x130)
+    state = result.state
+    if (state.exception != IA64_EXCP_NONE or
+        state.gr[8] != 1 or state.gr[9] != 0xef):
+        raise RuntimeError(
+            "armed_itm_match_pends_before_past_itm_write failed: "
+            f"exception={state.exception!r} itm={state.gr[4]!r} "
+            f"wait_itc={state.gr[11]!r} interrupts={state.gr[8]!r} "
+            f"vector={state.gr[9]!r}\n{result.register_output}")
+
+
+def test_armed_itm_match_shows_in_irr(qemu):
+    result = _run_itm_deadline_case(
+        qemu, "armed_itm_match_shows_in_irr",
+        _itm_match_program([
+            (0xa0, 0x00, mov_m_cr_gr(12, IA64_CR_SAPIC_IRR3),
+             nop_i(), nop_i()),
+            (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
+        ]), terminal_ip=0xb0)
+    state = result.state
+    if (state.exception != IA64_EXCP_NONE or
+        not state.gr[12] & ITV_VECTOR_IRR3_BIT):
+        raise RuntimeError(
+            "armed_itm_match_shows_in_irr failed: "
+            f"exception={state.exception!r} itm={state.gr[4]!r} "
+            f"wait_itc={state.gr[11]!r} irr3={state.gr[12]:#x}\n"
+            f"{result.register_output}")
+
+
+def test_armed_itm_match_survives_itv_mask(qemu):
+    result = _run_itm_deadline_case(
+        qemu, "armed_itm_match_survives_itv_mask",
+        _itm_match_program([
+            (0xa0, *movl_mlx(13, IA64_VECTOR_MASKED | 0xef)),
+            (0xb0, 0x00, mov_m_gr_cr(13, IA64_CR_ITV), nop_i(), nop_i()),
+            (0xc0, 0x00, mov_m_cr_gr(12, IA64_CR_SAPIC_IRR3),
+             nop_i(), nop_i()),
+            (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0xd0)),
+        ]), terminal_ip=0xd0)
+    state = result.state
+    if (state.exception != IA64_EXCP_NONE or
+        not state.gr[12] & ITV_VECTOR_IRR3_BIT):
+        raise RuntimeError(
+            "armed_itm_match_survives_itv_mask failed: "
+            f"exception={state.exception!r} itm={state.gr[4]!r} "
+            f"wait_itc={state.gr[11]!r} irr3={state.gr[12]:#x}\n"
+            f"{result.register_output}")
+
+
+
+def test_armed_itm_match_survives_itc_write_back(qemu):
+    result = _run_itm_deadline_case(
+        qemu, "armed_itm_match_survives_itc_write_back",
+        _itm_match_program([
+            (0xa0, 0x00, mov_m_gr_ar(3, 44), nop_i(), nop_i()),
+            (0xb0, 0x00, mov_m_cr_gr(12, IA64_CR_SAPIC_IRR3),
+             nop_i(), nop_i()),
+            (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+        ]), terminal_ip=0xc0)
+    state = result.state
+    if (state.exception != IA64_EXCP_NONE or
+        not state.gr[12] & ITV_VECTOR_IRR3_BIT):
+        raise RuntimeError(
+            "armed_itm_match_survives_itc_write_back failed: "
+            f"exception={state.exception!r} itm={state.gr[4]!r} "
+            f"wait_itc={state.gr[11]!r} irr3={state.gr[12]:#x}\n"
             f"{result.register_output}")
 
 
@@ -6146,6 +6260,10 @@ CASE_NAMES = (
     'ipis_during_break_faults_all_arrive',
 
     'ar_itc_advances_in_guest_loop',
+    'armed_itm_match_pends_before_past_itm_write',
+    'armed_itm_match_shows_in_irr',
+    'armed_itm_match_survives_itc_write_back',
+    'armed_itm_match_survives_itv_mask',
     'async_timer_interrupt_enters_ivt',
     'async_timer_interrupt_never_resumes_mlx_slot2',
     'async_timer_interrupt_preserves_bank1_grs',
