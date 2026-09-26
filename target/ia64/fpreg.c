@@ -103,7 +103,41 @@ static uint64_t extended_to_binary64(CPUIA64State *env, bool sign,
 {
     uint16_t ext_exp;
     float_status status = env->fp.fp_status;
+    int32_t bexp = (int32_t)exp - 0xffff + 1023;
 
+    /*
+     * A normal value in the binary64 normal range only has its significand
+     * rounded to 53 bits, as floatx80_to_float64 does below; a carry out of
+     * the significand moves into the exponent, up to infinity.  Everything
+     * else takes the softfloat path.
+     */
+    if ((mant & IA64_FP_SIGNIFICAND_INTEGER_BIT) && bexp >= 1 &&
+        bexp <= 2046) {
+        uint64_t kept = (mant >> 11) & IA64_FP_DOUBLE_FRAC_MASK;
+        uint64_t rest = mant & 0x7ff;
+        bool up;
+
+        switch (get_float_rounding_mode(&status)) {
+        case float_round_nearest_even:
+            up = rest > 0x400 || (rest == 0x400 && (kept & 1));
+            break;
+        case float_round_to_zero:
+            up = false;
+            break;
+        case float_round_up:
+            up = rest != 0 && !sign;
+            break;
+        case float_round_down:
+            up = rest != 0 && sign;
+            break;
+        default:
+            goto slow;
+        }
+        return ((uint64_t)sign << 63) |
+               ((((uint64_t)bexp << 52) | kept) + up);
+    }
+
+slow:
     if (exp == IA64_FP_REG_SPECIAL_EXP) {
         ext_exp = 0x7fff;
     } else if (exp == 0) {
