@@ -518,12 +518,31 @@ def test_cloop_zero_st1_timer_interrupts_batched_loop(qemu):
          nop_i()),
         (0x3010, 0x00, nop_m(), adds(8, 0, 2),
          nop_i()),
-        (0x3020, 0x10, nop_m(), nop_i(),
-         br_cond(0x3020, 0x3020)),
-    ], entry=0x10, terminal_ip=0x3020, timeout=8.0)
+        (0x3020, *movl_mlx(10, 0x8000)),
+        (0x3030, 0x01, nop_m(), cmp_ltu_unc(6, 7, 10, 8),
+         nop_i()),
+        (0x3040, 0x10, nop_m(), nop_i(),
+         br_cond(0x3040, 0x30f0, qp=6)),
+        # A host that stalls the vCPU past the deadline before the loop's
+        # first bundle takes the interrupt with nothing to check: take it
+        # as an OS would and re-arm the timer for the loop.
+        (0x3050, 0x01, mov_m_cr_gr(11, IA64_CR_SAPIC_IVR), nop_i(),
+         nop_i()),
+        (0x3060, 0x02, mov_m_ar_gr(3, 44), nop_i(),
+         nop_i()),
+        (0x3070, 0x01, addl(4, 10 * IA64_ITC_TICKS_PER_MILLISECOND, 3),
+         nop_i(), nop_i()),
+        (0x3080, 0x01, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(),
+         nop_i()),
+        (0x3090, 0x09, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), srlz_d(),
+         nop_i()),
+        (0x30a0, 0x11, nop_m(), nop_i(), rfi_b()),
+        (0x30f0, 0x10, nop_m(), nop_i(),
+         br_cond(0x30f0, 0x30f0)),
+    ], entry=0x10, terminal_ip=0x30f0, timeout=8.0)
     state = result.state
     advanced = state.gr[8] - 0x8000
-    if (state.ip != 0x3020 or
+    if (state.ip != 0x30f0 or
         state.exception != IA64_EXCP_NONE or
         advanced <= 0 or
         state.gr[9] >= 0x100000000):
