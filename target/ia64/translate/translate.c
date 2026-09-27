@@ -2316,6 +2316,13 @@ bool ia64_cr_write_reads_clock(uint32_t cr_num)
     return cr_num == IA64_CR_ITM || cr_num == IA64_CR_ITV;
 }
 
+/* helper_read_cr() pends a reached ITM deadline before these reads. */
+bool ia64_cr_read_reads_clock(uint32_t cr_num)
+{
+    return cr_num == IA64_CR_SAPIC_IVR ||
+           (cr_num >= IA64_CR_SAPIC_IRR0 && cr_num <= IA64_CR_SAPIC_IRR3);
+}
+
 bool ia64_clock_access_needs_io(const DisasContext *ctx)
 {
     return tb_cflags(ctx->base.tb) & CF_USE_ICOUNT;

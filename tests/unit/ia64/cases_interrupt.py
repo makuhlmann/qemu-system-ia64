@@ -457,6 +457,28 @@ def test_itc_reads_at_one_virtual_instant_agree_merced(qemu):
     _require_itc_reads_at_one_virtual_instant_agree(
         qemu, "itc_reads_at_one_virtual_instant_agree_merced", "merced")
 
+def test_sapic_ivr_irr_reads_under_icount(qemu):
+    """IVR and IRR reads pend a reached ITM deadline, so they read the clock.
+
+    Under icount only the last bundle of a TB may read it: the reads must end
+    their TB, else QEMU exits with "Bad icount read".  Each read here has
+    bundles after it that would share its TB.
+    """
+    run_program(qemu, [
+        (0x10, 0x01, mov_m_cr_gr(8, IA64_CR_SAPIC_IVR), nop_i(), nop_i()),
+        (0x20, 0x01, mov_m_cr_gr(9, IA64_CR_SAPIC_IRR0), nop_i(), nop_i()),
+        (0x30, 0x01, mov_m_cr_gr(10, IA64_CR_SAPIC_IRR3), nop_i(), nop_i()),
+        (0x40, 0x01, nop_m(), adds(11, 1, 0), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], entry=0x10, expected={
+        "ip": 0x50,
+        "exception": IA64_EXCP_NONE,
+        "r8": 15,  # the spurious vector
+        "r9": 0,
+        "r10": 0,
+        "r11": 1,
+    }, icount=ITC_ICOUNT, name="sapic_ivr_irr_reads_under_icount")
+
 def test_cloop_zero_st1_timer_interrupts_batched_loop(qemu):
     result = run_program(qemu, [
         (0x10, *movl_mlx(2, 0x8000)),
@@ -6552,6 +6574,7 @@ CASE_NAMES = (
     'itc_read_storm_keeps_virtual_time_rate_merced',
     'itc_reads_at_one_virtual_instant_agree',
     'itc_reads_at_one_virtual_instant_agree_merced',
+    'sapic_ivr_irr_reads_under_icount',
 )
 
 CASE_METADATA = {
@@ -6568,6 +6591,8 @@ CASE_METADATA = {
         required_features=frozenset({"icount"})),
     'itc_reads_at_one_virtual_instant_agree_merced': CaseMetadata(
         required_features=frozenset({"icount", "cpu-model:merced"})),
+    'sapic_ivr_irr_reads_under_icount': CaseMetadata(
+        required_features=frozenset({"icount"})),
     'masked_itv_discards_due_timer': CaseMetadata(nonterminal_effect_loop=True),
     'masking_itv_preserves_pended_timer_irr': CaseMetadata(nonterminal_effect_loop=True),
     'past_itm_does_not_fire': CaseMetadata(nonterminal_effect_loop=True),

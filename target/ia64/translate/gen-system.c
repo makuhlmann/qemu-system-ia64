@@ -225,6 +225,10 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
                                offsetof(CPUIA64State, cr) +
                                op->source * sizeof(uint64_t));
             } else {
+                if (ia64_cr_read_reads_clock(op->source) &&
+                    ia64_clock_access_needs_io(ctx)) {
+                    translator_io_start(&ctx->base);
+                }
                 gen_helper_read_cr(val, tcg_env,
                                    tcg_constant_i32(op->source));
             }

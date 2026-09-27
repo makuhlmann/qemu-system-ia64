@@ -295,6 +295,7 @@ void ia64_gen_validate_cr_access(TCGv_i64 result,
                                  TCGv_i64 value, bool write);
 bool ia64_cr_is_read_only(uint32_t cr_num);
 bool ia64_cr_write_reads_clock(uint32_t cr_num);
+bool ia64_cr_read_reads_clock(uint32_t cr_num);
 void ia64_gen_raise_exception(uint32_t exception, uint64_t fault_ip,
                               uint64_t fault_imm, uint32_t fault_slot);
 void ia64_gen_check_register_index(const Ia64Instruction *insn,
