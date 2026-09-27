@@ -871,6 +871,7 @@ pal_firmware_register_accepts_record
 pal_firmware_register_rejects_short_record
 pal_firmware_register_rejects_unknown_record
 pal_freq_base
+pal_freq_base_madison
 pal_freq_base_merced
 pal_freq_base_reserved_arg
 pal_freq_ratios

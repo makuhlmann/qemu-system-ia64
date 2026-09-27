@@ -103,7 +103,8 @@ from .encoding import (
     PAL_RATIO_8_1,
     PAL_RATIO_16_3,
     PAL_RATIO_2_1,
-    PAL_RATIO_4_1,
+    PAL_RATIO_16_2,
+    PAL_RATIO_1_1,
     PAL_REGISTER_INFO,
     PAL_RSE_INFO,
     PAL_SELF_TEST_STATE_TESTED,
@@ -504,11 +505,18 @@ test_pal_freq_ratios = require_registers("pal_freq_ratios",
     "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_16_3,
     "r11": PAL_RATIO_16_1}, entry=0x10)
 
+# The zx1 Itanium 2: a 200 MHz input clock, which is the bus clock, and the
+# core and the ITC at 16/2 of it (251110-003 6.10, 250945-005 Table 2-25).
 test_pal_freq_ratios_madison = require_registers(
     "pal_freq_ratios_madison", pal_call_program(PAL_FREQ_RATIOS),
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
-     "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_4_1,
-     "r11": PAL_RATIO_16_1}, entry=0x10, cpu="madison")
+     "r9": PAL_RATIO_16_2, "r10": PAL_RATIO_1_1,
+     "r11": PAL_RATIO_16_2}, entry=0x10, cpu="madison")
+
+test_pal_freq_base_madison = require_registers(
+    "pal_freq_base_madison", pal_call_program(PAL_FREQ_BASE),
+    {"ip": 0x30, "r28": PAL_FREQ_BASE, "r8": 0,
+     "r9": 200000000, "r10": 0, "r11": 0}, entry=0x10, cpu="madison")
 
 # Regression: a PAL procedure returns its status in GR8; on hardware that
 # register write clears the NaT bit.  r8-r11 are PAL *output* registers, so a
@@ -2011,6 +2019,7 @@ CASE_NAMES = (
     'pal_freq_ratios',
     'pal_call_clears_return_reg_nat',
     'pal_freq_ratios_madison',
+    'pal_freq_base_madison',
     'pal_freq_ratios_merced',
     'pal_freq_base_merced',
     'pal_vm_summary_merced',

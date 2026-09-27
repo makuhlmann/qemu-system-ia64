@@ -15404,12 +15404,13 @@ void fw_init_itc_rate(void)
 {
     UINT64 processor, bus, itc, num, den;
 
+    fw_init_platform_base_frequency();
     fw_pal_freq_ratios(&processor, &bus, &itc);
     num = itc >> 32;
     den = itc & 0xffffffffULL;
     if (num != 0 && den != 0) {
-        /* SAL_FREQ_BASE platform clock is 100 MHz = 10 ticks per 100 ns. */
-        fw_itc_ticks_per_100ns = 10ULL * num / den;
+        fw_itc_ticks_per_100ns =
+            mFwPlatformBaseFrequency * num / den / 10000000ULL;
     }
 }
 

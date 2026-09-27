@@ -49,6 +49,7 @@ typedef struct {
 #define SAL_UPDATE_PAL              0x01000020ULL
 #define SAL_FREQ_BASE_PLATFORM      0
 #define PLATFORM_BASE_FREQUENCY     100000000ULL
+#define FW_PAL_FREQ_BASE            0x00d
 #define SAL_UPDATE_PAL_WRITE_FAILURE ((UINT64)-10)
 
 #define SAL_VECTOR_OS_MCA           0
@@ -550,6 +551,15 @@ UINT64 fw_pal_stacked_call_at(UINT64 Entry, UINT64 Index, UINT64 Arg1,
 #define FW_PAL_COPY_PAL  0x100
 
 /*
+ * The platform clock of SAL_FREQ_BASE is the processor's input clock, to
+ * which PAL_FREQ_RATIOS relates the processor and the ITC (SDM Vol. 2
+ * PAL_FREQ_RATIOS).  The machine clocks the processor with the input clock
+ * of its model, and the model's PAL_FREQ_BASE returns that clock; a PAL that
+ * answers -1 (no output clock, SDM Vol. 2 PAL_FREQ_BASE) leaves 100 MHz.
+ */
+UINT64 mFwPlatformBaseFrequency = PLATFORM_BASE_FREQUENCY;
+
+/*
  * PAL_PROC in RAM: PAL's copy of itself in the image's first page, what
  * every PAL call of this firmware and the SAL system table use.
  */
@@ -589,6 +599,16 @@ BOOLEAN fw_platform_install_pal(UINT64 Processor, UINT64 ResetPalProc)
         mFwPalProc = buffer + results[0];
     }
     return 1;
+}
+
+void fw_init_platform_base_frequency(void)
+{
+    UINT64 results[3];
+
+    if (fw_pal_call_at(mFwPalProc, FW_PAL_FREQ_BASE, 0, 0, 0, results) == 0 &&
+        results[0] != 0) {
+        mFwPlatformBaseFrequency = results[0];
+    }
 }
 
 BOOLEAN fw_platform_register_processor(UINT64 ResetPalProc)
@@ -1307,7 +1327,7 @@ sal_freq_base(UINT64 ClockType, UINT64 Reserved1, UINT64 Reserved2,
     }
 
     if (ClockType == SAL_FREQ_BASE_PLATFORM) {
-        return sal_return(SAL_STATUS_SUCCESS, PLATFORM_BASE_FREQUENCY,
+        return sal_return(SAL_STATUS_SUCCESS, mFwPlatformBaseFrequency,
                           (UINT64)-1, 0);
     }
 
@@ -1327,7 +1347,7 @@ BOOLEAN __attribute__((noinline)) sal_freq_base_selftest(void)
     invalid_reserved = sal_freq_base(0, 0, 0, 1, 0, 0, 0);
 
     return platform.Status == SAL_STATUS_SUCCESS &&
-           platform.Value0 == PLATFORM_BASE_FREQUENCY &&
+           platform.Value0 == mFwPlatformBaseFrequency &&
            platform.Value1 == (UINT64)-1 &&
            optional.Status == SAL_STATUS_SUCCESS &&
            optional.Value0 == (UINT64)-1 && optional.Value1 == (UINT64)-1 &&
@@ -1857,7 +1877,7 @@ BOOLEAN __attribute__((noinline)) sal_proc_dispatch_selftest(void)
 
     return sal_runtime_state_valid() &&
            masked.Status == SAL_STATUS_SUCCESS &&
-           masked.Value0 == PLATFORM_BASE_FREQUENCY &&
+           masked.Value0 == mFwPlatformBaseFrequency &&
            masked.Value1 == (UINT64)-1 &&
            masked.Value2 == 0 &&
            unimplemented.Status == SAL_STATUS_NOT_IMPLEMENTED &&

@@ -54,6 +54,9 @@ extern char __fw_ivt[];
 extern UINT64 fw_itc_ticks_per_100ns;
 #define FW_ITC_TICKS_PER_100NS fw_itc_ticks_per_100ns
 void fw_pal_freq_ratios(UINT64 *Processor, UINT64 *Bus, UINT64 *Itc);
+/* SAL_FREQ_BASE's platform clock, from PAL_FREQ_BASE at boot. */
+extern UINT64 mFwPlatformBaseFrequency;
+void fw_init_platform_base_frequency(void);
 /* PAL_LOGICAL_TO_PHYSICAL for the calling processor: status, first return. */
 UINT64 fw_pal_logical_to_physical(UINT64 *Info);
 /* Register this image with the PAL emulation (IA64_PAL_FIRMWARE_REGISTER). */
