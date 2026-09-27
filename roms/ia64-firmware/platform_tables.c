@@ -537,9 +537,14 @@ static void efi_init_sal_system_table(void)
         md[3].Length = (UINT32)((image_end - image_base) >> 12);
     }
     mSalSystemTable.PlatformFeatures.Type = 2;
-    /* SAL spec platform-feature bit 0: bus lock, a 460GX-era feature. */
+    /*
+     * SAL spec 245359-007 Table 3-6: bit 0 bus lock, bit 1 IRQ
+     * redirection hint.  The 460GX sends redirectable interrupts to the
+     * lowest XTPR (SSDM 3.7), and the vendor i2000 firmware reports both
+     * (03h in its SAL system table).  zx1 has no XTP.
+     */
     mSalSystemTable.PlatformFeatures.Features =
-        fw_platform_is_460gx() ? 0x01U : 0x00U;
+        fw_platform_is_460gx() ? 0x03U : 0x00U;
     for (i = 0; i < sizeof(mSalSystemTable.PlatformFeatures.Reserved); i++) {
         mSalSystemTable.PlatformFeatures.Reserved[i] = 0;
     }

@@ -523,6 +523,7 @@ static void ia64_lba_realize(DeviceState *dev, Error **errp)
     s->iosapic = qdev_new(TYPE_IA64_IOSAPIC);
     qdev_prop_set_uint32(s->iosapic, "num-pins", LBA_IOSAPIC_PINS);
     qdev_prop_set_uint32(s->iosapic, "version", LBA_IOSAPIC_VERSION);
+    qdev_prop_set_uint8(s->iosapic, "face", IA64_IOSAPIC_FACE_IOA);
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(s->iosapic), errp)) {
         return;
     }

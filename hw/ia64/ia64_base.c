@@ -32,6 +32,7 @@
 #include "hw/display/vga_regs.h"
 #include "hw/core/loader.h"
 #include "hw/core/nmi.h"
+#include "trace.h"
 #include "hw/core/sysbus.h"
 #include "hw/block/flash.h"
 #include "system/block-backend.h"
@@ -2293,19 +2294,24 @@ static uint64_t ia64_vpc_lsapic_read(void *opaque, hwaddr addr,
 static void ia64_vpc_lsapic_write(void *opaque, hwaddr addr,
                                     uint64_t value, unsigned size)
 {
+    IA64VpcMachineState *s = opaque;
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
     CPUState *cs;
     unsigned delivery;
     uint8_t id;
     uint8_t eid;
     uint8_t vector;
 
-    (void)opaque;
     /*
      * The upper half of the Processor Interrupt Block contains the XTP byte.
      * XTP is a platform hint; systems without XTP support must still accept
      * and discard the one-byte store.
      */
     if (addr == IA64_PIB_XTP_OFFSET && size == 1) {
+        trace_ia64_vpc_xtp(current_cpu ? current_cpu->cpu_index : -1, value);
+        if (imc->xtp_cycle != NULL && current_cpu != NULL) {
+            imc->xtp_cycle(s, current_cpu, value);
+        }
         return;
     }
 
@@ -4259,6 +4265,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (imc->iosapic_pins != 0) {
         qdev_prop_set_uint32(iosapic, "num-pins", imc->iosapic_pins);
         qdev_prop_set_uint32(iosapic, "version", imc->iosapic_version);
+        qdev_prop_set_uint8(iosapic, "face", imc->iosapic_face);
     }
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(iosapic), errp)) {
         return false;

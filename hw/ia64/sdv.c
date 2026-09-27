@@ -129,6 +129,32 @@ static void ia64_vpc_460gx_window_moved(void *opaque, uint64_t base)
  */
 static const uint8_t sdv_processor_ids[] = { 0, 3 };
 
+/*
+ * The processor's XTP byte store is an XTPR update special cycle, which
+ * the SAC decodes by the requesting agent's id (SSDM 3.7).
+ */
+static void sdv_xtp_cycle(IA64VpcMachineState *s, CPUState *cs, uint8_t data)
+{
+    uint64_t lid = IA64_CPU(cs)->env.cr[IA64_CR_SAPIC_LID];
+
+    ia64_460gx_xtp_cycle(s->chipset, (lid & IA64_SAPIC_LID_ID_MASK) >>
+                                     IA64_SAPIC_LID_ID_SHIFT, data);
+}
+
+/* The SAC sends a redirectable interrupt to the lowest XTPR (SSDM 3.7). */
+static bool sdv_redirect(void *opaque, uint8_t *id, uint8_t *eid)
+{
+    IA64VpcMachineState *s = opaque;
+    int agent = ia64_460gx_xtp_lowest(s->chipset);
+
+    if (agent < 0 || ia64_cpu_by_sapic_id(agent, 0) == NULL) {
+        return false;
+    }
+    *id = agent;
+    *eid = 0;
+    return true;
+}
+
 static bool sdv_validate(IA64VpcMachineState *s, Error **errp)
 {
     MachineState *machine = MACHINE(s);
@@ -187,6 +213,7 @@ static bool sdv_build_chipset(IA64VpcMachineState *s, DeviceState *pci_host,
         return false;
     }
     ia64_460gx_attach_root(s->chipset, -1, pci_bus);
+    ia64_iosapic_set_redirect(iosapic, sdv_redirect, s);
 
     /*
      * The i2000's other three PCI roots: the two WXB buses and the GXB AGP
@@ -450,6 +477,7 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
      */
     imc->iosapic_pins = IA64_IOSAPIC_460GX_PINS;
     imc->iosapic_version = IA64_IOSAPIC_460GX_VERSION;
+    imc->iosapic_face = IA64_IOSAPIC_FACE_PID;
     imc->pci0_intx = ia64_i2000_pci0_intx;
     imc->pci0_nintx = ARRAY_SIZE(ia64_i2000_pci0_intx);
     imc->pci0_intx_fallback = IA64_460GX_INTX_FALLBACK_GSI;
@@ -477,6 +505,7 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
     imc->build_chipset = sdv_build_chipset;
     imc->wire_intx = sdv_wire_intx;
     imc->build_isa = sdv_build_isa;
+    imc->xtp_cycle = sdv_xtp_cycle;
     imc->seat = sdv_seat;
     imc->root_gsi_base = sdv_root_gsi_base;
     ia64_vpc_add_compat_defaults(mc);

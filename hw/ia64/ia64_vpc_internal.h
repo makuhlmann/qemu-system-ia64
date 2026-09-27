@@ -92,6 +92,7 @@ struct IA64VpcMachineClass {
     /* IOSAPIC inputs and version register; 0 keeps the device's defaults. */
     uint32_t iosapic_pins;
     uint32_t iosapic_version;
+    uint8_t iosapic_face;
     /* Per-slot INTx routing of PCI bus 0; NULL = the (slot+pin)%4 swizzle. */
     const IA64IntxRoute *pci0_intx;
     unsigned int pci0_nintx;
@@ -192,6 +193,11 @@ struct IA64VpcMachineClass {
     ISABus *(*build_isa)(IA64VpcMachineState *s, PCIBus *pci_bus,
                          MemoryRegion *pci_io, DeviceState *iosapic,
                          Error **errp);
+    /*
+     * A processor's store to its XTP byte (SDM Vol. 2 §5.8.4.4): the bus
+     * transaction's effect on the platform, or NULL where it is discarded.
+     */
+    void (*xtp_cycle)(IA64VpcMachineState *s, CPUState *cs, uint8_t data);
     /* Where a built-in device sits; *bus preset to PCI0, *devfn to -1. */
     void (*seat)(IA64VpcMachineState *s, IA64VpcSeat seat, PCIBus **bus,
                  int *devfn);

@@ -6223,10 +6223,11 @@ static void test_iosapic_level_remote_irr(void)
     g_assert_cmphex(rte & (IA64_IOSAPIC_RTE_DELIVERY |
                           IA64_IOSAPIC_RTE_REMOTE_IRR), ==, 0);
 
+    /* The PID's Delivery Status follows the asserted level (Table 2-10). */
     qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
     rte = iosapic_read(qts, rte_low);
     g_assert_cmphex(rte & IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
-    g_assert_cmphex(rte & IA64_IOSAPIC_RTE_DELIVERY, ==, 0);
+    g_assert_cmphex(rte & IA64_IOSAPIC_RTE_DELIVERY, !=, 0);
 
     /* EOI while the level remains asserted immediately redelivers it. */
     qtest_writel(qts, IA64_IOSAPIC_BASE + IA64_IOSAPIC_EOI, vector);
@@ -6324,6 +6325,54 @@ static void test_iosapic_edge_rte_write_is_not_a_request(void)
     qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
     iosapic_irr_fence(qts, iosapic_path, 0x63);
     g_assert_cmphex(cpu_sapic_irr_word(qts, word) & bit, !=, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * The 460GX PID's face (SSDM 2.6.3.1, 2.6.3.4): the ID register keeps bits
+ * 27:24 and reads DT set (SAPIC mode); reserved RTE bits read 0; Delivery
+ * Status follows an asserted level input, masked or not.
+ */
+static void test_iosapic_pid_register_face(void)
+{
+    const unsigned pin = 40;
+    const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + pin * 2;
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    g_autofree char *iosapic_path =
+        find_unattached_child(qts, "ia64-iosapic");
+
+    iosapic_write(qts, 0, UINT32_MAX);
+    g_assert_cmphex(iosapic_read(qts, 0), ==, 0x0f008000);
+    iosapic_write(qts, rte_low, UINT32_MAX);
+    iosapic_write(qts, rte_low + 1, UINT32_MAX);
+    g_assert_cmphex(iosapic_read(qts, rte_low), ==, 0x0003afff);
+    g_assert_cmphex(iosapic_read(qts, rte_low + 1), ==, 0xffff0000);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    g_assert_cmphex(iosapic_read(qts, rte_low) & IA64_IOSAPIC_RTE_DELIVERY,
+                    !=, 0);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 0);
+    g_assert_cmphex(iosapic_read(qts, rte_low) & IA64_IOSAPIC_RTE_DELIVERY,
+                    ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * The zx1 ioa's face (ioa ERS 11.3.5.2, Figure 11.3): no FLUSHEN, no
+ * destination mode, no visible Remote IRR; no ID register at index 0.
+ */
+static void test_iosapic_ioa_register_face(void)
+{
+    const uint64_t window = IA64_LBA_CSR_BASE + 0x800;
+    const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE;
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+
+    qtest_writel(qts, window + IA64_IOSAPIC_IOREGSEL, 0);
+    qtest_writel(qts, window + IA64_IOSAPIC_IOWIN, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, window + IA64_IOSAPIC_IOWIN), ==, 0);
+    qtest_writel(qts, window + IA64_IOSAPIC_IOREGSEL, rte_low);
+    qtest_writel(qts, window + IA64_IOSAPIC_IOWIN, UINT32_MAX);
+    g_assert_cmphex(qtest_readl(qts, window + IA64_IOSAPIC_IOWIN), ==,
+                    0x0001a7ff);
     qtest_quit(qts);
 }
 
@@ -8490,6 +8539,10 @@ int main(int argc, char **argv)
                    test_iosapic_level_remote_irr);
     qtest_add_func("/ia64-vpc/iosapic/lowest-priority",
                    test_iosapic_lowest_priority);
+    qtest_add_func("/ia64-vpc/iosapic/pid-register-face",
+                   test_iosapic_pid_register_face);
+    qtest_add_func("/ia64-vpc/iosapic/ioa-register-face",
+                   test_iosapic_ioa_register_face);
     qtest_add_func("/ia64-vpc/iosapic/edge-rte-write-not-a-request",
                    test_iosapic_edge_rte_write_is_not_a_request);
     qtest_add_func("/ia64-vpc/sparse-io/openbus", test_openbus_io_port);

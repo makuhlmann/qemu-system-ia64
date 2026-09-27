@@ -30,6 +30,23 @@
 #define RTE_TRIGGER_LEVEL    0x0000000000008000ULL
 #define RTE_POLARITY_LOW     0x0000000000002000ULL
 #define RTE_RO_BITS          (RTE_DELIVERY_STATUS | RTE_REMOTE_IRR)
+/*
+ * The bits each part implements; the others "cannot be written and will
+ * return 0s" (460GX SSDM 2.6.3.4, Table 2-10).  The PID adds FLUSHEN (17),
+ * destination mode (11) and a visible Remote IRR (14) to what the zx1 ioa
+ * has (ioa ERS 11.3.5.2, Figure 11.3); the ioa keeps its level state
+ * internally.  The zx1 stand-in at FEC0_0000 has the PID's layout.
+ */
+#define RTE_PID_BITS         0xFFFF00000003FFFFULL
+#define RTE_IOA_BITS         0xFFFF00000001B7FFULL
+
+/*
+ * The PID's ID register (SSDM 2.6.3.1, Table 2-7): ID in bits 27:24, and
+ * DT (bit 15) reflects the PICMODE strap, SAPIC on this board.  The ioa
+ * has no register at index 0.
+ */
+#define IOSAPIC_ID_MASK      0x0F000000U
+#define IOSAPIC_ID_DT        0x00008000U
 
 #define IOSAPIC_DELIVERY_FIXED  0
 #define IOSAPIC_DELIVERY_LOWEST 1
@@ -47,7 +64,20 @@ struct IA64IOSapicState {
     uint32_t reg_select;
     uint32_t num_pins;
     uint32_t version;
+    uint8_t face;
+    uint32_t id;
+    IA64IOSapicRedirect redirect;
+    void *redirect_opaque;
 };
+
+void ia64_iosapic_set_redirect(DeviceState *dev, IA64IOSapicRedirect redirect,
+                               void *opaque)
+{
+    IA64IOSapicState *s = IA64_IOSAPIC(dev);
+
+    s->redirect = redirect;
+    s->redirect_opaque = opaque;
+}
 
 static void iosapic_update(IA64IOSapicState *s, int pin)
 {
@@ -67,15 +97,17 @@ static void iosapic_update(IA64IOSapicState *s, int pin)
     switch (delivery) {
     case IOSAPIC_DELIVERY_FIXED:
     case IOSAPIC_DELIVERY_LOWEST:
-        /*
-         * Lowest-priority delivery is a redirection hint.  A platform may
-         * ignore the hint and deliver to the valid ID/EID programmed in the
-         * RTE.  The firmware advertises no external interrupt redirection,
-         * so use that architected fallback.
-         */
         vector = rte & RTE_VECTOR_MASK;
         if (!ia64_external_interrupt_vector_valid(vector)) {
             return;
+        }
+        /*
+         * Lowest-priority delivery is a redirection hint.  The platform
+         * picks the target; one that does not redirect delivers to the
+         * ID/EID programmed in the RTE.
+         */
+        if (delivery == IOSAPIC_DELIVERY_LOWEST && s->redirect != NULL) {
+            s->redirect(s->redirect_opaque, &id, &eid);
         }
         break;
     case IOSAPIC_DELIVERY_NMI:
@@ -131,6 +163,8 @@ static void iosapic_rte_write(IA64IOSapicState *s, int pin, uint32_t val,
                               bool high)
 {
     uint64_t ro_bits = s->rte[pin] & RTE_RO_BITS;
+    uint64_t implemented = s->face == IA64_IOSAPIC_FACE_IOA ? RTE_IOA_BITS
+                                                         : RTE_PID_BITS;
 
     if (high) {
         s->rte[pin] = (s->rte[pin] & 0xFFFFFFFFULL) | ((uint64_t)val << 32);
@@ -138,7 +172,7 @@ static void iosapic_rte_write(IA64IOSapicState *s, int pin, uint32_t val,
         s->rte[pin] = (s->rte[pin] & 0xFFFFFFFF00000000ULL) | val;
     }
 
-    s->rte[pin] = (s->rte[pin] & ~RTE_RO_BITS) | ro_bits;
+    s->rte[pin] = (s->rte[pin] & implemented & ~RTE_RO_BITS) | ro_bits;
     iosapic_fix_edge_remote_irr(s, pin);
     /*
      * A redirection-table write is not an interrupt request.  A level
@@ -208,6 +242,28 @@ static void iosapic_irq_handler(void *opaque, int pin, int level)
     }
 }
 
+/*
+ * PID Delivery Status (SSDM Table 2-10): for a level entry the input at its
+ * active level; an edge is sent as it is detected, and a masked input
+ * latches nothing.  The ioa's "send pending" is never visible either.
+ */
+static uint64_t iosapic_rte_read(IA64IOSapicState *s, int pin)
+{
+    uint64_t rte = s->rte[pin];
+
+    switch (s->face) {
+    case IA64_IOSAPIC_FACE_IOA:
+        return rte & ~RTE_REMOTE_IRR;
+    case IA64_IOSAPIC_FACE_PID:
+        if ((rte & RTE_TRIGGER_LEVEL) && s->irq_level[pin]) {
+            rte |= RTE_DELIVERY_STATUS;
+        }
+        return rte;
+    default:
+        return rte;
+    }
+}
+
 static uint64_t iosapic_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64IOSapicState *s = opaque;
@@ -221,16 +277,19 @@ static uint64_t iosapic_read(void *opaque, hwaddr addr, unsigned size)
     case IOSAPIC_IOWIN:
         index = s->reg_select;
         if (index == IOSAPIC_REG_ID) {
-            result = 0;
+            result = s->face == IA64_IOSAPIC_FACE_PID ? s->id | IOSAPIC_ID_DT
+                                                      : 0;
         } else if (index == IOSAPIC_REG_VER) {
             result = ((s->num_pins - 1) << 16) | s->version;
         } else if (index >= IOSAPIC_RTE_BASE &&
                    index < IOSAPIC_RTE_BASE + s->num_pins * 2) {
             int pin = (index - IOSAPIC_RTE_BASE) / 2;
+            uint64_t rte = iosapic_rte_read(s, pin);
+
             if ((index - IOSAPIC_RTE_BASE) & 1) {
-                result = (uint32_t)(s->rte[pin] >> 32);
+                result = (uint32_t)(rte >> 32);
             } else {
-                result = (uint32_t)s->rte[pin];
+                result = (uint32_t)rte;
             }
         }
         break;
@@ -254,6 +313,9 @@ static void iosapic_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
     case IOSAPIC_IOWIN:
         index = s->reg_select;
         if (index == IOSAPIC_REG_ID) {
+            if (s->face == IA64_IOSAPIC_FACE_PID) {
+                s->id = (uint32_t)val & IOSAPIC_ID_MASK;
+            }
             break;
         } else if (index >= IOSAPIC_RTE_BASE &&
                    index < IOSAPIC_RTE_BASE + s->num_pins * 2) {
@@ -285,6 +347,8 @@ static const Property iosapic_properties[] = {
                        IA64_IOSAPIC_NUM_PINS),
     DEFINE_PROP_UINT32("version", IA64IOSapicState, version,
                        IA64_IOSAPIC_VERSION),
+    DEFINE_PROP_UINT8("face", IA64IOSapicState, face,
+                      IA64_IOSAPIC_FACE_STANDIN),
 };
 
 static void iosapic_realize(DeviceState *dev, Error **errp)
@@ -314,6 +378,7 @@ static void iosapic_reset(DeviceState *dev)
         s->rte[i] = RTE_MASKED;
     }
     s->reg_select = 0;
+    s->id = 0;
 }
 
 static int iosapic_post_load(void *opaque, int version_id)
@@ -337,7 +402,7 @@ static int iosapic_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ia64_iosapic = {
     .name = "ia64-iosapic",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 2,
     .post_load = iosapic_post_load,
     .fields = (const VMStateField[]) {
@@ -346,6 +411,7 @@ static const VMStateDescription vmstate_ia64_iosapic = {
         VMSTATE_UINT8_ARRAY(irq_level, IA64IOSapicState,
                             IA64_IOSAPIC_MAX_PINS),
         VMSTATE_UINT32(reg_select, IA64IOSapicState),
+        VMSTATE_UINT32_V(id, IA64IOSapicState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -372,9 +438,12 @@ static void iosapic_print_info(InterruptStatsProvider *obj, GString *buf)
 
         if (!(rte & RTE_MASKED) || s->irq_level[pin] || s->irq_count[pin]) {
             g_string_append_printf(buf,
-                                   "  in %2u: vec=0x%02x %s%s%s%s level=%u "
-                                   "count=%" PRIu64 "\n",
+                                   "  in %2u: vec=0x%02x dm=%u dest=%02x.%02x "
+                                   "%s%s%s%s level=%u count=%" PRIu64 "\n",
                                    pin, (unsigned)(rte & RTE_VECTOR_MASK),
+                                   (unsigned)((rte & RTE_DELIVERY_MODE) >> 8),
+                                   (unsigned)(rte >> 56),
+                                   (unsigned)((rte >> 48) & 0xff),
                                    (rte & RTE_MASKED) ? "masked " : "",
                                    (rte & RTE_TRIGGER_LEVEL) ? "lvl " : "edge ",
                                    (rte & RTE_POLARITY_LOW) ? "lo " : "hi ",

@@ -162,6 +162,8 @@ from .encoding import (
     tbit_z,
     ld1,
     st2,
+    st4,
+    ld4,
     st8,
     st8_postinc,
     IA64_EXCP_LOWER_PRIV_TRANSFER,
@@ -1507,6 +1509,104 @@ test_lrr_active_low_pin_asserted_when_low = require_registers(
         "r8": 1 << 0x20,
         "r9": 0,
     }, entry=0x10)
+
+
+# 460GX: a lowest-priority I/O interrupt goes to the processor with the
+# lowest enabled XTPR, not to the entry's destination (SSDM 3.7).  Each
+# processor's XTP byte store loads its agent's XTPR in the SAC (CBN 00:0
+# C0h-C7h, read-only to configuration writes, 80h = disabled out of reset;
+# SSDM 2.6.1.1).  Processor 0 stores 08h, processor 1 02h; processor 0 aims
+# IRQ 0 (the 8254's counter 0) at itself with delivery mode 001, and
+# processor 1 takes it.  r20 is the vector processor 1 took, r21-r23 the
+# XTPR dwords before and after a configuration write of 0.
+_XTP_BYTE = (1 << 63) | 0xfee00000 + 0x1e0008
+_XTP_PID = (1 << 63) | 0xfec00000
+_XTP_READY = 0x8000
+_XTP_VECTOR = 0x8010
+_XTP_IVA = 0x200000
+_XTP_SAC_XTPRS = 0x80ff00c0
+test_xtpr_redirects_lowest_priority_interrupt = require_registers(
+    "xtpr_redirects_lowest_priority_interrupt", [
+        (0x10, *movl_mlx(2, _XTP_BYTE)),
+        (0x20, 0x01, adds(4, 0x08, 0), nop_i(), nop_i()),
+        (0x30, 0x01, st1_postinc(2, 4, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(2, (1 << 63) | 0xfee01000)),
+        (0x50, 0x01, adds(3, 0xf0, 0), nop_i(), nop_i()),
+        (0x60, 0x01, st8(2, 3), nop_i(), nop_i()),  # wake processor 1
+        (0x70, *movl_mlx(4, _XTP_READY)),
+        (0x80, 0x01, ld8(5, 4), nop_i(), nop_i()),
+        (0x90, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 5), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0x80, qp=6)),
+        # PID entry 0: destination 00.00, lowest priority, vector 40h.
+        (0xb0, *movl_mlx(2, _XTP_PID)),
+        (0xc0, 0x01, adds(3, 0x11, 0), adds(8, 0x10, 2), nop_i()),
+        (0xd0, 0x01, st4(2, 3), nop_i(), nop_i()),
+        (0xe0, 0x01, st4(8, 0), nop_i(), nop_i()),
+        (0xf0, 0x01, adds(3, 0x10, 0), nop_i(), nop_i()),
+        (0x100, 0x01, st4(2, 3), nop_i(), nop_i()),
+        (0x110, 0x01, adds(3, 0x140, 0), nop_i(), nop_i()),
+        (0x120, 0x01, st4(8, 3), nop_i(), nop_i()),
+        # 8254 counter 0: mode 0, count 10h; OUT rises at terminal count.
+        (0x130, *movl_mlx(2, _sparse_port(0x43))),
+        (0x140, *movl_mlx(3, _sparse_port(0x40))),
+        (0x150, 0x01, adds(4, 0x30, 0), nop_i(), nop_i()),
+        (0x160, 0x01, st1_postinc(2, 4, 0), nop_i(), nop_i()),
+        (0x170, 0x01, adds(4, 0x10, 0), nop_i(), nop_i()),
+        (0x180, 0x01, st1_postinc(3, 4, 0), nop_i(), nop_i()),
+        (0x190, 0x01, st1_postinc(3, 0, 0), nop_i(), nop_i()),
+        (0x1a0, 0x10, nop_m(), nop_i(), br_cond(0x1a0, 0x1a0)),
+
+        (_XTP_IVA + 0x3000, 0x01, mov_m_cr_gr(16, IA64_CR_SAPIC_IVR),
+         nop_i(), nop_i()),
+        (_XTP_IVA + 0x3010, *movl_mlx(18, _XTP_VECTOR)),
+        (_XTP_IVA + 0x3020, 0x01, st8(18, 16), nop_i(), nop_i()),
+        (_XTP_IVA + 0x3030, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI),
+         nop_i(), nop_i()),
+        (_XTP_IVA + 0x3040, 0x01, srlz_d(), nop_i(), nop_i()),
+        (_XTP_IVA + 0x3050, 0x11, nop_m(), nop_i(), rfi_b()),
+
+        # Processor 1, woken at the image base.
+        (0x100000, *movl_mlx(3, _XTP_IVA)),
+        (0x100010, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (0x100020, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x100030, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_TPR), nop_i(), nop_i()),
+        (0x100040, 0x01, srlz_d(), nop_i(), nop_i()),
+        (0x100050, *movl_mlx(2, _XTP_BYTE)),
+        (0x100060, 0x01, adds(4, 0x02, 0), nop_i(), nop_i()),
+        (0x100070, 0x01, st1_postinc(2, 4, 0), nop_i(), nop_i()),
+        (0x100080, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I | IA64_PSR_BN)),
+        (0x100090, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0x1000a0, *movl_mlx(4, _XTP_READY)),
+        (0x1000b0, 0x01, adds(5, 1, 0), nop_i(), nop_i()),
+        (0x1000c0, 0x01, st8(4, 5), nop_i(), nop_i()),
+        (0x1000d0, *movl_mlx(8, 0x1000000)),
+        (0x1000e0, 0x02, nop_m(), mov_lc_gr(8), nop_i()),
+        (0x1000f0, *movl_mlx(9, _XTP_VECTOR)),
+        # The wake-up IPI (vector F0h) is taken first.
+        (0x100100, 0x01, ld8(20, 9), nop_i(), nop_i()),
+        (0x100110, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0x40, 20), nop_i()),
+        (0x100120, 0x10, nop_m(), nop_i(),
+         br_cloop(0x100120, 0x100100, qp=7)),
+        (0x100130, *movl_mlx(2, _sparse_port(0xcf8))),
+        (0x100140, *movl_mlx(3, _sparse_port(0xcfc))),
+        (0x100150, *movl_mlx(4, _XTP_SAC_XTPRS)),
+        (0x100160, 0x01, st4(2, 4), nop_i(), nop_i()),
+        (0x100170, 0x01, ld4(21, 3), nop_i(), nop_i()),
+        (0x100180, 0x01, st4(3, 0), nop_i(), nop_i()),
+        (0x100190, 0x01, ld4(22, 3), nop_i(), nop_i()),
+        (0x1001a0, 0x01, adds(4, 4, 4), nop_i(), nop_i()),
+        (0x1001b0, 0x01, st4(2, 4), nop_i(), nop_i()),
+        (0x1001c0, 0x01, ld4(23, 3), nop_i(), nop_i()),
+        (0x1001d0, 0x10, nop_m(), nop_i(), br_cond(0x1001d0, 0x1001d0)),
+    ], {
+        "ip": 0x1001d0,
+        "exception": IA64_EXCP_NONE,
+        "r20": 0x40,
+        "r21": 0x80800208,
+        "r22": 0x80800208,
+        "r23": 0x80808080,
+    }, entry=0x10, cpu="merced", machine="460gx", alat=None, smp="2",
+    state_cpu=1)
 
 
 def lint0_extint_program():
@@ -6767,6 +6867,7 @@ test_pmi_return_moves_with_pal_copy = require_registers(
 
 CASE_NAMES = (
     'lrr_active_low_pin_asserted_when_low',
+    'xtpr_redirects_lowest_priority_interrupt',
     'pmi_ipi_enters_sale_pmi',
     'pmi_waits_for_psr_ic',
     'pmi_returns_through_b0',

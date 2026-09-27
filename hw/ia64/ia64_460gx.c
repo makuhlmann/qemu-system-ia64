@@ -394,6 +394,53 @@ static uint8_t *ia64_460gx_chipset_cfg(IA64460GXState *s,
 }
 
 /*
+ * The SAC's External Task Priority Registers at CBN 00:0 C0h-C7h, one per
+ * symmetric agent (SSDM 2.6.1.1).  They are read-only to configuration
+ * cycles: only the XTPR update special cycle loads them.
+ */
+#define IA64_460GX_SAC_XTPR_REG   0xc0
+#define IA64_460GX_SAC_XTPRS      8
+#define IA64_460GX_XTPR_DISABLE   0x80
+#define IA64_460GX_XTPR_PRIORITY  0x0f
+
+static uint8_t *ia64_460gx_xtprs(IA64460GXState *s)
+{
+    /* ia64_460gx_chipset_devs[0] is the SAC, device 00h. */
+    return s->chipset_cfg + IA64_460GX_SAC_XTPR_REG;
+}
+
+static bool ia64_460gx_is_xtpr(IA64460GXState *s, const uint8_t *cfg,
+                               unsigned off)
+{
+    return cfg == s->chipset_cfg && off >= IA64_460GX_SAC_XTPR_REG &&
+           off < IA64_460GX_SAC_XTPR_REG + IA64_460GX_SAC_XTPRS;
+}
+
+void ia64_460gx_xtp_cycle(IA64460GXState *s, unsigned agent, uint8_t data)
+{
+    /* The agent id's top bit is the priority agent's: Ab[22:20]# select. */
+    ia64_460gx_xtprs(s)[agent % IA64_460GX_SAC_XTPRS] =
+        data & (IA64_460GX_XTPR_DISABLE | IA64_460GX_XTPR_PRIORITY);
+}
+
+int ia64_460gx_xtp_lowest(IA64460GXState *s)
+{
+    const uint8_t *xtpr = ia64_460gx_xtprs(s);
+    int best = -1;
+    int i;
+
+    for (i = 0; i < IA64_460GX_SAC_XTPRS; i++) {
+        if (xtpr[i] & IA64_460GX_XTPR_DISABLE) {
+            continue;
+        }
+        if (best < 0 || xtpr[i] < xtpr[best]) {
+            best = i;
+        }
+    }
+    return best;
+}
+
+/*
  * The byte a SAC function-0 register-file access lands on: 70h-73h is a window
  * onto the entry 64h selects, so it comes from the file rather than from the
  * device's own config storage.  Any other device, function or offset stays
@@ -711,6 +758,9 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
             uint8_t *file = ia64_460gx_sac_indexed(s, dev, fn, cfg, off);
             uint8_t byte = data >> (i * 8);
 
+            if (ia64_460gx_is_xtpr(s, cfg, off)) {
+                continue;
+            }
             if (file != NULL) {
                 *file = byte;
             } else {
@@ -964,6 +1014,7 @@ static void ia64_460gx_reset_cfg(IA64460GXState *s)
                      IA64_460GX_EXPANDER_COUNT);
         }
     }
+    memset(ia64_460gx_xtprs(s), IA64_460GX_XTPR_DISABLE, IA64_460GX_SAC_XTPRS);
 
     /*
      * Memory Card A (dev 05h fn 0) claims presence with the MAC identity
