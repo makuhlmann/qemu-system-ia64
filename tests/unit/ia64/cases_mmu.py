@@ -1710,13 +1710,13 @@ test_itr_i_slot_uses_low_8_bits = require_registers(
         "r31": 0x7b,
     }, entry=0x10)
 
-test_itr_i_reserved_slot_faults = require_exception(
+test_itr_i_reserved_slot_faults = require_uncollected_reserved_field(
     "itr_i_reserved_slot_faults", [
         (0x10, *movl_mlx(18, 0x0010000004000661)),
         (0x20, 0x00, adds(5, IA64_TR_COUNT, 0), nop_i(), nop_i()),
         (0x30, 0x00, itr_i(5, 18), nop_i(),
          nop_i()),
-    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30, entry=0x10)
+    ], fault_ip=0x30, fault_imm=itr_i(5, 18), entry=0x10)
 
 test_itr_i_resumes_next_slot_after_tb_exit = require_registers(
     "itr_i_resumes_next_slot_after_tb_exit", [
@@ -4469,28 +4469,28 @@ test_itr_d_slot_uses_low_8_bits = require_registers(
 # (251110-003 table 6-1) and takes the same insertion without faulting.
 ONE_GIGABYTE_ITIR = 30 << 2
 
-# require_exception() wraps the program in a stub that sets PSR.ic so the
-# fault is collected and vectored, but mov-to-CR on the interruption
-# registers is illegal while PSR.ic is set, so drop it around the ITIR and
-# IFA writes and restore it before the insertion.
+# The insert runs with PSR.ic = 0, as itc requires, so the fault is not
+# collected and stops at the faulting bundle.
 ONE_GIGABYTE_ITC_PROGRAM = (
     (0x10, *movl_mlx(2, KEY_TEST_VA)),
     (0x20, *movl_mlx(16, KEY_TEST_RR)),
     (0x30, *movl_mlx(18, 0x0010000004000661)),
     (0x40, *movl_mlx(7, ONE_GIGABYTE_ITIR)),
     (0x50, 0x00, mov_rr_write(16, 0), nop_i(), nop_i()),
-    (0x60, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
-    (0x70, 0x00, srlz_d(), nop_i(), nop_i()),
-    (0x80, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
-    (0x90, 0x00, mov_m_gr_cr(2, 20), nop_i(), nop_i()),
-    (0xa0, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
-    (0xb0, 0x00, srlz_d(), nop_i(), nop_i()),
-    (0xc0, 0x00, itc_d(18), nop_i(), nop_i()),
+    (0x60, 0x00, srlz_d(), nop_i(), nop_i()),
+    (0x70, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+    (0x80, 0x00, mov_m_gr_cr(2, 20), nop_i(), nop_i()),
+    (0x90, 0x00, itc_d(18), nop_i(), nop_i()),
 )
 
-test_itc_d_merced_rejects_1gb_page = require_exception(
-    "itc_d_merced_rejects_1gb_page", list(ONE_GIGABYTE_ITC_PROGRAM),
-    IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0xc0, entry=0x10, cpu="merced")
+test_itc_d_merced_rejects_1gb_page = require_registers(
+    "itc_d_merced_rejects_1gb_page", list(ONE_GIGABYTE_ITC_PROGRAM), {
+        "ip": 0x90,
+        "fault_ip": 0x90,
+        "fault_imm": itc_d(18),
+        "exception": IA64_EXCP_RESERVED_REG_FIELD,
+        "fault_code": IA64_EXCP_RESERVED_REG_FIELD,
+    }, entry=0x10, cpu="merced")
 
 # 245318-001 sec 4.3.1 (p.4-26): a present translation whose PPN sets an
 # unimplemented physical address bit makes itc and itr take an Unimplemented
@@ -4546,8 +4546,8 @@ test_itc_d_madison_accepts_ppn_bit_44 = require_registers(
 test_itc_d_madison_accepts_1gb_page = require_registers(
     "itc_d_madison_accepts_1gb_page", [
         *ONE_GIGABYTE_ITC_PROGRAM,
-        (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0xd0)),
-    ], {"ip": 0xd0, "exception": IA64_EXCP_NONE}, entry=0x10, cpu="madison")
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+    ], {"ip": 0xa0, "exception": IA64_EXCP_NONE}, entry=0x10, cpu="madison")
 
 
 def _itc_d_mii_slot0_without_stop_is_illegal(name, template):
@@ -4576,13 +4576,42 @@ test_itc_d_mii_03_slot0_without_stop_is_illegal = \
     _itc_d_mii_slot0_without_stop_is_illegal(
         "itc_d_mii_03_slot0_without_stop_is_illegal", 0x03)
 
-test_itr_d_reserved_slot_faults = require_exception(
+test_itr_d_reserved_slot_faults = require_uncollected_reserved_field(
     "itr_d_reserved_slot_faults", [
         (0x10, *movl_mlx(18, 0x0010000004000661)),
         (0x20, 0x00, adds(5, IA64_TR_COUNT, 0), nop_i(), nop_i()),
         (0x30, 0x00, itr_d(5, 18), nop_i(),
          nop_i()),
-    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30, entry=0x10)
+    ], fault_ip=0x30, fault_imm=itr_d(5, 18), entry=0x10)
+
+# 245319-001 itc (p.2-122) and itr (p.2-124): with PSR.ic = 1 the insert is
+# an Illegal Operation fault, tested before privilege, NaT and reserved
+# fields; require_exception() sets PSR.ic before the program runs.
+test_itc_d_psr_ic_raises_illegal_operation = require_exception(
+    "itc_d_psr_ic_raises_illegal_operation", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, itc_d(18), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x20, entry=0x10)
+
+test_itc_i_psr_ic_raises_illegal_operation = require_exception(
+    "itc_i_psr_ic_raises_illegal_operation", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, itc_i(18), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x20, entry=0x10)
+
+test_itr_i_psr_ic_raises_illegal_operation = require_exception(
+    "itr_i_psr_ic_raises_illegal_operation", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, adds(5, 5, 0), nop_i(), nop_i()),
+        (0x30, 0x00, itr_i(5, 18), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x30, entry=0x10)
+
+test_itr_d_psr_ic_precedes_reserved_slot = require_exception(
+    "itr_d_psr_ic_precedes_reserved_slot", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, adds(5, IA64_TR_COUNT, 0), nop_i(), nop_i()),
+        (0x30, 0x00, itr_d(5, 18), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x30, entry=0x10)
 
 test_tpa_dt_disabled_uses_dtlb_entry = require_registers(
     "tpa_dt_disabled_uses_dtlb_entry", [
@@ -7650,6 +7679,10 @@ CASE_NAMES = (
     'itr_d_merced_unimplemented_ppn_faults',
     'itc_d_madison_accepts_ppn_bit_44',
     'itr_d_reserved_slot_faults',
+    'itc_d_psr_ic_raises_illegal_operation',
+    'itc_i_psr_ic_raises_illegal_operation',
+    'itr_i_psr_ic_raises_illegal_operation',
+    'itr_d_psr_ic_precedes_reserved_slot',
     'itr_d_slot_replacement_keeps_old_translation_cached',
     'itr_d_slot_uses_low_8_bits',
     'itr_d_uses_slot_register_value',
@@ -7815,6 +7848,9 @@ CASE_METADATA = {
     'itc_d_present_reserved_itir_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itc_d_present_reserved_ma_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itc_d_present_reserved_pte_field_fault': CaseMetadata(terminal_is_fault_ip=True),
+    'itc_d_merced_rejects_1gb_page': CaseMetadata(terminal_is_fault_ip=True),
+    'itr_d_reserved_slot_faults': CaseMetadata(terminal_is_fault_ip=True),
+    'itr_i_reserved_slot_faults': CaseMetadata(terminal_is_fault_ip=True),
     'itc_i_present_reserved_pte_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itr_i_8k_translation_uses_unrounded_paddr': CaseMetadata(nonterminal_effect_loop=True),
     'itr_i_clear_accessed_raises_inst_access_bit': CaseMetadata(nonterminal_effect_loop=True),

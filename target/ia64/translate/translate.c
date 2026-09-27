@@ -806,6 +806,35 @@ static void ia64_set_exit_nat_known(DisasContext *ctx,
     ia64_drop_nat_known_renamed(insn, ctx->memory.nat_known_at_exit);
 }
 
+static bool ia64_insn_is_translation_insert(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_ITC_D:
+    case IA64_OP_ITC_I:
+    case IA64_OP_ITR_D:
+    case IA64_OP_ITR_I:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * itc and itr raise Illegal Operation while PSR.ic is 1, before the privilege
+ * check (SDM Vol. 3 itc and itr; 245319-001 p.2-122, p.2-124).
+ */
+static void ia64_gen_check_insert_psr_ic(const Ia64Instruction *insn)
+{
+    TCGv_i64 ic = tcg_temp_new_i64();
+    TCGLabel *ok = gen_new_label();
+
+    tcg_gen_andi_i64(ic, cpu_psr, IA64_PSR_IC);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, ic, 0, ok);
+    ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address, insn->raw,
+                              insn->slot);
+    gen_set_label(ok);
+}
+
 static bool ia64_insn_is_privileged(const Ia64Instruction *insn)
 {
     switch (insn->opcode) {
@@ -3690,6 +3719,9 @@ static IA64PrepareResult ia64_gen_prepare_insn(
     }
     if (insn->reg_base_update || insn->imm_base_update) {
         ia64_gen_check_gr_in_frame(insn, insn->operands.common.source2);
+    }
+    if (ia64_insn_is_translation_insert(insn)) {
+        ia64_gen_check_insert_psr_ic(insn);
     }
     if (ia64_insn_is_privileged(insn)) {
         ia64_gen_check_privileged(ctx, insn);
