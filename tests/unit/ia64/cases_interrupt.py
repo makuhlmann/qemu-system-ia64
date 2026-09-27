@@ -16,6 +16,7 @@ from .encoding import (
     IA64_CR_ITM,
     IA64_CR_ITV,
     IA64_LRR_DM_EXTINT,
+    IA64_LRR_IPP,
     IA64_LRR_TM,
     IA64_CR_LRR0,
     IA64_CR_SAPIC_EOI,
@@ -1486,6 +1487,26 @@ test_sapic_same_class_higher_vector_preempts = require_registers(
 def _sparse_port(port):
     return (0x8000000000000000 | 0xffffc000000 |
             ((port >> 2) << 12) | (port & 0xfff))
+
+
+# LRR.ipp = 1 makes a LINT pin active low (SDM Vol. 2 Table 5-14).  The zx1
+# board leaves LINT0 unconnected and low: level-triggered and active low it
+# is asserted and pends its vector, active high it withdraws it.
+test_lrr_active_low_pin_asserted_when_low = require_registers(
+    "lrr_active_low_pin_asserted_when_low", [
+        (0x10, *movl_mlx(3, IA64_LRR_IPP | IA64_LRR_TM | 0x20)),
+        (0x20, 0x01, mov_m_gr_cr(3, IA64_CR_LRR0), nop_i(), nop_i()),
+        (0x30, 0x01, mov_m_cr_gr(8, IA64_CR_SAPIC_IRR0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, IA64_LRR_TM | 0x20)),
+        (0x50, 0x01, mov_m_gr_cr(3, IA64_CR_LRR0), nop_i(), nop_i()),
+        (0x60, 0x01, mov_m_cr_gr(9, IA64_CR_SAPIC_IRR0), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r8": 1 << 0x20,
+        "r9": 0,
+    }, entry=0x10)
 
 
 def lint0_extint_program():
@@ -6745,6 +6766,7 @@ test_pmi_return_moves_with_pal_copy = require_registers(
     }, entry=0x10)
 
 CASE_NAMES = (
+    'lrr_active_low_pin_asserted_when_low',
     'pmi_ipi_enters_sale_pmi',
     'pmi_waits_for_psr_ic',
     'pmi_returns_through_b0',

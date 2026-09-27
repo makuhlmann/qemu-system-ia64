@@ -316,11 +316,12 @@ void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
  * processor.  Each is steered by its Local Redirection Register (SDM vol 2
  * 5.8.3.9): the mask bit discards occurrences, the delivery mode picks the
  * vector to pend (ExtINT is vector 0, NMI vector 2, INT the vector field),
- * and the trigger mode decides whether the pending indication follows the
- * pin (level) or latches on an inactive-to-active edge.  On the 460GX the
- * south bridge's 8259 pair drives LINT0, which is how the SDV firmware runs
- * its legacy tick (it programs LRR0 = 0x8700: level ExtINT) and why the XP
- * HAL masks both pins (LRR = 0x10000) before it enables interrupts.
+ * ipp picks the active level, and the trigger mode decides whether the
+ * pending indication follows the pin (level) or latches on an
+ * inactive-to-active edge.  On the 460GX the south bridge's 8259 pair drives
+ * LINT0, which is how the SDV firmware runs its legacy tick (it programs
+ * LRR0 = 0x8700: level ExtINT) and why the XP HAL masks both pins
+ * (LRR = 0x10000) before it enables interrupts.
  */
 #define IA64_LRR_VECTOR_MASK    0xffULL
 #define IA64_LRR_DM_SHIFT       8
@@ -330,6 +331,7 @@ void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
 #define IA64_LRR_DM_NMI         4
 #define IA64_LRR_DM_INIT        5
 #define IA64_LRR_DM_EXTINT      7
+#define IA64_LRR_IPP            (1ULL << 13)
 #define IA64_LRR_TM             (1ULL << 15)
 #define IA64_LRR_M              (1ULL << 16)
 
@@ -348,6 +350,14 @@ static int ia64_lrr_vector(uint64_t lrr)
     default:
         return -1;
     }
+}
+
+/* lint_level is the pin's electrical level; LRR.ipp = 1 makes low active. */
+static bool ia64_lint_asserted(CPUIA64State *env, int pin)
+{
+    bool active_low = env->cr[IA64_CR_LRR0 + pin] & IA64_LRR_IPP;
+
+    return env->interrupt.lint_level[pin] != active_low;
 }
 
 static void ia64_lint_update(CPUIA64State *env, int pin, bool rising)
@@ -381,7 +391,7 @@ static void ia64_lint_update(CPUIA64State *env, int pin, bool rising)
          * withdraws it otherwise (deassertion clears the indication, and a
          * masked pin's occurrences are not pended).
          */
-        if (env->interrupt.lint_level[pin] && !(lrr & IA64_LRR_M)) {
+        if (ia64_lint_asserted(env, pin) && !(lrr & IA64_LRR_M)) {
             env->interrupt.sapic_irr[vector / 64] |= 1ULL << (vector % 64);
         } else {
             env->interrupt.sapic_irr[vector / 64] &= ~(1ULL << (vector % 64));
@@ -401,11 +411,11 @@ static void ia64_cpu_set_lint_work(CPUState *cs, run_on_cpu_data data)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     int pin = data.host_int >> 1;
-    bool level = data.host_int & 1;
-    bool rising = level && !cpu->env.interrupt.lint_level[pin];
+    bool was_asserted = ia64_lint_asserted(&cpu->env, pin);
 
-    cpu->env.interrupt.lint_level[pin] = level;
-    ia64_lint_update(&cpu->env, pin, rising);
+    cpu->env.interrupt.lint_level[pin] = data.host_int & 1;
+    ia64_lint_update(&cpu->env, pin,
+                     !was_asserted && ia64_lint_asserted(&cpu->env, pin));
 }
 
 void ia64_cpu_set_lint(CPUState *cs, int pin, int level)

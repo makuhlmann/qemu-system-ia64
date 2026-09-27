@@ -1680,3 +1680,4 @@ pmi_returns_through_b0
 pmi_pal_vector_returns_at_once
 pmi_before_sale_pmi_returns_at_once
 pmi_return_moves_with_pal_copy
+lrr_active_low_pin_asserted_when_low
