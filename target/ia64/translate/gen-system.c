@@ -867,6 +867,11 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
                    ia64_is_pal_reset_return_break(ctx->env, insn->address)) {
             gen_helper_pal_reset_return(tcg_env);
             return IA64_GEN_NORETURN;
+        } else if (op->auxiliary1 == 0 && op->immediate == 0x100008 &&
+                   ia64_is_pal_pmi_return_break(ctx->env, insn->address)) {
+            gen_helper_pal_pmi_return(tcg_env,
+                                      tcg_constant_i64(insn->address));
+            return IA64_GEN_NORETURN;
         } else if (op->immediate == 0x100001) {
             gen_helper_fpswa_dispatch(tcg_env);
         } else if ((op->immediate & 0x100000) &&

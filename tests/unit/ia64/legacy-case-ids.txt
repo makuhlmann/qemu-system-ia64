@@ -1674,3 +1674,9 @@ init_ipi_enters_pale_init
 init_with_psr_ic_collects
 init_waits_for_psr_mc
 pal_mc_resume_returns_from_init
+pmi_ipi_enters_sale_pmi
+pmi_waits_for_psr_ic
+pmi_returns_through_b0
+pmi_pal_vector_returns_at_once
+pmi_before_sale_pmi_returns_at_once
+pmi_return_moves_with_pal_copy

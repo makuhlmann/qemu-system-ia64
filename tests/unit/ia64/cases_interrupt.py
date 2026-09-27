@@ -83,6 +83,9 @@ from .encoding import (
     IA64_UNALIGNED_VECTOR,
     IA64_VECTOR_MASKED,
     LOW_VECTOR_TR_PTE,
+    PAL_COPY_BUFFER_SIZE,
+    PAL_COPY_PAL,
+    PAL_COPY_TARGET,
     PAL_HALT_LIGHT,
     PAL_PROC_ENTRY,
     add,
@@ -6527,7 +6530,208 @@ test_pal_mc_resume_returns_from_init = require_registers(
         "ar_ccv": 0x77,
     }, entry=0x10)
 
+# PMI (SDM Vol. 2 5.8.4.2, 11.5): a self-IPI with delivery mode 010 pends a
+# PMI vector.  While PSR.ic is 1, PALE_PMI enters the SALE_PMI entry that
+# PAL_PMI_ENTRYPOINT registered, with the 11.5.2 state in bank 0 and BR0 at
+# PAL's return point: image base + 0x80 in this no-firmware entry state,
+# next to the PAL_PROC stub, and in the copy after PAL_COPY_PAL.
+_PMI_HANDLER = 0x6000
+_PMI_RETURN = 0x100080
+_PMI_MARK = 0x7000
+_PMI_B1 = 0xb1b0
+_PMI_RSC = 3
+_PMI_IFS_IFM = 5
+
+
+def _pmi_setup(sal_entry=_PMI_HANDLER, vector=1, ic=True):
+    return [
+        (0x10, 0x11, nop_m(), nop_i(), bsw1()),
+        (0x20, 0x00, nop_m(), addl(28, 0x1b, 0), nop_i()),  # REGISTER_MEM
+        (0x30, *movl_mlx(29, _INIT_SAVE)),
+        (0x40, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
+        (0x50, 0x10, nop_m(), nop_i(), br_call(0, 0x50, PAL_PROC_ENTRY)),
+        (0x60, 0x00, nop_m(), addl(28, 0x20, 0), nop_i()),  # PMI_ENTRYPOINT
+        (0x70, *movl_mlx(29, sal_entry)),
+        (0x80, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
+        (0x90, 0x10, nop_m(), nop_i(), br_call(0, 0x90, PAL_PROC_ENTRY)),
+        (0xa0, *movl_mlx(3, _PMI_B1)),
+        (0xb0, 0x01, nop_m(), mov_br_gr(1, 3), cmp4_eq_imm(6, 7, 0, 0)),
+        (0xc0, *movl_mlx(3, (1 << 63) | _PMI_IFS_IFM)),
+        (0xd0, 0x01, mov_m_gr_cr(3, 23), nop_i(), nop_i()),     # cr.ifs
+        (0xe0, 0x01, nop_m(), adds(3, _PMI_RSC, 0), adds(24, 0x24, 0)),
+        (0xf0, 0x01, mov_m_gr_ar(3, 16), nop_i(), nop_i()),     # ar.rsc
+        (0x100, *movl_mlx(19, IA64_PSR_IC if ic else 0)),
+        (0x110, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0x120, *movl_mlx(2, (1 << 63) | 0xfee00000)),  # IPI to id 0, eid 0
+        (0x130, *movl_mlx(3, 0x200 | vector)),           # delivery mode PMI
+        (0x140, 0x01, st8(2, 3), nop_i(), nop_i()),
+    ]
+
+
+# After the PMI the main program marks its return and reads what SALE_PMI
+# stored at _PMI_MARK.
+_PMI_MAIN_TAIL = [
+    (0x150, 0x01, nop_m(), adds(10, 0x5a, 0), nop_i()),
+    (0x160, *movl_mlx(2, _PMI_MARK)),
+    (0x170, 0x01, ld8(12, 2), nop_i(), nop_i()),
+    (0x180, 0x10, nop_m(), nop_i(), br_cond(0x180, 0x180)),
+]
+
+_PMI_FIRMWARE = [
+    (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+    (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    (_PMI_RETURN, 0x0a, break_m(0x100008), nop_m(), nop_i()),
+    (_PMI_RETURN + 0x10, 0x10, nop_m(), nop_i(),
+     br_cond(_PMI_RETURN + 0x10, _PMI_RETURN + 0x10)),
+]
+
+# SALE_PMI stores its vector at _PMI_MARK, uses its scratch GR30-31 and
+# branches to BR0 (11.5.3).
+_PMI_STORE_AND_RETURN = [
+    (_PMI_HANDLER, *movl_mlx(30, _PMI_MARK)),
+    (_PMI_HANDLER + 0x10, 0x01, st8(30, 24), adds(31, 0x33, 0), nop_i()),
+    (_PMI_HANDLER + 0x20, 0x10, nop_m(), nop_i(), br_indirect(0)),
+]
+
+test_pmi_ipi_enters_sale_pmi = require_registers(
+    "pmi_ipi_enters_sale_pmi", [
+        *_pmi_setup(),
+        (0x150, 0x10, nop_m(), nop_i(), br_cond(0x150, 0x150)),
+        *_PMI_FIRMWARE,
+        (_PMI_HANDLER, 0x01, mov_m_cr_gr(30, 19), nop_i(), nop_i()),  # iip
+        (_PMI_HANDLER + 0x10, 0x01, mov_m_cr_gr(31, 23), nop_i(), nop_i()),
+        (_PMI_HANDLER + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(_PMI_HANDLER + 0x20, _PMI_HANDLER + 0x20)),
+    ], {
+        "ip": _PMI_HANDLER + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "psr": 0,
+        "ar_rsc": 0,
+        "b0": _PMI_RETURN,
+        "b1": _PMI_B1,
+        "r24": 1,
+        "r25": _INIT_SAVE,
+        "r26": _PMI_RSC,
+        "r27": 0xa0,
+        "r28": _PMI_B1,
+        "r29": 1 | (1 << 6),
+        "r30": 0x150,
+        "r31": _PMI_IFS_IFM,
+    }, entry=0x10)
+
+# PSR.ic = 0 holds the PMI pending (Table 5-8); the srlz.d that makes
+# PSR.ic = 1 visible lets it in on the next slot of the same bundle.
+test_pmi_waits_for_psr_ic = require_registers(
+    "pmi_waits_for_psr_ic", [
+        *_pmi_setup(ic=False),
+        *_nmi_spin(0x150, 2000),
+        (0x190, 0x01, nop_m(), adds(9, 1, 0), nop_i()),
+        (0x1a0, *movl_mlx(19, IA64_PSR_IC)),
+        (0x1b0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0x1c0, 0x10, nop_m(), nop_i(), br_cond(0x1c0, 0x1c0)),
+        *_PMI_FIRMWARE,
+        (_PMI_HANDLER, 0x01, mov_m_cr_gr(30, 19), nop_i(), nop_i()),  # iip
+        (_PMI_HANDLER + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(_PMI_HANDLER + 0x10, _PMI_HANDLER + 0x10)),
+    ], {
+        "ip": _PMI_HANDLER + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r9": 1,
+        "r24": 1,
+        "r30": 0x1b0,
+    }, entry=0x10)
+
+# The branch to BR0 puts back RSC, B0, B1 and the predicates from bank 0
+# GR26-29 and resumes from IIP and IPSR, in bank 1 again.
+test_pmi_returns_through_b0 = require_registers(
+    "pmi_returns_through_b0", [
+        *_pmi_setup(vector=2),
+        *_PMI_MAIN_TAIL,
+        *_PMI_FIRMWARE,
+        *_PMI_STORE_AND_RETURN,
+    ], {
+        "ip": 0x180,
+        "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_IC | IA64_PSR_BN,
+        "ar_rsc": _PMI_RSC,
+        "b0": 0xa0,
+        "b1": _PMI_B1,
+        "p6": 1,
+        "r10": 0x5a,
+        "r12": 2,
+        "r24": 0x24,
+    }, entry=0x10)
+
+# Vectors 4-15 are PAL's; PAL has no PMI work and returns at once.
+test_pmi_pal_vector_returns_at_once = require_registers(
+    "pmi_pal_vector_returns_at_once", [
+        *_pmi_setup(vector=5),
+        *_PMI_MAIN_TAIL,
+        *_PMI_FIRMWARE,
+        *_PMI_STORE_AND_RETURN,
+    ], {
+        "ip": 0x180,
+        "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_IC | IA64_PSR_BN,
+        "r10": 0x5a,
+        "r12": 0,
+        "r24": 0x24,
+    }, entry=0x10)
+
+# A SAL vector before SAL registered its handler: PAL returns at once (11.5.1).
+test_pmi_before_sale_pmi_returns_at_once = require_registers(
+    "pmi_before_sale_pmi_returns_at_once", [
+        *_pmi_setup(sal_entry=0),
+        *_PMI_MAIN_TAIL,
+        *_PMI_FIRMWARE,
+        *_PMI_STORE_AND_RETURN,
+    ], {
+        "ip": 0x180,
+        "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_IC | IA64_PSR_BN,
+        "r10": 0x5a,
+        "r12": 0,
+        "r24": 0x24,
+    }, entry=0x10)
+
+# PAL_COPY_PAL moves PALE_PMI, and with it the return point in BR0.
+test_pmi_return_moves_with_pal_copy = require_registers(
+    "pmi_return_moves_with_pal_copy", [
+        (0x10, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
+        (0x20, *movl_mlx(28, PAL_COPY_PAL)),
+        (0x30, *movl_mlx(32, PAL_COPY_PAL)),
+        (0x40, *movl_mlx(33, PAL_COPY_TARGET | (1 << 63))),
+        (0x50, *movl_mlx(34, PAL_COPY_BUFFER_SIZE)),
+        (0x60, *movl_mlx(35, 0)),
+        (0x70, 0x10, nop_m(), nop_i(), br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, 0x00, nop_m(), addl(28, 0x20, 0), nop_i()),  # PMI_ENTRYPOINT
+        (0x90, *movl_mlx(29, _PMI_HANDLER)),
+        (0xa0, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
+        (0xb0, 0x10, nop_m(), nop_i(), br_call(0, 0xb0, PAL_PROC_ENTRY)),
+        (0xc0, *movl_mlx(19, IA64_PSR_IC)),
+        (0xd0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xe0, *movl_mlx(2, (1 << 63) | 0xfee00000)),
+        (0xf0, *movl_mlx(3, 0x201)),
+        (0x100, 0x01, st8(2, 3), nop_i(), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0x110)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+        (_PMI_HANDLER, 0x10, nop_m(), nop_i(),
+         br_cond(_PMI_HANDLER, _PMI_HANDLER)),
+    ], {
+        "ip": _PMI_HANDLER,
+        "exception": IA64_EXCP_NONE,
+        "b0": PAL_COPY_TARGET + 0x20,
+        "r24": 1,
+    }, entry=0x10)
+
 CASE_NAMES = (
+    'pmi_ipi_enters_sale_pmi',
+    'pmi_waits_for_psr_ic',
+    'pmi_returns_through_b0',
+    'pmi_pal_vector_returns_at_once',
+    'pmi_before_sale_pmi_returns_at_once',
+    'pmi_return_moves_with_pal_copy',
     'init_ipi_enters_pale_init',
     'init_with_psr_ic_collects',
     'init_waits_for_psr_mc',

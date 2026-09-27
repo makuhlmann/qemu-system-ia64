@@ -70,7 +70,7 @@
 #define PAL_COPY_BUFFER_SIZE  0x1000ULL
 #define PAL_COPY_BUFFER_ALIGN 0x1000ULL
 #define PAL_COPY_PROC_OFFSET  0
-#define PAL_COPY_CODE_SIZE    0x20ULL
+#define PAL_COPY_CODE_SIZE    0x40ULL
 #define PAL_COPY_TARGET_CACHE_ATTR (1ULL << 63)
 #define PAL_SELF_TEST_STATE_TESTED (1ULL << 2)
 #define PAL_MEM_ATTR_WB            (1ULL << 0)
@@ -509,6 +509,14 @@ static void pal_copy_pal(CPUIA64State *env)
         0x0004000000000200ULL,
         0x0000000100000011ULL,
         0x0080000800000200ULL,
+        /*
+         * At IA64_PAL_COPY_PMI_RETURN_OFFSET, PALE_PMI's return point:
+         * break.m 0x100008 ;; br.few . ;; (ia64_pal_pmi_return).
+         */
+        0x000002000000400aULL,
+        0x0004000000000200ULL,
+        0x0000000100000011ULL,
+        0x4000000000000200ULL,
     };
     uint64_t target_addr = pal_stacked_arg(env, 0);
     uint64_t alloc_size = pal_stacked_arg(env, 1);
@@ -557,8 +565,8 @@ static void pal_copy_pal(CPUIA64State *env)
     /*
      * An application-processor call does not repeat the memory copy, but it
      * still installs the relocated procedure entry in that processor (SDM
-     * Vol. 2, PAL_COPY_PAL).  The copy also moves PAL's own PALE_PMI entry,
-     * which is not modelled; SAL's PMI entry, registered by
+     * Vol. 2, PAL_COPY_PAL).  The copy also moves PALE_PMI, and with it the
+     * return address PALE_PMI hands SAL; SAL's PMI entry, registered by
      * PAL_PMI_ENTRYPOINT, stays as it was.
      */
     qatomic_set(&env->pal.pal_proc_copy_addr,
@@ -1020,6 +1028,79 @@ void ia64_pal_init_event(CPUIA64State *env, uint64_t iip, uint64_t ipsr)
     env->pal.pal_mc_event_active = true;
     env->ip = env_archcpu(env)->boot_info.firmware_entry;
     env->instruction_group_start = true;
+}
+
+/*
+ * BR0 on the way to SALE_PMI: PALE_PMI's return point, in the copy once
+ * PAL_COPY_PAL has moved PAL, else in the PAL handed over at reset.
+ */
+static uint64_t pal_pmi_return_addr(CPUIA64State *env)
+{
+    IA64CPU *cpu = env_archcpu(env);
+
+    if (qatomic_load_acquire(&env->pal.pal_proc_copy_valid)) {
+        return qatomic_read(&env->pal.pal_proc_copy_addr) +
+               IA64_PAL_COPY_PMI_RETURN_OFFSET;
+    }
+    return cpu->boot_info_valid ? cpu->boot_info.raw_pal_pmi_return : 0;
+}
+
+/*
+ * PALE_PMI (SDM Vol. 2 11.5) for a SAL vector with a SALE_PMI registered.
+ * PSR.ic was 1, so the interruption collected IIP and IPSR and cleared
+ * IFS.v; SALE_PMI gets the 11.5.2 exit state in bank 0.
+ */
+void ia64_pal_pmi_event(CPUIA64State *env, uint64_t iip, uint64_t ipsr,
+                        unsigned vector)
+{
+    uint64_t rsc = env->ar_rsc;
+    uint64_t b0 = env->br[IA64_BR_RETURN_LINK];
+    uint64_t b1 = env->br[IA64_BR_MINSTATE_SCRATCH];
+    uint64_t pr = 0;
+    int i;
+
+    for (i = 0; i < IA64_PR_COUNT; i++) {
+        pr |= (env->pr[i] ? 1ULL : 0) << i;
+    }
+    env->cr_iip = iip;
+    env->cr_ipsr = ipsr;
+    env->cr_ifs &= ~IA64_IFS_V;
+    ia64_set_psr(env, env->psr & (IA64_PSR_MC | IA64_PSR_MFL | IA64_PSR_MFH |
+                                  IA64_PSR_PK));
+    env->exception_state.psr_ic_inflight = false;
+    env->gr[IA64_SALE_PMI_GR_VECTOR] = vector;
+    env->gr[IA64_SALE_PMI_GR_MINSTATE] = env->pal.pal_mc_save_addr;
+    env->gr[IA64_SALE_PMI_GR_RSC] = rsc;
+    env->gr[IA64_SALE_PMI_GR_B0] = b0;
+    env->gr[IA64_SALE_PMI_GR_B1] = b1;
+    env->gr[IA64_SALE_PMI_GR_PR] = pr;
+    env->nat[0] &= ~MAKE_64BIT_MASK(IA64_SALE_PMI_GR_VECTOR,
+                                    IA64_SALE_PMI_GR_PR -
+                                    IA64_SALE_PMI_GR_VECTOR + 1);
+    env->ar_rsc &= ~IA64_RSC_MODE;
+    env->br[IA64_BR_RETURN_LINK] = pal_pmi_return_addr(env);
+    env->ip = env->pal.pal_pmi_entry;
+    env->instruction_group_start = true;
+}
+
+/*
+ * SALE_PMI branched to BR0 (11.5.3): PAL puts back what it kept in bank 0
+ * GR26-29 and resumes the interrupted context from IIP and IPSR.
+ */
+void ia64_pal_pmi_return(CPUIA64State *env, uint64_t ip)
+{
+    uint64_t pr = env->gr[IA64_SALE_PMI_GR_PR];
+    int i;
+
+    env->ar_rsc = env->gr[IA64_SALE_PMI_GR_RSC];
+    env->br[IA64_BR_RETURN_LINK] = env->gr[IA64_SALE_PMI_GR_B0];
+    env->br[IA64_BR_MINSTATE_SCRATCH] = env->gr[IA64_SALE_PMI_GR_B1];
+    for (i = 1; i < IA64_PR_COUNT; i++) {
+        env->pr[i] = (pr >> i) & 1;
+    }
+    env->ip = ip;
+    ia64_rfi(env, ip, 0);
+    cpu_loop_exit(env_cpu(env));
 }
 
 /*

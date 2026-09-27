@@ -126,6 +126,10 @@ typedef struct IA64PalState {
     bool pal_mc_event_active;
     /* SAL's PMI entry, from PAL_PMI_ENTRYPOINT (not PAL's own PALE_PMI). */
     uint64_t pal_pmi_entry;
+    /* PMI vectors latched and not yet taken by PALE_PMI (SDM Vol. 2 11.5.1). */
+    uint16_t pal_pmi_pending;
+    /* The PMI pin's level: an assertion latches vector 0. */
+    bool pal_pmi_pin;
     /*
      * PAL_PROC entries this processor recognises: the one PAL handed over at
      * reset (from the boot info on every reset), and the copy PAL_COPY_PAL

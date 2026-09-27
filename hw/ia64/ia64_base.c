@@ -113,6 +113,8 @@
 #define IA64_PAL_ROM_SIZE         0x1000
 /* PAL_RESET's return address for SAL's RECOVERY_CHECK call, in that ROM. */
 #define IA64_PAL_RESET_RETURN     (IA64_PAL_ROM_BASE + 0x20)
+/* PALE_PMI's return address SAL gets in BR0, in that ROM. */
+#define IA64_PAL_PMI_RETURN       (IA64_PAL_ROM_BASE + 0x40)
 /*
  * The reset IVT: a 32 KiB-aligned interruption vector table whose every
  * bundle is a branch-to-self, pointed to by cr.iva in the SALE_ENTRY entry
@@ -305,6 +307,7 @@
  */
 
 #define IA64_SAPIC_DELIVERY_INT     0
+#define IA64_SAPIC_DELIVERY_PMI     2
 #define IA64_SAPIC_DELIVERY_NMI     4
 #define IA64_SAPIC_DELIVERY_INIT    5
 #define IA64_SAPIC_DELIVERY_EXTINT  7
@@ -2337,6 +2340,12 @@ static void ia64_vpc_lsapic_write(void *opaque, hwaddr addr,
             ia64_cpu_raise_init(cs);
         }
         return;
+    case IA64_SAPIC_DELIVERY_PMI:
+        cs = ia64_cpu_by_sapic_id(id, eid);
+        if (cs != NULL) {
+            ia64_cpu_raise_pmi(cs, value & 0xff);
+        }
+        return;
     default:
         return;
     }
@@ -3481,6 +3490,8 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
          * places its PAL stub at firmware_base + 0x60 (PAL_PROC_ENTRY).
          */
         .raw_pal_proc = firmware_base + 0x60,
+        /* And its PALE_PMI return point next to it (PAL_PMI_RETURN). */
+        .raw_pal_pmi_return = firmware_base + 0x80,
         /*
          * What the project firmware registers with the PAL emulation once it
          * runs (IA64_PAL_FIRMWARE_REGISTER), for an image at firmware_base:
@@ -3569,6 +3580,7 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                 .raw_pal_reset_return =
                     IA64_VPC_MACHINE_GET_CLASS(s)->sale_recovery_check ?
                     IA64_PAL_RESET_RETURN : 0,
+                .raw_pal_pmi_return = IA64_PAL_PMI_RETURN,
                 /*
                  * Every processor leaves reset together and runs SAL_A,
                  * which arbitrates the BSP through the SAC's write-once
@@ -3621,14 +3633,21 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
  *   break.m 0x100007 ;;  br.few . ;;
  * The translator turns the break at that address into the second SALE_ENTRY
  * call (ia64_cpu_pal_reset_return); the branch to itself is never reached.
+ * At +0x40 PALE_PMI's return address (IA64_PAL_PMI_RETURN):
+ *   break.m 0x100008 ;;  br.few . ;;
+ * which resumes the context a PMI interrupted (ia64_pal_pmi_return).
  */
 
-static const uint8_t ia64_pal_stub[64] = {
+static const uint8_t ia64_pal_stub[96] = {
     0x0a, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
     0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x08, 0x00, 0x80, 0x00,
     0x0a, 0x38, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+    0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+    0x0a, 0x40, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
     0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,

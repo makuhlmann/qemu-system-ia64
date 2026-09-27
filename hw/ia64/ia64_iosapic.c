@@ -33,6 +33,7 @@
 
 #define IOSAPIC_DELIVERY_FIXED  0
 #define IOSAPIC_DELIVERY_LOWEST 1
+#define IOSAPIC_DELIVERY_PMI    2
 #define IOSAPIC_DELIVERY_NMI    4
 #define IOSAPIC_DELIVERY_INIT   5
 #define IOSAPIC_DELIVERY_EXTINT 7
@@ -89,6 +90,14 @@ static void iosapic_update(IA64IOSapicState *s, int pin)
         if (cs) {
             s->irq_count[pin]++;
             ia64_cpu_raise_init(cs);
+        }
+        return;
+    case IOSAPIC_DELIVERY_PMI:
+        /* Edge only; the vector names the PMI vector (SSDM 2.6.3.4). */
+        cs = ia64_cpu_by_sapic_id(id, eid);
+        if (cs) {
+            s->irq_count[pin]++;
+            ia64_cpu_raise_pmi(cs, rte & RTE_VECTOR_MASK);
         }
         return;
     default:

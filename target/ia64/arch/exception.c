@@ -800,6 +800,51 @@ static void ia64_deliver_init(CPUState *cs)
     env->exception_state.ia32_transition_trap = false;
 }
 
+/*
+ * A PMI is taken at an instruction boundary while PSR.ic is 1, whatever
+ * PSR.i, and enters PALE_PMI (SDM Vol. 2 11.5.1): the highest pending vector
+ * first, PAL's 4-15 above SAL's 0-3.  PAL has no PMI work of its own, and
+ * a SAL vector that arrives before SAL registered its handler "will just
+ * return to the interrupted context": neither leaves a trace the
+ * interrupted context can see, since the interruption registers it
+ * overwrites are not readable while PSR.ic is 1.
+ */
+static void ia64_deliver_pmi(CPUState *cs)
+{
+    CPUIA64State *env = &ia64_cpu_from_cpu_state(cs)->env;
+    bool ia32 = env->psr & IA64_PSR_IS;
+    uint64_t ipsr = env->psr;
+    unsigned vector = 31 - clz32(env->pal.pal_pmi_pending);
+    uint64_t iip;
+
+    env->pal.pal_pmi_pending &= ~(1u << vector);
+    if (env->pal.pal_pmi_pending == 0) {
+        cpu_reset_interrupt(cs, IA64_INTERRUPT_PMI);
+    }
+    if (vector >= IA64_PMI_SAL_VECTORS || env->pal.pal_pmi_entry == 0) {
+        return;
+    }
+    env->exception_state.completion_trap_armed = false;
+    if (ia32 || env->exception_state.ia32_transition_trap) {
+        iip = ia64_ia32_virtual_ip(env);
+        ipsr &= ~IA64_PSR_RI_MASK;
+        if (ia32) {
+            ia64_ia32_abort_sse_instruction(env);
+            ia64_ia32_sync_to_ia64(env);
+        }
+    } else {
+        iip = ia64_ip_bundle_addr(env->ip);
+    }
+    ia64_flush_suppressed_tlb(env);
+    env->exception_state.psr_suppression_before_insn = 0;
+    ia64_tlb_serialize(env, 1, 1);
+    ia64_pal_pmi_event(env, iip, ipsr, vector);
+    cs->halted = 0;
+    env->exception_state.exception = 0;
+    env->exception_state.ia32_trap = false;
+    env->exception_state.ia32_transition_trap = false;
+}
+
 bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
@@ -849,6 +894,16 @@ bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
         cpu_reset_interrupt(cs, IA64_INTERRUPT_INIT);
         ia64_deliver_init(cs);
         return true;
+    }
+
+    if ((interrupt_request & IA64_INTERRUPT_PMI) &&
+        (cpu->env.psr & IA64_PSR_IC) && rse_frame_complete) {
+        if (cpu->env.pal.pal_pmi_pending == 0) {
+            cpu_reset_interrupt(cs, IA64_INTERRUPT_PMI);
+        } else {
+            ia64_deliver_pmi(cs);
+            return true;
+        }
     }
 
     if ((interrupt_request & CPU_INTERRUPT_HARD) &&

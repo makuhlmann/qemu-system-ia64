@@ -200,6 +200,27 @@ bool ia64_is_pal_reset_return_break(CPUIA64State *env, uint64_t address)
                env, address, env->pal.pal_reset_return_addr);
 }
 
+/*
+ * SALE_PMI's return to PALE_PMI through BR0 (break 0x100008): in the PAL
+ * handed over at reset, which stays PAL after a copy, or in the copy.
+ */
+bool ia64_is_pal_pmi_return_break(CPUIA64State *env, uint64_t address)
+{
+    IA64CPU *cpu = env_archcpu(env);
+    uint64_t reset_pa = cpu->boot_info_valid ?
+                        cpu->boot_info.raw_pal_pmi_return : 0;
+
+    if (reset_pa != 0 &&
+        ia64_instruction_address_matches_physical_entry(env, address,
+                                                        reset_pa)) {
+        return true;
+    }
+    return qatomic_load_acquire(&env->pal.pal_proc_copy_valid) &&
+           ia64_instruction_address_matches_physical_entry(
+               env, address, qatomic_read(&env->pal.pal_proc_copy_addr) +
+                             IA64_PAL_COPY_PMI_RETURN_OFFSET);
+}
+
 bool ia64_is_sal_runtime_break(CPUIA64State *env, uint64_t address,
                                uint64_t imm)
 {

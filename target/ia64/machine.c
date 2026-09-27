@@ -238,7 +238,7 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
-    .version_id = 8,
+    .version_id = 9,
     .minimum_version_id = 1,
     .pre_save = ia64_cpu_pre_save,
     .post_load = ia64_cpu_post_load,
@@ -332,6 +332,8 @@ const VMStateDescription vmstate_ia64_cpu = {
         VMSTATE_UINT64(env.pal.pal_mc_save_addr, IA64CPU),
         VMSTATE_BOOL_V(env.pal.pal_mc_event_active, IA64CPU, 8),
         VMSTATE_UINT64(env.pal.pal_pmi_entry, IA64CPU),
+        VMSTATE_UINT16_V(env.pal.pal_pmi_pending, IA64CPU, 9),
+        VMSTATE_BOOL_V(env.pal.pal_pmi_pin, IA64CPU, 9),
         VMSTATE_BOOL(env.pal.pal_proc_copy_valid, IA64CPU),
         VMSTATE_UINT64(env.pal.pal_proc_copy_addr, IA64CPU),
         VMSTATE_UINT64(env.pal.pal_interrupt_block_addr, IA64CPU),

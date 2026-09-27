@@ -245,6 +245,61 @@ void ia64_cpu_raise_init(CPUState *cs)
     }
 }
 
+static void ia64_pmi_pend(CPUIA64State *env, unsigned vector)
+{
+    CPUState *cs = env_cpu(env);
+
+    env->pal.pal_pmi_pending |= 1u << vector;
+    cpu_set_interrupt(cs, IA64_INTERRUPT_PMI);
+    qemu_cpu_kick(cs);
+}
+
+static void ia64_raise_pmi_work(CPUState *cs, run_on_cpu_data data)
+{
+    ia64_pmi_pend(cpu_env(cs), data.host_int);
+}
+
+/*
+ * A PMI message for this processor (SDM Vol. 2 5.8.4.2, Table 5-17).  The
+ * vector is 4 bits wide (11.5.1); values beyond 15 are not PMI vectors.
+ */
+void ia64_cpu_raise_pmi(CPUState *cs, unsigned vector)
+{
+    run_on_cpu_data data = RUN_ON_CPU_HOST_INT(vector);
+
+    if (vector >= IA64_PMI_VECTORS) {
+        return;
+    }
+    if (qemu_cpu_is_self(cs)) {
+        ia64_raise_pmi_work(cs, data);
+    } else {
+        async_run_on_cpu(cs, ia64_raise_pmi_work, data);
+    }
+}
+
+static void ia64_set_pmi_pin_work(CPUState *cs, run_on_cpu_data data)
+{
+    CPUIA64State *env = cpu_env(cs);
+    bool level = data.host_int != 0;
+
+    if (level && !env->pal.pal_pmi_pin) {
+        ia64_pmi_pend(env, IA64_PMI_VECTOR_PIN);
+    }
+    env->pal.pal_pmi_pin = level;
+}
+
+/* The PMI pin, asserted high here: an assertion pends PMI vector 0. */
+void ia64_cpu_set_pmi_pin(CPUState *cs, int level)
+{
+    run_on_cpu_data data = RUN_ON_CPU_HOST_INT(level != 0);
+
+    if (qemu_cpu_is_self(cs)) {
+        ia64_set_pmi_pin_work(cs, data);
+    } else {
+        async_run_on_cpu(cs, ia64_set_pmi_pin_work, data);
+    }
+}
+
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
 {
     run_on_cpu_data data = RUN_ON_CPU_HOST_INT(vector);
@@ -271,6 +326,7 @@ void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
 #define IA64_LRR_DM_SHIFT       8
 #define IA64_LRR_DM_MASK        7ULL
 #define IA64_LRR_DM_INT         0
+#define IA64_LRR_DM_PMI         2
 #define IA64_LRR_DM_NMI         4
 #define IA64_LRR_DM_INIT        5
 #define IA64_LRR_DM_EXTINT      7
@@ -290,7 +346,6 @@ static int ia64_lrr_vector(uint64_t lrr)
     case IA64_LRR_DM_EXTINT:
         return 0;
     default:
-        /* PMI delivery through a LINT pin is not modelled. */
         return -1;
     }
 }
@@ -301,10 +356,19 @@ static void ia64_lint_update(CPUIA64State *env, int pin, bool rising)
     int vector = ia64_lrr_vector(lrr);
     bool level = (lrr & IA64_LRR_TM) != 0;
 
-    /* INIT is an event, not a vector: an unmasked rising edge raises it. */
-    if (((lrr >> IA64_LRR_DM_SHIFT) & IA64_LRR_DM_MASK) == IA64_LRR_DM_INIT) {
+    /*
+     * INIT and PMI are events, not external vectors: an unmasked rising
+     * edge raises them, a LINT PMI at vector 0 (Table 5-14).
+     */
+    switch ((lrr >> IA64_LRR_DM_SHIFT) & IA64_LRR_DM_MASK) {
+    case IA64_LRR_DM_INIT:
         if (rising && !(lrr & IA64_LRR_M)) {
             ia64_cpu_raise_init(env_cpu(env));
+        }
+        return;
+    case IA64_LRR_DM_PMI:
+        if (rising && !(lrr & IA64_LRR_M)) {
+            ia64_pmi_pend(env, IA64_PMI_VECTOR_PIN);
         }
         return;
     }
@@ -553,6 +617,10 @@ bool ia64_cpu_has_work(CPUState *cs)
      */
     if (cpu_test_interrupt(cs, IA64_INTERRUPT_INIT) &&
         !(env->psr & IA64_PSR_MC)) {
+        return true;
+    }
+    if (cpu_test_interrupt(cs, IA64_INTERRUPT_PMI) &&
+        (env->psr & IA64_PSR_IC)) {
         return true;
     }
     return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) && interrupts_enabled;

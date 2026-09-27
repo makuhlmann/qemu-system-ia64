@@ -619,6 +619,17 @@ typedef enum IA64SaleEntryRegisterIndex {
 #define IA64_SALE_FUNCTION_RESET        0
 #define IA64_SALE_FUNCTION_INIT         2
 #define IA64_SALE_FUNCTION_RECOVERY_CHECK 3
+/* What PALE_PMI hands SALE_PMI in bank 0 (SDM Vol. 2 11.5.2). */
+#define IA64_SALE_PMI_GR_VECTOR         24
+#define IA64_SALE_PMI_GR_MINSTATE       25
+#define IA64_SALE_PMI_GR_RSC            26
+#define IA64_SALE_PMI_GR_B0             27
+#define IA64_SALE_PMI_GR_B1             28
+#define IA64_SALE_PMI_GR_PR             29
+/* Vectors 0-3 are SAL's, 4-15 PAL's; the PMI pin is vector 0 (11.5.1). */
+#define IA64_PMI_VECTORS                16
+#define IA64_PMI_SAL_VECTORS            4
+#define IA64_PMI_VECTOR_PIN             0
 
 typedef enum IA64FirmwareDebugRegisterIndex {
     IA64_FW_DEBUG_GR_HANDLER = 16,
@@ -810,6 +821,8 @@ typedef enum IA64Exception {
 #define IA64_INTERRUPT_COMPLETION_TRAP CPU_INTERRUPT_TGT_INT_0
 /* An INIT is pending; it waits while PSR.mc is 1 (SDM Vol. 2 11.4.1). */
 #define IA64_INTERRUPT_INIT CPU_INTERRUPT_TGT_EXT_0
+/* A PMI vector is pending; PMIs wait while PSR.ic is 0 (Table 5-8). */
+#define IA64_INTERRUPT_PMI CPU_INTERRUPT_TGT_EXT_1
 
 /* ---- IVT vector mapping table ---- */
 extern const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX];
@@ -1744,6 +1757,8 @@ void ia64_rse_delivery_check(CPUIA64State *env, int excp);
 CPUState *ia64_cpu_by_sapic_id(uint8_t id, uint8_t eid);
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector);
 void ia64_cpu_raise_init(CPUState *cs);
+void ia64_cpu_raise_pmi(CPUState *cs, unsigned vector);
+void ia64_cpu_set_pmi_pin(CPUState *cs, int level);
 void ia64_cpu_set_lint(CPUState *cs, int pin, int level);
 void ia64_lint_lrr_written(CPUIA64State *env, int pin);
 void ia64_sapic_update_interrupt(CPUIA64State *env);
@@ -1866,7 +1881,15 @@ typedef struct IA64BootInfo {
      * break 0x100007 makes the second SALE_ENTRY call.
      */
     uint64_t raw_pal_reset_return;
+    /*
+     * PALE_PMI's return address in BR0 before PAL_COPY_PAL moves PAL: its
+     * break 0x100008 resumes the interrupted context.
+     */
+    uint64_t raw_pal_pmi_return;
 } IA64BootInfo;
+
+/* The same return point in PAL_COPY_PAL's copy, from its PAL_PROC entry. */
+#define IA64_PAL_COPY_PMI_RETURN_OFFSET 0x20
 
 struct ArchCPU {
     CPUState parent_obj;
