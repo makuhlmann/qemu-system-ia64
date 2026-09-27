@@ -39,6 +39,7 @@ from .encoding import (
     IA64_GENEX_UNIMPL_DATA_ADDR,
     IA64_IMPL_PA_BITS,
     IA64_IMPL_VA_MSB,
+    IA64_MERCED_IMPL_PA_BITS,
     IA64_INST_ACCESS_BIT_VECTOR,
     IA64_INST_ACCESS_VECTOR,
     IA64_INST_KEY_MISS_VECTOR,
@@ -4491,6 +4492,57 @@ test_itc_d_merced_rejects_1gb_page = require_exception(
     "itc_d_merced_rejects_1gb_page", list(ONE_GIGABYTE_ITC_PROGRAM),
     IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0xc0, entry=0x10, cpu="merced")
 
+# 245318-001 sec 4.3.1 (p.4-26): a present translation whose PPN sets an
+# unimplemented physical address bit makes itc and itr take an Unimplemented
+# Data Address fault.  PPN{49:12} exceeds only Merced's 44 bits
+# (245320-002 sec 3.2), so the same PTE inserts on Itanium 2.
+MERCED_UNIMPLEMENTED_PPN_PTE = LOW_VECTOR_TR_PTE | (1 << IA64_MERCED_IMPL_PA_BITS)
+
+UNIMPLEMENTED_PPN_ITC_PROGRAM = (
+    (0x10, *movl_mlx(18, MERCED_UNIMPLEMENTED_PPN_PTE)),
+    (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+    (0x30, 0x00, adds(7, LOW_VECTOR_ITIR, 0), nop_i(), nop_i()),
+    (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+    (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+    (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
+)
+
+# The insert runs with PSR.ic = 0, so the fault is not collected (ISR.ni).
+UNIMPLEMENTED_PPN_HANDLER = (
+    (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+    (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(10, 20),
+     nop_i(), nop_i()),
+    (IA64_GENERAL_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+     br_cond(IA64_GENERAL_VECTOR + 0x20, IA64_GENERAL_VECTOR + 0x20)),
+)
+
+UNIMPLEMENTED_PPN_FAULT_STATE = {
+    "ip": IA64_GENERAL_VECTOR + 0x20,
+    "exception": IA64_EXCP_NONE,
+    "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_NA | IA64_ISR_NI,
+    "r10": HIGH_TR_BASE + 0x20000,
+}
+
+test_itc_d_merced_unimplemented_ppn_faults = require_registers(
+    "itc_d_merced_unimplemented_ppn_faults", [
+        *UNIMPLEMENTED_PPN_ITC_PROGRAM,
+        *UNIMPLEMENTED_PPN_HANDLER,
+    ], UNIMPLEMENTED_PPN_FAULT_STATE, entry=0x10, cpu="merced")
+
+test_itr_d_merced_unimplemented_ppn_faults = require_registers(
+    "itr_d_merced_unimplemented_ppn_faults", [
+        *UNIMPLEMENTED_PPN_ITC_PROGRAM[:-1],
+        (0x60, 0x00, adds(5, 5, 0), nop_i(), nop_i()),
+        (0x70, 0x00, itr_d(5, 18), nop_i(), nop_i()),
+        *UNIMPLEMENTED_PPN_HANDLER,
+    ], UNIMPLEMENTED_PPN_FAULT_STATE, entry=0x10, cpu="merced")
+
+test_itc_d_madison_accepts_ppn_bit_44 = require_registers(
+    "itc_d_madison_accepts_ppn_bit_44", [
+        *UNIMPLEMENTED_PPN_ITC_PROGRAM,
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {"ip": 0x70, "exception": IA64_EXCP_NONE}, entry=0x10, cpu="madison")
+
 test_itc_d_madison_accepts_1gb_page = require_registers(
     "itc_d_madison_accepts_1gb_page", [
         *ONE_GIGABYTE_ITC_PROGRAM,
@@ -4801,6 +4853,53 @@ test_short_vhpt_reserved_pte_aborts_to_dtlb_miss = require_registers(
         "r30": 0xa000000000000430,
         "r31": 0xbffc000000000000,
     }, entry=0x10)
+
+# The VHPT walker aborts on a PTE with unimplemented PPN bits (245318-001
+# sec 4.3.1), so the short-format walk for the tpa ends in a Data TLB fault on
+# Merced; the control walk with an implemented PPN translates.
+def short_vhpt_tpa_program(pte):
+    return [
+        (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
+        (0x20, *movl_mlx(17, 0xa000000000000000)),
+        (0x30, *movl_mlx(18, 0x539)),
+        (0x40, *movl_mlx(19, 0xbffc000000000000)),
+        (0x50, *movl_mlx(20, 0x0010000004009661)),
+        (0x60, *movl_mlx(21, pte)),
+        (0x70, *movl_mlx(22, 0x4008000)),
+        (0x80, 0x00, st8(22, 21), nop_i(), nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(16, 8), adds(7, 0x38, 0), nop_i()),
+        (0xa0, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0xb0, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0), nop_i()),
+        (0xd0, 0x00, itr_d(5, 20), nop_i(), nop_i()),
+        (0xe0, *movl_mlx(2, 0xa000000000000430)),
+        (0xf0, 0x00, ssm((1 << 13) | (1 << 17)), nop_i(), nop_i()),
+        (0x100, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x110, 0x00, tpa(29, 2), nop_i(), nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+        (IA64_DTLB_VECTOR, 0x00, mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+        (IA64_DTLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DTLB_VECTOR + 0x10, IA64_DTLB_VECTOR + 0x10)),
+    ]
+
+test_short_vhpt_merced_walk_translates = require_registers(
+    "short_vhpt_merced_walk_translates",
+    short_vhpt_tpa_program(0x0010000004000661), {
+        "ip": 0x120,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0x4000430,
+    }, entry=0x10, cpu="merced")
+
+test_short_vhpt_merced_unimplemented_ppn_aborts_to_dtlb_miss = \
+    require_registers(
+    "short_vhpt_merced_unimplemented_ppn_aborts_to_dtlb_miss",
+    short_vhpt_tpa_program(
+        0x0010000004000661 | (1 << IA64_MERCED_IMPL_PA_BITS)), {
+        "ip": IA64_DTLB_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0,
+        "r30": 0xa000000000000430,
+    }, entry=0x10, cpu="merced")
 
 test_short_vhpt_walker_ignores_uncacheable_mapping = require_registers(
     "short_vhpt_walker_ignores_uncacheable_mapping", [
@@ -7547,6 +7646,9 @@ CASE_NAMES = (
     'itr_d_not_present_raises_page_fault',
     'itc_d_madison_accepts_1gb_page',
     'itc_d_merced_rejects_1gb_page',
+    'itc_d_merced_unimplemented_ppn_faults',
+    'itr_d_merced_unimplemented_ppn_faults',
+    'itc_d_madison_accepts_ppn_bit_44',
     'itr_d_reserved_slot_faults',
     'itr_d_slot_replacement_keeps_old_translation_cached',
     'itr_d_slot_uses_low_8_bits',
@@ -7666,6 +7768,8 @@ CASE_NAMES = (
     'short_vhpt_not_present_entry_is_cached',
     'short_vhpt_not_present_raises_page_fault',
     'short_vhpt_reserved_pte_aborts_to_dtlb_miss',
+    'short_vhpt_merced_walk_translates',
+    'short_vhpt_merced_unimplemented_ppn_aborts_to_dtlb_miss',
     'short_vhpt_thash_decode',
     'short_vhpt_thash_high_region_self_map',
     'short_vhpt_thash_uses_implemented_va_bits',

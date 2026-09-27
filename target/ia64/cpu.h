@@ -1950,9 +1950,8 @@ typedef struct IA64PalProfile {
     uint64_t freq_base_hz;
     /*
      * The address PAL_PLATFORM_ADDR takes for the I/O port block: the top
-     * 64 MB of the processor's architectural physical address space (see
-     * ia64_pal_io_block_pa).  It is not derived from impl_pa_bits, which
-     * every model in this fork keeps at 50 for the machine's own windows.
+     * 64 MB of the processor's implemented physical address space (see
+     * ia64_pal_io_block_pa).
      */
     uint64_t io_block_pa;
     /*

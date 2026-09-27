@@ -23,6 +23,7 @@ from .encoding import (
     IA64_GENERAL_VECTOR,
     IA64_GENEX_UNIMPL_DATA_ADDR,
     IA64_IMPL_PA_BITS,
+    IA64_MERCED_IMPL_PA_BITS,
     IA64_ISR_CODE_REG_NAT,
     IA64_ISR_ED,
     IA64_ISR_EI_SHIFT,
@@ -1457,6 +1458,30 @@ test_unimplemented_physical_load_faults = require_registers(
         "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R,
         "r10": 1 << IA64_IMPL_PA_BITS,
     }, entry=0x10)
+
+# 245320-002 sec 3.2: Merced implements 44 physical address bits.
+test_unimplemented_physical_load_faults_merced = require_registers(
+    "unimplemented_physical_load_faults_merced", [
+        (0x10, *movl_mlx(3, 1 << IA64_MERCED_IMPL_PA_BITS)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00, mov_m_cr_gr(10, 20),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30,
+                 IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R,
+        "r10": 1 << IA64_MERCED_IMPL_PA_BITS,
+    }, entry=0x10, cpu="merced")
 
 # 245320-002 sec 3.2: Merced implements 54 virtual address bits, so
 # VA{60:51} must sign-extend VA{50}.  A region-0 address with bit 51 set and
@@ -3586,6 +3611,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'tnat_nz_or_decode',
     'tnat_unc_same_pred_pred_false_illegal',
     'unimplemented_physical_load_faults',
+    'unimplemented_physical_load_faults_merced',
     'unimplemented_virtual_load_faults_merced',
     'unimplemented_virtual_load_translates_madison',
     'unimplemented_physical_precludes_unaligned',

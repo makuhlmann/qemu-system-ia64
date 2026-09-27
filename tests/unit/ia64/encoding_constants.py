@@ -236,7 +236,7 @@ IA64_MERCED_IMPL_KEY_BITS = 21
 IA64_MERCED_ITR_COUNT = 8
 IA64_MERCED_DTR_COUNT = 48
 IA64_MERCED_UNIQUE_TCS = 3
-PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_IMPL_PA_BITS << 1) |
+PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_MERCED_IMPL_PA_BITS << 1) |
                                 (IA64_MERCED_IMPL_KEY_BITS << 8) |
                                 ((IA64_PKR_COUNT - 1) << 16) |
                                 (8 << 24) |
@@ -291,7 +291,7 @@ PAL_CACHE_INFO_DATA_HINTS = (0x09 << 48) | (0x0b << 56)
 PAL_CACHE_INFO_MERCED_L0_I_1 = ((4 << 8) | (5 << 16) |
                                 (5 << 24) | (0xff << 32) | (1 << 40))
 PAL_CACHE_INFO_MERCED_L0_I_2 = (16384 | (12 << 32) | (12 << 40) |
-                                (IA64_IMPL_PA_BITS - 1 << 48))
+                                (IA64_MERCED_IMPL_PA_BITS - 1 << 48))
 PAL_CACHE_INFO_MERCED_L0_D_1 = ((4 << 8) | (5 << 16) |
                                 (5 << 24) | (1 << 32) | (2 << 40) |
                                 PAL_CACHE_INFO_DATA_HINTS)
@@ -299,12 +299,12 @@ PAL_CACHE_INFO_MERCED_L1_U_1 = (1 | (1 << 1) | (6 << 8) | (6 << 16) |
                                 (6 << 24) | (1 << 32) | (6 << 40) |
                                 PAL_CACHE_INFO_DATA_HINTS)
 PAL_CACHE_INFO_MERCED_L1_U_2 = (96 * 1024 | (14 << 32) | (14 << 40) |
-                                (IA64_IMPL_PA_BITS - 1 << 48))
+                                (IA64_MERCED_IMPL_PA_BITS - 1 << 48))
 PAL_CACHE_INFO_MERCED_L2_U_1 = (1 | (1 << 1) | (4 << 8) | (6 << 16) |
                                 (6 << 24) | (1 << 32) | (21 << 40) |
                                 PAL_CACHE_INFO_DATA_HINTS)
 PAL_CACHE_INFO_MERCED_L2_U_2 = (2 * 1024 * 1024 | (19 << 32) | (19 << 40) |
-                                (IA64_IMPL_PA_BITS - 1 << 48))
+                                (IA64_MERCED_IMPL_PA_BITS - 1 << 48))
 # ITLB 64 entries holding the instruction TRs; DTLB1 32 entries holding none;
 # DTLB2 96 entries holding the data TRs (248701-002 sec 2.5.6).  All levels
 # hold every architected page size (245473-002 sec 4.7).

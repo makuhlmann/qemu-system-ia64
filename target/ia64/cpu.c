@@ -1648,20 +1648,8 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
     .dtr_count = 48,
     .insertable_page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK,
     .purgeable_page_mask = IA64_MERCED_PURGEABLE_PAGE_SIZE_MASK,
-    /*
-     * Merced implements 44 physical address bits (245320-002 sec 3.2), but
-     * this machine cannot yet be described inside a 44-bit physical space:
-     * ia64-vpc places the PCI I/O port window at 0x8000_1000_0000 and the
-     * PAL I/O block at 0x8000_0C00_0000, both of which set bit 47.
-     * Narrowing impl_pa_bits makes the firmware's own UART and I/O accesses
-     * take Unimplemented Data Address faults before the loader ever runs.
-     * Relocating those windows is a machine-wide change -- hw/ia64, the
-     * firmware and the ACPI _CRS all describe them -- so until that lands
-     * the physical width stays at what this platform needs.  The virtual
-     * width, region-ID width and key width do not depend on the platform
-     * layout and are Merced's.
-     */
-    .impl_pa_bits = IA64_IMPL_PA_BITS,
+    /* 245320-002 sec 3.2: 44 physical and 54 (51 + 3) virtual bits. */
+    .impl_pa_bits = IA64_MERCED_IMPL_PA_BITS,
     .impl_va_msb = IA64_MERCED_IMPL_VA_MSB,
     .impl_rid_bits = IA64_MERCED_IMPL_RID_BITS,
     .impl_key_bits = IA64_MERCED_IMPL_KEY_BITS,

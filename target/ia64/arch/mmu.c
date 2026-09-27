@@ -25,6 +25,7 @@ static bool ia64_code_tlb_ed(CPUIA64State *env);
 #define IA64_PTE_AR_SHIFT 9
 #define IA64_PTE_AR_MASK  (7ULL << IA64_PTE_AR_SHIFT)
 #define IA64_PTE_RESERVED_MASK ((1ULL << 1) | (3ULL << 50))
+#define IA64_PTE_PPN_FIELD_MASK (((1ULL << 50) - 1) & ~0xfffULL)
 #define IA64_ITIR_RESERVED_MASK (3ULL | (0xffffffffULL << 32))
 #define IA64_L0_CACHE_LINE_SIZE 64ULL
 
@@ -67,6 +68,18 @@ static uint64_t ia64_gr_page_size(uint64_t value)
 {
     return ia64_page_size_from_shift((value >> IA64_ITIR_PS_SHIFT) &
                                      IA64_ITIR_PS_MASK);
+}
+
+/*
+ * A present translation may not set PPN bits above the implemented width:
+ * itc and itr take an Unimplemented Data Address fault, and the VHPT walker
+ * aborts (SDM Vol. 2 §4.3.1; 245318-001 p.4-26).  Only Merced's 44 bits are
+ * narrower than the PPN field.
+ */
+static bool ia64_pte_ppn_implemented(const CPUIA64State *env, uint64_t pte)
+{
+    return !(pte & IA64_PTE_PRESENT) ||
+           !(pte & IA64_PTE_PPN_FIELD_MASK & ~ia64_pte_ppn_mask(env));
 }
 
 static bool ia64_translation_insert_fields_valid(const CPUIA64State *env,
@@ -830,7 +843,8 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     perm = ia64_pte_perm(pte, 0);
     rid = ia64_region_rid(env, env->cr_ifa);
 
-    if (!ia64_va_is_implemented(env, env->cr_ifa)) {
+    if (!ia64_va_is_implemented(env, env->cr_ifa) ||
+        !ia64_pte_ppn_implemented(env, pte)) {
         ia64_raise_unimplemented_data_address(
             env, env->cr_ifa, 0, true, false, ia64_code_tlb_ed(env));
     }
@@ -2223,7 +2237,7 @@ static void ia64_vhpt_load_long_entry(CPUIA64State *env, uint64_t pa,
     *tag = ia64_vhpt_load_u64(env, pa + 16);
 }
 
-static bool ia64_vhpt_pte_valid(uint64_t pte)
+static bool ia64_vhpt_pte_valid(const CPUIA64State *env, uint64_t pte)
 {
     uint8_t ma;
 
@@ -2231,7 +2245,8 @@ static bool ia64_vhpt_pte_valid(uint64_t pte)
         return true;
     }
     ma = (pte & IA64_PTE_MA_MASK) >> IA64_PTE_MA_SHIFT;
-    return !(pte & IA64_PTE_RESERVED_MASK) && (ma == 0 || ma >= 4);
+    return !(pte & IA64_PTE_RESERVED_MASK) && (ma == 0 || ma >= 4) &&
+           ia64_pte_ppn_implemented(env, pte);
 }
 
 static bool ia64_vhpt_itir_valid(const CPUIA64State *env,
@@ -2273,7 +2288,7 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
         if (page_shift) {
             *page_shift = ia64_region_preferred_ps(env, va);
         }
-        return ia64_vhpt_pte_valid(*pte);
+        return ia64_vhpt_pte_valid(env, *pte);
     }
 
     {
@@ -2293,7 +2308,7 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
         if (page_shift) {
             *page_shift = (itir >> IA64_ITIR_PS_SHIFT) & IA64_ITIR_PS_MASK;
         }
-        return ia64_vhpt_pte_valid(*pte) &&
+        return ia64_vhpt_pte_valid(env, *pte) &&
                ia64_vhpt_itir_valid(env, *pte, itir);
     }
 }
@@ -2492,7 +2507,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
         }
 
         translation = ia64_vhpt_load_u64(env, entry_pa);
-        if (!ia64_vhpt_pte_valid(translation)) {
+        if (!ia64_vhpt_pte_valid(env, translation)) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt short reserved translation %c"
                           " va=0x%016" PRIx64 " rid=0x%06" PRIx32
@@ -2578,7 +2593,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
         if (tag != expected_tag) {
             goto long_miss;
         }
-        if (!ia64_vhpt_pte_valid(translation) ||
+        if (!ia64_vhpt_pte_valid(env, translation) ||
             !ia64_vhpt_itir_valid(env, translation, itir)) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt reserved translation %c"
@@ -2701,7 +2716,8 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
         return;
     }
 
-    if (!ia64_va_is_implemented(env, env->cr_ifa)) {
+    if (!ia64_va_is_implemented(env, env->cr_ifa) ||
+        !ia64_pte_ppn_implemented(env, pte)) {
         ia64_raise_unimplemented_data_address(
             env, env->cr_ifa, 0, true, false, ia64_code_tlb_ed(env));
     }
