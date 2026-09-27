@@ -247,11 +247,10 @@ PAL_VM_SUMMARY_INFO_2_MERCED = (IA64_MERCED_IMPL_VA_MSB |
                                 (IA64_MERCED_IMPL_RID_BITS << 8))
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_16_3 = (16 << 32) | 3
-PAL_RATIO_4_3 = (4 << 32) | 3
-PAL_RATIO_8_1 = (8 << 32) | 1
 PAL_RATIO_2_1 = (2 << 32) | 1
 PAL_RATIO_16_2 = (16 << 32) | 2
 PAL_RATIO_1_1 = (1 << 32) | 1
+PAL_RATIO_12_2 = (12 << 32) | 2
 # WB(0), UC(4), UCE(5) and WC(6) are all implemented by both supported
 # generations (251110-003 sec 12.1; 245320-002 ch. 4 for Merced's WC buffer);
 # NaTPage(7) is architected (SDM Vol. 2 Table 4-11).
@@ -571,8 +570,7 @@ __all__ = (
     'PAL_RATIO_16_3',
     'PAL_RATIO_16_2',
     'PAL_RATIO_1_1',
-    'PAL_RATIO_4_3',
-    'PAL_RATIO_8_1',
+    'PAL_RATIO_12_2',
     'PAL_RATIO_2_1',
     'PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE',
     'PAL_CACHE_INFO_DATA_HINTS',

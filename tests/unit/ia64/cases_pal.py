@@ -99,12 +99,11 @@ from .encoding import (
     PAL_PTCE_INFO,
     PAL_PURGE_PAGE_SIZE_MASK,
     PAL_RATIO_16_1,
-    PAL_RATIO_4_3,
-    PAL_RATIO_8_1,
     PAL_RATIO_16_3,
     PAL_RATIO_2_1,
     PAL_RATIO_16_2,
     PAL_RATIO_1_1,
+    PAL_RATIO_12_2,
     PAL_REGISTER_INFO,
     PAL_RSE_INFO,
     PAL_SELF_TEST_STATE_TESTED,
@@ -543,19 +542,18 @@ test_pal_call_clears_return_reg_nat = require_registers(
     }, entry=0x10)
 
 # --- Merced (original Itanium) model-differentiated PAL responses ----------
-# 800 MHz core / 133.33 MHz bus (249634-002 datasheet); the ITC counts
-# processor clocks, so its ratio is the processor ratio (245473-002).
+# 800 MHz core at 12/2 of the 133.33 MHz bus clock (249634-002 2.4.2,
+# 248701-002 Table 5-4); the ITC counts processor clocks (245473-002).
 test_pal_freq_ratios_merced = require_registers(
     "pal_freq_ratios_merced", pal_call_program(PAL_FREQ_RATIOS),
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
-     "r9": PAL_RATIO_8_1, "r10": PAL_RATIO_4_3,
-     "r11": PAL_RATIO_8_1}, entry=0x10, cpu="merced")
+     "r9": PAL_RATIO_12_2, "r10": PAL_RATIO_1_1,
+     "r11": PAL_RATIO_12_2}, entry=0x10, cpu="merced")
 
-# PAL_FREQ_BASE base clock is the same 100 MHz for merced.
 test_pal_freq_base_merced = require_registers(
     "pal_freq_base_merced", pal_call_program(PAL_FREQ_BASE),
     {"ip": 0x30, "r28": PAL_FREQ_BASE, "r8": 0,
-     "r9": 100000000, "r10": 0, "r11": 0}, entry=0x10, cpu="merced")
+     "r9": 133333333, "r10": 0, "r11": 0}, entry=0x10, cpu="merced")
 
 # PAL_VM_SUMMARY reports the asymmetric 8 ITR / 48 DTR file.
 test_pal_vm_summary_merced = require_registers(

@@ -1300,13 +1300,16 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
  * there is no second instruction level.
  */
 static const IA64PalProfile ia64_pal_profile_merced = {
-    .freq_base_hz = 100000000ULL,
+    /*
+     * The input clock is the 133 MHz system bus clock (249634-002 2.4.2), and
+     * the core runs at 12/2 of it, the bus-to-core setting 2/12 of 248701-002
+     * Table 5-4.  The ITC counts processor clocks (245473-002).
+     */
+    .freq_base_hz = 133333333ULL,
     .io_block_pa = IA64_PAL_IO_BLOCK_MERCED,
-    .proc_ratio_num = 8,  .proc_ratio_den = 1,     /* 800 MHz */
-    .bus_ratio_num = 4,   .bus_ratio_den = 3,       /* 133.33 MHz */
-    .itc_ratio_num = 8,   .itc_ratio_den = 1,       /* ITC at the core clock
-                                                     * (245473-002: the ITC counts
-                                                     * processor clocks) */
+    .proc_ratio_num = 12, .proc_ratio_den = 2,     /* 800 MHz */
+    .bus_ratio_num = 1,   .bus_ratio_den = 1,       /* 133.33 MHz */
+    .itc_ratio_num = 12,  .itc_ratio_den = 2,       /* ITC at the core clock */
     .has_post_merced_pal = false,
     /*
      * PAL 8.8.30, the C2 stepping's firmware version (249720-009 revision
