@@ -228,6 +228,23 @@ static void ia64_sapic_set_irq_work(CPUState *cs, run_on_cpu_data data)
     ia64_sapic_update_interrupt(&cpu->env);
 }
 
+static void ia64_raise_init_work(CPUState *cs, run_on_cpu_data data)
+{
+    (void)data;
+    cpu_set_interrupt(cs, IA64_INTERRUPT_INIT);
+    qemu_cpu_kick(cs);
+}
+
+/* An INIT message or signal for this processor (SDM Vol. 2 5.8.4.1). */
+void ia64_cpu_raise_init(CPUState *cs)
+{
+    if (qemu_cpu_is_self(cs)) {
+        ia64_raise_init_work(cs, RUN_ON_CPU_NULL);
+    } else {
+        async_run_on_cpu(cs, ia64_raise_init_work, RUN_ON_CPU_NULL);
+    }
+}
+
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
 {
     run_on_cpu_data data = RUN_ON_CPU_HOST_INT(vector);
@@ -255,6 +272,7 @@ void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
 #define IA64_LRR_DM_MASK        7ULL
 #define IA64_LRR_DM_INT         0
 #define IA64_LRR_DM_NMI         4
+#define IA64_LRR_DM_INIT        5
 #define IA64_LRR_DM_EXTINT      7
 #define IA64_LRR_TM             (1ULL << 15)
 #define IA64_LRR_M              (1ULL << 16)
@@ -272,7 +290,7 @@ static int ia64_lrr_vector(uint64_t lrr)
     case IA64_LRR_DM_EXTINT:
         return 0;
     default:
-        /* PMI and INIT delivery through a LINT pin are not modelled. */
+        /* PMI delivery through a LINT pin is not modelled. */
         return -1;
     }
 }
@@ -283,6 +301,13 @@ static void ia64_lint_update(CPUIA64State *env, int pin, bool rising)
     int vector = ia64_lrr_vector(lrr);
     bool level = (lrr & IA64_LRR_TM) != 0;
 
+    /* INIT is an event, not a vector: an unmasked rising edge raises it. */
+    if (((lrr >> IA64_LRR_DM_SHIFT) & IA64_LRR_DM_MASK) == IA64_LRR_DM_INIT) {
+        if (rising && !(lrr & IA64_LRR_M)) {
+            ia64_cpu_raise_init(env_cpu(env));
+        }
+        return;
+    }
     if (vector < 0) {
         return;
     }
@@ -526,6 +551,10 @@ bool ia64_cpu_has_work(CPUState *cs)
      * and the in-service priority leave unmasked, NMI included, whatever
      * PSR.i (SDM Vol. 2 rev 1.0 11.6); outside it PSR.i gates NMI too.
      */
+    if (cpu_test_interrupt(cs, IA64_INTERRUPT_INIT) &&
+        !(env->psr & IA64_PSR_MC)) {
+        return true;
+    }
     return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) && interrupts_enabled;
 }
 

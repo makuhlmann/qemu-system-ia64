@@ -31,6 +31,7 @@
 #include "hw/display/edid.h"
 #include "hw/display/vga_regs.h"
 #include "hw/core/loader.h"
+#include "hw/core/nmi.h"
 #include "hw/core/sysbus.h"
 #include "hw/block/flash.h"
 #include "system/block-backend.h"
@@ -305,6 +306,7 @@
 
 #define IA64_SAPIC_DELIVERY_INT     0
 #define IA64_SAPIC_DELIVERY_NMI     4
+#define IA64_SAPIC_DELIVERY_INIT    5
 #define IA64_SAPIC_DELIVERY_EXTINT  7
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -2329,6 +2331,12 @@ static void ia64_vpc_lsapic_write(void *opaque, hwaddr addr,
     case IA64_SAPIC_DELIVERY_EXTINT:
         vector = 0;
         break;
+    case IA64_SAPIC_DELIVERY_INIT:
+        cs = ia64_cpu_by_sapic_id(id, eid);
+        if (cs != NULL) {
+            ia64_cpu_raise_init(cs);
+        }
+        return;
     default:
         return;
     }
@@ -4732,6 +4740,24 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
 }
 
 /*
+ * The monitor's nmi is the INIT switch every platform must have, the
+ * "CrashDump switch" (SAL spec 245359-007 2.11): the zx1 boards' TOC button
+ * and MP command TC, "system reset through INIT signal" (zx6000/rx2600
+ * Operations and Maintenance Guide, 2002).  It reaches every processor.
+ */
+static void ia64_vpc_nmi(NMIState *n, int cpu_index, Error **errp)
+{
+    CPUState *cs;
+
+    (void)n;
+    (void)cpu_index;
+    (void)errp;
+    CPU_FOREACH(cs) {
+        ia64_cpu_raise_init(cs);
+    }
+}
+
+/*
  * Shared class-init for the abstract "ia64-base": everything common to both
  * concrete machines.  The concrete 460gx/zx1 class-inits (below) run after this
  * and set the fields that differ -- desc, default CPU, and the board hooks.
@@ -4740,8 +4766,10 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
     IA64VpcMachineClass *imc = IA64_VPC_MACHINE_CLASS(oc);
+    NMIClass *nc = NMI_CLASS(oc);
 
     (void)data;
+    nc->nmi_monitor_handler = ia64_vpc_nmi;
 
     imc->ahci_slot = 1;
     imc->low_ram_top = IA64_LOW_RAM_LIMIT;
@@ -4918,6 +4946,10 @@ static const TypeInfo ia64_vpc_machine_typeinfo = {
     .instance_finalize = ia64_vpc_machine_instance_finalize,
     .class_size = sizeof(IA64VpcMachineClass),
     .class_init = ia64_vpc_machine_class_init,
+    .interfaces = (const InterfaceInfo[]) {
+        { TYPE_NMI },
+        { }
+    },
 };
 
 static void ia64_vpc_register_types(void)

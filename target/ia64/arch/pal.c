@@ -871,6 +871,190 @@ static void pal_mc_error_info(CPUIA64State *env)
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
+/*
+ * The architected part of the min-state save area (SDM Vol. 2 11.3.2.4,
+ * Figures 11-2 and 11-3), in 8-byte words.
+ */
+enum {
+    MINSTATE_NAT = 0x000 / 8,
+    MINSTATE_GR1 = 0x008 / 8,
+    MINSTATE_BANK0_GR16 = 0x080 / 8,
+    MINSTATE_BANK1_GR16 = 0x100 / 8,
+    MINSTATE_PR = 0x180 / 8,
+    MINSTATE_BR0 = 0x188 / 8,
+    MINSTATE_RSC = 0x190 / 8,
+    MINSTATE_IIP = 0x198 / 8,
+    MINSTATE_IPSR = 0x1a0 / 8,
+    MINSTATE_IFS = 0x1a8 / 8,
+    MINSTATE_XIP = 0x1b0 / 8,
+    MINSTATE_XPSR = 0x1b8 / 8,
+    MINSTATE_XFS = 0x1c0 / 8,
+    MINSTATE_BR1 = 0x1c8 / 8,
+    MINSTATE_WORDS,
+};
+
+/* Processor State Parameter of an INIT (SDM Vol. 2 Table 11-12). */
+#define PAL_PSP_MN          (1ULL << 5)
+#define PAL_PSP_CO          (1ULL << 7)
+#define PAL_PSP_CI          (1ULL << 8)
+#define PAL_PSP_IN          (1ULL << 16)
+#define PAL_PSP_RS          (1ULL << 17)
+/* cr, pc, dr, tr, rr, ar, br, pr, fp, b1, b0 and gr valid. */
+#define PAL_PSP_STATE_VALID (0xfffULL << 20)
+
+static void pal_minstate_save_registers(CPUIA64State *env, uint64_t *area)
+{
+    bool bank1 = env->psr & IA64_PSR_BN;
+    uint64_t nat = 0;
+    uint64_t pr = 0;
+    int i;
+
+    for (i = 1; i < 16; i++) {
+        area[MINSTATE_GR1 + i - 1] = env->gr[i];
+        nat |= ((env->nat[0] >> i) & 1) << i;
+    }
+    for (i = 0; i < 16; i++) {
+        uint64_t cur_nat = (env->nat[0] >> (16 + i)) & 1;
+        uint64_t other_nat = (env->banked_nat >> i) & 1;
+
+        area[MINSTATE_BANK0_GR16 + i] = bank1 ? env->banked_gr[i]
+                                              : env->gr[16 + i];
+        area[MINSTATE_BANK1_GR16 + i] = bank1 ? env->gr[16 + i]
+                                              : env->banked_gr[i];
+        nat |= (bank1 ? other_nat : cur_nat) << (16 + i);
+        nat |= (bank1 ? cur_nat : other_nat) << (32 + i);
+    }
+    for (i = 0; i < IA64_PR_COUNT; i++) {
+        pr |= (env->pr[i] ? 1ULL : 0) << i;
+    }
+    area[MINSTATE_NAT] = nat;
+    area[MINSTATE_PR] = pr;
+    area[MINSTATE_BR0] = env->br[IA64_BR_RETURN_LINK];
+    area[MINSTATE_BR1] = env->br[IA64_BR_MINSTATE_SCRATCH];
+    area[MINSTATE_RSC] = env->ar_rsc;
+}
+
+static void pal_minstate_restore_registers(CPUIA64State *env,
+                                           const uint64_t *area)
+{
+    bool bank1 = env->psr & IA64_PSR_BN;
+    uint64_t nat = area[MINSTATE_NAT];
+    int i;
+
+    for (i = 1; i < 16; i++) {
+        env->gr[i] = area[MINSTATE_GR1 + i - 1];
+        env->nat[0] = deposit64(env->nat[0], i, 1, (nat >> i) & 1);
+    }
+    env->banked_nat = 0;
+    for (i = 0; i < 16; i++) {
+        uint64_t b0_nat = (nat >> (16 + i)) & 1;
+        uint64_t b1_nat = (nat >> (32 + i)) & 1;
+
+        env->gr[16 + i] = area[bank1 ? MINSTATE_BANK1_GR16 + i
+                                     : MINSTATE_BANK0_GR16 + i];
+        env->banked_gr[i] = area[bank1 ? MINSTATE_BANK0_GR16 + i
+                                       : MINSTATE_BANK1_GR16 + i];
+        env->nat[0] = deposit64(env->nat[0], 16 + i, 1,
+                                bank1 ? b1_nat : b0_nat);
+        env->banked_nat |= (bank1 ? b0_nat : b1_nat) << i;
+    }
+    for (i = 1; i < IA64_PR_COUNT; i++) {
+        env->pr[i] = (area[MINSTATE_PR] >> i) & 1;
+    }
+    env->br[IA64_BR_RETURN_LINK] = area[MINSTATE_BR0];
+    env->br[IA64_BR_MINSTATE_SCRATCH] = area[MINSTATE_BR1];
+    env->ar_rsc = area[MINSTATE_RSC];
+}
+
+/*
+ * PALE_INIT (SDM Vol. 2 11.4): the machine plays PAL, as it does for
+ * PALE_RESET.  iip and ipsr are the interrupted context.  The IIP, IPSR and
+ * IFS words hold where PAL_MC_RESUME returns to, the XIP, XPSR and XFS words
+ * what IIP, IPSR and IFS hold after it (11.3.3); with PSR.ic = 1 the INIT is
+ * collected, so both name the interrupted context.  Every register is saved,
+ * so the event is recoverable whatever PSR.ic was.
+ */
+void ia64_pal_init_event(CPUIA64State *env, uint64_t iip, uint64_t ipsr)
+{
+    uint64_t xr0 = env->pal.pal_mc_save_addr;
+    uint64_t ifs = IA64_IFS_V | ia64_rse_current_cfm(env);
+    bool collect = ipsr & IA64_PSR_IC;
+    uint64_t area[MINSTATE_WORDS];
+    uint64_t psp = PAL_PSP_IN | PAL_PSP_CO | PAL_PSP_CI | PAL_PSP_RS |
+                   PAL_PSP_STATE_VALID;
+    int i;
+
+    pal_minstate_save_registers(env, area);
+    area[MINSTATE_IIP] = iip;
+    area[MINSTATE_IPSR] = ipsr;
+    area[MINSTATE_IFS] = ifs;
+    area[MINSTATE_XIP] = collect ? iip : env->cr_iip;
+    area[MINSTATE_XPSR] = collect ? ipsr : env->cr_ipsr;
+    area[MINSTATE_XFS] = collect ? ifs : env->cr_ifs;
+    if (xr0 != 0) {
+        for (i = 0; i < MINSTATE_WORDS; i++) {
+            area[i] = cpu_to_le64(area[i]);
+        }
+        (void)ia64_exec_physical_rw(xr0 & ~PAL_COPY_TARGET_CACHE_ATTR, area,
+                                    sizeof(area), true);
+        psp |= PAL_PSP_MN;
+    }
+    if (collect) {
+        env->cr_iip = iip;
+        env->cr_ipsr = ipsr;
+    }
+
+    /* PALE_INIT exit state (11.4.2). */
+    ia64_set_psr(env, IA64_PSR_MC |
+                 (env->psr & (IA64_PSR_MFL | IA64_PSR_MFH | IA64_PSR_PK)));
+    env->exception_state.psr_ic_inflight = false;
+    ia64_rse_cover(env);
+    env->ar_rsc &= ~IA64_RSC_MODE;
+    env->gr[IA64_SALE_GR_MINSTATE_FREE] =
+        xr0 != 0 ? xr0 + MINSTATE_WORDS * 8 : 0;
+    env->gr[IA64_SALE_GR_MINSTATE] = xr0;
+    env->gr[IA64_SALE_GR_PROC_STATE] = psp;
+    env->gr[IA64_SALE_GR_RENDEZ_RETURN] = 0;
+    env->gr[IA64_SALE_GR_STATE] = IA64_SALE_FUNCTION_INIT;
+    env->nat[0] &= ~MAKE_64BIT_MASK(IA64_SALE_GR_MINSTATE_FREE, 5);
+    env->pal.pal_mc_event_active = true;
+    env->ip = env_archcpu(env)->boot_info.firmware_entry;
+    env->instruction_group_start = true;
+}
+
+/*
+ * The model-specific rfi of 11.3.1.1: resume at IIP/IPSR/IFS of the save
+ * area and leave XIP/XPSR/XFS in the interruption registers.
+ */
+static G_NORETURN void pal_mc_resume_context(CPUIA64State *env,
+                                             uint64_t save_ptr, bool set_cmci)
+{
+    uint64_t area[MINSTATE_WORDS];
+    int i;
+
+    (void)ia64_exec_physical_rw(save_ptr & ~PAL_COPY_TARGET_CACHE_ATTR, area,
+                                sizeof(area), false);
+    for (i = 0; i < MINSTATE_WORDS; i++) {
+        area[i] = le64_to_cpu(area[i]);
+    }
+    pal_minstate_restore_registers(env, area);
+    env->pal.pal_mc_event_active = false;
+    if (set_cmci && !(env->cr[IA64_CR_CMCV] & (1ULL << 16))) {
+        uint8_t vector = env->cr[IA64_CR_CMCV] & 0xff;
+
+        env->interrupt.sapic_irr[vector / 64] |= 1ULL << (vector % 64);
+    }
+    env->cr_iip = area[MINSTATE_IIP];
+    env->cr_ipsr = area[MINSTATE_IPSR];
+    env->cr_ifs = area[MINSTATE_IFS];
+    ia64_rfi(env, env->ip, 0);
+    env->cr_iip = area[MINSTATE_XIP];
+    env->cr_ipsr = area[MINSTATE_XPSR];
+    env->cr_ifs = area[MINSTATE_XFS];
+    ia64_sapic_update_interrupt(env);
+    cpu_loop_exit(env_cpu(env));
+}
+
 static void pal_mc_resume(CPUIA64State *env)
 {
     uint64_t set_cmci = env->gr[IA64_PAL_GR_ARG1];
@@ -879,11 +1063,14 @@ static void pal_mc_resume(CPUIA64State *env)
 
     /*
      * save_ptr has the rules of the PAL_MC_REGISTER_MEM address (SDM Vol.2
-     * PAL_MC_RESUME), so the uncacheable bit 63 is allowed there too.
+     * PAL_MC_RESUME), so the uncacheable bit 63 is allowed there too.  With
+     * no INIT context to return from, the call completes with error.
      */
     if (set_cmci > 1 || new_context > 1 ||
         (save_ptr & 0x1ff) != 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
+    } else if (env->pal.pal_mc_event_active) {
+        pal_mc_resume_context(env, save_ptr, set_cmci);
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_ERROR;
     }
@@ -910,7 +1097,7 @@ static void pal_mc_register_mem(CPUIA64State *env)
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->pal.pal_mc_save_addr = pa;
+        env->pal.pal_mc_save_addr = address;
     }
     env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;

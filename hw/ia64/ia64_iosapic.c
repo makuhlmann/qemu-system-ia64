@@ -34,6 +34,7 @@
 #define IOSAPIC_DELIVERY_FIXED  0
 #define IOSAPIC_DELIVERY_LOWEST 1
 #define IOSAPIC_DELIVERY_NMI    4
+#define IOSAPIC_DELIVERY_INIT   5
 #define IOSAPIC_DELIVERY_EXTINT 7
 
 struct IA64IOSapicState {
@@ -82,6 +83,14 @@ static void iosapic_update(IA64IOSapicState *s, int pin)
     case IOSAPIC_DELIVERY_EXTINT:
         vector = 0;
         break;
+    case IOSAPIC_DELIVERY_INIT:
+        /* An event, not a vector: nothing for the Remote IRR to track. */
+        cs = ia64_cpu_by_sapic_id(id, eid);
+        if (cs) {
+            s->irq_count[pin]++;
+            ia64_cpu_raise_init(cs);
+        }
+        return;
     default:
         return;
     }

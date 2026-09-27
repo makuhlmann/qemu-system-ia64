@@ -1670,3 +1670,7 @@ pfs_write_rrb_pr_at_48_faults
 pfs_write_largest_valid_fields
 pfs_write_rrb_gr_below_sor
 pfs_write_frame_without_rotating_region
+init_ipi_enters_pale_init
+init_with_psr_ic_collects
+init_waits_for_psr_mc
+pal_mc_resume_returns_from_init

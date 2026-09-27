@@ -120,7 +120,10 @@ typedef struct IA64InterruptState {
 typedef struct IA64PalState {
     /* Architected PAL registration and machine-check state. */
     bool pal_mc_expected;
+    /* XR0: the min-state save area as registered, bit 63 included. */
     uint64_t pal_mc_save_addr;
+    /* PALE_INIT has saved a context that PAL_MC_RESUME has not resumed. */
+    bool pal_mc_event_active;
     /* SAL's PMI entry, from PAL_PMI_ENTRYPOINT (not PAL's own PALE_PMI). */
     uint64_t pal_pmi_entry;
     /*

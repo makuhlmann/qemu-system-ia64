@@ -767,6 +767,39 @@ static bool ia64_take_completion_trap(CPUState *cs)
     return true;
 }
 
+/*
+ * An INIT is taken at an instruction boundary, whatever PSR.i, and enters
+ * PALE_INIT (SDM Vol. 2 5.8.3.9, 11.4.1) instead of an IVT vector.
+ */
+static void ia64_deliver_init(CPUState *cs)
+{
+    CPUIA64State *env = &ia64_cpu_from_cpu_state(cs)->env;
+    bool ia32 = env->psr & IA64_PSR_IS;
+    uint64_t ipsr = env->psr;
+    uint64_t iip;
+
+    env->exception_state.completion_trap_armed = false;
+    if (ia32 || env->exception_state.ia32_transition_trap) {
+        iip = ia64_ia32_virtual_ip(env);
+        ipsr &= ~IA64_PSR_RI_MASK;
+        if (ia32) {
+            ia64_ia32_abort_sse_instruction(env);
+            ia64_ia32_sync_to_ia64(env);
+        }
+    } else {
+        iip = ia64_ip_bundle_addr(env->ip);
+    }
+    ia64_flush_suppressed_tlb(env);
+    env->exception_state.psr_suppression_before_insn = 0;
+    ia64_tlb_serialize(env, 1, 1);
+    env->rse.rse_cfle = false;
+    ia64_pal_init_event(env, iip, ipsr);
+    cs->halted = 0;
+    env->exception_state.exception = 0;
+    env->exception_state.ia32_trap = false;
+    env->exception_state.ia32_transition_trap = false;
+}
+
 bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
@@ -808,6 +841,13 @@ bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
     if ((interrupt_request & IA64_INTERRUPT_COMPLETION_TRAP) &&
         ia64_take_completion_trap(cs)) {
+        return true;
+    }
+
+    if ((interrupt_request & IA64_INTERRUPT_INIT) &&
+        !(cpu->env.psr & IA64_PSR_MC) && rse_frame_complete) {
+        cpu_reset_interrupt(cs, IA64_INTERRUPT_INIT);
+        ia64_deliver_init(cs);
         return true;
     }
 

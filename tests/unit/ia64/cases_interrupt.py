@@ -6365,7 +6365,173 @@ test_ia32_fxrstor_unmasked_exception_faults_in_same_tb = \
         (0xa010, bytes.fromhex("00 00 00 00 00 00 00 00 00 1f 00 00")),
         {"r8": 0x105, "r9": 19 << 16})
 
+# INIT (SDM Vol. 2 5.8.4.1, 11.4): a self-IPI with delivery mode 101 enters
+# PALE_INIT, which saves the min-state area registered with
+# PAL_MC_REGISTER_MEM and branches to SALE_ENTRY, which is the image base
+# (0x100000) in this no-firmware entry state.
+_INIT_SAVE = (1 << 63) | 0x200000
+_INIT_PSP = ((1 << 5) | (1 << 7) | (1 << 8) | (1 << 16) | (1 << 17) |
+             (0xfff << 20))
+_INIT_SALE_ENTRY = 0x100000
+_INIT_HANDLER = 0x3000
+
+
+def _init_setup(ic):
+    return [
+        (0x10, 0x00, nop_m(), addl(28, 0x1b, 0), nop_i()),  # REGISTER_MEM
+        (0x20, *movl_mlx(29, _INIT_SAVE)),
+        (0x30, 0x00, nop_m(), addl(30, 0, 0), nop_i()),
+        (0x40, 0x00, nop_m(), addl(31, 0, 0), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_call(0, 0x50, PAL_PROC_ENTRY)),
+        (0x60, *movl_mlx(1, 0x1111)),
+        (0x70, *movl_mlx(15, 0x2222)),
+        (0x80, *movl_mlx(3, 0x5550)),
+        (0x90, 0x01, mov_m_gr_cr(3, 19), nop_i(), nop_i()),  # cr.iip
+        (0xa0, *movl_mlx(19, IA64_PSR_IC if ic else 0)),
+        (0xb0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xc0, *movl_mlx(2, (1 << 63) | 0xfee00000)),  # IPI to id 0, eid 0
+        (0xd0, *movl_mlx(3, 0x500)),                    # delivery mode INIT
+        (0xe0, 0x01, st8(2, 3), nop_i(), nop_i()),
+    ]
+
+
+_INIT_FIRMWARE = [
+    (_INIT_SALE_ENTRY, 0x10, nop_m(), nop_i(),
+     br_cond(_INIT_SALE_ENTRY, _INIT_HANDLER)),
+    (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+    (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+]
+
+
+def _init_read_save_area(ip, words):
+    bundles = []
+    for register, offset in words:
+        bundles += [
+            (ip, 0x01, nop_m(), adds(21, offset, 17), nop_i()),
+            (ip + 0x10, 0x01, ld8(register, 21), nop_i(), nop_i()),
+        ]
+        ip += 0x20
+    return bundles
+
+
+# With PSR.ic = 0 the INIT is not collected: IIP names the interrupted
+# bundle and XIP keeps what cr.iip held.
+test_init_ipi_enters_pale_init = require_registers(
+    "init_ipi_enters_pale_init", [
+        *_init_setup(ic=False),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+        *_INIT_FIRMWARE,
+        *_init_read_save_area(_INIT_HANDLER, [(22, 0x198), (25, 0x1b0),
+                                              (23, 0x08), (24, 0x78)]),
+        (_INIT_HANDLER + 0x80, 0x10, nop_m(), nop_i(),
+         br_cond(_INIT_HANDLER + 0x80, _INIT_HANDLER + 0x80)),
+    ], {
+        "ip": _INIT_HANDLER + 0x80,
+        "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_MC,
+        "cfm_sof": 0,
+        "r16": _INIT_SAVE + 0x1d0,
+        "r17": _INIT_SAVE,
+        "r18": _INIT_PSP,
+        "r19": 0,
+        "r20": 2,
+        "r22": 0xf0,
+        "r23": 0x1111,
+        "r24": 0x2222,
+        "r25": 0x5550,
+    }, entry=0x10)
+
+# With PSR.ic = 1 the INIT is collected: cr.iip and XIP name the bundle too.
+test_init_with_psr_ic_collects = require_registers(
+    "init_with_psr_ic_collects", [
+        *_init_setup(ic=True),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+        *_INIT_FIRMWARE,
+        *_init_read_save_area(_INIT_HANDLER, [(22, 0x198), (25, 0x1b0)]),
+        (_INIT_HANDLER + 0x40, 0x01, mov_m_cr_gr(26, 19), nop_i(), nop_i()),
+        (_INIT_HANDLER + 0x50, 0x10, nop_m(), nop_i(),
+         br_cond(_INIT_HANDLER + 0x50, _INIT_HANDLER + 0x50)),
+    ], {
+        "ip": _INIT_HANDLER + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_MC,
+        "r20": 2,
+        "r22": 0xf0,
+        "r25": 0xf0,
+        "r26": 0xf0,
+    }, entry=0x10)
+
+# PSR.mc = 1 holds the INIT pending (11.4.1); the rfi that clears it lets
+# the INIT in on the next bundle.
+test_init_waits_for_psr_mc = require_registers(
+    "init_waits_for_psr_mc", [
+        *_init_setup(ic=False)[:5],
+        (0x60, *movl_mlx(3, IA64_PSR_MC)),
+        (0x70, 0x01, mov_m_gr_cr(3, 16), nop_i(), nop_i()),   # cr.ipsr
+        (0x80, *movl_mlx(3, 0x200)),
+        (0x90, 0x01, mov_m_gr_cr(3, 19), nop_i(), nop_i()),   # cr.iip
+        (0xa0, 0x01, mov_m_gr_cr(0, 23), nop_i(), nop_i()),   # cr.ifs
+        (0xb0, 0x11, nop_m(), nop_i(), rfi_b()),
+        (0x200, *movl_mlx(2, (1 << 63) | 0xfee00000)),
+        (0x210, *movl_mlx(3, 0x500)),
+        (0x220, 0x01, st8(2, 3), nop_i(), nop_i()),
+        *_nmi_spin(0x230, 2000),
+        (0x270, 0x01, nop_m(), adds(9, 1, 0), nop_i()),
+        (0x280, 0x01, mov_m_gr_cr(0, 16), nop_i(), nop_i()),
+        (0x290, *movl_mlx(3, 0x300)),
+        (0x2a0, 0x01, mov_m_gr_cr(3, 19), nop_i(), nop_i()),
+        (0x2b0, 0x11, nop_m(), nop_i(), rfi_b()),
+        (0x300, 0x10, nop_m(), nop_i(), br_cond(0x300, 0x300)),
+        *_INIT_FIRMWARE,
+        (_INIT_HANDLER, 0x01, nop_m(), adds(21, 0x198, 17), nop_i()),
+        (_INIT_HANDLER + 0x10, 0x01, ld8(22, 21), nop_i(), nop_i()),
+        (_INIT_HANDLER + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(_INIT_HANDLER + 0x20, _INIT_HANDLER + 0x20)),
+    ], {
+        "ip": _INIT_HANDLER + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r9": 1,
+        "r20": 2,
+        "r22": 0x300,
+    }, entry=0x10)
+
+# PAL_MC_RESUME returns to the interrupted bundle with the saved registers;
+# ar.ccv is not in the save area, so its handler value survives and ends
+# the spin.
+test_pal_mc_resume_returns_from_init = require_registers(
+    "pal_mc_resume_returns_from_init", [
+        *_init_setup(ic=False),
+        (0xf0, 0x01, mov_m_ar_gr(4, 32), nop_i(), nop_i()),
+        (0x100, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 4), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0xf0, qp=6)),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+        *_INIT_FIRMWARE,
+        (_INIT_HANDLER, *movl_mlx(3, 0x77)),
+        (_INIT_HANDLER + 0x10, 0x01, mov_m_gr_ar(3, 32), nop_i(), nop_i()),
+        (_INIT_HANDLER + 0x20, 0x01, nop_m(), adds(1, 0, 0), nop_i()),
+        (_INIT_HANDLER + 0x30, 0x00, nop_m(), addl(28, 0x1a, 0), nop_i()),
+        (_INIT_HANDLER + 0x40, 0x01, nop_m(), adds(29, 0, 0), nop_i()),
+        (_INIT_HANDLER + 0x50, 0x01, nop_m(), adds(30, 0, 17), nop_i()),
+        (_INIT_HANDLER + 0x60, 0x01, nop_m(), adds(31, 0, 0), nop_i()),
+        (_INIT_HANDLER + 0x70, 0x10, nop_m(), nop_i(),
+         br_call(0, _INIT_HANDLER + 0x70, PAL_PROC_ENTRY)),
+        (_INIT_HANDLER + 0x80, 0x10, nop_m(), nop_i(),
+         br_cond(_INIT_HANDLER + 0x80, _INIT_HANDLER + 0x80)),
+    ], {
+        "ip": 0x120,
+        "exception": IA64_EXCP_NONE,
+        "psr": 0,
+        "r1": 0x1111,
+        "r15": 0x2222,
+        "r28": 0x1b,
+        "ar_ccv": 0x77,
+    }, entry=0x10)
+
 CASE_NAMES = (
+    'init_ipi_enters_pale_init',
+    'init_with_psr_ic_collects',
+    'init_waits_for_psr_mc',
+    'pal_mc_resume_returns_from_init',
     'ipis_during_break_faults_all_arrive',
     'nmi_waits_for_psr_i',
     'nmi_wakes_pal_halt_light_with_psr_i_clear',

@@ -765,6 +765,7 @@ static void ia64_swap_banked_gr(CPUIA64State *env)
 void ia64_set_psr(CPUIA64State *env, uint64_t value)
 {
     bool unmasks = !(env->psr & IA64_PSR_I) && (value & IA64_PSR_I);
+    bool unmasks_init = (env->psr & IA64_PSR_MC) && !(value & IA64_PSR_MC);
 
     if ((env->psr ^ value) & IA64_PSR_IC) {
         env->exception_state.psr_ic_inflight = true;
@@ -786,6 +787,10 @@ void ia64_set_psr(CPUIA64State *env, uint64_t value)
      */
     if (unmasks) {
         ia64_sapic_update_interrupt(env);
+    }
+    /* Likewise for an INIT held pending while PSR.mc was 1. */
+    if (unmasks_init && cpu_test_interrupt(env_cpu(env), IA64_INTERRUPT_INIT)) {
+        qemu_cpu_kick(env_cpu(env));
     }
 }
 

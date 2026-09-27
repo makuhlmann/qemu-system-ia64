@@ -554,6 +554,8 @@ typedef enum IA64PredicateRegisterIndex {
 
 typedef enum IA64BranchRegisterIndex {
     IA64_BR_RETURN_LINK = 0,
+    /* The second branch register the min-state save area keeps. */
+    IA64_BR_MINSTATE_SCRATCH = 1,
 } IA64BranchRegisterIndex;
 
 typedef enum IA64FloatingRegisterIndex {
@@ -609,7 +611,13 @@ typedef enum IA64SaleEntryRegisterIndex {
  * RECOVERY_CHECK, and after SAL returns to GR36, RESET.
  */
 #define IA64_SALE_GR_STATE              20
+/* The rest of what PALE_INIT hands over in bank 0 (SDM Vol. 2 11.4.2). */
+#define IA64_SALE_GR_MINSTATE_FREE      16
+#define IA64_SALE_GR_MINSTATE           17
+#define IA64_SALE_GR_PROC_STATE         18
+#define IA64_SALE_GR_RENDEZ_RETURN      19
 #define IA64_SALE_FUNCTION_RESET        0
+#define IA64_SALE_FUNCTION_INIT         2
 #define IA64_SALE_FUNCTION_RECOVERY_CHECK 3
 
 typedef enum IA64FirmwareDebugRegisterIndex {
@@ -800,6 +808,8 @@ typedef enum IA64Exception {
  * Branch or Single Step trap (IA64ExceptionState.completion_trap_*).
  */
 #define IA64_INTERRUPT_COMPLETION_TRAP CPU_INTERRUPT_TGT_INT_0
+/* An INIT is pending; it waits while PSR.mc is 1 (SDM Vol. 2 11.4.1). */
+#define IA64_INTERRUPT_INIT CPU_INTERRUPT_TGT_EXT_0
 
 /* ---- IVT vector mapping table ---- */
 extern const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX];
@@ -1733,6 +1743,7 @@ void ia64_rse_delivery_check(CPUIA64State *env, int excp);
 
 CPUState *ia64_cpu_by_sapic_id(uint8_t id, uint8_t eid);
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector);
+void ia64_cpu_raise_init(CPUState *cs);
 void ia64_cpu_set_lint(CPUState *cs, int pin, int level);
 void ia64_lint_lrr_written(CPUIA64State *env, int pin);
 void ia64_sapic_update_interrupt(CPUIA64State *env);
