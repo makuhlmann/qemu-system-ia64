@@ -181,12 +181,6 @@ BOOLEAN fw_acpi_sci_override(UINT32 *Gsi, UINT16 *Flags)
 }
 
 /*
- * The vendor firmware's chipset-init pokes for the IFB's ACPI block, in its
- * order (bios130.BIN 0x2c7a80): ACPI Enable off, ACPI Base A00h, ACPI Enable
- * on.  The block's SCI_EN stays clear: the OS raises it through the SMI
- * command port, as on the real board.
- */
-/*
  * Give the 460GX's expander ports their bus numbers, as POST does before it
  * scans them: each port claims configuration cycles for the bus range
  * [BUSNO, SUBNO] (SSDM 2.3.1).  The ports sit on bus CBN (programmed to EEh
@@ -219,8 +213,23 @@ void fw_platform_init_expander_ports(void)
     }
 }
 
+/*
+ * The legacy I/O block, uncacheable, for SALE_PMI's physical accesses to the
+ * IFB; 0 on a board whose PMI pin has no source.
+ */
+UINT64 mFwSalPmiIoBase;
+
+/*
+ * The vendor firmware's chipset-init pokes for the IFB's ACPI block, in its
+ * order (bios130.BIN 0x2c7a80): ACPI Enable off, ACPI Base A00h, ACPI Enable
+ * on.  Then the APMC SMI its SAL_B enables (run-time 0x3FF17CE0: APMC_EN,
+ * then SMI_EN): the block's SCI_EN stays clear until the OS writes
+ * ACPI_ENABLE to the SMI command port and SALE_PMI sets it.
+ */
 void fw_platform_init_south_bridge(void)
 {
+    volatile UINT16 *glbctl;
+
     if (!fw_platform_is_460gx()) {
         return;
     }
@@ -231,6 +240,12 @@ void fw_platform_init_south_bridge(void)
                            IA64_460GX_ACPI_PM_IO_BASE);
     pci_config_write_value(0, 0, IA64_460GX_IFB_SLOT,
                            IA64_460GX_IFB_LPC_FUNCTION, 0x44, 1, 1);
+    mFwSalPmiIoBase = (1ULL << 63) | LEGACY_IO_BASE;
+    glbctl = (volatile UINT16 *)(UINTN)(LEGACY_IO_BASE +
+                                        IA64_460GX_ACPI_PM_IO_BASE +
+                                        IA64_460GX_ACPI_GLBCTL_OFFSET);
+    *glbctl |= IA64_460GX_GLBCTL_APMC_EN;
+    *glbctl |= IA64_460GX_GLBCTL_SMI_EN;
 }
 
 /*
@@ -614,8 +629,10 @@ void fw_init_platform_base_frequency(void)
 
 FW_SAL_INIT_BLOCK mFwSalInit;
 extern UINT8 fw_sal_init[];
+extern UINT8 fw_sal_pmi[];
 
 #define FW_PAL_MC_REGISTER_MEM 0x01b
+#define FW_PAL_PMI_ENTRYPOINT  0x020
 
 _Static_assert(IA64_FW_MINSTATE_OFFSET +
                IA64_VPC_MAX_CPUS * IA64_FW_MINSTATE_SIZE <=
@@ -661,6 +678,13 @@ void fw_platform_register_minstate(BOOLEAN OsOwned)
     mFwSalInit.PalProc = mFwPalProc;
     (void)fw_pal_call_at(mFwPalProc, FW_PAL_MC_REGISTER_MEM,
                          (UINTN)area | (1ULL << 63), 0, 0, NULL);
+}
+
+/* SALE_PMI, on every processor (SAL spec 245359-007 3.2.3 step 12, 6.2). */
+void fw_platform_register_pmi(void)
+{
+    (void)fw_pal_call_at(mFwPalProc, FW_PAL_PMI_ENTRYPOINT,
+                         (UINTN)fw_sal_pmi, 0, 0, NULL);
 }
 
 static void fw_platform_set_os_owned(BOOLEAN OsOwned)
@@ -2406,6 +2430,7 @@ void firmware_ap_main(UINT64 ProcessorId, UINT64 ResetPalProc)
     fw_platform_install_pal(1, ResetPalProc);
     fw_platform_register_processor(ResetPalProc);
     fw_platform_register_minstate(0);
+    fw_platform_register_pmi();
     fw_ap_rendezvous();
     for (;;) {
         /* TPR is scratch on return from OS_BOOT_RENDEZ. */

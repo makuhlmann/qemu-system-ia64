@@ -555,6 +555,17 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_460GX_RESET_CONTROL_VALUE 0x06U
 #define IA64_460GX_SCI_GSI            49
 /*
+ * The IFB's SMI registers after the ACPI block (SSDM 11.2.8): Global Control
+ * with SMI_EN, EOS and APMC_EN, and Global Status with APM_STS (write 1 to
+ * clear).  Its SMI# is the processors' PMI pin, which SALE_PMI serves.
+ */
+#define IA64_460GX_ACPI_GLBCTL_OFFSET 0x0000001aU
+#define IA64_460GX_ACPI_GLBSTS_OFFSET 0x0000001cU
+#define IA64_460GX_GLBCTL_SMI_EN      0x0001U
+#define IA64_460GX_GLBCTL_EOS         0x0008U
+#define IA64_460GX_GLBCTL_APMC_EN     0x0400U
+#define IA64_460GX_GLBSTS_APM_STS     0x0008U
+/*
  * The board's Super I/O UARTs (LPC47B27x LDN 4 and 5): COM1 at 3F8h on ISA
  * IRQ 4 is the console, COM2 at 2F8h on IRQ 3 the debug port when one is
  * configured.  Both ports are what kdcom's fixed table expects.

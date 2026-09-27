@@ -14437,6 +14437,7 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     mFwSalInit.ResetControl = mRuntimeResetControl;
     mFwSalInit.ResetValue = mRuntimeResetValue;
     fw_platform_register_minstate(1);
+    fw_platform_register_pmi();
     mResetFloatingPointDisableBits =
         fw_read_psr() & (IA64_PSR_DFL | IA64_PSR_DFH);
 

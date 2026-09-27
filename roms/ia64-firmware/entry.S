@@ -594,6 +594,100 @@ fw_sal_init_warm_boot:
     .size fw_sal_init, . - fw_sal_init
 
     /*
+     * SALE_PMI (SAL spec 245359-007 6.3; SDM Vol. 2 11.5.2-11.5.3): physical
+     * mode, bank 0, PSR.ic = 0, GR24 the PMI vector.  It may use GR24-25,
+     * GR30-31, the predicates and BR1, and returns through BR0.  Only the
+     * PMI pin (vector 0) has a source: on the 460GX board the IFB's SMI#,
+     * for the FADT's SMI command port.  Every processor takes the pin, and
+     * what each does here gives the same result in any order.
+     * PAL_PMI_ENTRYPOINT wants the entry 256-byte aligned.
+     */
+    .section .text.fw_sal_pmi, "ax"
+    .align 256
+    .global fw_sal_pmi
+    .type fw_sal_pmi, @function
+    .proc fw_sal_pmi
+    .explicit
+fw_sal_pmi:
+    movl r30 = mFwSalPmiIoBase
+    cmp.ne p6, p0 = r0, r24
+(p6) br.cond.spnt.few fw_sal_pmi_return
+    ;;
+    ld8 r30 = [r30]
+    movl r31 = IA64_460GX_ACPI_PM_IO_BASE + IA64_460GX_ACPI_GLBSTS_OFFSET
+    ;;
+    cmp.eq p6, p0 = r0, r30
+(p6) br.cond.spnt.few fw_sal_pmi_return
+    add r31 = r31, r30
+    ;;
+    /* An APMC write set APM_STS; clear it and read the command. */
+    ld2 r24 = [r31]
+    ;;
+    tbit.z p6, p0 = r24, 3
+(p6) br.cond.spnt.few fw_sal_pmi_eos
+    mov r24 = IA64_460GX_GLBSTS_APM_STS
+    ;;
+    st2 [r31] = r24
+    movl r31 = IA64_460GX_SMI_CMD_PORT
+    ;;
+    add r31 = r31, r30
+    ;;
+    ld1 r24 = [r31]
+    movl r31 = IA64_460GX_ACPI_PM_IO_BASE
+    mov r25 = IA64_460GX_ACPI_ENABLE_CMD
+    ;;
+    add r31 = r31, r30
+    cmp.eq p6, p0 = r24, r25
+    mov r25 = IA64_460GX_ACPI_DISABLE_CMD
+    ;;
+    cmp.eq p7, p0 = r24, r25
+    ;;
+    /*
+     * ACPI_ENABLE as the vendor handler answers it (SAL_B run-time
+     * 0x3FF1A4C0): PM1 status cleared, the power button enabled in PM1_EN,
+     * SCI_EN set in PM1_CNT.  ACPI_DISABLE clears SCI_EN.
+     */
+(p6) mov r25 = -1
+(p7) adds r31 = 4, r31
+    ;;
+(p6) st2 [r31] = r25, 2
+    ;;
+(p6) ld2 r25 = [r31]
+    ;;
+(p6) dep r25 = -1, r25, 8, 1
+    ;;
+(p6) st2 [r31] = r25, 2
+    ;;
+(p6) ld2 r25 = [r31]
+    ;;
+(p6) or r25 = 1, r25
+    ;;
+(p6) st2 [r31] = r25
+(p7) ld2 r25 = [r31]
+    ;;
+(p7) and r25 = -2, r25
+    ;;
+(p7) st2 [r31] = r25
+    ;;
+fw_sal_pmi_eos:
+    /* EOS: SMI# goes inactive, and a cause still pending raises it again. */
+    movl r31 = IA64_460GX_ACPI_PM_IO_BASE + IA64_460GX_ACPI_GLBCTL_OFFSET
+    ;;
+    add r31 = r31, r30
+    ;;
+    ld2 r24 = [r31]
+    ;;
+    or r24 = IA64_460GX_GLBCTL_EOS, r24
+    ;;
+    st2 [r31] = r24
+    ;;
+fw_sal_pmi_return:
+    br.sptk.few b0
+    ;;
+    .endp fw_sal_pmi
+    .size fw_sal_pmi, . - fw_sal_pmi
+
+    /*
      * The machine implements the arithmetic behind this architected
      * firmware ABI.  Keeping the bridge as a leaf preserves all eight input
      * registers and returns the four-word result directly in r8-r11.

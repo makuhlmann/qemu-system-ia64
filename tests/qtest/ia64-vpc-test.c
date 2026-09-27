@@ -5063,10 +5063,11 @@ static void test_realfw_chipset_identity(void)
  * the FADT's PM1a_EVT/PM1a_CNT, the DSDT and SAL_B's PMI handler all assume
  * it -- although this firmware build never reaches the chipset-init pokes
  * that would program it (the machine supplies their result).  The FADT's
- * SMI_CMD B2h with ACPI_ENABLE A0h reaches the PMI handler, which sets
- * SCI_EN; ACPI_DISABLE A1h clears it.  The DSDT's _S5 is SLP_TYP 4, and
- * Windows' HAL writes it with SLP_EN to power off: that must end the
- * machine, not fall through to the HAL's 30-second EFI cold reset.
+ * SMI_CMD B2h with ACPI_ENABLE A0h raises an APMC SMI once the firmware has
+ * set SMI_EN and APMC_EN, and SMI# stays asserted until software sets EOS;
+ * the PMI handler, not the chipset, sets SCI_EN.  The DSDT's _S5 is
+ * SLP_TYP 4, and Windows' HAL writes it with SLP_EN to power off: that must
+ * end the machine, not fall through to the HAL's 30-second EFI cold reset.
  */
 static uint64_t realfw_port(uint16_t port)
 {
@@ -5108,24 +5109,36 @@ static void test_realfw_ifb_acpi_block(void)
                                          0x44) & 1, ==, 1);
     /* PM1a_CNT decodes (not open bus), SCI_EN clear out of reset. */
     g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a04)), ==, 0);
-    /* Global Control at 1Ah: bit 3 by default, APMC_EN from the script. */
-    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a1a)) & 0x0408, ==,
-                    0x0408);
+    /* Global Control at 1Ah: EOS only; the SMI enables are firmware's. */
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a1a)), ==, 0x0008);
 
-    /* ACPI_ENABLE through SMI_CMD: SCI_EN and the power button enable. */
+    /* Without APMC_EN a write to APMC is only stored. */
     qtest_writeb(qts, realfw_port(0x00b2), 0xa0);
     g_assert_cmphex(qtest_readb(qts, realfw_port(0x00b2)), ==, 0xa0);
-    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a04)) & 1, ==, 1);
-    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a02)) & 0x0100, ==,
-                    0x0100);
-    qtest_writeb(qts, realfw_port(0x00b2), 0xa1);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a1c)), ==, 0);
+
+    /*
+     * With SMI_EN and APMC_EN it sets APM_STS and asserts SMI#, which clears
+     * EOS; SCI_EN is left to the PMI handler.
+     */
+    qtest_writew(qts, realfw_port(0x0a1a), 0x0409);
+    qtest_writeb(qts, realfw_port(0x00b2), 0xa0);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a1c)), ==, 0x0008);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a1a)), ==, 0x0401);
     g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a04)) & 1, ==, 0);
+    /* EOS with APM_STS still set asserts SMI# again. */
+    qtest_writew(qts, realfw_port(0x0a1a), 0x0409);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a1a)), ==, 0x0401);
+    /* APM_STS is write-1-to-clear; EOS after it leaves SMI# deasserted. */
+    qtest_writew(qts, realfw_port(0x0a1c), 0x0008);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a1c)), ==, 0);
+    qtest_writew(qts, realfw_port(0x0a1a), 0x0409);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a1a)), ==, 0x0409);
     /* APMS is plain storage. */
     qtest_writeb(qts, realfw_port(0x00b3), 0x5a);
     g_assert_cmphex(qtest_readb(qts, realfw_port(0x00b3)), ==, 0x5a);
 
     /* The vendor _S5 (SLP_TYP 4) with SLP_EN powers the machine off. */
-    qtest_writeb(qts, realfw_port(0x00b2), 0xa0);
     qtest_writew(qts, realfw_port(0x0a04), (4 << 10) | (1 << 13) | 1);
     qtest_qmp_eventwait(qts, "SHUTDOWN");
     qtest_quit(qts);

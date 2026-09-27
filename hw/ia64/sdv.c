@@ -31,15 +31,23 @@
 /* The 82557 seat on the compatibility bus. */
 #define IA64_460GX_NIC_SLOT         5
 
-static void ia64_vpc_realfw_apmc(void *opaque, int n, int level)
+/*
+ * The south bridge's SMI# is every processor's PMI pin, PMI vector 0 (SDM
+ * Vol. 2 11.5.1).  No 460GX document shows the board trace; the vendor
+ * firmware does: its SALE_PMI (bios130.BIN SAL_B, run-time 0x3FF46BC0)
+ * sorts GR24 (0x3FF47860) and takes vector 0 to the code that reads the
+ * IFB's Global Status and answers APMC (0x3FF47920 -> 0x3FF178A0 ->
+ * 0x3FF1A4C0), where all processors but one wait for the one that
+ * services it.
+ */
+static void ia64_vpc_smi(void *opaque, int n, int level)
 {
-    IA64VpcMachineState *s = opaque;
+    CPUState *cs;
 
+    (void)opaque;
     (void)n;
-    if (level == IA64_460GX_ACPI_ENABLE_CMD) {
-        intel_82468gx_ifb_acpi_sci_enable(s->ifb, true);
-    } else if (level == IA64_460GX_ACPI_DISABLE_CMD) {
-        intel_82468gx_ifb_acpi_sci_enable(s->ifb, false);
+    CPU_FOREACH(cs) {
+        ia64_cpu_set_pmi_pin(cs, level);
     }
 }
 
@@ -319,16 +327,8 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
     qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_SCI,
                                 0, qdev_get_gpio_in(iosapic,
                                                     IA64_460GX_SCI_GSI));
-    /*
-     * The APM control port's SMI is the processor's PMI on this platform,
-     * and the vendor SAL's PMI handler answers the FADT's ACPI_ENABLE and
-     * ACPI_DISABLE commands by setting or clearing SCI_EN.  PMI delivery is
-     * not modelled; this stands in for that handler's effect
-     * (intel_82468gx_ifb_acpi_sci_enable).
-     */
-    qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_APMC,
-                                0, qemu_allocate_irq(ia64_vpc_realfw_apmc,
-                                                     s, 0));
+    qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_SMI,
+                                0, qemu_allocate_irq(ia64_vpc_smi, s, 0));
     for (i = 0; i < INTEL_82468GX_IFB_FUNCTIONS; i++) {
         PCIDevice *fn = intel_82468gx_ifb_function(s->ifb, i);
 

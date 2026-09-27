@@ -24,9 +24,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(Intel82468GXIFBState, INTEL_82468GX_IFB)
 #define INTEL_82468GX_IFB_GPIO_LEGACY "legacy"
 #define INTEL_82468GX_IFB_GPIO_ISA_IRQ "isa-irq"
 #define INTEL_82468GX_IFB_GPIO_SCI    "sci"
+/* SMI# of the LPC function (SSDM 16.2.2), and the SMBus function's SMI. */
 #define INTEL_82468GX_IFB_GPIO_SMI    "smi"
-/* APM control-port SMI: raised with the command byte on each APMC write. */
-#define INTEL_82468GX_IFB_GPIO_APMC   "apmc"
 /* ACPI I/O base the board firmware programs at POST; 0 = part reset state. */
 #define INTEL_82468GX_IFB_PROP_INIT_ACPI_BASE "init-acpi-base"
 
@@ -53,6 +52,5 @@ I2CBus *intel_82468gx_ifb_smbus(Intel82468GXIFBState *s);
 int intel_82468gx_ifb_pic_read_irq(Intel82468GXIFBState *s);
 void intel_82468gx_ifb_configure_acpi(Intel82468GXIFBState *s,
                                       uint16_t io_base);
-void intel_82468gx_ifb_acpi_sci_enable(Intel82468GXIFBState *s, bool enable);
 
 #endif
