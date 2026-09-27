@@ -20,11 +20,14 @@ struct IA64AGPState {
     PCIDevice parent_obj;
 
     MemoryRegion gart_window;    /* GART SRAM window at 0xFE200000           */
+    MemoryRegion gart_alias[3];  /* the same window with A22/A21 set         */
     IOMMUMemoryRegion iommu;     /* per-bus DMA translation                  */
     AddressSpace dma_as;
 
-    uint32_t *gatt;              /* GART SRAM, one 32-bit entry per 4 KiB    */
+    uint32_t *gatt;              /* GART SRAM, one 32-bit entry per page     */
     uint64_t aperture_base;      /* current aperture base (from BAPBASE)     */
+    uint64_t aperture_size;      /* from AGPSIZ; 0 = no aperture             */
+    unsigned page_shift;         /* 12, or 22 with GXBCTL 4 MB pages         */
     bool aperture_enabled;
 
     /*

@@ -14,9 +14,10 @@
  *
  * Contract taken from Linux 2.6.8 drivers/char/agp/i460-agp.c:
  *   - binds to class host-bridge, 8086:84ea, and requires a PCI AGP capability;
- *   - GXBCTL[0xa0] bit1 must read 0 (4 KiB pages); AGPSIZ[0xa2] bits[2:0] select
- *     the size (1 = 256 MiB); bit3 (BAPBASE_ENABLE) picks which register holds
- *     the aperture base;
+ *   - GXBCTL[0xa0] bit1 selects 4 MiB GART pages; AGPSIZ[0xa2] bits[2:0] select
+ *     the size (1 = 256 MiB, 2 = 1 GiB, 4 = 32 GiB, the last with 4 MiB pages
+ *     only); bit3 (BAPBASE_ENABLE) picks which register holds the aperture
+ *     base;
  *   - the aperture base register is APBASE (BAR0, 0x10) when AGPSIZ bit3 is
  *     clear, or the non-header BAPBASE (0x98) when it is set;
  *   - GATT entry = 0x03000000 | (paddr[35:12]); bit24 valid, bit25 coherent.
@@ -56,24 +57,43 @@
 #define I460_AGPSIZ             0xa2    /* 8-bit: [2:0] size, bit3/4 flags   */
 
 #define I460_GXBCTL_4M_PS       0x02
+#define I460_AGPSIZ_SIZE_MASK   0x07
 #define I460_AGPSIZ_SIZE_256M   0x01    /* size_value 1 */
+#define I460_AGPSIZ_SIZE_1G     0x02
+#define I460_AGPSIZ_SIZE_32G    0x04
 #define I460_AGPSIZ_BAPBASE_EN  0x08    /* bit3: aperture base is in BAPBASE   */
 #define I460_AGPSIZ_SRAM_IO_DIS 0x10    /* bit4: GART SRAM I/O disabled        */
 
-/* GATT entry bits. */
+/*
+ * GATT entry bits (SSDM 7.1.1, Figures 7-3/7-4): the page address is bits
+ * 23:0 for 4 KiB pages and bits 23:10 for 4 MiB pages; bit 26 is parity.
+ */
 #define I460_GATT_VALID         (1u << 24)
 #define I460_GATT_COHERENT      (1u << 25)
+#define I460_GATT_PARITY        (1u << 26)
 #define I460_GATT_PFN_MASK      0x00ffffffu     /* phys[35:12] */
+#define I460_GATT_4M_PFN_SHIFT  10
+#define I460_GATT_4M_PFN_MASK   0x3fffu         /* phys[35:22] */
 
 /*
- * 256 MiB aperture (AGPSIZ size_value 1), 4 KiB pages => 65536 GATT entries
- * (256 KiB of SRAM).  The aperture bus range reuses the platform PCI MMIO hole
- * (see the placement note above); an out-of-aperture DMA still passes straight
+ * The GART SRAM at its largest, 1 MiB (SSDM 7.1.1): 256K entries, a 1 GiB
+ * aperture with 4 KiB pages, and up to the chipset's 32 GiB with 4 MiB
+ * pages.  The aperture bus range starts at the platform PCI MMIO hole (see
+ * the placement note above); an out-of-aperture DMA still passes straight
  * through to system memory.
  */
-#define I460_APERTURE_SIZE      (256 * MiB)
-#define I460_GATT_ENTRIES       (I460_APERTURE_SIZE / (4 * KiB))
+#define I460_GART_SRAM_SIZE     (1 * MiB)
+#define I460_GATT_ENTRIES       (I460_GART_SRAM_SIZE / sizeof(uint32_t))
 #define I460_APERTURE_BASE      IA64_PCI_MMIO_BASE
+
+/*
+ * A22 and A21 are not decoded in FEzx_xxxx with z = 0xx0 binary (SSDM
+ * 7.1.2), so the SRAM answers at FE00_0000, FE40_0000 and FE60_0000 as well;
+ * FE30_0000-FE3F_FFFF is not a GART access.
+ */
+static const hwaddr i460_gart_aliases[] = {
+    0x00000000fe000000ULL, 0x00000000fe400000ULL, 0x00000000fe600000ULL,
+};
 
 static IA64AGPState *ia64_agp_from_iommu(IOMMUMemoryRegion *iommu)
 {
@@ -97,23 +117,29 @@ static IOMMUTLBEntry ia64_agp_translate(IOMMUMemoryRegion *iommu, hwaddr addr,
         .perm = IOMMU_RW,
     };
     uint64_t apbase = s->aperture_base;
+    uint64_t index;
     uint32_t entry;
-    unsigned index;
 
     if (!s->aperture_enabled || addr < apbase ||
-        addr >= apbase + I460_APERTURE_SIZE) {
+        addr - apbase >= s->aperture_size) {
         /* Not the graphics aperture: identity map into system memory. */
         return ret;
     }
 
-    index = (addr - apbase) >> 12;
-    entry = s->gatt[index];
+    index = (addr - apbase) >> s->page_shift;
+    entry = index < I460_GATT_ENTRIES ? s->gatt[index] : 0;
+    /* "treated as GART misses and the address is passed on untranslated" */
     if (!(entry & I460_GATT_VALID)) {
-        ret.perm = IOMMU_NONE;
         return ret;
     }
-    ret.translated_addr = ((hwaddr)(entry & I460_GATT_PFN_MASK) << 12) |
-                          (addr & 0xfff);
+    if (s->page_shift == 22) {
+        ret.translated_addr =
+            ((hwaddr)((entry >> I460_GATT_4M_PFN_SHIFT) &
+                      I460_GATT_4M_PFN_MASK) << 22) | (addr & 0x3ff000);
+    } else {
+        ret.translated_addr = (hwaddr)(entry & I460_GATT_PFN_MASK) << 12;
+    }
+    ret.iova = addr & ~(hwaddr)0xfff;
     return ret;
 }
 
@@ -122,11 +148,14 @@ static uint64_t ia64_agp_gart_read(void *opaque, hwaddr addr, unsigned size)
 {
     IA64AGPState *s = opaque;
     unsigned index = addr >> 2;
+    uint32_t entry;
 
     if (index >= I460_GATT_ENTRIES) {
         return 0;
     }
-    return s->gatt[index];
+    /* Even parity over the whole entry, reserved bits included (7.1.1.3). */
+    entry = s->gatt[index];
+    return entry | (ctpop32(entry) & 1 ? I460_GATT_PARITY : 0);
 }
 
 static void ia64_agp_gart_write(void *opaque, hwaddr addr, uint64_t val,
@@ -144,7 +173,7 @@ static void ia64_agp_gart_write(void *opaque, hwaddr addr, uint64_t val,
      * every access via ia64_agp_translate(), so a fresh entry is live at once
      * with no invalidation needed.
      */
-    s->gatt[index] = (uint32_t)val & ~(1u << 26);
+    s->gatt[index] = (uint32_t)val & ~I460_GATT_PARITY;
 }
 
 static const MemoryRegionOps ia64_agp_gart_ops = {
@@ -188,9 +217,27 @@ static void ia64_agp_update_aperture(IA64AGPState *s)
 {
     PCIDevice *dev = PCI_DEVICE(s);
     uint64_t base = pci_get_quad(dev->config + I460_BAPBASE) & ~7ULL;
+    bool large = dev->config[I460_GXBCTL] & I460_GXBCTL_4M_PS;
 
+    s->page_shift = large ? 22 : 12;
+    switch (dev->config[I460_AGPSIZ] & I460_AGPSIZ_SIZE_MASK) {
+    case I460_AGPSIZ_SIZE_256M:
+        s->aperture_size = 256 * MiB;
+        break;
+    case I460_AGPSIZ_SIZE_1G:
+        s->aperture_size = 1 * GiB;
+        break;
+    case I460_AGPSIZ_SIZE_32G:
+        /* 32 GB "requires 4 MB pages" (SSDM 7.1.1). */
+        s->aperture_size = large ? 32 * GiB : 0;
+        break;
+    default:
+        s->aperture_size = 0;
+        break;
+    }
     s->aperture_base = base;
-    s->aperture_enabled = s->gart_enabled && base != 0;
+    s->aperture_enabled = s->gart_enabled && base != 0 &&
+                          s->aperture_size != 0;
 }
 
 static void ia64_agp_config_write(PCIDevice *dev, uint32_t addr,
@@ -206,6 +253,7 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
 {
     IA64AGPState *s = IA64_AGP(dev);
     uint8_t *c = dev->config;
+    unsigned i;
 
     /* Host-bridge class so i460-agp's pci_device_id table matches. */
     pci_config_set_prog_interface(c, 0);
@@ -222,7 +270,7 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
     c[I460_GXBCTL] = 0x00;
     c[I460_AGPSIZ] = I460_AGPSIZ_SIZE_256M | I460_AGPSIZ_BAPBASE_EN |
                      (s->gart_enabled ? 0 : I460_AGPSIZ_SRAM_IO_DIS);
-    dev->wmask[I460_GXBCTL] = 0x05;           /* driver writes OOG|BWC only */
+    dev->wmask[I460_GXBCTL] = 0x07;           /* OOG, 4 MB pages, BWC */
     dev->wmask[I460_AGPSIZ] = 0x07;           /* size_value RMW, keep [7:3] */
 
     /*
@@ -245,9 +293,16 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
     /* GART SRAM, exposed to the CPU at the fixed 0xFE200000 window. */
     s->gatt = g_new0(uint32_t, I460_GATT_ENTRIES);
     memory_region_init_io(&s->gart_window, OBJECT(s), &ia64_agp_gart_ops, s,
-                          "ia64-agp-gart", I460_GATT_ENTRIES * sizeof(uint32_t));
+                          "ia64-agp-gart", I460_GART_SRAM_SIZE);
     memory_region_add_subregion(get_system_memory(), I460_GART_WINDOW_BASE,
                                 &s->gart_window);
+    for (i = 0; i < ARRAY_SIZE(i460_gart_aliases); i++) {
+        memory_region_init_alias(&s->gart_alias[i], OBJECT(s),
+                                 "ia64-agp-gart-alias", &s->gart_window, 0,
+                                 I460_GART_SRAM_SIZE);
+        memory_region_add_subregion(get_system_memory(),
+                                    i460_gart_aliases[i], &s->gart_alias[i]);
+    }
 
     /* Per-bus DMA translation: aperture -> GATT -> DRAM, else passthrough. */
     memory_region_init_iommu(&s->iommu, sizeof(s->iommu),

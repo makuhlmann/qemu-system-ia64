@@ -6795,14 +6795,19 @@ static void test_agp_gxb(void)
               qpci_config_readl(dev, IA64_AGP_BAPBASE);
     g_assert_cmphex(bapbase & ~7ULL, ==, IA64_AGP_APERTURE_BASE);
 
-    /* The GART SRAM window is writable/read-backable at its fixed address. */
+    /*
+     * The GART SRAM window is writable at its fixed address.  Parity bit 26
+     * is the hardware's: it reads back even parity over the entry (SSDM
+     * 7.1.1.3), whatever was written there.
+     */
     qtest_writel(qts, IA64_AGP_GART_WINDOW + 4 * 7, 0x03001234);
     g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 4 * 7), ==,
-                    0x03001234);
-    /* Parity bit 26 is HW-owned and must not stick. */
+                    0x07001234);
     qtest_writel(qts, IA64_AGP_GART_WINDOW + 4 * 8, 0x04000005);
     g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 4 * 8), ==,
                     0x00000005);
+    /* A22 and A21 are not decoded (SSDM 7.1.2): FE00_0000 is the same SRAM. */
+    g_assert_cmphex(qtest_readl(qts, 0xfe000000ULL + 4 * 7), ==, 0x07001234);
 
     g_free(dev);
     qtest_quit(qts);
