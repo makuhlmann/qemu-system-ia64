@@ -83,6 +83,8 @@ from .encoding import (
     IA64_UNALIGNED_VECTOR,
     IA64_VECTOR_MASKED,
     LOW_VECTOR_TR_PTE,
+    PAL_HALT_LIGHT,
+    PAL_PROC_ENTRY,
     add,
     addl,
     adds,
@@ -5699,6 +5701,91 @@ test_ipis_during_break_faults_all_arrive = require_registers(
         "r6": 2001,
     }, entry=0x10, alat=None, smp="2", state_cpu=1)
 
+# PSR.i enables NMI (vector 2) like any external interrupt; only TPR and the
+# in-service priority do not mask it (SDM Vol. 2 rev 1.0 Table 5-7).  A
+# self-IPI with delivery mode NMI (100b) pends while PSR.i is 0, with TPR.mmi
+# set, and is taken once PSR.i is 1.  The handler counts entries in r25 and
+# keeps the IVR vector in r24; r20 holds the count while PSR.i was still 0.
+_NMI_IVA = 0x200000
+_NMI_HANDLER = [
+    (_NMI_IVA + 0x3000, 0x01, mov_m_cr_gr(24, IA64_CR_SAPIC_IVR),
+     nop_i(), nop_i()),
+    (_NMI_IVA + 0x3010, 0x01, nop_m(), adds(25, 1, 25), nop_i()),
+    (_NMI_IVA + 0x3020, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI),
+     nop_i(), nop_i()),
+    (_NMI_IVA + 0x3030, 0x01, srlz_d(), nop_i(), nop_i()),
+    (_NMI_IVA + 0x3040, 0x11, nop_m(), nop_i(), rfi_b()),
+]
+_NMI_SETUP = [
+    (0x10, *movl_mlx(3, _NMI_IVA)),
+    (0x20, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+    (0x30, 0x01, srlz_i(), nop_i(), nop_i()),
+    (0x40, *movl_mlx(3, IA64_TPR_MMI)),
+    (0x50, 0x01, mov_m_gr_cr(3, IA64_CR_SAPIC_TPR), nop_i(), nop_i()),
+    (0x60, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_BN)),
+    (0x70, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+    (0x80, *movl_mlx(2, (1 << 63) | 0xfee00000)),  # IPI to id 0, eid 0
+    (0x90, *movl_mlx(3, 0x400)),
+    (0xa0, 0x01, st8(2, 3), nop_i(), nop_i()),
+    (0xb0, 0x01, srlz_d(), nop_i(), nop_i()),
+]
+
+
+def _nmi_spin(ip, count):
+    return [
+        (ip, *movl_mlx(5, count)),
+        (ip + 0x10, 0x01, nop_m(), adds(5, -1, 5), nop_i()),
+        (ip + 0x20, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 5), nop_i()),
+        (ip + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(ip + 0x30, ip + 0x10, qp=7)),
+    ]
+
+
+def _nmi_unmask_tail(ip):
+    return [
+        (ip, 0x01, nop_m(), adds(20, 0, 25), nop_i()),
+        (ip + 0x10, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_BN | IA64_PSR_I)),
+        (ip + 0x20, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        *_nmi_spin(ip + 0x30, 1000),
+        (ip + 0x70, 0x10, nop_m(), nop_i(), br_cond(ip + 0x70, ip + 0x70)),
+    ]
+
+
+test_nmi_waits_for_psr_i = require_registers(
+    "nmi_waits_for_psr_i", [
+        *_NMI_SETUP,
+        *_nmi_spin(0xc0, 200000),
+        *_nmi_unmask_tail(0x100),
+        *_NMI_HANDLER,
+    ], {
+        "ip": 0x170,
+        "exception": IA64_EXCP_NONE,
+        "r20": 0,
+        "r24": 2,
+        "r25": 1,
+    }, entry=0x10)
+
+# PAL_HALT_LIGHT leaves the halt for any interrupt that TPR leaves unmasked,
+# NMI included, whatever PSR.i (SDM Vol. 2 rev 1.0 11.6), and returns to the
+# caller; the NMI then waits for PSR.i as above.
+test_nmi_wakes_pal_halt_light_with_psr_i_clear = require_registers(
+    "nmi_wakes_pal_halt_light_with_psr_i_clear", [
+        *_NMI_SETUP,
+        (0xc0, *movl_mlx(28, PAL_HALT_LIGHT)),
+        (0xd0, 0x10, nop_m(), nop_i(), br_call(0, 0xd0, PAL_PROC_ENTRY)),
+        *_nmi_unmask_tail(0xe0),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+        *_NMI_HANDLER,
+    ], {
+        "ip": 0x150,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r20": 0,
+        "r24": 2,
+        "r25": 1,
+    }, entry=0x10)
+
 # A 4 GiB code segment lets a TB leave out the per-instruction checks
 # (ia64_ia32_tb_fast).  These variants rerun debug and disabled-FP cases
 # with such a segment: each condition must still select the checked TB.
@@ -6258,6 +6345,8 @@ test_ia32_fxrstor_unmasked_exception_faults_in_same_tb = \
 
 CASE_NAMES = (
     'ipis_during_break_faults_all_arrive',
+    'nmi_waits_for_psr_i',
+    'nmi_wakes_pal_halt_light_with_psr_i_clear',
 
     'ar_itc_advances_in_guest_loop',
     'armed_itm_match_pends_before_past_itm_write',

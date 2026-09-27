@@ -515,7 +515,6 @@ bool ia64_cpu_has_work(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     CPUIA64State *env = &cpu->env;
-    bool nmi_pending = (env->interrupt.sapic_irr[0] & (1ULL << 2)) != 0;
     bool interrupts_enabled = (env->psr & IA64_PSR_I) ||
                               (cs->halted && env->interrupt.pal_halt_wake);
 
@@ -523,11 +522,11 @@ bool ia64_cpu_has_work(CPUState *cs)
      * ia64_sapic_update_interrupt() maintains CPU_INTERRUPT_HARD whenever
      * IRR, ISR or TPR changes, and the ITM callback does the same when its
      * deadline expires.  Do not rescan IRR or reschedule the timer from this
-     * exec-loop hot path.  PAL_HALT_LIGHT wakes only for an interrupt that
-     * is actually deliverable; PSR.i does not mask NMI vector 2.
+     * exec-loop hot path.  PAL_HALT_LIGHT wakes for any interrupt that TPR
+     * and the in-service priority leave unmasked, NMI included, whatever
+     * PSR.i (SDM Vol. 2 rev 1.0 11.6); outside it PSR.i gates NMI too.
      */
-    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) &&
-           (interrupts_enabled || nmi_pending);
+    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) && interrupts_enabled;
 }
 
 

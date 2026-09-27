@@ -771,7 +771,12 @@ bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     bool nmi_pending = cpu->env.interrupt.sapic_irr[0] & (1ULL << 2);
-    bool interrupt_enabled = (cpu->env.psr & IA64_PSR_I) || nmi_pending;
+    /*
+     * PSR.i gates NMI too; only TPR and the in-service priority do not mask
+     * it (SDM Vol. 2 rev 1.0 Table 5-7, 11.8.2.3).  In IA-32 code EFLAG.if
+     * and CFLG.if do not gate NMI (Table 3-2, PSR.i).
+     */
+    bool interrupt_enabled = cpu->env.psr & IA64_PSR_I;
     /*
      * While RSE.CFLE is set, instruction execution is stalled until
      * the mandatory RSE loads complete (SDM Vol.2 6.6).  This
