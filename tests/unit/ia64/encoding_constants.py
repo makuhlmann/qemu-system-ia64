@@ -285,7 +285,8 @@ PAL_CACHE_INFO_DATA_HINTS = (0x09 << 48) | (0x0b << 56)
 
 # --- Merced cache and TC geometry -------------------------------------------
 # L1I/L1D 16 KB 4-way 32 B lines; L2 unified 96 KB 6-way 64 B write-back;
-# L3 unified 4 MB 4-way 64 B (245473-002 sec 4.1-4.4, 248701-002 sec 2.5.4).
+# L3 unified 2 MB 4-way 64 B, the i2000 part (245473-002 sec 4.1-4.4,
+# 248701-002 sec 2.5.4, HP i2000 Owner's Guide sec 11.1.3).
 # Integer load latencies: L1 2, L2 6, L3 21 (245473-002 sec 4.1, 4.3, 4.4).
 PAL_CACHE_INFO_MERCED_L0_I_1 = ((4 << 8) | (5 << 16) |
                                 (5 << 24) | (0xff << 32) | (1 << 40))
@@ -302,7 +303,7 @@ PAL_CACHE_INFO_MERCED_L1_U_2 = (96 * 1024 | (14 << 32) | (14 << 40) |
 PAL_CACHE_INFO_MERCED_L2_U_1 = (1 | (1 << 1) | (4 << 8) | (6 << 16) |
                                 (6 << 24) | (1 << 32) | (21 << 40) |
                                 PAL_CACHE_INFO_DATA_HINTS)
-PAL_CACHE_INFO_MERCED_L2_U_2 = (4 * 1024 * 1024 | (20 << 32) | (20 << 40) |
+PAL_CACHE_INFO_MERCED_L2_U_2 = (2 * 1024 * 1024 | (19 << 32) | (19 << 40) |
                                 (IA64_IMPL_PA_BITS - 1 << 48))
 # ITLB 64 entries holding the instruction TRs; DTLB1 32 entries holding none;
 # DTLB2 96 entries holding the data TRs (248701-002 sec 2.5.6).  All levels

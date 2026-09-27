@@ -1275,8 +1275,9 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
 };
 
 /*
- * Original Itanium (Merced), 800 MHz / 133 MHz bus / 4 MB L3 SKU (249634-002
- * datasheet; CPUID table 249720-009).  brl is not implemented
+ * Original Itanium (Merced), 800 MHz / 133 MHz bus / 2 MB L3 SKU, the i2000
+ * part (249634-002 datasheet; HP i2000 Owner's Guide §11.1.3; CPUID table
+ * 249720-009).  brl is not implemented
  * (cpuid_features = 0) and the post-Merced PAL procedures are absent
  * (245318-001/-002 §11.8).
  *
@@ -1286,10 +1287,10 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
  *        2-cycle integer load latency
  *   L2   96 KB, 6-way, 64 B lines, write-back, write-allocate,
  *        6-cycle integer load latency
- *   L3   4 MB,  4-way, 64 B lines, 21-cycle integer load latency
+ *   L3   2 MB,  4-way, 64 B lines, 21-cycle integer load latency
  * tag_lsb is the first tag bit above the index and offset: 128 sets of 32 B
- * for the 16 KB caches (12), 256 sets of 64 B for L2 (14), 16384 sets of 64 B
- * for L3 (20).
+ * for the 16 KB caches (12), 256 sets of 64 B for L2 (14), 8192 sets of 64 B
+ * for L3 (19).
  *
  * Translation caches, 248701-002 sec 2.5.6: a single-level 64-entry fully
  * associative ITLB holding the instruction TRs, and a two-level data TLB --
@@ -1342,9 +1343,9 @@ static const IA64PalProfile ia64_pal_profile_merced = {
                     IA64_PAL_CACHE_DATA_HINTS },
         },
         [2] = {
-            [1] = { .size = 4 * MiB, .associativity = 4, .line_shift = 6,
+            [1] = { .size = 2 * MiB, .associativity = 4, .line_shift = 6,
                     .stride_shift = 6, .attribute = 1, .store_latency = 1,
-                    .load_latency = 21, .tag_lsb = 20, .unified = true,
+                    .load_latency = 21, .tag_lsb = 19, .unified = true,
                     IA64_PAL_CACHE_DATA_HINTS },
         },
     },
@@ -1621,7 +1622,7 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
 };
 
 /*
- * Original Itanium ("Merced"), 800 MHz / 4 MB L3, C2 stepping.  Family 0x07,
+ * Original Itanium ("Merced"), 800 MHz / 2 MB L3, C2 stepping.  Family 0x07,
  * model 0, revision 8, CPUID[4] is the last register (249720-009 spec update).
  * cpuid_features = 0: brl is not implemented (CPUID[4].lb = 0, 245319-002 brl
  * page), which is what Windows' KF_BRL check expects on Merced.  Asymmetric TR
@@ -1639,10 +1640,10 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
      */
     .ia32_cpuid_version = 0x00000708,
     /*
-     * 245320-003 §8.4 Table 8-2; <L2> in EBX is 0x89, the 4 MB cache of
+     * 245320-003 §8.4 Table 8-2; <L2> in EBX is 0x88, the 2 MB cache of
      * this model's PAL_CACHE_INFO.
      */
-    .ia32_cpuid_leaf2 = { 0x00151001, 0x0000891a, 0x009b9690, 0x80000000 },
+    .ia32_cpuid_leaf2 = { 0x00151001, 0x0000881a, 0x009b9690, 0x80000000 },
     .itr_count = 8,
     .dtr_count = 48,
     .insertable_page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK,

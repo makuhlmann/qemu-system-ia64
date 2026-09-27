@@ -594,9 +594,9 @@ test_pal_vm_tr_read_merced_dtr_limit = require_registers(
     entry=0x10, cpu="merced")
 
 # Merced cache hierarchy: 16 KB 4-way 32 B L1I/L1D, 96 KB 6-way 64 B unified
-# write-back L2, 4 MB 4-way 64 B unified L3 (245473-002 sec 4.1-4.4,
-# 248701-002 sec 2.5.4).  The unified levels are reported on the data type
-# only; the instruction type is an invalid argument there.
+# write-back L2, 2 MB 4-way 64 B unified L3 as in the i2000 (245473-002 sec
+# 4.1-4.4, 248701-002 sec 2.5.4).  The unified levels are reported on the
+# data type only; the instruction type is an invalid argument there.
 test_pal_cache_info_merced_l0_i = require_registers(
     "pal_cache_info_merced_l0_i",
     pal_call_program(PAL_CACHE_INFO, [(29, 0), (30, 1), (31, 0)]),
@@ -678,14 +678,23 @@ test_pal_version_merced = require_registers(
      "r9": PAL_VERSION_VALUE_MERCED, "r10": PAL_VERSION_VALUE_MERCED},
     entry=0x10, cpu="merced")
 
-# Procedures that post-date Merced return NOT_IMPLEMENTED on the merced model.
-test_pal_prefetch_vis_merced_unimplemented = require_registers(
-    "pal_prefetch_vis_merced_unimplemented",
+# PAL_PREFETCH_VISIBILITY is required in the 2000 editions too, but with
+# trans_type still reserved (245318-001 p.11-97, 245318-002 p.11-94).
+test_pal_prefetch_vis_merced = require_registers(
+    "pal_prefetch_vis_merced",
     pal_call_program(PAL_PREFETCH_VIS),
     {"ip": 0x30, "r28": PAL_PREFETCH_VIS,
-     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+     "r8": 0, "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="merced")
 
+test_pal_prefetch_vis_merced_trans_type_reserved = require_registers(
+    "pal_prefetch_vis_merced_trans_type_reserved",
+    pal_call_program(PAL_PREFETCH_VIS, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PREFETCH_VIS,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+# Procedures that post-date Merced return NOT_IMPLEMENTED on the merced model.
 test_pal_cache_shared_info_merced_unimplemented = require_registers(
     "pal_cache_shared_info_merced_unimplemented",
     pal_call_program(PAL_CACHE_SHARED_INFO, [(29, 0), (30, 1), (31, 0)]),
@@ -2037,7 +2046,8 @@ CASE_NAMES = (
     'pal_vm_tr_read_merced_itr_bound',
     'pal_vm_tr_read_merced_dtr_bound',
     'pal_vm_tr_read_merced_dtr_limit',
-    'pal_prefetch_vis_merced_unimplemented',
+    'pal_prefetch_vis_merced',
+    'pal_prefetch_vis_merced_trans_type_reserved',
     'pal_cache_shared_info_merced_unimplemented',
     'pal_brand_info_merced_unimplemented',
     'pal_logical_to_physical_merced_unimplemented',

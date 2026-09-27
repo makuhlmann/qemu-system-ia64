@@ -96,6 +96,7 @@
 #define IA64_MONTECITO_BUS_FREQUENCY 533333333ULL
 
 static bool pal_reserved_args_are_zero(CPUIA64State *env);
+static bool pal_post_merced_available(CPUIA64State *env);
 
 static uint64_t pal_stacked_arg(CPUIA64State *env, uint32_t arg)
 {
@@ -322,13 +323,15 @@ static bool pal_halt(CPUIA64State *env)
 static void pal_prefetch_vis(CPUIA64State *env)
 {
     uint64_t trans_type = env->gr[IA64_PAL_GR_ARG1];
-
     /*
      * trans_type 0 transitions virtual attributes only and 1 physical or
      * mixed ones; the three returns after status are reserved (SDM Vol. 2,
-     * PAL_PREFETCH_VISIBILITY).
+     * PAL_PREFETCH_VISIBILITY). The 2000 editions that describe Merced
+     * reserve all three arguments (245318-001 p.11-97, 245318-002 p.11-94).
      */
-    if (trans_type <= 1 && env->gr[IA64_PAL_GR_ARG2] == 0 &&
+    uint64_t max_trans_type = pal_post_merced_available(env) ? 1 : 0;
+
+    if (trans_type <= max_trans_type && env->gr[IA64_PAL_GR_ARG2] == 0 &&
         env->gr[IA64_PAL_GR_ARG3] == 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
     } else {
@@ -1545,11 +1548,7 @@ uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
         }
         break;
     case PAL_PREFETCH_VIS:
-        if (!pal_post_merced_available(env)) {
-            pal_return_not_implemented(env);
-        } else {
-            pal_prefetch_vis(env);
-        }
+        pal_prefetch_vis(env);
         break;
     case PAL_CACHE_FLUSH:
         if (pal_cache_flush(env)) {

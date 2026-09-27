@@ -2512,7 +2512,7 @@ test_ia32_cpuid_leaf2_reports_madison_cache_descriptors = require_registers(
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
-# 245320-003 §8.4 Table 8-2, with the 4 MB L2 descriptor (0x89).
+# 245320-003 §8.4 Table 8-2, with the 2 MB L2 descriptor (0x88).
 test_ia32_cpuid_leaf2_reports_merced_cache_descriptors = require_registers(
     "ia32_cpuid_leaf2_reports_merced_cache_descriptors", [
         *ia32_environment_bundles(0x700, 0x10),
@@ -2532,7 +2532,7 @@ test_ia32_cpuid_leaf2_reports_merced_cache_descriptors = require_registers(
         "r8": 0x00151001,
         "r9": 0x009b9690,
         "r10": 0xffffffff80000000,
-        "r11": 0x0000891a,
+        "r11": 0x0000881a,
         "r14": 2,
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="merced")
