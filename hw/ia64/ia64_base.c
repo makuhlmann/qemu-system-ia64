@@ -1595,7 +1595,9 @@ void ia64_vpc_add_compat_defaults(MachineClass *mc)
 
 static uint64_t ia64_vpc_fw_base(IA64VpcMachineState *s, uint64_t ram_size)
 {
-    return s->fw_relocate ? IA64_FW_IMAGE_BASE_FOR(ram_size)
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
+
+    return s->fw_relocate ? IA64_FW_IMAGE_BASE_FOR(ram_size, imc->low_ram_top)
                           : IA64_FW_LINK_BASE;
 }
 
@@ -2441,23 +2443,8 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
      * band is a single unbroken run, which also avoids the fragmented
      * single-DMA-zone layout that Linux 2.6.8 IA-64 mishandled.
      *
-     * The zx1 machine additionally carves a DRAM hole for the SBA "safe IOVA
-     * space" [IA64_SBA_IOVA_BASE, IA64_SBA_IOVA_END) (1-2 GiB): the RAM that
-     * would sit there is shifted up past IA64_SBA_IOVA_END, so the enabled IOVA
-     * window overlaps no DRAM (see IA64_SBA_IOVA_BASE in ia64_vpc_abi.h).
-     *
-     * The hole is only carved once installed RAM exceeds the PCI aperture
-     * (IA64_LOW_RAM_LIMIT ~= 3.72 GiB), i.e. exactly when there is already RAM
-     * displaced above 4 GiB.  In that regime the low band fills to the aperture
-     * regardless of the hole, so the firmware's aperture-relative self-placement
-     * (image, CPU-assist, SRAT/SMBIOS top) is unaffected and the two maps stay
-     * trivially consistent.  For a guest at or below the aperture the layout is
-     * identical to 460gx (a single contiguous low run) -- carving the hole there
-     * would move the top of low RAM and the firmware image with it, which needs
-     * a hole-aware low_ram_end the firmware does not yet compute.
-     *
-     * Keep this in lockstep with fw_init_guest_high_ram_ranges() +
-     * efi_add_low_ram_band() in roms/ia64-firmware/.
+     * A board whose chipset places DRAM otherwise maps its part before the
+     * run at 4 GiB through imc->map_low_ram (zx1: longspeak_map_low_ram()).
      */
     if (s->low_ram_limit == 0) {
         s->low_ram_limit = IA64_LOW_RAM_LIMIT;
@@ -3469,7 +3456,8 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
      * the top of installed low RAM, as real IA-64 firmware places its SAL
      * scratch; the firmware derives the same base from the memory it probes.
      */
-    uint64_t assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(machine->ram_size);
+    uint64_t assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(
+        machine->ram_size, IA64_VPC_MACHINE_GET_CLASS(machine)->low_ram_top);
     IA64BootInfo info = {
         .firmware_base = firmware_base,
         .firmware_entry = entry,
@@ -4756,6 +4744,7 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
     (void)data;
 
     imc->ahci_slot = 1;
+    imc->low_ram_top = IA64_LOW_RAM_LIMIT;
     /*
      * Intel 82802AC Firmware Hub, 8 Mbit, 64 KiB blocks, which locks every
      * block out of reset through its register interface (datasheet 290658).

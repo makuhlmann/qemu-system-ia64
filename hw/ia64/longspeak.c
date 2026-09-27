@@ -10,6 +10,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/cutils.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "hw/core/qdev-properties.h"
@@ -51,57 +52,52 @@ static const IA64IntxRoute longspeak_pci0_intx[] = {
 };
 
 /*
- * The zx1 machine carves a DRAM hole for the SBA "safe IOVA space"
- * [IA64_SBA_IOVA_BASE, IA64_SBA_IOVA_END) (1-2 GiB): the RAM that would sit
- * there is shifted up past IA64_SBA_IOVA_END, so the enabled IOVA window
- * overlaps no DRAM (see IA64_SBA_IOVA_BASE in ia64_vpc_abi.h).
- *
- * The hole is only carved once installed RAM exceeds the PCI aperture
- * (IA64_LOW_RAM_LIMIT ~= 3.72 GiB), i.e. exactly when there is already RAM
- * displaced above 4 GiB.  In that regime the low band fills to the aperture
- * regardless of the hole, so the firmware's aperture-relative self-placement
- * (image, CPU-assist, SRAT/SMBIOS top) is unaffected and the two maps stay
- * trivially consistent.  For a guest at or below the aperture the layout is
- * identical to 460gx (a single contiguous low run) -- carving the hole there
- * would move the top of low RAM and the firmware image with it, which needs
- * a hole-aware low_ram_end the firmware does not yet compute.
- *
- * Keep this in lockstep with fw_init_guest_high_ram_ranges() +
- * efi_add_low_ram_band() in roms/ia64-firmware/.
+ * The mio's fixed DRAM map (mio ERS 2.1): Memory0 from 0 to the I/O virtual
+ * region at 1 GiB, then Memory1 at 0x40_4000_0000 for up to 3 GiB; the rest
+ * is Memory2, the generic run at 4 GiB.  No DRAM decodes from 1 GiB to 4 GiB,
+ * so the SBA's IOVA window and the LMMIO range overlap no memory.  Keep this
+ * in lockstep with probe_ram_zx1() and fw_init_guest_high_ram_ranges() in
+ * roms/ia64-firmware/.
  */
 static uint64_t longspeak_map_low_ram(IA64VpcMachineState *s, uint64_t offset,
                                       uint64_t remaining)
 {
-    uint64_t size, mapped;
+    uint64_t size;
 
-    if (remaining <= IA64_LOW_RAM_LIMIT) {
-        return ia64_vpc_map_ram_alias(s, 0, offset, remaining,
-                                      s->low_ram_limit, "ia64-vpc.low-ram");
-    }
     size = ia64_vpc_map_ram_alias(s, 0, offset, remaining,
-                                  IA64_SBA_IOVA_BASE,
-                                  "ia64-vpc.low-ram-below-iova");
-    offset += size;
-    remaining -= size;
-    mapped = size;
-    size = ia64_vpc_map_ram_alias(s, IA64_SBA_IOVA_END, offset, remaining,
-                                  IA64_LOW_RAM_LIMIT - IA64_SBA_IOVA_END,
-                                  "ia64-vpc.low-ram-above-iova");
-    return mapped + size;
+                                  IA64_ZX1_MEMORY0_END, "ia64-vpc.memory0");
+    return size + ia64_vpc_map_ram_alias(s, IA64_ZX1_MEMORY1_BASE,
+                                         offset + size, remaining - size,
+                                         IA64_ZX1_MEMORY1_SIZE,
+                                         "ia64-vpc.memory1");
+}
+
+static bool longspeak_validate(IA64VpcMachineState *s, Error **errp)
+{
+    uint64_t max = IA64_ZX1_MEMORY0_END + IA64_ZX1_MEMORY1_SIZE +
+                   IA64_ZX1_MEMORY2_END - IA64_ZX1_MEMORY2_BASE;
+
+    if (MACHINE(s)->ram_size > max) {
+        g_autofree char *top = size_to_str(max);
+
+        error_setg(errp, "Invalid RAM size: the zx1 mio decodes at most %s",
+                   top);
+        return false;
+    }
+    return true;
 }
 
 /*
  * The firmware's LMMIO ranges say where PCI memory lives; PCI addresses are
- * CPU physical addresses here, so open the machine's PCI MMIO window there and
- * keep low RAM below it.  Our own firmware never writes those registers, so
- * this fires only under the vendor one.
+ * CPU physical addresses here, so open the machine's PCI MMIO window there.
+ * Our own firmware never writes those registers, so this fires only under
+ * the vendor one.
  */
 static void longspeak_lmmio_window_moved(void *opaque, uint64_t base)
 {
     IA64VpcMachineState *s = opaque;
 
     ia64_pci_host_set_low_mmio_window(s->pci_host_dev, base);
-    ia64_vpc_set_low_ram_limit(s, MIN(base, IA64_LOW_RAM_LIMIT));
 }
 
 static bool longspeak_build_chipset(IA64VpcMachineState *s,
@@ -372,6 +368,8 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->processor_ids = longspeak_processor_ids;
     imc->nprocessor_ids = ARRAY_SIZE(longspeak_processor_ids);
     imc->map_low_ram = longspeak_map_low_ram;
+    imc->low_ram_top = IA64_ZX1_MEMORY0_END;
+    imc->validate = longspeak_validate;
     imc->build_chipset = longspeak_build_chipset;
     imc->pci0_intx = longspeak_pci0_intx;
     imc->pci0_nintx = ARRAY_SIZE(longspeak_pci0_intx);

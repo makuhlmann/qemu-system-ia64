@@ -166,12 +166,15 @@ struct IA64VpcMachineClass {
     /* Board-specific configuration checks; NULL = none. */
     bool (*validate)(IA64VpcMachineState *s, Error **errp);
     /*
-     * Map the low DRAM band from backing offset @offset, @remaining bytes
-     * left; returns the bytes mapped.  NULL = one contiguous run up to
-     * low_ram_limit (ia64_vpc_map_ram_alias).
+     * Map the DRAM the board fills before its run at 4 GiB, from backing
+     * offset @offset, @remaining bytes left; returns the bytes mapped.
+     * NULL = one contiguous run at 0 up to low_ram_limit
+     * (ia64_vpc_map_ram_alias).
      */
     uint64_t (*map_low_ram)(IA64VpcMachineState *s, uint64_t offset,
                             uint64_t remaining);
+    /* Where the DRAM run at 0 ends once RAM fills it (IA64_FW_LOW_RAM_END). */
+    uint64_t low_ram_top;
     /*
      * Create the core chipset: its DMA-translation device (before any other
      * PCI device) and its further PCI roots.

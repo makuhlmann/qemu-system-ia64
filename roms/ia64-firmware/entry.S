@@ -26,6 +26,8 @@ fw_pal_buffer:
      * equals IA64_FW_CPU_STACK_SIZE, enforced by a static assert there.
      */
     .equ FW_PCI_MMIO_BASE, IA64_PCI_MMIO_BASE
+    .equ FW_ZX1_MEMORY0_END, IA64_ZX1_MEMORY0_END
+    .equ FW_CHIPSET_ZX1, IA64_FW_CHIPSET_ZX1
     .equ FW_LOW_RAM_MIN, IA64_FW_LOW_RAM_MIN
     .equ FW_LOW_RAM_ALIGN_MASK, (IA64_FW_LOW_RAM_ALIGN - 1)
     .equ FW_AP_RELEASE_BLOCK, IA64_FW_AP_RELEASE_BLOCK
@@ -198,6 +200,12 @@ fw_flash_entry:
     movl r19 = FW_PCI_MMIO_BASE
     movl r22 = FW_LOW_RAM_ALIGN_MASK
     ;;
+    /* The zx1 DRAM run at 0 ends at the I/O virtual region (mio ERS 2.1). */
+    cmp.eq p6, p7 = FW_CHIPSET_ZX1, r3
+    movl r18 = FW_ZX1_MEMORY0_END
+    ;;
+(p6) mov r19 = r18
+    ;;
     cmp.ltu p8, p9 = r19, r8
     mov r17 = r8
     ;;
@@ -293,7 +301,7 @@ fw_flash_entry:
 
     /*
      * Application processors: wait for the boot processor's release IPI,
-     * read the shadow's _start (release block +0) and the DRAM size (+8),
+     * read the shadow's _start (release block +0) and low_ram_end (+8),
      * move the RSE backing store to this processor's real early slot, and
      * run the shadow's reset entry, which sends them down start_secondary.
      * External interrupts are disabled here, so poll the vector's request
@@ -345,15 +353,10 @@ flash_wait_shadow:
     ;;
     ld8 r15 = [r14]
     adds r16 = 8, r14
-    movl r19 = FW_PCI_MMIO_BASE
     movl r22 = FW_LOW_RAM_ALIGN_MASK
     ;;
     ld8 r17 = [r16]
     movl r23 = FW_EARLY_RSE_BELOW_END
-    ;;
-    cmp.ltu p8, p9 = r19, r17
-    ;;
-(p8) mov r17 = r19
     ;;
     andcm r17 = r17, r22        /* low_ram_end */
     ;;

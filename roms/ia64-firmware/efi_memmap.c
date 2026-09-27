@@ -368,31 +368,6 @@ void efi_add_conventional_with_system_pointer(UINTN *Index,
     }
 }
 
-/*
- * Emit a conventional-memory band that, when the SBA IOVA hole is active
- * (fw_zx1_iova_hole_active(): zx1 with RAM past the aperture), skips the "safe
- * IOVA space" DRAM hole [IA64_SBA_IOVA_BASE, IA64_SBA_IOVA_END).  The RAM that
- * would sit there is shifted up past the window by the machine (and accounted
- * for by fw_init_guest_high_ram_ranges), so the enabled IOVA window overlaps no
- * DRAM; the hole is left an undescribed gap.  When the hole is inactive, or for
- * a band that does not fully span the window, this is just
- * efi_add_conventional_with_system_pointer().  In the hole-active regime the
- * low band always reaches the aperture, so it fully spans the window and this
- * split is exact.  Keep in lockstep with ia64_vpc_map_ram() in
- * hw/ia64/ia64_base.c.
- */
-static void efi_add_low_ram_band(UINTN *Index, UINT64 Start, UINT64 End)
-{
-    if (fw_zx1_iova_hole_active() &&
-        Start < IA64_SBA_IOVA_BASE && End > IA64_SBA_IOVA_END) {
-        efi_add_conventional_with_system_pointer(Index, Start,
-                                                 IA64_SBA_IOVA_BASE);
-        efi_add_conventional_with_system_pointer(Index, IA64_SBA_IOVA_END, End);
-    } else {
-        efi_add_conventional_with_system_pointer(Index, Start, End);
-    }
-}
-
 /* See FW_LOW_ANCHOR_BASE: 128 MB when it lies below the CPU-assist region. */
 UINT64 fw_low_anchor_base(void)
 {
@@ -471,9 +446,9 @@ void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
      * reuses after ExitBootServices().
      */
     if (image_low) {
-        efi_add_low_ram_band(Index, StartRam, top_block);
+        efi_add_conventional_with_system_pointer(Index, StartRam, top_block);
     } else {
-        efi_add_low_ram_band(Index, StartRam, image_start);
+        efi_add_conventional_with_system_pointer(Index, StartRam, image_start);
         /* bss + span headroom up to the next block: boot-services scratch. */
         efi_add_memory_range(Index, EfiBootServicesData, image_end,
                              top_block, EFI_MEMORY_WB);

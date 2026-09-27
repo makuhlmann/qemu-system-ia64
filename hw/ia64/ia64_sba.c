@@ -145,9 +145,9 @@
  * mappings -- with a 0 mask it would try to allocate a 4 GiB-worth page table
  * and panic ("IOC: Couldn't allocate I/O Page Table").  It is the classic 1 GiB
  * window at 1 GiB, 32-bit-addressable so a 32-bit master (the Rage 128) can
- * issue IOVAs into it, and the zx1 machine keeps a DRAM hole there so it
- * overlaps no memory.  The IBASE enable bit is left clear at reset, so until an
- * sba_iommu-class OS turns translation on the IOC stays in bypass.
+ * issue IOVAs into it, and the mio maps no DRAM there (mio ERS 2.1).  The
+ * IBASE enable bit is left clear at reset, so until an sba_iommu-class OS
+ * turns translation on the IOC stays in bypass.
  */
 
 /* A whole-aperture UNMAP, emitted on non-PCOM register writes and on reset. */

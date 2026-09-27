@@ -7323,7 +7323,8 @@ test_fc_i_cpl3_access_rights_fault_is_nonaccess = require_registers(
 
 
 
-FC_HIGH_RAM_TARGET = 0x80210000
+# zx1 Memory1: DRAM that the machine aliases from backing offset 1 GiB.
+FC_HIGH_RAM_TARGET = 0x4040210000
 FC_ABOVE_4G_RAM_TARGET = 0x100100000
 
 
@@ -7340,7 +7341,7 @@ def test_fc_i_high_ram_invalidates_translated_target(qemu):
         (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
         (FC_HIGH_RAM_TARGET, 0x10, nop_m(), adds(30, 1, 0),
          br_indirect(1)),
-    ], entry=0x10, terminal_ip=0x90, memory="4G")
+    ], entry=0x10, terminal_ip=0x90, memory="2G")
     if stats.get("TB invalidate count", 0) < 1:
         raise AssertionError(
             "fc.i did not invalidate code in aliased high RAM:\n" + output)

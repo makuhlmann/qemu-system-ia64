@@ -2760,69 +2760,58 @@ static void test_ram_high_remap(void)
 }
 
 /*
- * The zx1 machine carves a 1 GiB DRAM hole out of the low band for the SBA
- * "safe IOVA space" window [0x40000000, 0x80000000).  RAM below the hole and
- * from 2 GiB up to the aperture is backed; the hole itself is not; and the
- * 1 GiB displaced by the hole spills above 4 GiB (on top of the ordinary
- * top-of-memory displacement).  The 460gx machine at the same size has no hole
- * -- 0x40000000 is ordinary backed RAM -- which this test asserts as a
- * differential guard.  Keep in lockstep with ia64_vpc_map_ram(),
- * efi_add_low_ram_band() and fw_init_guest_high_ram_ranges().
+ * The zx1 mio's fixed DRAM map (mio ERS 2.1): Memory0 from 0 to 1 GiB, no
+ * DRAM in the I/O virtual region [1, 2) GiB or in LMMIO up to 4 GiB, then
+ * Memory1 (3 GiB at 0x40_4000_0000) before Memory2 at 4 GiB.  The 460gx
+ * machine at the same size keeps DRAM contiguous across 1 GiB, a
+ * differential guard.  Keep in lockstep with longspeak_map_low_ram(),
+ * probe_ram_zx1() and fw_init_guest_high_ram_ranges().
  */
-#define IA64_SBA_HOLE_BASE 0x0000000040000000ULL
-#define IA64_SBA_HOLE_LAST 0x000000007ffffff8ULL /* last qword inside the hole */
+#define IA64_ZX1_MEMORY0_LAST  (IA64_ZX1_MEMORY0_END - 8)
+#define IA64_ZX1_MEMORY1_LAST  (IA64_ZX1_MEMORY1_BASE + IA64_ZX1_MEMORY1_SIZE - 8)
 
-static void test_ram_hole_zx1(void)
+static void ram_expect(QTestState *qts, uint64_t addr, bool backed)
 {
     const uint64_t magic = 0x0123456789abcdefULL;
+
+    qtest_writeq(qts, addr, magic);
+    if (backed) {
+        g_assert_cmphex(qtest_readq(qts, addr), ==, magic);
+    } else {
+        g_assert_cmphex(qtest_readq(qts, addr), !=, magic);
+    }
+}
+
+static void test_ram_map_zx1(void)
+{
     QTestState *qts;
 
-    /*
-     * 4096 MiB on zx1: below the hole is backed, the hole reads back unbacked,
-     * 2 GiB resumes backed, and the remainder displaced by both the hole and
-     * the top-of-memory gap lands above 4 GiB.
-     */
-    qts = qtest_init("-machine zx1 -m 4096M -S");
-
-    /* Below the hole: ordinary low RAM. */
-    qtest_writeq(qts, IA64_SBA_HOLE_BASE - 8, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_SBA_HOLE_BASE - 8), ==, magic);
-    /* The hole itself is not backed by DRAM. */
-    qtest_writeq(qts, IA64_SBA_HOLE_BASE, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_SBA_HOLE_BASE), !=, magic);
-    qtest_writeq(qts, IA64_SBA_HOLE_LAST, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_SBA_HOLE_LAST), !=, magic);
-    /* DRAM resumes at 2 GiB and runs up toward the aperture. */
-    qtest_writeq(qts, IA64_RAM_AT_2GIB, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_RAM_AT_2GIB), ==, magic);
-    qtest_writeq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE), ==, magic);
-    /* The 1 GiB pushed out by the hole is displaced above 4 GiB. */
-    qtest_writeq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE), ==, magic);
-    qtest_quit(qts);
-
-    /* Differential guard: 460gx at the same size has NO hole at 0x40000000. */
-    qts = qtest_init("-machine 460gx -m 4096M -S");
-    qtest_writeq(qts, IA64_SBA_HOLE_BASE, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_SBA_HOLE_BASE), ==, magic);
-    qtest_writeq(qts, IA64_SBA_HOLE_LAST, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_SBA_HOLE_LAST), ==, magic);
-    qtest_quit(qts);
-
-    /*
-     * Gate guard: at or below the PCI aperture the hole is NOT carved even on
-     * zx1 -- the layout is the contiguous 460gx one, so the firmware's
-     * aperture-relative self-placement stays valid.  A 2 GiB guest has ordinary
-     * backed RAM across the window and no DRAM above 4 GiB.
-     */
+    /* 2 GiB: 1 GiB in Memory0 and 1 GiB at the start of Memory1. */
     qts = qtest_init("-machine zx1 -m 2048M -S");
-    qtest_writeq(qts, IA64_SBA_HOLE_BASE, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_SBA_HOLE_BASE), ==, magic);
-    qtest_writeq(qts, IA64_SBA_HOLE_LAST, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_SBA_HOLE_LAST), ==, magic);
-    qtest_writeq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, magic);
-    g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE), !=, magic);
+    ram_expect(qts, IA64_ZX1_MEMORY0_LAST, true);
+    ram_expect(qts, IA64_SBA_IOVA_BASE, false);
+    ram_expect(qts, IA64_RAM_AT_2GIB, false);
+    ram_expect(qts, IA64_ZX1_MEMORY1_BASE, true);
+    ram_expect(qts, IA64_ZX1_MEMORY1_BASE + 0x40000000ULL - 8, true);
+    ram_expect(qts, IA64_ZX1_MEMORY1_BASE + 0x40000000ULL, false);
+    ram_expect(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, false);
+    qtest_quit(qts);
+
+    /* 6 GiB: Memory1 full, then 2 GiB of Memory2 at 4 GiB. */
+    qts = qtest_init("-machine zx1 -m 6144M -S");
+    ram_expect(qts, IA64_ZX1_MEMORY0_LAST, true);
+    ram_expect(qts, IA64_SBA_IOVA_BASE, false);
+    ram_expect(qts, IA64_HIGH_RAM_BELOW_PCI_BASE, false);
+    ram_expect(qts, IA64_ZX1_MEMORY1_LAST, true);
+    ram_expect(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, true);
+    ram_expect(qts, IA64_HIGH_RAM_ABOVE_4G_BASE + 0x80000000ULL - 8, true);
+    ram_expect(qts, IA64_HIGH_RAM_ABOVE_4G_BASE + 0x80000000ULL, false);
+    qtest_quit(qts);
+
+    /* 460gx at 2 GiB: contiguous DRAM across 1 GiB. */
+    qts = qtest_init("-machine 460gx -m 2048M -S");
+    ram_expect(qts, IA64_SBA_IOVA_BASE, true);
+    ram_expect(qts, IA64_ZX1_MEMORY1_BASE, false);
     qtest_quit(qts);
 }
 
@@ -8384,7 +8373,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/vga/int10-legacy-std",
                    test_int10_legacy_std);
     qtest_add_func("/ia64-vpc/ram/high-remap-above-4g", test_ram_high_remap);
-    qtest_add_func("/ia64-vpc/ram/hole-zx1", test_ram_hole_zx1);
+    qtest_add_func("/ia64-vpc/ram/map-zx1", test_ram_map_zx1);
     qtest_add_func("/ia64-vpc/nvram/defaults", test_nvram_defaults);
     qtest_add_func("/ia64-vpc/lba/agp-capability", test_lba_agp_capability);
     qtest_add_func("/ia64-vpc/lba/rope-window", test_lba_rope_window);

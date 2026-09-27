@@ -67,7 +67,8 @@
  * 2 MiB CPU-assist region (per-CPU SAL re-entry slots, debug contexts and
  * stacks, initial RSE backing stores, and the boot memory stacks) sits at
  * [low_ram_end - 2 MiB, low_ram_end), where low_ram_end is installed RAM
- * clamped to the PCI aperture and rounded down to IA64_FW_LOW_RAM_ALIGN.
+ * clamped to the top of the board's DRAM run at 0 (the PCI aperture on the
+ * 460GX, the end of Memory0 on zx1) and rounded down to IA64_FW_LOW_RAM_ALIGN.
  * Low DRAM below it stays conventional (the firmware's efi_init_memory_map
  * keeps only the loader-contract boundaries described there), so OS loaders
  * that map their working set with large translation registers (Server 2003
@@ -142,10 +143,10 @@
 
 /*
  * RAM-top firmware image shadow (55e553d).  The machine loads the
- * firmware binary at IA64_FW_IMAGE_BASE_FOR(ram_size) - 1 MB aligned, sized
- * for the image plus bss with headroom (the linker asserts the real span
- * fits) - applies the image's self-relocation fixup table for the delta from
- * the 1 MB link base.  Above the image
+ * firmware binary at IA64_FW_IMAGE_BASE_FOR(ram_size, low_top) - 1 MB
+ * aligned, sized for the image plus bss with headroom (the linker asserts the
+ * real span fits) - applies the image's self-relocation fixup table for the
+ * delta from the 1 MB link base.  Above the image
  * sit the ACPI staging region and the CPU-assist region, ending exactly at
  * the end of installed low RAM, mirroring how real 460GX/E8870 firmware
  * shadows itself near the top of memory.
@@ -202,16 +203,20 @@
 #define IA64_FW_REGISTRATION_ASSIST_OFF     0x38
 #define IA64_FW_ACPI_REGION_SIZE      IA64_U64(0x0000000000020000)
 
-/* low_ram_end for an installed RAM size, as both QEMU and the firmware see it. */
-#define IA64_FW_LOW_RAM_END(ram_size) \
-    ((((ram_size) < IA64_PCI_MMIO_BASE ? (ram_size) : IA64_PCI_MMIO_BASE)) & \
+/*
+ * low_ram_end for an installed RAM size, as both QEMU and the firmware see it;
+ * low_top is where the board's DRAM run at 0 ends when RAM fills it
+ * (IA64_PCI_MMIO_BASE on the 460GX, IA64_ZX1_MEMORY0_END on zx1).
+ */
+#define IA64_FW_LOW_RAM_END(ram_size, low_top) \
+    ((((ram_size) < (low_top) ? (ram_size) : (low_top))) & \
      ~(IA64_FW_LOW_RAM_ALIGN - 1ULL))
-#define IA64_FW_CPU_ASSIST_BASE_FOR(ram_size) \
-    (IA64_FW_LOW_RAM_END(ram_size) - IA64_FW_CPU_ASSIST_SIZE)
+#define IA64_FW_CPU_ASSIST_BASE_FOR(ram_size, low_top) \
+    (IA64_FW_LOW_RAM_END(ram_size, low_top) - IA64_FW_CPU_ASSIST_SIZE)
 /* 4 MB aligned: the SST names a truthful 4 MB ITR(0) over the shadow. */
-#define IA64_FW_IMAGE_BASE_FOR(ram_size) \
-    ((IA64_FW_CPU_ASSIST_BASE_FOR(ram_size) - IA64_FW_ACPI_REGION_SIZE - \
-      IA64_FW_IMAGE_SPAN) & ~IA64_U64(0xfffff))
+#define IA64_FW_IMAGE_BASE_FOR(ram_size, low_top) \
+    ((IA64_FW_CPU_ASSIST_BASE_FOR(ram_size, low_top) - \
+      IA64_FW_ACPI_REGION_SIZE - IA64_FW_IMAGE_SPAN) & ~IA64_U64(0xfffff))
 
 #ifndef __ASSEMBLER__
 /*
@@ -309,27 +314,24 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_SBA_MODULE_INFO          IA64_U64(0x000000000703000a)
 /*
  * The zx1 SBA "safe IOVA space": the 1 GiB window at 1 GiB the IOC advertises
- * through IBASE/IMASK and that the OS's sba_iommu allocates IOVAs from.  On the
- * zx1 machine this range is a DRAM HOLE -- the machine shifts the RAM that would
- * sit here up past the window, exactly as real zx1 keeps a "Virtual I/O" hole so
- * the IOVA window never overlaps memory.  Without the hole, Linux sba_iommu's
- * ALLOW_IOV_BYPASS path (which DMAs to a buffer's raw physical address) can put
- * a >1 GiB buffer inside the enabled window and have the IOC mis-translate it.
- *
- * The hole is only carved when installed RAM exceeds the PCI aperture
- * (IA64_PCI_MMIO_BASE), i.e. when there is already RAM displaced above 4 GiB and
- * the low band fills to the aperture regardless of the hole (see the gate in
- * hw/ia64/longspeak.c and fw_zx1_iova_hole_active() in the firmware).  Carving it
- * for a smaller guest would move the top of low RAM -- and the firmware image,
- * CPU-assist region and SRAT/SMBIOS ranges pinned near it -- which needs a
- * hole-aware low_ram_end the firmware does not yet compute.
- * hw/ia64/longspeak.c (RAM map), roms/ia64-firmware/efi_memmap.c (EFI map)
- * and platform.c (high-RAM ranges) carve this hole in lockstep.
+ * through IBASE/IMASK and that the OS's sba_iommu allocates IOVAs from.  The
+ * mio maps no memory there (mio ERS 2.1, "The I/O Virtual Region").
  */
 #define IA64_SBA_IOVA_BASE            IA64_U64(0x0000000040000000)
 #define IA64_SBA_IOVA_SIZE            IA64_U64(0x0000000040000000) /* 1 GiB */
 #define IA64_SBA_IOVA_END \
     (IA64_SBA_IOVA_BASE + IA64_SBA_IOVA_SIZE)
+/*
+ * zx1 mio DRAM (mio ERS 2.1, Figure 3).  Memory0 runs from 0 to the I/O
+ * virtual region at 1 GiB.  The DRAM that would sit from there to 4 GiB is
+ * Memory1, at 0x40_4000_0000; Memory2 starts at 4 GiB and ends below Memory1.
+ * Memory1 is used only once Memory0 is full, and Memory2 once Memory1 is full.
+ */
+#define IA64_ZX1_MEMORY0_END          IA64_SBA_IOVA_BASE
+#define IA64_ZX1_MEMORY1_BASE         IA64_U64(0x0000004040000000)
+#define IA64_ZX1_MEMORY1_SIZE         IA64_U64(0x00000000c0000000) /* 3 GiB */
+#define IA64_ZX1_MEMORY2_BASE         IA64_U64(0x0000000100000000)
+#define IA64_ZX1_MEMORY2_END          IA64_U64(0x0000004000000000)
 /*
  * The zx1 LBA (Local Bus Adapter / Mercury I/O adapter) config block.  Linux
  * hp-agp (drivers/char/agp/hp-agp.c) finds it via the ACPI HWP0003 device's

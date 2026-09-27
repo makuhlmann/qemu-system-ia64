@@ -192,7 +192,8 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
         env->firmware.sal_entry = base + IA64_FW_SAL_RUNTIME_ENTRY_OFF;
         env->firmware.sal_return = base + IA64_FW_SAL_RUNTIME_RETURN_OFF;
         env->firmware.sal_block = base + IA64_FW_SAL_DISPATCH_BLOCK_OFF;
-        env->firmware.assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(ram);
+        env->firmware.assist_base =
+            IA64_FW_CPU_ASSIST_BASE_FOR(ram, IA64_PCI_MMIO_BASE);
     }
     if (version_id < 6) {
         /*
