@@ -1718,6 +1718,7 @@ static void test_pdh_dimm_spd(void)
     QTestState *qts = qtest_init("-machine zx1 -m 1G -S");
     uint8_t request[6];
     uint8_t rsp[80];
+    uint32_t serial_512m;
     unsigned int area;
     uint8_t sum;
     unsigned i;
@@ -1765,16 +1766,36 @@ static void test_pdh_dimm_spd(void)
     }
     g_assert_cmphex(rsp[4 + 63], ==, sum);
 
-    /* HP's own status command answers for a populated slot. */
+    /*
+     * HP's own command 0xd0 answers four bytes for a populated slot, the
+     * module's serial number (SPD bytes 95-98); the firmware compares them
+     * with its saved memory configuration to see a changed module.
+     */
+    memcpy(request, spd, sizeof(request));
+    request[2] = 0x81;
+    request[3] = 95;
+    request[5] = 4;
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, request, sizeof(request),
+                                     rsp, sizeof(rsp)), ==, 4 + 4);
+    serial_512m = ldl_le_p(rsp + 4);
+    g_assert_cmphex(serial_512m, !=, 0);
     g_assert_cmpuint(bmc_kcs_command(qts, kcs, status, G_N_ELEMENTS(status),
-                                     rsp, sizeof(rsp)), ==, 4);
+                                     rsp, sizeof(rsp)), ==, 3 + 4);
     g_assert_cmphex(rsp[2], ==, 0x00);
+    g_assert_cmphex(ldl_le_p(rsp + 3), ==, serial_512m);
 
     /* The second pair is empty at this size, so its device is not there. */
     g_assert_cmpuint(bmc_kcs_command(qts, kcs, empty, G_N_ELEMENTS(empty),
                                      rsp, sizeof(rsp)), ==, 3);
     g_assert_cmphex(rsp[2], !=, 0x00);
+    qtest_quit(qts);
 
+    /* 2 GB puts 1 GB modules in the same slots: another serial number. */
+    qts = qtest_init("-machine zx1 -m 2G -S");
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, status, G_N_ELEMENTS(status),
+                                     rsp, sizeof(rsp)), ==, 3 + 4);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    g_assert_cmphex(ldl_le_p(rsp + 3), !=, serial_512m);
     qtest_quit(qts);
 }
 
