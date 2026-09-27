@@ -24,6 +24,7 @@
 #include "fw-memmap.h"
 #include "fw-platform-handoff.h"
 #include "fw-platform-layout.h"
+#include "fw-sal-init.h"
 #include "fw-acpi.h"
 #include "fw-pe.h"
 #include "fw-storage.h"
@@ -14433,6 +14434,9 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
                          ACPI_PM1_CNT_OFFSET;
     mRuntimeResetControl = LEGACY_IO_BASE + fw_acpi_reset_port();
     mRuntimeResetValue = fw_acpi_reset_value();
+    mFwSalInit.ResetControl = mRuntimeResetControl;
+    mFwSalInit.ResetValue = mRuntimeResetValue;
+    fw_platform_register_minstate(1);
     mResetFloatingPointDisableBits =
         fw_read_psr() & (IA64_PSR_DFL | IA64_PSR_DFH);
 

@@ -20,6 +20,7 @@ SERVICE_CASES = {
     "memory-primitives", "time-services", "variable-services",
     "block-disk-protocols", "pci-root-io", "pci-io",
     "graphics-output", "tcg-no-tpm", "sal-state-info-no-log",
+    "sal-os-init",
 }
 EXITBS_CASES = {
     "memory-map", "exit-boot-services", "system-table-handoff",

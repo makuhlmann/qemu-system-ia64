@@ -2706,6 +2706,79 @@ out:
     return ok;
 }
 
+/*
+ * OS_INIT (SAL spec 245359-007 5): an INIT this processor sends itself goes
+ * through PALE_INIT and SAL_INIT to the handler registered with
+ * SAL_SET_VECTORS, whose return (GR8 = 0, 5.4) resumes this code through
+ * PAL_MC_RESUME.
+ */
+#define TEST_SAL_SET_VECTORS    0x01000000ULL
+#define TEST_SAL_VECTOR_OS_INIT 1ULL
+
+volatile UINT64 test_os_init_count;
+extern UINT8 test_os_init_entry[];
+
+__asm__(
+    ".text\n"
+    ".align 16\n"
+    ".global test_os_init_entry\n"
+    ".proc test_os_init_entry\n"
+    "test_os_init_entry:\n"
+    "    addl r2 = @gprel(test_os_init_count), gp\n"
+    "    ;;\n"
+    "    ld8 r3 = [r2]\n"
+    "    ;;\n"
+    "    adds r3 = 1, r3\n"
+    "    ;;\n"
+    "    st8 [r2] = r3\n"
+    "    mov r9 = r10\n"
+    "    mov r8 = r0\n"
+    "    mov r10 = r0\n"
+    "    mov r22 = r17\n"
+    "    mov b6 = r12\n"
+    "    ;;\n"
+    "    br.sptk.many b6\n"
+    "    ;;\n"
+    ".endp test_os_init_entry\n");
+
+static BOOLEAN test_sal_os_init(EFI_SYSTEM_TABLE *SystemTable)
+{
+    UINT8 *sal = (UINT8 *)find_config_table(SystemTable, sal_guid);
+    volatile UINT64 descriptor[2] __attribute__((aligned(16)));
+    volatile UINT64 *ipi;
+    TEST_SAL_PROC procedure;
+    TEST_SAL_RETURN set;
+    UINT64 gp;
+    UINT64 lid;
+    UINTN spins;
+
+    if (sal == NULL || get_u64(sal + 112U) == 0 || get_u64(sal + 120U) == 0) {
+        return 0;
+    }
+    descriptor[0] = get_u64(sal + 112U);
+    descriptor[1] = get_u64(sal + 120U);
+    procedure = (TEST_SAL_PROC)(UINTN)&descriptor[0];
+    __asm__ volatile ("mov %0 = gp" : "=r"(gp));
+    __asm__ volatile ("mov %0 = cr.lid" : "=r"(lid));
+    set = procedure(TEST_SAL_SET_VECTORS, TEST_SAL_VECTOR_OS_INIT,
+                    (UINTN)test_os_init_entry, gp, 0,
+                    (UINTN)test_os_init_entry, gp, 0);
+    if (set.Status != TEST_SAL_SUCCESS) {
+        return 0;
+    }
+    test_os_init_count = 0;
+    /* Processor interrupt block, delivery mode 101 (SDM Vol. 2 5.8.4.1). */
+    ipi = (volatile UINT64 *)(UINTN)(0xfee00000ULL |
+                                     (((lid >> 24) & 0xffU) << 12) |
+                                     (((lid >> 16) & 0xffU) << 4));
+    *ipi = 5ULL << 8;
+    for (spins = 0; spins < 100000000U && test_os_init_count == 0; spins++) {
+    }
+    (void)procedure(TEST_SAL_SET_VECTORS, TEST_SAL_VECTOR_OS_INIT,
+                    0, 0, 0, 0, 0, 0);
+    return test_os_init_count == 1;
+}
+
 static BOOLEAN test_sal_smbios_tables(EFI_SYSTEM_TABLE *SystemTable,
                                       const TEST_TABLE_CONTEXT *Context)
 {
@@ -2917,6 +2990,9 @@ EFI_STATUS ia64_services_main(EFI_HANDLE ImageHandle,
         ia64_test_check(&context, "sal-state-info-no-log",
                         test_sal_state_info_no_log(SystemTable),
                         EFI_DEVICE_ERROR, "size-empty-clear-contract");
+        ia64_test_check(&context, "sal-os-init",
+                        test_sal_os_init(SystemTable),
+                        EFI_DEVICE_ERROR, "init-resume");
     }
     ia64_test_done(&context);
     return context.Failed == 0 ? EFI_SUCCESS : EFI_DEVICE_ERROR;

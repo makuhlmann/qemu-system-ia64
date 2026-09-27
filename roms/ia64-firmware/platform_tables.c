@@ -15,6 +15,7 @@
 #include "fw-platform-handoff.h"
 #include "fw-platform-layout.h"
 #include "linker-symbols.h"
+#include "fw-sal-init.h"
 #include "ia64-fw-acpi-aml.h"
 
 static IA64_SAL_SYSTEM_TABLE   mSalSystemTable;
@@ -479,6 +480,9 @@ static void efi_init_sal_system_table(void)
      */
     mSalSystemTable.Entrypoint.SalProc = (UINTN)sal_runtime_entry;
     mSalSystemTable.Entrypoint.SalGp = fw_current_gp();
+    mFwSalInit.PalProc = mSalSystemTable.Entrypoint.PalProc;
+    mFwSalInit.SalProc = mSalSystemTable.Entrypoint.SalProc;
+    mFwSalInit.SalGp = mSalSystemTable.Entrypoint.SalGp;
     for (i = 0; i < sizeof(mSalSystemTable.Entrypoint.Reserved1); i++) {
         mSalSystemTable.Entrypoint.Reserved1[i] = 0;
     }

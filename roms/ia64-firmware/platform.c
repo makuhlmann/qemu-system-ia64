@@ -19,6 +19,7 @@
 #include "fw-platform-layout.h"
 #include "linker-symbols.h"
 #include "fw-platform-handoff.h"
+#include "fw-sal-init.h"
 
 typedef struct {
     UINT64 Status;
@@ -611,6 +612,66 @@ void fw_init_platform_base_frequency(void)
     }
 }
 
+FW_SAL_INIT_BLOCK mFwSalInit;
+extern UINT8 fw_sal_init[];
+
+#define FW_PAL_MC_REGISTER_MEM 0x01b
+
+_Static_assert(IA64_FW_MINSTATE_OFFSET +
+               IA64_VPC_MAX_CPUS * IA64_FW_MINSTATE_SIZE <=
+               IA64_FW_DEBUG_STACK_OFFSET, "min-state areas overlap");
+
+static UINT64 fw_own_processor_id(void)
+{
+    UINT64 lid;
+
+    __asm__ volatile ("mov %0 = cr.lid;;" : "=r"(lid) : : "memory");
+    return (lid >> 24) & 0xff;
+}
+
+static volatile UINT64 *fw_minstate_area(UINT64 ProcessorId)
+{
+    return (volatile UINT64 *)(UINTN)(mCpuAssistBase +
+                                      IA64_FW_MINSTATE_OFFSET +
+                                      ProcessorId * IA64_FW_MINSTATE_SIZE);
+}
+
+/*
+ * SAL spec 245359-007 5.1: every processor registers a min-state save area
+ * with PAL for PALE_INIT, uncacheable (SDM Vol. 2 11.3.2.4).  OsOwned is
+ * clear while the processor waits in SAL boot rendezvous, where an INIT
+ * returns at once.
+ */
+void fw_platform_register_minstate(BOOLEAN OsOwned)
+{
+    UINT64 id = fw_own_processor_id();
+    volatile UINT64 *area;
+    UINTN i;
+
+    if (id >= IA64_VPC_MAX_CPUS) {
+        return;
+    }
+    area = fw_minstate_area(id);
+    for (i = 0; i < 1024 / 8; i++) {
+        area[i] = 0;
+    }
+    area[IA64_FW_MINSTATE_SAL_INIT_OFF / 8] = (UINTN)fw_sal_init;
+    area[IA64_FW_MINSTATE_OS_OWNED_OFF / 8] = OsOwned;
+    /* SAL_INIT resumes a rendezvous processor before the SAL tables exist. */
+    mFwSalInit.PalProc = mFwPalProc;
+    (void)fw_pal_call_at(mFwPalProc, FW_PAL_MC_REGISTER_MEM,
+                         (UINTN)area | (1ULL << 63), 0, 0, NULL);
+}
+
+static void fw_platform_set_os_owned(BOOLEAN OsOwned)
+{
+    UINT64 id = fw_own_processor_id();
+
+    if (id < IA64_VPC_MAX_CPUS) {
+        fw_minstate_area(id)[IA64_FW_MINSTATE_OS_OWNED_OFF / 8] = OsOwned;
+    }
+}
+
 BOOLEAN fw_platform_register_processor(UINT64 ResetPalProc)
 {
     return ResetPalProc != 0 &&
@@ -983,12 +1044,25 @@ sal_set_vectors(UINT64 VectorType, UINT64 PhysAddr1, UINT64 Gp1,
     entry->Gp2 = Gp2;
     entry->HandlerLen2 = LengthCs2;
     entry->Valid = 1;
+    if (VectorType == SAL_VECTOR_OS_INIT) {
+        mFwSalInit.Valid = 0;
+        __asm__ volatile ("mf;;" : : : "memory");
+        mFwSalInit.MonarchEntry = PhysAddr1;
+        mFwSalInit.MonarchGp = Gp1;
+        mFwSalInit.MonarchLengthCs = LengthCs1;
+        mFwSalInit.SlaveEntry = PhysAddr2;
+        mFwSalInit.SlaveGp = Gp2;
+        mFwSalInit.SlaveLengthCs = LengthCs2;
+        __asm__ volatile ("mf;;" : : : "memory");
+        mFwSalInit.Valid = PhysAddr1 != 0;
+    }
     return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
 }
 
 BOOLEAN __attribute__((noinline)) sal_set_vectors_selftest(void)
 {
     SAL_VECTOR_REGISTRATION saved[SAL_VECTOR_COUNT];
+    FW_SAL_INIT_BLOCK saved_init = mFwSalInit;
     SAL_RETURN_VALUE mca_valid;
     SAL_RETURN_VALUE bad_secondary;
     SAL_RETURN_VALUE bad_type;
@@ -1032,6 +1106,7 @@ BOOLEAN __attribute__((noinline)) sal_set_vectors_selftest(void)
     for (i = 0; i < SAL_VECTOR_COUNT; i++) {
         mSalVectors[i] = saved[i];
     }
+    mFwSalInit = saved_init;
 
     return ok;
 }
@@ -2312,8 +2387,10 @@ static void fw_ap_rendezvous(void)
     saved_psr = fw_read_psr();
     saved_rsc = fw_read_rsc();
     prepare_sal_loader_handoff();
+    fw_platform_set_os_owned(1);
     fw_call_ap_rendezvous(descriptor, sal_loader_psr_low(),
                           saved_psr, saved_rsc);
+    fw_platform_set_os_owned(0);
 }
 
 void firmware_ap_main(UINT64 ProcessorId, UINT64 ResetPalProc)
@@ -2328,6 +2405,7 @@ void firmware_ap_main(UINT64 ProcessorId, UINT64 ResetPalProc)
     }
     fw_platform_install_pal(1, ResetPalProc);
     fw_platform_register_processor(ResetPalProc);
+    fw_platform_register_minstate(0);
     fw_ap_rendezvous();
     for (;;) {
         /* TPR is scratch on return from OS_BOOT_RENDEZ. */

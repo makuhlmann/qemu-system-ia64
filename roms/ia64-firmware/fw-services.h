@@ -66,6 +66,7 @@ BOOLEAN fw_platform_install_pal(UINT64 Processor, UINT64 ResetPalProc);
 extern UINT64 mFwPalProc;
 extern UINT64 mFwResetPalProc;
 BOOLEAN fw_platform_register_processor(UINT64 ResetPalProc);
+void fw_platform_register_minstate(BOOLEAN OsOwned);
 /* What the flash stage probed, before anything derives from it. */
 void fw_platform_set_probed(UINT64 RamSize, UINT64 Chipset);
 void fw_init_itc_rate(void);

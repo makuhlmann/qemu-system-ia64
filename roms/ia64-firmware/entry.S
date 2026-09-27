@@ -7,6 +7,7 @@
  */
 
 #include "hw/ia64/ia64_vpc_abi.h"
+#include "fw-sal-init.h"
 
     /*
      * The buffer PAL copies itself into (PAL_COPY_PAL, SAL 3.2.3 step 9):
@@ -115,6 +116,11 @@ fw_flash_entry:
     mov b6 = r36
     ;;
 (p6) br.cond.sptk.few b6
+    ;;
+    /* INIT (2) comes from PALE_INIT in bank 0 (SDM vol. 2 11.4.2). */
+    cmp.eq p6, p7 = 2, r2
+    ;;
+(p6) br.cond.spnt.few fw_flash_init
     ;;
     bsw.0
     ;;
@@ -381,6 +387,30 @@ flash_wait_shadow:
     .endp fw_flash_entry
     .size fw_flash_entry, . - fw_flash_entry
 
+    /*
+     * INIT: the shadow keeps its SAL_INIT entry in the SAL part of the
+     * min-state save area PALE_INIT hands over in GR17.  With no area or no
+     * entry there is no state to resume, and the processor stops here.
+     */
+    .proc fw_flash_init
+    .explicit
+fw_flash_init:
+    adds r24 = IA64_FW_MINSTATE_SAL_INIT_OFF, r17
+    cmp.eq p6, p7 = r0, r17
+    ;;
+(p7) ld8 r24 = [r24]
+(p6) mov r24 = r0
+    ;;
+    cmp.eq p6, p7 = r0, r24
+    mov b6 = r24
+    ;;
+(p7) br.cond.sptk.few b6
+    ;;
+1:
+    br.cond.sptk.few 1b
+    ;;
+    .endp fw_flash_init
+
     /* Byte length of the image body to shadow; fw-flash.py fills it in. */
     .align 8
     .global fw_flash_body_size
@@ -435,6 +465,133 @@ sal_runtime_return:
     .global sal_dispatch_block
 sal_dispatch_block:
     .skip 0x20
+
+    /*
+     * SAL_INIT (SAL spec 245359-007 5.1-5.4), reached from SALE_ENTRY with
+     * the PALE_INIT exit state: bank 0, PSR.mc = 1, physical addressing, GR17
+     * the min-state save area.  PAL saved every static register there, so
+     * this code uses static registers only and leaves the register stack and
+     * its backing store as PALE_INIT left them: OS_INIT gets them so (5.3).
+     */
+    .section .text.fw_sal_init, "ax"
+    .global fw_sal_init
+    .type fw_sal_init, @function
+    .proc fw_sal_init
+    .explicit
+fw_sal_init:
+    adds r2 = IA64_FW_MINSTATE_OS_OWNED_OFF, r17
+    movl r21 = mFwSalInit
+    ;;
+    ld8 r3 = [r2]
+    ld8 r4 = [r21]
+    mov r22 = r17
+    mov r10 = r0
+    ;;
+    /* A processor in SAL boot rendezvous stays there (5.1). */
+    cmp.eq p6, p0 = r0, r3
+(p6) br.cond.spnt.few fw_sal_init_resume
+    ;;
+    /* No OS_INIT registered: warm boot (5.1). */
+    cmp.eq p6, p0 = r0, r4
+(p6) br.cond.spnt.few fw_sal_init_warm_boot
+    adds r2 = FW_SAL_INIT_ENTERED, r21
+    ;;
+    /* The first processor in is the monarch (5.2). */
+    fetchadd8.acq r3 = [r2], 1
+    adds r4 = FW_SAL_INIT_MONARCH_ENTRY, r21
+    adds r5 = FW_SAL_INIT_SLAVE_ENTRY, r21
+    ;;
+    cmp.eq p6, p7 = r0, r3
+    ;;
+(p7) mov r4 = r5
+    ;;
+    adds r5 = FW_SAL_INIT_LENGTH_CS, r4
+    adds r6 = FW_SAL_INIT_GP, r4
+    ;;
+    ld8 r3 = [r4]
+    ld8 r5 = [r5]
+    ld8 r1 = [r6]
+    ;;
+    /* The code and its checksum byte sum to zero, or no jump (5.1). */
+    tbit.z p6, p0 = r5, 32
+    extr.u r6 = r5, 0, 32
+    extr.u r7 = r5, 40, 8
+    mov r9 = r3
+(p6) br.cond.sptk.few 3f
+    ;;
+1:
+    cmp.eq p6, p0 = r0, r6
+(p6) br.cond.spnt.few 2f
+    ;;
+    ld1 r8 = [r9], 1
+    adds r6 = -1, r6
+    ;;
+    add r7 = r7, r8
+    br.cond.sptk.few 1b
+    ;;
+2:
+    zxt1 r7 = r7
+    ;;
+    cmp.ne p6, p0 = r0, r7
+(p6) br.cond.spnt.few fw_sal_init_warm_boot
+    ;;
+3:
+    /* OS_INIT hand-off (5.3). */
+    adds r2 = FW_SAL_INIT_PAL_PROC, r21
+    ;;
+    ld8 r8 = [r2], 8
+    ;;
+    ld8 r9 = [r2], 8
+    ;;
+    ld8 r10 = [r2]
+    mov r11 = r0
+    movl r12 = fw_sal_init_return
+    mov b6 = r3
+    ;;
+    br.sptk.many b6
+    ;;
+fw_sal_init_return:
+    /* OS_INIT hands back (5.4): GR8 0 resume, -1 warm boot; GR10, GR22. */
+    movl r21 = mFwSalInit
+    ;;
+    adds r2 = FW_SAL_INIT_ENTERED, r21
+    cmp.eq p6, p0 = -1, r8
+    ;;
+    fetchadd8.rel r3 = [r2], -1
+(p6) br.cond.spnt.few fw_sal_init_warm_boot
+    ;;
+fw_sal_init_resume:
+    movl r21 = mFwSalInit
+    ;;
+    adds r2 = FW_SAL_INIT_PAL_PROC, r21
+    mov r28 = 26                /* PAL_MC_RESUME */
+    mov r29 = r0
+    mov r30 = r22
+    mov r31 = r10
+    ;;
+    ld8 r2 = [r2]
+    ;;
+    mov b6 = r2
+    ;;
+    br.call.sptk.many b0 = b6
+    ;;
+    /* PAL_MC_RESUME returns only on an error. */
+fw_sal_init_warm_boot:
+    movl r21 = mFwSalInit
+    ;;
+    adds r2 = FW_SAL_INIT_RESET_CONTROL, r21
+    ;;
+    ld8 r3 = [r2], 8
+    ;;
+    ld8 r4 = [r2]
+    ;;
+    st1 [r3] = r4
+    ;;
+4:
+    br.cond.sptk.few 4b
+    ;;
+    .endp fw_sal_init
+    .size fw_sal_init, . - fw_sal_init
 
     /*
      * The machine implements the arithmetic behind this architected
