@@ -220,6 +220,41 @@ void fw_platform_init_expander_ports(void)
 UINT64 mFwSalPmiIoBase;
 
 /*
+ * The board's LPC47B27x comes out of reset with every logical device
+ * inactive (datasheet Table 20-1).  Program it as the vendor's chipset-init
+ * script does (bios130.BIN 0x2c85a0, 0x2c8bd0): 16-bit address
+ * qualification (CR24 = 44h), the runtime block at 800h, UART1 at 3F8h on
+ * IRQ 4 and the keyboard on IRQ 1.  The mouse IRQ (72h) is 12, which our
+ * ACPI tables report; the vendor script leaves it clear.
+ */
+#define FW_SIO_CONFIG_PORT 0x2e
+#define FW_SIO_ENTER_KEY   0x55
+#define FW_SIO_EXIT_KEY    0xaa
+
+static void fw_platform_init_super_io(void)
+{
+    static const UINT8 writes[][2] = {
+        { 0x24, 0x44 },
+        { 0x07, 0x0a }, { 0x60, 0x08 }, { 0x61, 0x00 }, { 0x30, 0x01 },
+        { 0x07, 0x04 }, { 0x60, IA64_460GX_COM1_IO_BASE >> 8 },
+        { 0x61, IA64_460GX_COM1_IO_BASE & 0xff },
+        { 0x70, IA64_460GX_COM1_IRQ }, { 0x30, 0x01 },
+        { 0x07, 0x07 }, { 0x70, 0x01 }, { 0x72, 0x0c }, { 0x30, 0x01 },
+    };
+    volatile UINT8 *index =
+        (volatile UINT8 *)(UINTN)(LEGACY_IO_BASE + FW_SIO_CONFIG_PORT);
+    volatile UINT8 *data = index + 1;
+    UINTN i;
+
+    *index = FW_SIO_ENTER_KEY;
+    for (i = 0; i < FW_ARRAY_SIZE(writes); i++) {
+        *index = writes[i][0];
+        *data = writes[i][1];
+    }
+    *index = FW_SIO_EXIT_KEY;
+}
+
+/*
  * The vendor firmware's chipset-init pokes for the IFB's ACPI block, in its
  * order (bios130.BIN 0x2c7a80): ACPI Enable off, ACPI Base A00h, ACPI Enable
  * on.  Then the APMC SMI its SAL_B enables (run-time 0x3FF17CE0: APMC_EN,
@@ -246,6 +281,7 @@ void fw_platform_init_south_bridge(void)
                                         IA64_460GX_ACPI_GLBCTL_OFFSET);
     *glbctl |= IA64_460GX_GLBCTL_APMC_EN;
     *glbctl |= IA64_460GX_GLBCTL_SMI_EN;
+    fw_platform_init_super_io();
 }
 
 /*

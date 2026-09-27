@@ -282,6 +282,8 @@ struct IA64VpcMachineState {
     MemoryRegion acpi_reset;
     SerialMM *debug_uart;
     SerialMM *console_uart;
+    /* The board's Super I/O (smsc-lpc47b27x), or NULL. */
+    ISADevice *super_io;
     DeviceState *pci_host_dev;
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     MemoryRegion int10_pci_io;

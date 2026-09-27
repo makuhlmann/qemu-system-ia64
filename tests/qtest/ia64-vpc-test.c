@@ -38,6 +38,7 @@
 #define IA64_IOSAPIC_RTE_DELIVERY    BIT(12)
 #define IA64_IOSAPIC_RTE_REMOTE_IRR  BIT(14)
 #define IA64_IOSAPIC_RTE_LEVEL       BIT(15)
+#define IA64_IOSAPIC_RTE_MASK        BIT(16)
 #define IA64_TEST_RAM_SIZE           (256 * MiB)
 #define IA64_INT10_ROM_BASE          0x000c0000ULL
 /*
@@ -4481,46 +4482,161 @@ static void test_460gx_sac_aperture(void)
 }
 
 /*
- * The i2000's SMSC LPC47B27x Super I/O answers its configuration pair at
- * 2Eh/2Fh: 55h enters, AAh leaves, index 07h selects the logical device,
- * and the vendor DSDT reads COM1 (LDN 4) as ACTR 30h / IOAH-IOAL 60h-61h /
- * INTR 70h -- 3F8h on IRQ 4, active, as the board's firmware configures it.
- * Outside configuration mode the data port reads open bus.
+ * The i2000's SMSC LPC47B27x Super I/O (datasheet §20): the index/data pair
+ * at 2Eh/2Fh decodes only between the 55h and AAh keys, and a logical
+ * device's Activate, base and Interrupt Select registers place its device:
+ * UART1 is the board's COM1, LDN 7 its keyboard controller.  The board
+ * resets it to what the vendor chipset-init script leaves (bios130.BIN
+ * 0x2c85a0, 0x2c8bd0); a soft reset gives the chip's own values.
  */
+#define SIO_CONFIG_PORT    0x2e
+#define SIO_ENTER_KEY      0x55
+#define SIO_EXIT_KEY       0xaa
+#define SIO_REG_CONTROL    0x02
+#define SIO_REG_LDN        0x07
+#define SIO_REG_DEVID      0x20
+#define SIO_REG_POWER      0x22
+#define SIO_REG_OSC        0x24
+#define SIO_REG_CFGPORT_LO 0x26
+#define SIO_REG_CFGPORT_HI 0x27
+#define SIO_LDN_ACTIVATE   0x30
+#define SIO_LDN_BASE_HI    0x60
+#define SIO_LDN_BASE_LO    0x61
+#define SIO_LDN_IRQ        0x70
+#define SIO_LDN_DMA        0x74
+#define SIO_LDN_UART1      0x04
+#define SIO_LDN_KBD        0x07
+#define SIO_UART_IER       1
+#define SIO_UART_SCR       7
+#define SIO_UART_IER_THRI  0x02
+
+static uint64_t sio_port(uint32_t port)
+{
+    return IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port);
+}
+
+static uint8_t sio_read(QTestState *qts, uint32_t config, uint8_t index)
+{
+    qtest_writeb(qts, sio_port(config), index);
+    return qtest_readb(qts, sio_port(config + 1));
+}
+
+static void sio_write(QTestState *qts, uint32_t config, uint8_t index,
+                      uint8_t value)
+{
+    qtest_writeb(qts, sio_port(config), index);
+    qtest_writeb(qts, sio_port(config + 1), value);
+}
+
+/* A 16550 keeps its scratch register; nothing decoded keeps nothing. */
+static bool sio_uart_at(QTestState *qts, uint32_t base)
+{
+    qtest_writeb(qts, sio_port(base + SIO_UART_SCR), 0x5a);
+    return qtest_readb(qts, sio_port(base + SIO_UART_SCR)) == 0x5a;
+}
+
 static void test_460gx_superio(void)
 {
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
-    uint64_t idx = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2e);
-    uint64_t dat = IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x2f);
+    uint32_t cfg = SIO_CONFIG_PORT;
 
-    qtest_writeb(qts, idx, 0x07);
-    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xff);
-    qtest_writeb(qts, idx, 0x55);
-    qtest_writeb(qts, idx, 0x20);
-    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x51);
-    qtest_writeb(qts, idx, 0x07);
-    qtest_writeb(qts, dat, 0x04);
-    qtest_writeb(qts, idx, 0x30);
-    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x01);
-    qtest_writeb(qts, idx, 0x60);
-    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x03);
-    qtest_writeb(qts, idx, 0x61);
-    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xf8);
-    qtest_writeb(qts, idx, 0x70);
-    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x04);
-    qtest_writeb(qts, idx, 0x07);
-    qtest_writeb(qts, dat, 0x05);
-    qtest_writeb(qts, idx, 0x30);
-    g_assert_cmphex(qtest_readb(qts, dat), ==, 0x00);
-    qtest_writeb(qts, idx, 0xaa);
-    qtest_writeb(qts, idx, 0x30);
-    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xff);
+    qtest_writeb(qts, sio_port(cfg), SIO_REG_DEVID);
+    g_assert_cmphex(qtest_readb(qts, sio_port(cfg)), ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts, sio_port(cfg + 1)), ==, 0xff);
+    qtest_writeb(qts, sio_port(cfg), SIO_ENTER_KEY);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_REG_DEVID), ==, 0x51);
+    g_assert_cmphex(qtest_readb(qts, sio_port(cfg)), ==, SIO_REG_DEVID);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_REG_OSC), ==, 0x44);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_REG_CFGPORT_LO), ==, 0x2e);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_REG_LDN), ==, 0x0b);
+
+    sio_write(qts, cfg, SIO_REG_LDN, SIO_LDN_UART1);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_LDN_ACTIVATE), ==, 1);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_LDN_BASE_HI), ==, 0x03);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_LDN_BASE_LO), ==, 0xf8);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_LDN_IRQ), ==, 4);
+    g_assert_true(sio_uart_at(qts, 0x3f8));
+    /* UART1 has no DMA Channel Select: unimplemented reads 0. */
+    sio_write(qts, cfg, SIO_LDN_DMA, 0x03);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_LDN_DMA), ==, 0);
+
+    /* A soft reset (CR02 bit 0) clears Activate and the base. */
+    sio_write(qts, cfg, SIO_REG_CONTROL, 0x01);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_REG_LDN), ==, 0);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_REG_OSC), ==, 0x44);
+    sio_write(qts, cfg, SIO_REG_LDN, SIO_LDN_UART1);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_LDN_ACTIVATE), ==, 0);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_LDN_BASE_LO), ==, 0);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_LDN_IRQ), ==, 0);
+    g_assert_false(sio_uart_at(qts, 0x3f8));
+
+    sio_write(qts, cfg, SIO_LDN_BASE_HI, 0x03);
+    sio_write(qts, cfg, SIO_LDN_BASE_LO, 0xe8);
+    sio_write(qts, cfg, SIO_LDN_ACTIVATE, 1);
+    g_assert_true(sio_uart_at(qts, 0x3e8));
+    g_assert_false(sio_uart_at(qts, 0x3f8));
+    /* The Activate bit and CR22 bit 4 are one bit (Table 20-3 Note 1). */
+    g_assert_cmphex(sio_read(qts, cfg, SIO_REG_POWER), ==, 0x10);
+    sio_write(qts, cfg, SIO_REG_POWER, 0x00);
+    g_assert_false(sio_uart_at(qts, 0x3e8));
+    sio_write(qts, cfg, SIO_REG_POWER, 0x10);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_LDN_ACTIVATE), ==, 1);
+    g_assert_true(sio_uart_at(qts, 0x3e8));
+
+    /* The keyboard controller answers at 60h/64h only while active. */
+    g_assert_cmphex(qtest_readb(qts, sio_port(0x64)), ==, 0xff);
+    sio_write(qts, cfg, SIO_REG_LDN, SIO_LDN_KBD);
+    sio_write(qts, cfg, SIO_LDN_ACTIVATE, 1);
+    g_assert_cmphex(qtest_readb(qts, sio_port(0x64)), !=, 0xff);
+
+    /* The configuration port moves when CR27 is written (Table 20-2). */
+    sio_write(qts, cfg, SIO_REG_CFGPORT_LO, 0x4e);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_REG_DEVID), ==, 0x51);
+    sio_write(qts, cfg, SIO_REG_CFGPORT_HI, 0x00);
+    cfg = 0x4e;
+    g_assert_cmphex(sio_read(qts, cfg, SIO_REG_DEVID), ==, 0x51);
+    g_assert_cmphex(qtest_readb(qts, sio_port(SIO_CONFIG_PORT + 1)), ==, 0xff);
+    qtest_writeb(qts, sio_port(cfg), SIO_EXIT_KEY);
+    g_assert_cmphex(sio_read(qts, cfg, SIO_REG_DEVID), ==, 0xff);
     qtest_quit(qts);
 
     qts = qtest_init("-machine zx1 -m 256M -S");
-    qtest_writeb(qts, idx, 0x55);
-    qtest_writeb(qts, idx, 0x20);
-    g_assert_cmphex(qtest_readb(qts, dat), ==, 0xff);
+    qtest_writeb(qts, sio_port(SIO_CONFIG_PORT), SIO_ENTER_KEY);
+    g_assert_cmphex(sio_read(qts, SIO_CONFIG_PORT, SIO_REG_DEVID), ==, 0xff);
+    qtest_quit(qts);
+}
+
+/*
+ * UART1's interrupt reaches the ISA IRQ its Interrupt Select register names,
+ * and only while the logical device is active.  The PID's Delivery Status of
+ * a level-triggered entry shows the input's level (SSDM Table 2-10).
+ */
+static void test_460gx_superio_irq(void)
+{
+    const uint32_t rte3 = IA64_IOSAPIC_RTE_BASE + 3 * 2;
+    const uint32_t rte4 = IA64_IOSAPIC_RTE_BASE + 4 * 2;
+    const uint32_t level_masked = IA64_IOSAPIC_RTE_LEVEL |
+                                  IA64_IOSAPIC_RTE_MASK | 0x40;
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    uint32_t cfg = SIO_CONFIG_PORT;
+
+    iosapic_write(qts, rte3, level_masked);
+    iosapic_write(qts, rte4, level_masked);
+    qtest_writeb(qts, sio_port(cfg), SIO_ENTER_KEY);
+    sio_write(qts, cfg, SIO_REG_LDN, SIO_LDN_UART1);
+    g_assert_cmphex(iosapic_read(qts, rte4) & IA64_IOSAPIC_RTE_DELIVERY,
+                    ==, 0);
+    qtest_writeb(qts, sio_port(0x3f8 + SIO_UART_IER), SIO_UART_IER_THRI);
+    g_assert_cmphex(iosapic_read(qts, rte4) & IA64_IOSAPIC_RTE_DELIVERY,
+                    !=, 0);
+    sio_write(qts, cfg, SIO_LDN_IRQ, 3);
+    g_assert_cmphex(iosapic_read(qts, rte4) & IA64_IOSAPIC_RTE_DELIVERY,
+                    ==, 0);
+    g_assert_cmphex(iosapic_read(qts, rte3) & IA64_IOSAPIC_RTE_DELIVERY,
+                    !=, 0);
+    sio_write(qts, cfg, SIO_LDN_ACTIVATE, 0);
+    g_assert_cmphex(iosapic_read(qts, rte3) & IA64_IOSAPIC_RTE_DELIVERY,
+                    ==, 0);
     qtest_quit(qts);
 }
 
@@ -8617,6 +8733,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/460gx-agp-aperture-rebased",
                    test_460gx_agp_aperture_rebased);
     qtest_add_func("/ia64-vpc/isa/460gx-superio", test_460gx_superio);
+    qtest_add_func("/ia64-vpc/isa/460gx-superio-irq",
+                   test_460gx_superio_irq);
     qtest_add_func("/ia64-vpc/pci/460gx-sac-indexed-file",
                    test_460gx_sac_indexed_file);
     qtest_add_func("/ia64-vpc/pci/460gx-sac-aperture", test_460gx_sac_aperture);

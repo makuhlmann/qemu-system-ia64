@@ -26,3 +26,7 @@ via_superio_write(uint8_t addr, uint32_t val) "addr 0x%x val 0x%x"
 # lpc_ich9.c
 ich9_cc_write(uint64_t addr, uint64_t val, unsigned len) "addr=0x%"PRIx64 " val=0x%"PRIx64 " len=%u"
 ich9_cc_read(uint64_t addr, uint64_t val, unsigned len) "addr=0x%"PRIx64 " val=0x%"PRIx64 " len=%u"
+
+# smsc_lpc47b27x.c
+smsc_lpc47b27x_config_write(uint8_t ldn, uint8_t index, uint8_t value) "ldn 0x%x index 0x%02x value 0x%02x"
+smsc_lpc47b27x_soft_reset(void) ""

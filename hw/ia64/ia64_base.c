@@ -4207,6 +4207,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     DeviceState *iosapic;
     PCIBus *pci_bus;
     ISABus *isa_bus;
+    ISADevice *i8042 = NULL;
     MemoryRegion *pci_io;
 #ifdef CONFIG_IA64_VPC_STORAGE
     DriveInfo *sata_drives[6] = { NULL };
@@ -4361,8 +4362,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     /*
      * The i2000's COM ports: the Super I/O's UART1 at 3F8h on IRQ 4 is the
      * console, which is what the vendor DSDT reports for it (UAR1, LDN 4)
-     * and what its firmware talks to; a debug port, when configured, is
-     * UART2 at 2F8h on IRQ 3.  Early IA-64 kernel debuggers predate the
+     * and what its firmware talks to; the Super I/O moves it where its
+     * configuration says once the board's ISA bus is up.  The i2000 wires
+     * no second port: a debug port, when configured, is a machine addition
+     * at 2F8h on IRQ 3.  Early IA-64 kernel debuggers predate the
      * ACPI DBGP table and drive these fixed ports directly (Windows
      * Whistler build 2462's kdcom.dll hardcodes 0x3f8/0x2f8/0x3e8/0x2e8
      * through HAL's READ_PORT_UCHAR/WRITE_PORT_UCHAR), so /debugport=com2
@@ -4438,7 +4441,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 
 #ifdef CONFIG_IA64_VPC_PS2
     if (s->i8042_enabled) {
-        ISADevice *i8042 = isa_new(TYPE_I8042);
+        i8042 = isa_new(TYPE_I8042);
 
         /*
          * Model the PS/2 serial transfer latency of the Super I/O KBC (see
@@ -4455,6 +4458,16 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         }
     }
 #endif
+    if (s->super_io) {
+        SMSCLPC47B27xState *sio = SMSC_LPC47B27X(s->super_io);
+
+        if (s->console_uart) {
+            smsc_lpc47b27x_attach_uart1(sio, SYS_BUS_DEVICE(s->console_uart));
+        }
+        if (i8042) {
+            smsc_lpc47b27x_attach_kbc(sio, i8042);
+        }
+    }
 
 #ifdef CONFIG_IA64_VPC_USB
     if (!ia64_vpc_init_usb(s, pci_bus, errp)) {
