@@ -139,10 +139,15 @@
  * with PAL_MC_REGISTER_MEM (SAL spec 245359-007 5.1; SDM Vol. 2 11.3.2.4:
  * 4 KB, 512-byte aligned).  PAL writes the first 0x1d0 bytes; SAL owns the
  * rest of the first 1 KB and keeps there the physical entry of its SAL_INIT
- * (read by SALE_ENTRY) and whether the OS runs on the processor.
+ * (read by SALE_ENTRY) and whether the OS runs on the processor.  The areas
+ * are uncacheable, 16 KB away from any other data, and reported to the OS as
+ * EfiMemoryMappedIO (SAL spec 3.3.2): the guard is part of that range.
  */
-#define IA64_FW_MINSTATE_OFFSET        0x0000000000048000ULL
+#define IA64_FW_MINSTATE_OFFSET        0x0000000000050000ULL
 #define IA64_FW_MINSTATE_SIZE          0x0000000000001000ULL
+#define IA64_FW_MINSTATE_GUARD         0x0000000000004000ULL
+#define IA64_FW_MINSTATE_END_OFFSET \
+    (IA64_FW_MINSTATE_OFFSET + IA64_VPC_MAX_CPUS * IA64_FW_MINSTATE_SIZE)
 #define IA64_FW_MINSTATE_OS_OWNED_OFF  0x3e8
 #define IA64_FW_MINSTATE_SAL_INIT_OFF  0x3f0
 

@@ -323,14 +323,33 @@ BOOLEAN efi_memory_map_covers_range(EFI_MEMORY_TYPE Type,
     return 0;
 }
 
+/* The min-state areas with their guards (SAL spec 3.3.2). */
+static UINT64 fw_minstate_block_start(void)
+{
+    return mCpuAssistBase + IA64_FW_MINSTATE_OFFSET - IA64_FW_MINSTATE_GUARD;
+}
+
+static UINT64 fw_minstate_block_end(void)
+{
+    return mCpuAssistBase + IA64_FW_MINSTATE_END_OFFSET +
+           IA64_FW_MINSTATE_GUARD;
+}
+
 BOOLEAN efi_memory_map_has_boot_stack_layout(void)
 {
     UINT64 pointer_start = mSystemTablePointerBase;
     UINT64 pointer_end = pointer_start + FW_SYSTEM_TABLE_POINTER_SIZE;
 
     if (!efi_memory_map_has_descriptor(
-            EfiRuntimeServicesData,
-            mCpuAssistBase, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE,
+            EfiRuntimeServicesData, mCpuAssistBase, fw_minstate_block_start(),
+            EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
+        !efi_memory_map_has_descriptor(
+            EfiMemoryMappedIO, fw_minstate_block_start(),
+            fw_minstate_block_end(),
+            efi_memory_attribute(EfiMemoryMappedIO, EFI_MEMORY_UC)) ||
+        !efi_memory_map_has_descriptor(
+            EfiRuntimeServicesData, fw_minstate_block_end(),
+            mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE,
             EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
         !efi_memory_map_covers_range(
             EfiRuntimeServicesData, mBootStackBase, mBootStackTop,
@@ -462,7 +481,15 @@ void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
     }
     efi_add_memory_range(
         Index, EfiRuntimeServicesData,
-        mCpuAssistBase, mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE,
+        mCpuAssistBase, fw_minstate_block_start(),
+        efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
+    efi_add_memory_range(
+        Index, EfiMemoryMappedIO,
+        fw_minstate_block_start(), fw_minstate_block_end(),
+        efi_memory_attribute(EfiMemoryMappedIO, EFI_MEMORY_UC));
+    efi_add_memory_range(
+        Index, EfiRuntimeServicesData,
+        fw_minstate_block_end(), mCpuAssistBase + IA64_FW_CPU_ASSIST_SIZE,
         efi_memory_attribute(EfiRuntimeServicesData, EFI_MEMORY_WB));
     /* Any sub-alignment tail of installed RAM stays ordinary memory. */
     efi_add_conventional_with_system_pointer(

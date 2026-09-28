@@ -670,9 +670,11 @@ extern UINT8 fw_sal_pmi[];
 #define FW_PAL_MC_REGISTER_MEM 0x01b
 #define FW_PAL_PMI_ENTRYPOINT  0x020
 
-_Static_assert(IA64_FW_MINSTATE_OFFSET +
-               IA64_VPC_MAX_CPUS * IA64_FW_MINSTATE_SIZE <=
-               IA64_FW_DEBUG_STACK_OFFSET, "min-state areas overlap");
+_Static_assert(IA64_FW_AP_RELEASE_OFFSET + IA64_FW_AP_RELEASE_SIZE +
+               IA64_FW_MINSTATE_GUARD <= IA64_FW_MINSTATE_OFFSET &&
+               IA64_FW_MINSTATE_END_OFFSET + IA64_FW_MINSTATE_GUARD <=
+               IA64_FW_DEBUG_STACK_OFFSET,
+               "min-state areas too close to other data");
 
 static UINT64 fw_own_processor_id(void)
 {
@@ -682,11 +684,13 @@ static UINT64 fw_own_processor_id(void)
     return (lid >> 24) & 0xff;
 }
 
+/* Physical and uncached, as SAL must access the area (SAL spec 3.3.2). */
 static volatile UINT64 *fw_minstate_area(UINT64 ProcessorId)
 {
-    return (volatile UINT64 *)(UINTN)(mCpuAssistBase +
-                                      IA64_FW_MINSTATE_OFFSET +
-                                      ProcessorId * IA64_FW_MINSTATE_SIZE);
+    return (volatile UINT64 *)(UINTN)((mCpuAssistBase +
+                                       IA64_FW_MINSTATE_OFFSET +
+                                       ProcessorId * IA64_FW_MINSTATE_SIZE) |
+                                      (1ULL << 63));
 }
 
 /*
@@ -713,7 +717,7 @@ void fw_platform_register_minstate(BOOLEAN OsOwned)
     /* SAL_INIT resumes a rendezvous processor before the SAL tables exist. */
     mFwSalInit.PalProc = mFwPalProc;
     (void)fw_pal_call_at(mFwPalProc, FW_PAL_MC_REGISTER_MEM,
-                         (UINTN)area | (1ULL << 63), 0, 0, NULL);
+                         (UINTN)area, 0, 0, NULL);
 }
 
 /* SALE_PMI, on every processor (SAL spec 245359-007 3.2.3 step 12, 6.2). */
