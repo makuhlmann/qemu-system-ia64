@@ -589,7 +589,7 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  *
  *   0x0000-0x950F  the EFI variable store ("IVARSTOR")
  *   0xF000-0xF01F  the time zone record ("IRT64OFT"; the clock itself is
- *                  the CMOS RTC)
+ *                  the board's: the CMOS RTC, or the PDH clock on zx1)
  *   0xF800-0xF82F  this record ("IA64DFLT")
  *
  * and the machine writes it from its options before the firmware runs, as

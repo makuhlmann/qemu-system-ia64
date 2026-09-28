@@ -733,9 +733,15 @@ void efi_init_memory_map(void)
      * before AGP support.
      */
 
-    /* The RTC is a CMOS device at legacy ports now (f610823). */
+    /*
+     * The time services reach the clock at run time: on 460gx the CMOS
+     * device at the legacy ports (f610823), on zx1 the PDH part, whose page
+     * sits above the variable store.
+     */
     {
         UINT64 store = fw_nvram_base();
+        UINT64 clock = IA64_PDH_DEV5B_BASE + IA64_PDH_RTC;
+        UINT64 clock_end = clock + IA64_EFI_MEMORY_ALIGN;
 
         efi_add_memory_range(&index, EfiMemoryMappedIO,
                              FW_FIRMWARE_ADDRESS_SPACE_BASE,
@@ -743,9 +749,20 @@ void efi_init_memory_map(void)
         efi_add_memory_range(&index, EfiMemoryMappedIO,
                              store, store + FW_NVRAM_SIZE,
                              EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
-        efi_add_memory_range(&index, EfiMemoryMappedIO,
-                             store + FW_NVRAM_SIZE,
-                             FW_FIRMWARE_ADDRESS_SPACE_END, EFI_MEMORY_UC);
+        if (fw_platform_is_zx1()) {
+            efi_add_memory_range(&index, EfiMemoryMappedIO,
+                                 store + FW_NVRAM_SIZE, clock, EFI_MEMORY_UC);
+            efi_add_memory_range(&index, EfiMemoryMappedIO, clock, clock_end,
+                                 EFI_MEMORY_UC | EFI_MEMORY_RUNTIME);
+            efi_add_memory_range(&index, EfiMemoryMappedIO, clock_end,
+                                 FW_FIRMWARE_ADDRESS_SPACE_END,
+                                 EFI_MEMORY_UC);
+        } else {
+            efi_add_memory_range(&index, EfiMemoryMappedIO,
+                                 store + FW_NVRAM_SIZE,
+                                 FW_FIRMWARE_ADDRESS_SPACE_END,
+                                 EFI_MEMORY_UC);
+        }
     }
 
     /*

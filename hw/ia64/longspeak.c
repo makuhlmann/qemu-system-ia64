@@ -18,7 +18,6 @@
 #include "hw/core/sysbus.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_bus.h"
-#include "hw/rtc/mc146818rtc.h"
 #include "hw/ia64/ia64_lba.h"
 #include "hw/ia64/ia64_mercury.h"
 #include "hw/ia64/ia64_sba.h"
@@ -269,8 +268,9 @@ static void longspeak_wire_intx(IA64VpcMachineState *s, DeviceState *pci_host,
 
 /*
  * zx1 is a different platform with a different south bridge, so it keeps
- * the parentless ISA bus until it gets one of its own.  The real-time clock
- * is the standard MC146818 CMOS device at legacy ports 0x70/0x71 (IRQ 8).
+ * the parentless ISA bus until it gets one of its own.  It carries no clock:
+ * "systems using zx1 mio do not support ISA" (mio ERS 2.2.1), and the
+ * board's clock is the PDH part (longspeak_rtc.c).
  */
 static ISABus *longspeak_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
                                    MemoryRegion *pci_io, DeviceState *iosapic,
@@ -287,7 +287,6 @@ static ISABus *longspeak_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
         s->isa_irqs[i] = qdev_get_gpio_in(iosapic, i);
     }
     isa_bus_register_input_irqs(isa_bus, s->isa_irqs);
-    mc146818_rtc_init(isa_bus, 2000, NULL);
     return isa_bus;
 }
 

@@ -199,13 +199,14 @@ typedef struct {
 #define TEST_UART_BASE               0x00000047f0000000ULL
 #define TEST_UART_SIZE               0x0000000000002000ULL
 /*
- * The RTC is a legacy CMOS device on the I/O ports now (f610823); it no
- * longer has a memory-mapped runtime descriptor of its own.  This suite runs
- * on the zx1 board, which keeps the variable store in the PDH part and not in
- * the flash.
+ * This suite runs on the zx1 board, which keeps the variable store in the
+ * PDH part and not in the flash, and whose clock is the PDH clock: the time
+ * services reach both at run time.
  */
 #define TEST_NVRAM_BASE              0x00000000ff420000ULL
 #define TEST_NVRAM_SIZE              0x0000000000010000ULL
+#define TEST_PDH_CLOCK_BASE          0x00000000ff5b8000ULL
+#define TEST_PDH_CLOCK_SIZE          0x0000000000002000ULL
 /* PCI config window at the E8870 MMCFG home, 64 MiB = 64 buses (28ea66e). */
 #define TEST_ECAM_BASE               0x00000ffff8000000ULL
 #define TEST_ECAM_SIZE               0x0000000004000000ULL
@@ -2608,6 +2609,9 @@ static BOOLEAN test_platform_memory_descriptors(
                                  EfiMemoryMappedIO, EFI_MEMORY_UC) &&
            memory_range_has_type(map, TEST_NVRAM_BASE, TEST_NVRAM_SIZE,
                                  EfiMemoryMappedIO,
+                                 EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) &&
+           memory_range_has_type(map, TEST_PDH_CLOCK_BASE,
+                                 TEST_PDH_CLOCK_SIZE, EfiMemoryMappedIO,
                                  EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) &&
            memory_range_has_type(map, TEST_ECAM_BASE, TEST_ECAM_SIZE,
                                  EfiMemoryMappedIO,

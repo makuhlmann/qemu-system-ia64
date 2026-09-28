@@ -2932,20 +2932,23 @@ static uint32_t assert_geographic_id(QTestState *qts, int64_t cpu_index)
 static void test_io_block_window(void)
 {
     QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
-    const uint64_t index = ia64_sparse_io_offset(0x70);
-    const uint64_t data = ia64_sparse_io_offset(0x71);
+    const uint64_t index = ia64_sparse_io_offset(0x3ce);
+    const uint64_t data = ia64_sparse_io_offset(0x3cf);
 
-    /* CMOS byte 0x0E is plain RAM in the RTC: write it through one window. */
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x0e);
+    /*
+     * The VGA graphics controller's bit mask (index 8) is a plain 8-bit
+     * register: write it through one window.
+     */
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x08);
     qtest_writeb(qts, IA64_LEGACY_IO_BASE + data, 0x5a);
 
     /* The architected I/O block reaches the same ports. */
-    qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + index, 0x0e);
+    qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + index, 0x08);
     g_assert_cmphex(qtest_readb(qts, IA64_IO_BLOCK_ITANIUM2 + data), ==, 0x5a);
 
-    qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + index, 0x0e);
+    qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + index, 0x08);
     qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + data, 0xa5);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x0e);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x08);
     g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE + data), ==, 0xa5);
     qtest_quit(qts);
 
@@ -2954,12 +2957,12 @@ static void test_io_block_window(void)
      * second window: the Itanium 2 address decodes nothing.
      */
     qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x0e);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x08);
     qtest_writeb(qts, IA64_LEGACY_IO_BASE + data, 0x5a);
     /* Nothing decodes there, so a write through it reaches no port. */
-    qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + index, 0x0e);
+    qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + index, 0x08);
     qtest_writeb(qts, IA64_IO_BLOCK_ITANIUM2 + data, 0xa5);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x0e);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + index, 0x08);
     g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE + data), ==, 0x5a);
     qtest_quit(qts);
 }

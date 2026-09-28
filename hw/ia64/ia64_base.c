@@ -4431,8 +4431,8 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
 
     /*
-     * The board's south bridge and ISA bus, with the RTC and the legacy
-     * interrupt inputs (which drive the matching IOSAPIC inputs).
+     * The board's south bridge and ISA bus, with the 460GX board's RTC and
+     * the legacy interrupt inputs (which drive the matching IOSAPIC inputs).
      */
     isa_bus = imc->build_isa(s, pci_bus, pci_io, iosapic, errp);
     if (isa_bus == NULL) {
