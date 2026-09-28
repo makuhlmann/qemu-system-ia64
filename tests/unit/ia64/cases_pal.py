@@ -48,6 +48,7 @@ from .encoding import (
     PAL_CR_IMPLEMENTED_HIGH,
     PAL_CR_IMPLEMENTED_LOW,
     PAL_CR_READ_SIDE_EFFECT_HIGH,
+    UINT64_MAX,
     PAL_DEBUG_INFO,
     PAL_FIXED_ADDR,
     PAL_FREQ_BASE,
@@ -1228,11 +1229,15 @@ test_pal_register_info_application_implemented = require_registers(
      "r9": PAL_AR_IMPLEMENTED_LOW, "r10": PAL_AR_IMPLEMENTED_HIGH,
      "r11": 0}, entry=0x10)
 
+# Requests 1 and 3 mark every unimplemented register: reading one faults,
+# and the HP zx1 SAL's INIT handler reads every control register whose
+# request-3 bit is clear.
 test_pal_register_info_application_side_effects = require_registers(
     "pal_register_info_application_side_effects",
     pal_call_program(PAL_REGISTER_INFO, [(29, 1), (30, 0), (31, 0)]),
     {"ip": 0x60, "r28": PAL_REGISTER_INFO, "r8": 0,
-     "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+     "r9": ~PAL_AR_IMPLEMENTED_LOW & UINT64_MAX,
+     "r10": ~PAL_AR_IMPLEMENTED_HIGH & UINT64_MAX, "r11": 0}, entry=0x10)
 
 test_pal_register_info_control_implemented = require_registers(
     "pal_register_info_control_implemented",
@@ -1245,7 +1250,9 @@ test_pal_register_info_control_side_effects = require_registers(
     "pal_register_info_control_side_effects",
     pal_call_program(PAL_REGISTER_INFO, [(29, 3), (30, 0), (31, 0)]),
     {"ip": 0x60, "r28": PAL_REGISTER_INFO, "r8": 0,
-     "r9": 0, "r10": PAL_CR_READ_SIDE_EFFECT_HIGH, "r11": 0},
+     "r9": ~PAL_CR_IMPLEMENTED_LOW & UINT64_MAX,
+     "r10": (~PAL_CR_IMPLEMENTED_HIGH & UINT64_MAX) |
+            PAL_CR_READ_SIDE_EFFECT_HIGH, "r11": 0},
     entry=0x10)
 
 test_pal_register_info_invalid_request = require_registers(

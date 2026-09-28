@@ -1574,6 +1574,20 @@ static void pal_set_features(CPUIA64State *env)
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
+/*
+ * PAL_REGISTER_INFO (SDM Vol. 2 Table 11-114): implemented application and
+ * control registers, and those whose read has a side effect.  Reading an
+ * unimplemented register faults, so requests 1 and 3 set its bit too: the
+ * HP zx1 SAL's INIT handler (FFE8B3C0) reads every control register whose
+ * request-3 bit is clear, and would fault on cr3 with PSR.ic = 0.  IVR
+ * (cr65) acknowledges the interrupt it returns.
+ */
+#define PAL_AR_IMPLEMENTED_LOW          0x000011117f2f00ffULL
+#define PAL_AR_IMPLEMENTED_HIGH         0x7ULL
+#define PAL_CR_IMPLEMENTED_LOW          0x0000000003fb0107ULL
+#define PAL_CR_IMPLEMENTED_HIGH         0x307ffULL
+#define PAL_CR_READ_SIDE_EFFECT_HIGH    0x2ULL
+
 static void pal_register_info(CPUIA64State *env)
 {
     uint64_t info_type = env->gr[IA64_PAL_GR_ARG1];
@@ -1590,20 +1604,21 @@ static void pal_register_info(CPUIA64State *env)
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
     switch (info_type) {
     case 0:
-        env->gr[IA64_PAL_GR_RESULT1] = 0x000011117f2f00ffULL;
-        env->gr[IA64_PAL_GR_RESULT2] = 0x7;
+        env->gr[IA64_PAL_GR_RESULT1] = PAL_AR_IMPLEMENTED_LOW;
+        env->gr[IA64_PAL_GR_RESULT2] = PAL_AR_IMPLEMENTED_HIGH;
         break;
     case 1:
-        env->gr[IA64_PAL_GR_RESULT1] = 0;
-        env->gr[IA64_PAL_GR_RESULT2] = 0;
+        env->gr[IA64_PAL_GR_RESULT1] = ~PAL_AR_IMPLEMENTED_LOW;
+        env->gr[IA64_PAL_GR_RESULT2] = ~PAL_AR_IMPLEMENTED_HIGH;
         break;
     case 2:
-        env->gr[IA64_PAL_GR_RESULT1] = 0x0000000003fb0107ULL;
-        env->gr[IA64_PAL_GR_RESULT2] = 0x307ff;
+        env->gr[IA64_PAL_GR_RESULT1] = PAL_CR_IMPLEMENTED_LOW;
+        env->gr[IA64_PAL_GR_RESULT2] = PAL_CR_IMPLEMENTED_HIGH;
         break;
     case 3:
-        env->gr[IA64_PAL_GR_RESULT1] = 0;
-        env->gr[IA64_PAL_GR_RESULT2] = 0x2;
+        env->gr[IA64_PAL_GR_RESULT1] = ~PAL_CR_IMPLEMENTED_LOW;
+        env->gr[IA64_PAL_GR_RESULT2] = ~PAL_CR_IMPLEMENTED_HIGH |
+                                       PAL_CR_READ_SIDE_EFFECT_HIGH;
         break;
     default:
         g_assert_not_reached();
