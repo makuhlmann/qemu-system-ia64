@@ -2973,6 +2973,8 @@ void ia64_gen_write_user_mask(TCGv_i64 value)
     gen_set_label(done);
 
     tcg_gen_mov_i64(cpu_psr, new_psr);
+    /* PSR.up starts and stops the user performance monitors. */
+    gen_helper_pmu_sync(tcg_env);
 }
 
 void ia64_gen_validate_ar_access(const Ia64Instruction *insn,

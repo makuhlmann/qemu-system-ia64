@@ -638,17 +638,6 @@ void ia64_write_cr(CPUIA64State *env, uint32_t cr_num, uint64_t value)
     }
 }
 
-/* The value a PMC or PMD holds after a write, per the model's layout. */
-static uint64_t ia64_pmu_written_value(const IA64PmuRegister *reg,
-                                       uint64_t value)
-{
-    value &= reg->mask;
-    if (reg->sext_mask && (value >> reg->sext_bit) & 1) {
-        value |= reg->sext_mask;
-    }
-    return value;
-}
-
 uint64_t ia64_system_read_pmc(CPUIA64State *env, uint32_t index)
 {
     if (index >= IA64_PMC_COUNT) {
@@ -664,8 +653,11 @@ void ia64_system_write_pmc(CPUIA64State *env, uint32_t index, uint64_t value)
     if (index >= IA64_PMC_COUNT) {
         return;
     }
-    env->pmc[index] = pmu ? ia64_pmu_written_value(&pmu->pmc[index], value) :
+    ia64_pmu_sync(env);
+    env->pmc[index] = pmu ? ia64_pmu_register_value(&pmu->pmc[index], value) :
                             value;
+    ia64_pmu_configure(env);
+    ia64_pmu_sync(env);
 }
 
 uint64_t ia64_system_read_pmc_indexed(CPUIA64State *env, uint64_t index)
@@ -688,6 +680,7 @@ uint64_t ia64_system_read_pmd(CPUIA64State *env, uint32_t index)
     if (index >= IA64_PMD_COUNT) {
         return 0;
     }
+    ia64_pmu_sync(env);
     return env->pmd[index];
 }
 
@@ -714,8 +707,10 @@ void ia64_system_write_pmd(CPUIA64State *env, uint32_t index, uint64_t value)
     if (index >= IA64_PMD_COUNT) {
         return;
     }
-    env->pmd[index] = pmu ? ia64_pmu_written_value(&pmu->pmd[index], value) :
+    ia64_pmu_sync(env);
+    env->pmd[index] = pmu ? ia64_pmu_register_value(&pmu->pmd[index], value) :
                             value;
+    ia64_pmu_sync(env);
 }
 
 uint64_t ia64_system_read_pmd_indexed(CPUIA64State *env, uint64_t index)
@@ -724,6 +719,7 @@ uint64_t ia64_system_read_pmd_indexed(CPUIA64State *env, uint64_t index)
     if (index >= IA64_PMD_COUNT) {
         return 0;
     }
+    ia64_pmu_sync(env);
     return env->pmd[index];
 }
 
@@ -775,6 +771,8 @@ void ia64_set_psr(CPUIA64State *env, uint64_t value)
         ia64_swap_banked_gr(env);
     }
     env->psr = value;
+    /* PSR.up, pp, cpl and is start and stop the performance counters. */
+    ia64_pmu_sync(env);
     /*
      * An interrupt that became pending while PSR.i was 0 is taken right after
      * the instruction that sets PSR.i (ssm, mov psr.l, rfi).  The TCG loop

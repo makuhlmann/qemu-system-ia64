@@ -23,6 +23,13 @@ from .encoding import (
     IA64_PSR_MC,
     IA64_PSR_SP,
     IA64_PSR_UP,
+    IA64_PSR_PP,
+    IA64_CR_PMV,
+    IA64_CR_SAPIC_EOI,
+    IA64_CR_SAPIC_IVR,
+    IA64_CR_SAPIC_TPR,
+    st8,
+    rfi_b,
     UINT64_MAX,
     _strcpy_pipeline_data,
     add,
@@ -3343,6 +3350,146 @@ test_pmd_merced_address_fields_and_unimplemented_register = require_registers(
         "r28": 0,
     }, entry=0x10, cpu="merced")
 
+
+# Generic counters (SDM Vol. 2 7.2.1): PMC[i] selects cycles (12h) or retired
+# instructions (08h), and the counter counts at the CPLs of its plm while
+# PSR.pp (pm = 1) or PSR.up (pm = 0) is set.  Itanium 2's PMC4 carries the
+# PMU enable in bit 23 (251110-003 Table 10-6).  Montecito's PMU is storage
+# only in this model.
+_PMU_ENABLE = 1 << 23
+_PMU_CYCLES = 0x12 << 8
+_PMU_RETIRED = 0x08 << 8
+_PMU_PM = 1 << 6
+_PMU_OI = 1 << 5
+_PMU_PLM0 = 1
+_PMU_LOOPS = 0x40000
+
+
+def _pmu_loop(address, count_reg=8):
+    """A counted loop with a load in it, from address to address + 0x30."""
+    return [
+        (address, *movl_mlx(count_reg, _PMU_LOOPS)),
+        (address + 0x10, 0x02, nop_m(), mov_lc_gr(count_reg), nop_i()),
+        (address + 0x20, 0x01, ld8(15, 12), nop_i(), nop_i()),
+        (address + 0x30, 0x10, nop_m(), nop_i(),
+         br_cloop(address + 0x30, address + 0x20)),
+    ]
+
+
+def _pmu_start_stop_program(pmc, start, stop):
+    """PMC4 = pmc, PMD4 = 0; count over a loop, stop, read PMD4 (r10),
+    loop again and read it (r11): r12 = 1 if it moved after the stop, r13 = 1
+    if it counted before."""
+    return [
+        (0x10, *movl_mlx(2, pmc)),
+        (0x20, 0x01, adds(9, 4, 0), nop_i(), nop_i()),
+        (0x30, 0x01, mov_grpmc_indexed(9, 2), nop_i(), nop_i()),
+        (0x40, 0x01, mov_grpmd_indexed(9, 0), nop_i(), nop_i()),
+        (0x50, 0x09, start, srlz_d(), nop_i()),
+        *_pmu_loop(0x60),
+        (0xa0, 0x09, stop, srlz_d(), nop_i()),
+        (0xb0, 0x01, mov_pmdgr_indexed(10, 9), nop_i(), nop_i()),
+        *_pmu_loop(0xc0),
+        (0x100, 0x01, mov_pmdgr_indexed(11, 9), nop_i(), nop_i()),
+        (0x110, 0x01, nop_m(), cmp_ltu_unc(6, 7, 10, 11), nop_i()),
+        (0x120, 0x01, nop_m(), cmp_ltu_unc(8, 7, 0, 10), nop_i()),
+        (0x130, 0x00, nop_m(), adds(12, 1, 0, qp=6), adds(13, 1, 0, qp=8)),
+        (0x140, 0x10, nop_m(), nop_i(), br_cond(0x140, 0x140)),
+    ]
+
+
+test_pmu_cycles_count_while_psr_pp = require_registers(
+    "pmu_cycles_count_while_psr_pp",
+    _pmu_start_stop_program(_PMU_ENABLE | _PMU_CYCLES | _PMU_PM | _PMU_PLM0,
+                            ssm(IA64_PSR_PP), rsm(IA64_PSR_PP)),
+    {"ip": 0x140, "exception": IA64_EXCP_NONE, "r12": 0, "r13": 1},
+    entry=0x10, cpu="madison")
+
+# sum and rum set and clear PSR.up, which runs a user monitor (pm = 0).
+test_pmu_user_monitor_follows_sum_rum = require_registers(
+    "pmu_user_monitor_follows_sum_rum",
+    _pmu_start_stop_program(_PMU_ENABLE | _PMU_CYCLES | _PMU_PLM0,
+                            sum_um(IA64_PSR_UP), rum(IA64_PSR_UP)),
+    {"ip": 0x140, "exception": IA64_EXCP_NONE, "r12": 0, "r13": 1},
+    entry=0x10, cpu="madison")
+
+# Merced counts retired instructions on PMC4 only (PAL_PERF_MON_INFO retired
+# mask 10h): the same event on PMC5 leaves PMD5 at 0 (r14).
+test_pmu_merced_retired_counts_on_pmc4_only = require_registers(
+    "pmu_merced_retired_counts_on_pmc4_only", [
+        (0x10, *movl_mlx(2, _PMU_RETIRED | _PMU_PM | _PMU_PLM0)),
+        (0x20, 0x01, adds(9, 4, 0), adds(10, 5, 0), nop_i()),
+        (0x30, 0x01, mov_grpmc_indexed(9, 2), nop_i(), nop_i()),
+        (0x40, 0x01, mov_grpmc_indexed(10, 2), nop_i(), nop_i()),
+        (0x50, 0x01, mov_grpmd_indexed(9, 0), nop_i(), nop_i()),
+        (0x60, 0x01, mov_grpmd_indexed(10, 0), nop_i(), nop_i()),
+        (0x70, 0x09, ssm(IA64_PSR_PP), srlz_d(), nop_i()),
+        *_pmu_loop(0x80),
+        (0xc0, 0x09, rsm(IA64_PSR_PP), srlz_d(), nop_i()),
+        (0xd0, 0x01, mov_pmdgr_indexed(11, 9), nop_i(), nop_i()),
+        (0xe0, 0x01, mov_pmdgr_indexed(14, 10), nop_i(), nop_i()),
+        (0xf0, 0x01, nop_m(), cmp_ltu_unc(8, 7, 0, 11), nop_i()),
+        (0x100, 0x00, nop_m(), adds(13, 1, 0, qp=8), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0x110)),
+    ], {"ip": 0x110, "exception": IA64_EXCP_NONE, "r13": 1, "r14": 0},
+    entry=0x10, cpu="merced")
+
+# A carry out of bit 46 sets PMD4 bit 47 and PMC0 bit 4; with PMC4.oi it also
+# sets PMC0.fr, which stops the counter, and pends the PMV vector (SDM Vol. 2
+# 7.2.2; 251110-003 Table 10-7).  r40 is the vector the handler took, r41
+# PMC0, r43 PMD4 bit 47, r45 = 1 if PMD4 moved while frozen.
+_PMU_IVA = 0x200000
+_PMU_TAKEN = 0x8000
+test_pmu_overflow_freezes_and_pends_pmv = require_registers(
+    "pmu_overflow_freezes_and_pends_pmv", [
+        (0x10, *movl_mlx(3, _PMU_IVA)),
+        (0x20, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (0x30, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x40, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_TPR), nop_i(), nop_i()),
+        (0x50, 0x01, adds(3, 0xe0, 0), nop_i(), nop_i()),
+        (0x60, 0x01, mov_m_gr_cr(3, IA64_CR_PMV), nop_i(), nop_i()),
+        (0x70, 0x01, srlz_d(), nop_i(), nop_i()),
+        (0x80, *movl_mlx(2, _PMU_ENABLE | _PMU_CYCLES | _PMU_PM | _PMU_OI |
+                         _PMU_PLM0)),
+        (0x90, 0x01, adds(9, 4, 0), nop_i(), nop_i()),
+        (0xa0, 0x01, mov_grpmc_indexed(9, 2), nop_i(), nop_i()),
+        (0xb0, *movl_mlx(2, (1 << 47) - 5000)),
+        (0xc0, 0x01, mov_grpmd_indexed(9, 2), nop_i(), nop_i()),
+        (0xd0, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I | IA64_PSR_BN |
+                         IA64_PSR_PP)),
+        (0xe0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xf0, *movl_mlx(4, _PMU_TAKEN)),
+        (0x100, *movl_mlx(8, 0x1000000)),
+        (0x110, 0x02, nop_m(), mov_lc_gr(8), nop_i()),
+        (0x120, 0x01, ld8(40, 4), nop_i(), nop_i()),
+        (0x130, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 40), nop_i()),
+        (0x140, 0x10, nop_m(), nop_i(), br_cloop(0x140, 0x120, qp=6)),
+        (0x150, 0x01, mov_pmcgr_indexed(41, 0), nop_i(), nop_i()),
+        (0x160, 0x01, mov_pmdgr_indexed(42, 9), nop_i(), nop_i()),
+        (0x170, 0x01, nop_m(), extr_u(43, 42, 47, 1), nop_i()),
+        *_pmu_loop(0x180),
+        (0x1c0, 0x01, mov_pmdgr_indexed(44, 9), nop_i(), nop_i()),
+        (0x1d0, 0x01, nop_m(), cmp_ltu_unc(6, 7, 42, 44), nop_i()),
+        (0x1e0, 0x00, nop_m(), adds(45, 1, 0, qp=6), nop_i()),
+        (0x1f0, 0x10, nop_m(), nop_i(), br_cond(0x1f0, 0x1f0)),
+
+        (_PMU_IVA + 0x3000, 0x01, mov_m_cr_gr(16, IA64_CR_SAPIC_IVR),
+         nop_i(), nop_i()),
+        (_PMU_IVA + 0x3010, *movl_mlx(18, _PMU_TAKEN)),
+        (_PMU_IVA + 0x3020, 0x01, st8(18, 16), nop_i(), nop_i()),
+        (_PMU_IVA + 0x3030, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI),
+         nop_i(), nop_i()),
+        (_PMU_IVA + 0x3040, 0x01, srlz_d(), nop_i(), nop_i()),
+        (_PMU_IVA + 0x3050, 0x11, nop_m(), nop_i(), rfi_b()),
+    ], {
+        "ip": 0x1f0,
+        "exception": IA64_EXCP_NONE,
+        "r40": 0xe0,
+        "r41": 0x11,
+        "r43": 1,
+        "r45": 0,
+    }, entry=0x10, cpu="madison")
+
 def _pmd_counter_sign_extension_case(name, cpu, value, expected):
     return require_registers(name, [
         (0x10, *movl_mlx(20, value)),
@@ -3728,6 +3875,10 @@ CASE_NAMES = (
     'pmd_cpl3_secure_monitor_reads_zero',
     'pmd_madison_counter_sign_extends_overflow_bit',
     'pmd_merced_address_fields_and_unimplemented_register',
+    'pmu_cycles_count_while_psr_pp',
+    'pmu_user_monitor_follows_sum_rum',
+    'pmu_merced_retired_counts_on_pmc4_only',
+    'pmu_overflow_freezes_and_pends_pmv',
     'pmd_merced_counter_is_32_bit_sign_extended',
     'pminmax_pack_decode',
     'pmpy2_decode',

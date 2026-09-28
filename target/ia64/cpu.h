@@ -55,6 +55,20 @@
 #define IA64_PMC_COUNT   64
 #define IA64_PMD_COUNT   64
 #define IA64_PMC_PM      (1ULL << 6)
+/* Generic counter configuration (SDM Vol. 2 Table 7-4) and PMC0.fr. */
+#define IA64_PMC_PLM_MASK   0xfULL
+#define IA64_PMC_OI         (1ULL << 5)
+#define IA64_PMC_ES_SHIFT   8
+#define IA64_PMC_ISM_SHIFT  24
+#define IA64_PMC0_FR        1ULL
+/*
+ * The two events every model counts, as PAL_PERF_MON_INFO reports them
+ * (245320-003 Table 6-24, 251110-003 Table 10-28): cycles on PMD4-7,
+ * retired instructions on the counters of the PAL profile's retired mask.
+ */
+#define IA64_PMU_EVENT_CPU_CYCLES   0x12
+#define IA64_PMU_EVENT_INST_RETIRED 0x08
+#define IA64_PMU_CYCLE_COUNTERS     0xf0
 #define IA64_PKR_COUNT   16
 #define IA64_RR_COUNT    8
 #define IA64_MSR_COUNT   1024
@@ -1037,6 +1051,12 @@ typedef struct CPUArchState {
     uint64_t msr[IA64_MSR_COUNT];
     uint64_t pmc[IA64_PMC_COUNT];
     uint64_t pmd[IA64_PMD_COUNT];
+    /* Generic counters: bit i stands for PMC/PMD[i] (arch/pmu.c). */
+    struct {
+        int64_t sync_ns;        /* virtual time the counts stand at */
+        uint8_t configured;     /* PMC selects an event it counts */
+        uint8_t counting;       /* enabled since sync_ns */
+    } pmu;
     uint64_t pkr[IA64_PKR_COUNT];
 
     /* Debug and instruction break registers */
@@ -1752,6 +1772,10 @@ bool ia64_translate_data_access(CPUIA64State *env, uint64_t va,
 
 void ia64_set_psr(CPUIA64State *env, uint64_t value);
 void ia64_set_psr_bn(CPUIA64State *env, bool bank1);
+void ia64_pmu_sync(CPUIA64State *env);
+void ia64_pmu_configure(CPUIA64State *env);
+void ia64_pmu_reset(CPUIA64State *env);
+void ia64_pmu_timer_cb(void *opaque);
 void ia64_rse_delivery_check(CPUIA64State *env, int excp);
 
 CPUState *ia64_cpu_by_sapic_id(uint8_t id, uint8_t eid);
@@ -1895,6 +1919,7 @@ struct ArchCPU {
     CPUState parent_obj;
     CPUIA64State env;
     QEMUTimer *itm_timer;
+    QEMUTimer *pmu_timer;
     IA64BootInfo boot_info;
     IA64FirmwareDebugState firmware_debug;
     bool boot_info_valid;
@@ -2048,7 +2073,25 @@ typedef struct IA64PmuRegister {
 typedef struct IA64PmuLayout {
     IA64PmuRegister pmc[IA64_PMC_COUNT];
     IA64PmuRegister pmd[IA64_PMD_COUNT];
+    /* Generic counters: count bits, and whether the bit above records a carry. */
+    uint8_t count_bits;
+    bool overflow_bit;
+    /* Implemented bits of the event select field. */
+    uint8_t es_mask;
+    /* PMC4's PMU enable bit, or 0 where the model has none. */
+    uint64_t pmc4_enable;
 } IA64PmuLayout;
+
+/* The value a PMC or PMD holds after a write, per the model's layout. */
+static inline uint64_t ia64_pmu_register_value(const IA64PmuRegister *reg,
+                                               uint64_t value)
+{
+    value &= reg->mask;
+    if (reg->sext_mask && (value >> reg->sext_bit) & 1) {
+        value |= reg->sext_mask;
+    }
+    return value;
+}
 
 struct IA64CPUClass {
     CPUClass parent_class;

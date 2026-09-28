@@ -248,6 +248,7 @@ void helper_ia32_rdpmc(CPUIA64State *env)
         raise_exception_err_ra(xenv, EXCP0D_GPF, 0, GETPC());
     }
 
+    ia64_pmu_sync(env);
     value = env->pmd[index];
     xenv->regs[R_EAX] = (uint32_t)value;
     xenv->regs[R_EDX] = value >> 32;

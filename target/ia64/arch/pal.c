@@ -75,10 +75,12 @@
 #define PAL_SELF_TEST_STATE_TESTED (1ULL << 2)
 #define PAL_MEM_ATTR_WB            (1ULL << 0)
 #define PAL_MEM_ATTR_VALID_MASK    0xffffULL
-#define PAL_PERF_MON_INFO_VALUE    0x08120004ULL
+/* PAL_PERF_MON_INFO: the retired and cycle event codes, four counters. */
+#define PAL_PERF_MON_INFO_VALUE \
+    (((uint64_t)IA64_PMU_EVENT_INST_RETIRED << 24) | \
+     ((uint64_t)IA64_PMU_EVENT_CPU_CYCLES << 16) | 4)
 #define PAL_PERF_PMC_MASK          0x3fffULL
 #define PAL_PERF_PMD_MASK          0x3ffffULL
-#define PAL_PERF_CYCLES_MASK       0xf0ULL
 
 #define PAL_CACHE_FLUSH_OPERATION_MASK 0x3ULL
 #define PAL_HALT_STATE_COUNT       8
@@ -1637,7 +1639,7 @@ static void pal_perf_mon_info(CPUIA64State *env, uintptr_t ra)
     ia64_exec_store_data(env, pm_buffer, PAL_PERF_PMC_MASK, 8, false, ra);
     ia64_exec_store_data(env, pm_buffer + 0x20, PAL_PERF_PMD_MASK,
                          8, false, ra);
-    ia64_exec_store_data(env, pm_buffer + 0x40, PAL_PERF_CYCLES_MASK,
+    ia64_exec_store_data(env, pm_buffer + 0x40, IA64_PMU_CYCLE_COUNTERS,
                          8, false, ra);
     ia64_exec_store_data(env, pm_buffer + 0x60, pal->perf_retired_mask,
                          8, false, ra);

@@ -238,7 +238,7 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
-    .version_id = 9,
+    .version_id = 10,
     .minimum_version_id = 1,
     .pre_save = ia64_cpu_pre_save,
     .post_load = ia64_cpu_post_load,
@@ -326,6 +326,10 @@ const VMStateDescription vmstate_ia64_cpu = {
         VMSTATE_BOOL(env.interrupt.itm_armed, IA64CPU),
         VMSTATE_BOOL(env.interrupt.itm_last_match_valid, IA64CPU),
         VMSTATE_TIMER_PTR(itm_timer, IA64CPU),
+        VMSTATE_INT64_V(env.pmu.sync_ns, IA64CPU, 10),
+        VMSTATE_UINT8_V(env.pmu.configured, IA64CPU, 10),
+        VMSTATE_UINT8_V(env.pmu.counting, IA64CPU, 10),
+        VMSTATE_TIMER_PTR_V(pmu_timer, IA64CPU, 10),
 
         /* PAL, SAL bridge, RSE, ALAT and floating-point state. */
         VMSTATE_BOOL(env.pal.pal_mc_expected, IA64CPU),

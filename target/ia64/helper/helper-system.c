@@ -451,6 +451,11 @@ void helper_write_pmd_indexed(CPUIA64State *env, uint64_t index,
     ia64_system_write_pmd_indexed(env, index, value);
 }
 
+void helper_pmu_sync(CPUIA64State *env)
+{
+    ia64_pmu_sync(env);
+}
+
 void helper_clear_psr_fault_suppression(CPUIA64State *env)
 {
     ia64_system_clear_psr_fault_suppression(env);

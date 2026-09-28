@@ -1011,6 +1011,7 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
             cpu->env.pmc[i] = icc->pmu->pmc[i].reset;
         }
     }
+    ia64_pmu_reset(&cpu->env);
     cpu->env.pal.pal_proc_copy_valid = false;
     cpu->env.pal.pal_proc_copy_addr = 0;
     cpu->env.pal.pal_interrupt_block_addr = IA64_LOCAL_SAPIC_PA;
@@ -1070,6 +1071,7 @@ static void ia64_cpu_realize(DeviceState *dev, Error **errp)
     }
 
     cpu->itm_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ia64_itm_timer_cb, cpu);
+    cpu->pmu_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ia64_pmu_timer_cb, cpu);
 
     qemu_init_vcpu(cs);
     cpu_reset(cs);
@@ -1531,6 +1533,9 @@ static const IA64PmuLayout ia64_pmu_layout_merced = {
         [16] = { .mask = 0xf },                         /* Figure 6-24 */
         [17] = { .mask = 0xe007fffffffffffdULL, IA64_MERCED_PMU_ADDR_SEXT },
     },
+    /* Figures 6-12 and 6-13: 32-bit counters, es in bits 14:8. */
+    .count_bits = 32,
+    .es_mask = 0x7f,
 };
 
 /*
@@ -1561,6 +1566,14 @@ static const IA64PmuLayout ia64_pmu_layout_madison = {
                       .sext_mask = 0xffff000000000000ULL, .sext_bit = 47 },
         [8 ... 17] = { .mask = UINT64_MAX },
     },
+    /*
+     * Table 10-7: the count is bits 46:0 and bit 47 records the carry;
+     * Figure 10-11: es in bits 15:8, PMC4.enable in bit 23.
+     */
+    .count_bits = 47,
+    .overflow_bit = true,
+    .es_mask = 0xff,
+    .pmc4_enable = 1ULL << 23,
 };
 
 /*
