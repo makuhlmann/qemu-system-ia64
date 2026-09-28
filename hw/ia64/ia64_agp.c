@@ -48,7 +48,11 @@
 #include "qemu/log.h"
 #include "qapi/error.h"
 
-/* Fixed physical window through which the OS reads/writes the GART SRAM. */
+/*
+ * Fixed physical window through which the OS reads/writes the GART SRAM.  The
+ * GXB ignores A22 and A21 (SSDM 7.1.2), but the SAC forwards only
+ * FE20_0000-FE3F_FFFF to it (SSDM p.4-3), so the SRAM has no other window.
+ */
 #define I460_GART_WINDOW_BASE   0x00000000fe200000ULL
 
 /* Config-space registers the i460-agp driver touches. */
@@ -76,24 +80,18 @@
 #define I460_GATT_4M_PFN_MASK   0x3fffu         /* phys[35:22] */
 
 /*
- * The GART SRAM at its largest, 1 MiB (SSDM 7.1.1): 256K entries, a 1 GiB
- * aperture with 4 KiB pages, and up to the chipset's 32 GiB with 4 MiB
- * pages.  The aperture bus range starts at the platform PCI MMIO hole (see
- * the placement note above); an out-of-aperture DMA still passes straight
+ * The board populates 256 KiB of GART SRAM, one of the two sizes SSDM 7.1.1
+ * allows: 64K entries, a 256 MiB aperture with 4 KiB pages, and up to the
+ * chipset's 32 GiB with 4 MiB pages.  The vendor SDV firmware sets up the
+ * aperture from the SRAM it finds, and with 1 MiB its DSDT's AGP bus window
+ * (\_SB.PCI3._CRS) starts at 0, so XP 2600 stops the AGP bridge (Code 12).
+ * The aperture bus range starts at the platform PCI MMIO hole (see the
+ * placement note above); an out-of-aperture DMA still passes straight
  * through to system memory.
  */
-#define I460_GART_SRAM_SIZE     (1 * MiB)
+#define I460_GART_SRAM_SIZE     (256 * KiB)
 #define I460_GATT_ENTRIES       (I460_GART_SRAM_SIZE / sizeof(uint32_t))
 #define I460_APERTURE_BASE      IA64_PCI_MMIO_BASE
-
-/*
- * A22 and A21 are not decoded in FEzx_xxxx with z = 0xx0 binary (SSDM
- * 7.1.2), so the SRAM answers at FE00_0000, FE40_0000 and FE60_0000 as well;
- * FE30_0000-FE3F_FFFF is not a GART access.
- */
-static const hwaddr i460_gart_aliases[] = {
-    0x00000000fe000000ULL, 0x00000000fe400000ULL, 0x00000000fe600000ULL,
-};
 
 static IA64AGPState *ia64_agp_from_iommu(IOMMUMemoryRegion *iommu)
 {
@@ -253,7 +251,6 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
 {
     IA64AGPState *s = IA64_AGP(dev);
     uint8_t *c = dev->config;
-    unsigned i;
 
     /* Host-bridge class so i460-agp's pci_device_id table matches. */
     pci_config_set_prog_interface(c, 0);
@@ -296,13 +293,6 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
                           "ia64-agp-gart", I460_GART_SRAM_SIZE);
     memory_region_add_subregion(get_system_memory(), I460_GART_WINDOW_BASE,
                                 &s->gart_window);
-    for (i = 0; i < ARRAY_SIZE(i460_gart_aliases); i++) {
-        memory_region_init_alias(&s->gart_alias[i], OBJECT(s),
-                                 "ia64-agp-gart-alias", &s->gart_window, 0,
-                                 I460_GART_SRAM_SIZE);
-        memory_region_add_subregion(get_system_memory(),
-                                    i460_gart_aliases[i], &s->gart_alias[i]);
-    }
 
     /* Per-bus DMA translation: aperture -> GATT -> DRAM, else passthrough. */
     memory_region_init_iommu(&s->iommu, sizeof(s->iommu),

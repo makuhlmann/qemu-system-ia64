@@ -6970,8 +6970,14 @@ static void test_agp_gxb(void)
     qtest_writel(qts, IA64_AGP_GART_WINDOW + 4 * 8, 0x04000005);
     g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 4 * 8), ==,
                     0x00000005);
-    /* A22 and A21 are not decoded (SSDM 7.1.2): FE00_0000 is the same SRAM. */
-    g_assert_cmphex(qtest_readl(qts, 0xfe000000ULL + 4 * 7), ==, 0x07001234);
+    /*
+     * The SRAM is 256 KiB, and the SAC sends only FE20_0000-FE3F_FFFF to the
+     * GXB (SSDM p.4-3): FE00_0000 is not the SRAM, and nothing is stored
+     * past its end.
+     */
+    g_assert_cmphex(qtest_readl(qts, 0xfe000000ULL + 4 * 7), ==, 0);
+    qtest_writel(qts, IA64_AGP_GART_WINDOW + 256 * KiB, 0x03005678);
+    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 256 * KiB), ==, 0);
 
     g_free(dev);
     qtest_quit(qts);

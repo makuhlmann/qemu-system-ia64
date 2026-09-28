@@ -20,7 +20,6 @@ struct IA64AGPState {
     PCIDevice parent_obj;
 
     MemoryRegion gart_window;    /* GART SRAM window at 0xFE200000           */
-    MemoryRegion gart_alias[3];  /* the same window with A22/A21 set         */
     IOMMUMemoryRegion iommu;     /* per-bus DMA translation                  */
     AddressSpace dma_as;
 
