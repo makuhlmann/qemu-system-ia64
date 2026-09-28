@@ -1840,6 +1840,25 @@ static void test_pdh_clock(void)
         g_assert_cmphex(qtest_readb(qts, rtc + i), ==, reset_time[i]);
     }
 
+    /*
+     * A frozen write loads as one: day 31 and October, written in that
+     * order on 30 September, give 31 October and not 1 October.
+     */
+    qtest_writeb(qts, rtc + 0x0f, 0x00);
+    qtest_writeb(qts, rtc + 4, 0x30);
+    qtest_writeb(qts, rtc + 5, 0x49);
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+    g_assert_cmphex(qtest_readb(qts, rtc + 4), ==, 0x30);
+    qtest_writeb(qts, rtc + 0x0f, 0x00);
+    qtest_writeb(qts, rtc + 4, 0x31);
+    qtest_writeb(qts, rtc + 5, 0x50);
+    g_assert_cmphex(qtest_readb(qts, rtc + 4), ==, 0x31);
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+    g_assert_cmphex(qtest_readb(qts, rtc + 4), ==, 0x31);
+    g_assert_cmphex(qtest_readb(qts, rtc + 5), ==, 0x50);
+    g_assert_cmphex(qtest_readb(qts, rtc + 6), ==, 0x98);
+    g_assert_cmphex(qtest_readb(qts, rtc + 7), ==, 0x19);
+
     /* The window is 256 bytes behind an address and a data register. */
     for (i = 0; i < 4; i++) {
         qtest_writeb(qts, rtc + 0x10, i * 64);
