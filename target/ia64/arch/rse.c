@@ -1372,6 +1372,8 @@ void ia64_rse_br_ia(CPUIA64State *env, uint32_t b_reg,
     env->psr |= IA64_PSR_IS;
     env->psr &= ~(IA64_PSR_DA | IA64_PSR_DD | IA64_PSR_IA | IA64_PSR_ED |
                   IA64_PSR_RI_MASK);
+    /* PSR.is selects the performance monitors' instruction set mask. */
+    ia64_pmu_sync(env);
     ia64_rse_sync_frame_out(env);
     env->cfm_sof = 0;
     env->cfm_sol = 0;

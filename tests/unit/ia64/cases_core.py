@@ -3413,6 +3413,37 @@ test_pmu_user_monitor_follows_sum_rum = require_registers(
     {"ip": 0x140, "exception": IA64_EXCP_NONE, "r12": 0, "r13": 1},
     entry=0x10, cpu="madison")
 
+# PMC bit 24 masks IA-64 code out of the count (the ism bits 25:24,
+# 251110-003 Table 10-5), and br.ia and jmpe change PSR.is without a PSR
+# write: r13 = 1 if PMD4 counted over the IA-32 loop, r12 = 1 if it moved over
+# the IA-64 loop after jmpe.  The IA-32 code owns GR8-GR15 (ECX is GR9).
+_PMU_ISM_IA64 = 1 << 24
+test_pmu_ism_counts_ia32_code_only = require_registers(
+    "pmu_ism_counts_ia32_code_only", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(2, _PMU_ENABLE | _PMU_CYCLES | _PMU_PM | _PMU_PLM0 |
+                         _PMU_ISM_IA64)),
+        (0x20, 0x01, adds(3, 4, 0), nop_i(), nop_i()),
+        (0x30, 0x01, mov_grpmc_indexed(3, 2), nop_i(), nop_i()),
+        (0x40, 0x01, mov_grpmd_indexed(3, 0), nop_i(), nop_i()),
+        (0x50, 0x09, ssm(IA64_PSR_PP), srlz_d(), nop_i()),
+        (0x60, *movl_mlx(8, 0x100)),
+        (0x70, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "b9 00 40 "       # mov cx,0x4000
+            "e2 fe "          # loop $
+            "0f b8 00 02")),  # jmpe 0x200
+        (0x200, 0x01, mov_pmdgr_indexed(10, 3), nop_i(), nop_i()),
+        *_pmu_loop(0x210),
+        (0x250, 0x01, mov_pmdgr_indexed(11, 3), nop_i(), nop_i()),
+        (0x260, 0x01, nop_m(), cmp_ltu_unc(6, 7, 10, 11), nop_i()),
+        (0x270, 0x01, nop_m(), cmp_ltu_unc(8, 7, 0, 10), nop_i()),
+        (0x280, 0x00, nop_m(), adds(12, 1, 0, qp=6), adds(13, 1, 0, qp=8)),
+        (0x290, 0x10, nop_m(), nop_i(), br_cond(0x290, 0x290)),
+    ], {"ip": 0x290, "exception": IA64_EXCP_NONE, "r12": 0, "r13": 1},
+    entry=0x700, cpu="madison")
+
 # Merced counts retired instructions on PMC4 only (PAL_PERF_MON_INFO retired
 # mask 10h): the same event on PMC5 leaves PMD5 at 0 (r14).
 test_pmu_merced_retired_counts_on_pmc4_only = require_registers(
@@ -3877,6 +3908,7 @@ CASE_NAMES = (
     'pmd_merced_address_fields_and_unimplemented_register',
     'pmu_cycles_count_while_psr_pp',
     'pmu_user_monitor_follows_sum_rum',
+    'pmu_ism_counts_ia32_code_only',
     'pmu_merced_retired_counts_on_pmc4_only',
     'pmu_overflow_freezes_and_pends_pmv',
     'pmd_merced_counter_is_32_bit_sign_extended',

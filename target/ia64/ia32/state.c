@@ -365,4 +365,5 @@ void ia64_ia32_sync_psr_cpl(CPUIA64State *env)
     env->psr = (env->psr & ~IA64_PSR_CPL_MASK) |
                (uint64_t)(env->ia32.hflags & HF_CPL_MASK)
                << IA64_PSR_CPL_SHIFT;
+    ia64_pmu_sync(env);
 }
