@@ -17,6 +17,11 @@
 #define IOSAPIC_IOREGSEL   0x00
 #define IOSAPIC_IOWIN      0x10
 #define IOSAPIC_EOI        0x40
+/*
+ * The ioa's Software Interrupt (ERS 11.3.4): a write of any value raises
+ * the last redirection entry, SW_int (Table 11.1); reads return 0.
+ */
+#define IOSAPIC_SWINT      0x50
 
 #define IOSAPIC_REG_ID     0x00
 #define IOSAPIC_REG_VER    0x01
@@ -326,6 +331,12 @@ static void iosapic_write(void *opaque, hwaddr addr, uint64_t val, unsigned size
         break;
     case IOSAPIC_EOI:
         iosapic_eoi(s, (uint8_t)val);
+        break;
+    case IOSAPIC_SWINT:
+        if (s->face == IA64_IOSAPIC_FACE_IOA) {
+            iosapic_irq_handler(s, s->num_pins - 1, 1);
+            iosapic_irq_handler(s, s->num_pins - 1, 0);
+        }
         break;
     default:
         break;

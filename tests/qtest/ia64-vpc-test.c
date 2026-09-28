@@ -6492,6 +6492,32 @@ static void test_iosapic_ioa_register_face(void)
     qtest_quit(qts);
 }
 
+/*
+ * The ioa's Software Interrupt register (ERS 11.3.4): any write raises the
+ * SW_int entry, the eleventh (Table 11.1); reads return 0.
+ */
+static void test_iosapic_ioa_software_interrupt(void)
+{
+    const uint64_t window = IA64_LBA_CSR_BASE + 0x800;
+    const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + 10 * 2;
+    const uint8_t vector = 0x61;
+    gint64 deadline = g_get_monotonic_time() + 15 * G_USEC_PER_SEC;
+    QTestState *qts = ia64_vpc_start_zx1(NULL);
+
+    qtest_writel(qts, window + IA64_IOSAPIC_IOREGSEL, rte_low);
+    qtest_writel(qts, window + IA64_IOSAPIC_IOWIN, vector);
+    g_assert_cmphex(cpu_sapic_irr_word(qts, vector / 64) &
+                    (1ULL << (vector % 64)), ==, 0);
+    qtest_writel(qts, window + 0x50, 0);
+    g_assert_cmphex(qtest_readl(qts, window + 0x50), ==, 0);
+    while (!(cpu_sapic_irr_word(qts, vector / 64) &
+             (1ULL << (vector % 64)))) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+    qtest_quit(qts);
+}
+
 static void test_iosapic_lowest_priority(void)
 {
     const unsigned pin = 22;
@@ -8664,6 +8690,8 @@ int main(int argc, char **argv)
                    test_iosapic_pid_register_face);
     qtest_add_func("/ia64-vpc/iosapic/ioa-register-face",
                    test_iosapic_ioa_register_face);
+    qtest_add_func("/ia64-vpc/iosapic/ioa-software-interrupt",
+                   test_iosapic_ioa_software_interrupt);
     qtest_add_func("/ia64-vpc/iosapic/edge-rte-write-not-a-request",
                    test_iosapic_edge_rte_write_is_not_a_request);
     qtest_add_func("/ia64-vpc/sparse-io/openbus", test_openbus_io_port);
