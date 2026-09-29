@@ -222,20 +222,32 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
  * Only an above-4-GiB base is clamped -- a legitimate below-4-GiB base (agp460
  * writes the aperture back once the OS owns it) is left as written.  AGPSIZ
  * bit 3 stays set: it only selects the 64-bit register, not an above-4-GiB
- * address (our own ia64_agp GART runs bit 3 set with a below-4-GiB base too).
- * Vendor-firmware-only: the project firmware never writes this register,
- * guests reach PCI config through SAL, and the 460GX
- * GART-translation device (ia64_agp, bus 0 dev 31) keeps its own aperture base
- * (0xEE000000), so the Linux AGP-GART DMA path is unaffected.  agp460 now
- * programs the aperture at a different base than ia64_agp decodes, so Windows
- * AGP-texture DMA would need the two reconciled -- a known gap, not a
- * regression (that path was dead while the root failed Code 12).
+ * address (our own firmware's setup runs bit 3 set with a below-4-GiB base
+ * too).  Vendor-firmware-only: the project firmware never writes this
+ * register.
+ *
+ * BAPBASE, GXBCTL (A0h) and AGPSIZ are the GART model's registers
+ * (ia64_agp.c), which answers for them at 00:1f.0 too, where Linux finds the
+ * bridge.  The GART therefore decodes the aperture programmed here.
  */
 #define IA64_460GX_GXB_DEV              0x14
 #define IA64_460GX_GXB_BRIDGE_FN       1
 #define IA64_460GX_GXB_BAPBASE_REG     0x98    /* 64-bit AGP aperture base */
 #define IA64_460GX_GXB_BAPBASE_LAST    0x9f
+#define IA64_460GX_GXB_GXBCTL_REG      0xa0
+#define IA64_460GX_GXB_AGPSIZ_REG      0xa2
 #define IA64_460GX_GXB_AGP_APERTURE_BASE 0x00000000d0000000ULL
+
+static bool ia64_460gx_gxb_aperture_reg(IA64460GXState *s, uint8_t dev,
+                                        uint8_t fn, unsigned off)
+{
+    return s->gxb_agp != NULL && dev == IA64_460GX_GXB_DEV &&
+           fn == IA64_460GX_GXB_BRIDGE_FN &&
+           ((off >= IA64_460GX_GXB_BAPBASE_REG &&
+             off <= IA64_460GX_GXB_BAPBASE_LAST) ||
+            off == IA64_460GX_GXB_GXBCTL_REG ||
+            off == IA64_460GX_GXB_AGPSIZ_REG);
+}
 
 /*
  * SPD EEPROMs served through the MAC's I2C pass-through: firmware writes the
@@ -681,8 +693,15 @@ static uint64_t ia64_460gx_cfg_read(void *opaque, hwaddr addr, unsigned size)
         for (i = 0; i < size; i++) {
             unsigned off = (reg + i) & 0xff;
             const uint8_t *file = ia64_460gx_sac_indexed(s, dev, fn, cfg, off);
+            uint64_t byte;
 
-            val |= (uint64_t)(file != NULL ? *file : cfg[off]) << (i * 8);
+            if (ia64_460gx_gxb_aperture_reg(s, dev, fn, off)) {
+                byte = pci_host_config_read_common(
+                    s->gxb_agp, off, pci_config_size(s->gxb_agp), 1);
+            } else {
+                byte = file != NULL ? *file : cfg[off];
+            }
+            val |= byte << (i * 8);
         }
     } else if (bus == ia64_460gx_cbn(s)) {
         /*
@@ -761,6 +780,12 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
             if (ia64_460gx_is_xtpr(s, cfg, off)) {
                 continue;
             }
+            if (ia64_460gx_gxb_aperture_reg(s, dev, fn, off)) {
+                pci_host_config_write_common(s->gxb_agp, off,
+                                             pci_config_size(s->gxb_agp),
+                                             byte, 1);
+                continue;
+            }
             if (file != NULL) {
                 *file = byte;
             } else {
@@ -780,15 +805,19 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
          * check runs when this access touches the register (its high dword
          * arrives as a separate size-4 write at 0x9c, per the POST trace).
          */
-        if (bus != 0 && dev == IA64_460GX_GXB_DEV &&
-            fn == IA64_460GX_GXB_BRIDGE_FN &&
+        if (ia64_460gx_gxb_aperture_reg(s, dev, fn,
+                                        IA64_460GX_GXB_BAPBASE_REG) &&
             reg <= IA64_460GX_GXB_BAPBASE_LAST &&
             reg + size > IA64_460GX_GXB_BAPBASE_REG) {
-            uint64_t bap = ldq_le_p(cfg + IA64_460GX_GXB_BAPBASE_REG);
+            PCIDevice *agp = s->gxb_agp;
 
-            if (bap >> 32) {
-                stq_le_p(cfg + IA64_460GX_GXB_BAPBASE_REG,
-                         IA64_460GX_GXB_AGP_APERTURE_BASE);
+            if (pci_get_quad(agp->config + IA64_460GX_GXB_BAPBASE_REG) >> 32) {
+                pci_host_config_write_common(
+                    agp, IA64_460GX_GXB_BAPBASE_REG, pci_config_size(agp),
+                    IA64_460GX_GXB_AGP_APERTURE_BASE, 4);
+                pci_host_config_write_common(
+                    agp, IA64_460GX_GXB_BAPBASE_REG + 4, pci_config_size(agp),
+                    IA64_460GX_GXB_AGP_APERTURE_BASE >> 32, 4);
             }
         }
         return;
@@ -1111,6 +1140,11 @@ IA64460GXState *ia64_460gx_create(Object *parent, MemoryRegion *pci_io,
     memory_region_add_subregion(pci_io, 0x80, &s->post_io);
     memory_region_add_subregion(pci_io, 0xcf8, &s->cfg_io);
     return s;
+}
+
+void ia64_460gx_attach_gxb_agp(IA64460GXState *s, PCIDevice *agp)
+{
+    s->gxb_agp = agp;
 }
 
 void ia64_460gx_attach_root(IA64460GXState *s, int root, PCIBus *bus)

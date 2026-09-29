@@ -212,6 +212,7 @@ static bool sdv_build_chipset(IA64VpcMachineState *s, DeviceState *pci_host,
     if (s->chipset == NULL) {
         return false;
     }
+    ia64_460gx_attach_gxb_agp(s->chipset, s->agp_dev);
     ia64_460gx_attach_root(s->chipset, -1, pci_bus);
     ia64_iosapic_set_redirect(iosapic, sdv_redirect, s);
 

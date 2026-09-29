@@ -35,6 +35,11 @@
  * VGA framebuffer BAR and trip the guest PCI resource allocator); it is exposed
  * only in the per-bus DMA address space through the IOMMU below, and its base
  * is advertised through BAPBASE with AGPSIZ bit3 set.
+ *
+ * On the board these registers are the GXB's function 1 on the chipset bus
+ * (CBN device 14h), where the vendor firmware and Windows' agp460 program
+ * them; ia64_460gx.c sends the accesses there to this device, so the GART
+ * decodes whatever aperture either place last programmed.
  */
 
 #include "qemu/osdep.h"
@@ -206,15 +211,16 @@ static const PCIIOMMUOps ia64_agp_iommu_ops = {
 };
 
 /*
- * The aperture base is the BAPBASE register (0x98) with its low control bits
- * masked off -- the same value the i460-agp driver reads and stores in
- * gart_bus_addr (see i460_configure()).  Translation is live whenever it is
- * programmed; the GART's per-entry valid bit gates individual pages.
+ * The aperture base is the BAPBASE register (0x98) without its BAR type bits
+ * -- the same value the i460-agp driver reads and stores in gart_bus_addr
+ * (see i460_configure()).  Translation is live whenever it is programmed; the
+ * GART's per-entry valid bit gates individual pages.
  */
 static void ia64_agp_update_aperture(IA64AGPState *s)
 {
     PCIDevice *dev = PCI_DEVICE(s);
-    uint64_t base = pci_get_quad(dev->config + I460_BAPBASE) & ~7ULL;
+    uint64_t base = pci_get_quad(dev->config + I460_BAPBASE) &
+                    PCI_BASE_ADDRESS_MEM_MASK;
     bool large = dev->config[I460_GXBCTL] & I460_GXBCTL_4M_PS;
 
     s->page_shift = large ? 22 : 12;
@@ -247,6 +253,27 @@ static void ia64_agp_config_write(PCIDevice *dev, uint32_t addr,
     ia64_agp_update_aperture(s);
 }
 
+/*
+ * i460-agp reads GXBCTL bit1 (must be 0 = 4 KiB pages) and AGPSIZ[2:0]
+ * (1 = 256 MiB).  AGPSIZ bit3 (BAPBASE_ENABLE) is set so the driver takes
+ * the aperture base from BAPBASE (a >4 GiB-capable, non-header BAR) rather
+ * than the standard header BAR -- see the placement note at the top.  When
+ * the machine turns the GART off (agp=off), also assert bit4
+ * (SRAM_IO_DISABLE), on which i460_fetch_size() bails ("GART SRAMS
+ * disabled") so the OS keeps to the Rage 128's own PCI GART.  Our firmware
+ * programs none of them, so these values stand in for its setup.
+ */
+static void ia64_agp_reset_regs(IA64AGPState *s)
+{
+    uint8_t *c = PCI_DEVICE(s)->config;
+
+    c[I460_GXBCTL] = 0x00;
+    c[I460_AGPSIZ] = I460_AGPSIZ_SIZE_256M | I460_AGPSIZ_BAPBASE_EN |
+                     (s->gart_enabled ? 0 : I460_AGPSIZ_SRAM_IO_DIS);
+    pci_set_quad(c + I460_BAPBASE,
+                 I460_APERTURE_BASE | PCI_BASE_ADDRESS_MEM_TYPE_64);
+}
+
 static void ia64_agp_realize(PCIDevice *dev, Error **errp)
 {
     IA64AGPState *s = IA64_AGP(dev);
@@ -255,29 +282,15 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
     /* Host-bridge class so i460-agp's pci_device_id table matches. */
     pci_config_set_prog_interface(c, 0);
 
-    /*
-     * i460-agp reads GXBCTL bit1 (must be 0 = 4 KiB pages) and AGPSIZ[2:0]
-     * (1 = 256 MiB).  AGPSIZ bit3 (BAPBASE_ENABLE) is set so the driver takes
-     * the aperture base from BAPBASE (a >4 GiB-capable, non-header BAR) rather
-     * than the standard header BAR -- see the placement note at the top.  When
-     * the machine turns the GART off (agp=off), also assert bit4
-     * (SRAM_IO_DISABLE), on which i460_fetch_size() bails ("GART SRAMS
-     * disabled") so the OS keeps to the Rage 128's own PCI GART.
-     */
-    c[I460_GXBCTL] = 0x00;
-    c[I460_AGPSIZ] = I460_AGPSIZ_SIZE_256M | I460_AGPSIZ_BAPBASE_EN |
-                     (s->gart_enabled ? 0 : I460_AGPSIZ_SRAM_IO_DIS);
     dev->wmask[I460_GXBCTL] = 0x07;           /* OOG, 4 MB pages, BWC */
     dev->wmask[I460_AGPSIZ] = 0x07;           /* size_value RMW, keep [7:3] */
-
     /*
-     * BAPBASE (0x98): the aperture base, low 3 bits marking a 64-bit memory
-     * BAR (the driver masks them off).  Fixed at the platform PCI MMIO hole
-     * base; hardwired (read-only) since this synthetic chipset does not depend
-     * on firmware to size/relocate it.
+     * The GXB decodes 40 address bits (SSDM 7.2.1).  The SSDM hardwires
+     * bits 27:12 to 0; bits 27:24 stay writable so that the register can
+     * hold the placement above, which is not 256 MB aligned.
      */
-    pci_set_quad(c + I460_BAPBASE,
-                 I460_APERTURE_BASE | PCI_BASE_ADDRESS_MEM_TYPE_64);
+    pci_set_quad(dev->wmask + I460_BAPBASE, 0x000000ffff000000ULL);
+    ia64_agp_reset_regs(s);
 
     /* Mandatory: an AGP capability, or the driver returns -ENODEV. */
     if (pci_add_capability(dev, PCI_CAP_ID_AGP, 0, 8, errp) < 0) {
@@ -319,8 +332,8 @@ static void ia64_agp_reset(DeviceState *dev)
 {
     IA64AGPState *s = IA64_AGP(dev);
 
-    /* GATT SRAM clears; BAPBASE is hardwired, so the aperture stays mapped. */
     memset(s->gatt, 0, I460_GATT_ENTRIES * sizeof(uint32_t));
+    ia64_agp_reset_regs(s);
     ia64_agp_update_aperture(s);
 }
 

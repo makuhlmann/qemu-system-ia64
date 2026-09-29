@@ -4806,7 +4806,9 @@ static void test_460gx_config_ports(void)
  * the 64-bit BAPBASE register (98h).  The vendor firmware programs it at 4 GiB
  * (low dword 0, high dword 1); an above-4-GiB base makes Windows XP-64 fail the
  * AGP root with Code 12, so the realfw config path clamps an above-4-GiB base
- * below 4 GiB while leaving a legitimate below-4-GiB base as written.
+ * below 4 GiB while leaving a legitimate below-4-GiB base as written.  The
+ * register is the one the GART decodes, which Linux reads at 00:1f.0.  Bits
+ * 3:0 mark a 64-bit memory BAR.
  */
 static void test_460gx_agp_aperture_rebased(void)
 {
@@ -4815,15 +4817,22 @@ static void test_460gx_agp_aperture_rebased(void)
     /* Firmware's 4 GiB BAPBASE (low 0, high 1) reads back clamped below 4 GiB. */
     cf8_writel(qts, 0xff, 0x14, 1, 0x98, 0x00000000);
     cf8_writel(qts, 0xff, 0x14, 1, 0x9c, 0x00000001);
-    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xd0000000);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xd0000004);
     g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x00000000);
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_AGP_SLOT, 0, 0x98), ==, 0xd0000004);
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_AGP_SLOT, 0, 0x9c), ==, 0x00000000);
 
     /* A below-4-GiB base is legitimate (agp460 writes the aperture back once
      * the OS owns it) and is stored verbatim -- only above-4-GiB is clamped. */
     cf8_writel(qts, 0xff, 0x14, 1, 0x98, 0xc0000000);
     cf8_writel(qts, 0xff, 0x14, 1, 0x9c, 0x00000000);
-    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xc0000000);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xc0000004);
     g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x00000000);
+
+    /* GXBCTL and AGPSIZ are the GART's too: the vendor firmware's values. */
+    cf8_writel(qts, 0xff, 0x14, 1, 0xa0, 0x000900b4);
+    g_assert_cmphex(cf8_readl(qts, 0, IA64_AGP_SLOT, 0, 0xa0) & 0x00ff00ff,
+                    ==, 0x00090004);
 
     /* Scope: only dev 14h function 1's BAPBASE.  Function 0 (the SAC) is not
      * clamped, and registers outside 98h-9fh are ordinary config storage. */
@@ -7718,9 +7727,8 @@ static void test_ati_cce_indirect_buffer(void)
  * framebuffer, so if either half were broken the CCE would read zeros and the
  * fill would never land.
  */
-static void test_agp_gart_dma(void)
+static void agp_gart_dma_fill(ATITestDev *a, uint32_t aperture)
 {
-    ATITestDev a;
     const uint32_t dram_page = 0x08000000;       /* scratch DRAM (128 MiB)  */
     const uint32_t agp_vm = R128_AGP_OFFSET;     /* aperture page 0         */
     const uint32_t dst_off = 0x100000;           /* fill target, in VRAM    */
@@ -7741,39 +7749,59 @@ static void test_agp_gart_dma(void)
     };
     unsigned i, x, y;
 
-    ati_dev_open(&a, NULL);
-
     /* The AGP fetch is a bus-master DMA cycle: enable bus mastering. */
-    qpci_config_writew(a.dev, PCI_COMMAND,
-                       qpci_config_readw(a.dev, PCI_COMMAND) |
+    qpci_config_writew(a->dev, PCI_COMMAND,
+                       qpci_config_readw(a->dev, PCI_COMMAND) |
                        PCI_COMMAND_MASTER);
 
     /* Map aperture page 0 -> the DRAM scratch page: valid | phys[35:12]. */
-    qtest_writel(a.qts, IA64_AGP_GART_WINDOW + 0,
+    qtest_writel(a->qts, IA64_AGP_GART_WINDOW + 0,
                  0x03000000u | (dram_page >> 12));
     /* Point the card's AGP window at the chipset aperture base. */
-    ati_wr(&a, ATI_AGP_BASE, (uint32_t)IA64_AGP_APERTURE_BASE);
+    ati_wr(a, ATI_AGP_BASE, aperture);
 
     /* Indirect buffer lives in DRAM, reachable only through the aperture. */
     for (i = 0; i < ARRAY_SIZE(prog); i++) {
-        qtest_writel(a.qts, dram_page + i * 4, prog[i]);
+        qtest_writel(a->qts, dram_page + i * 4, prog[i]);
     }
     for (y = 0; y < height; y++) {
         for (x = 0; x < width; x++) {
-            ati_vram_wr32(&a, dst_off + (y * width + x) * 4, 0xdeadbeef);
+            ati_vram_wr32(a, dst_off + (y * width + x) * 4, 0xdeadbeef);
         }
     }
 
     /* Launch: CCE fetches the buffer via AGP -> GART -> DRAM and runs it. */
-    ati_wr(&a, ATI_PM4_IW_INDOFF, agp_vm);
-    ati_wr(&a, ATI_PM4_IW_INDSIZE, ARRAY_SIZE(prog));
+    ati_wr(a, ATI_PM4_IW_INDOFF, agp_vm);
+    ati_wr(a, ATI_PM4_IW_INDSIZE, ARRAY_SIZE(prog));
     for (y = 0; y < height; y++) {
         for (x = 0; x < width; x++) {
-            g_assert_cmphex(ati_vram_rd32(&a, dst_off + (y * width + x) * 4),
+            g_assert_cmphex(ati_vram_rd32(a, dst_off + (y * width + x) * 4),
                             ==, color);
         }
     }
+}
 
+static void test_agp_gart_dma(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    agp_gart_dma_fill(&a, IA64_AGP_APERTURE_BASE);
+    ati_dev_close(&a);
+}
+
+/*
+ * The GART follows the aperture the GXB's function 1 on the chipset bus is
+ * programmed with, as the vendor firmware and Windows' agp460 do it.
+ */
+static void test_agp_gart_dma_moved(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    cf8_writel(a.qts, 0xff, 0x14, 1, 0x98, 0xd0000000);
+    cf8_writel(a.qts, 0xff, 0x14, 1, 0x9c, 0x00000000);
+    agp_gart_dma_fill(&a, 0xd0000000);
     ati_dev_close(&a);
 }
 
@@ -8752,6 +8780,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ati/cce-indirect-buffer",
                    test_ati_cce_indirect_buffer);
     qtest_add_func("/ia64-vpc/agp/gart-dma", test_agp_gart_dma);
+    qtest_add_func("/ia64-vpc/agp/gart-dma-moved", test_agp_gart_dma_moved);
     qtest_add_func("/ia64-vpc/mach64/ids", test_mach64_ids);
     qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
                    test_mach64_2d_solid_fill);
