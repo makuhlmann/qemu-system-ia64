@@ -304,7 +304,7 @@ const VMStateDescription vmstate_ia64_cpu = {
         VMSTATE_UINT16(env.mmu.tlb_inst_replace, IA64CPU),
         VMSTATE_UINT16(env.mmu.pending_purge_data_count, IA64CPU),
         VMSTATE_UINT16(env.mmu.pending_purge_inst_count, IA64CPU),
-        VMSTATE_UINT64(env.mmu.region7_directmap_limit, IA64CPU),
+        VMSTATE_UNUSED(8),
         VMSTATE_UINT64_V(env.firmware.image_base, IA64CPU, 2),
         VMSTATE_UINT64_V(env.firmware.image_size, IA64CPU, 5),
         VMSTATE_UINT64_V(env.firmware.ivt, IA64CPU, 5),

@@ -193,23 +193,6 @@
  * fills otherwise-unmapped region-7 pages with the same bias.
  */
 #define IA64_FW_REGION7_DIRECTMAP_BASE 0x0000000080000000ULL
-/*
- * The persistent alias only covers the Windows/2003 KSEG0 window, a *fixed*
- * 512 MiB range [KSEG0_BASE, KSEG2_BASE) = region-7 offset
- * [0x8000_0000, 0xA000_0000) (WXPSP1 base/ntos/mm/ia64/miia64.h: "The HAL,
- * kernel, initial drivers, NLS data, and registry ... which physically
- * addresses memory ... Initial NonPaged Pool is within KSEG0").  It must not
- * scale with RAM: region-7 VAs at or above KSEG2_BASE are ordinary kernel
- * system space (system cache, pools, PFN database, KI_USER_SHARED_DATA, the
- * PCR) that the OS maps through the VHPT/self-map, so a wider alias would
- * silently shadow those VAs with the wrong physical page once installed RAM
- * pushes the window past 0xA000_0000 -- corrupting the kernel and bugchecking
- * the guest (measured: XP RTM dies in KeBugCheck2 during MmInitSystem above
- * ~1.75 GiB).  Loader-phase accesses to physical memory above KSEG0 arrive
- * while the SAL boot environment still owns the IVT and are served by the
- * boot-identity fallback below, not this persistent alias.
- */
-#define IA64_FW_REGION7_DIRECTMAP_SIZE 0x0000000020000000ULL
 #define IA64_LOCAL_SAPIC_PA   IA64_LOCAL_SAPIC_BASE
 /*
  * The architected I/O block: the top 64 MB of the processor's *implemented*
@@ -1558,29 +1541,6 @@ static inline bool ia64_sal_boot_environment_active(const CPUIA64State *env)
            (env->psr & IA64_PSR_IC) != 0;
 }
 
-/*
- * Distinguish an OS that manages region 7 as a *flat identity* map (region-7
- * VA == physical, e.g. Linux's PAGE_OFFSET) from one that uses the loader's
- * biased KSEG (region-7 VA == physical + 0x8000_0000, e.g. Windows/2003).  The
- * two conventions collide for region-7 offsets in [0x8000_0000, KSEG2): under
- * the Windows convention that window aliases low physical memory, but under the
- * identity convention it *is* physical RAM at 2 GiB+, so the persistent KSEG
- * alias must not shadow it -- doing so hands the identity OS the wrong page and
- * crashes it once installed RAM exceeds 2 GiB (measured: Debian/Linux 2.4.17).
- *
- * The signal is where the OS placed its interruption vector table: Windows'
- * IVT lives inside KSEG0 (region 7, offset >= 0x8000_0000); Linux's is at the
- * identity-mapped KERNEL_START (region 7, offset well below KSEG0).  So a
- * region-7 IVT below the KSEG base means the running OS owns region 7 as an
- * identity map and services its own region-7 TLB misses -- suppress the alias.
- * A non-region-7 IVT (SAL/firmware, or the microprogram harness) keeps it.
- */
-static inline bool ia64_region7_is_identity_os(const CPUIA64State *env)
-{
-    return ia64_rr_index(env->cr_iva) == 7 &&
-           (env->cr_iva & IA64_REGION7_PHYS_MASK) < IA64_FW_REGION7_DIRECTMAP_BASE;
-}
-
 static inline bool ia64_data_nested_tlb_active(const CPUIA64State *env)
 {
     return !(env->psr & IA64_PSR_IC) && !env->exception_state.psr_ic_inflight;
@@ -1612,41 +1572,15 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
                                                   bool is_inst)
 {
     uint64_t phys = va & IA64_REGION7_PHYS_MASK;
-    bool region7_directmap;
-    bool boot_identity;
 
     /*
-     * Persistent region-7 physical alias (the "KSEG" direct map): the IA-64
-     * OS loaders and the early kernel reach loader-built structures near the
-     * top of RAM through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE
-     * before the kernel's self-mapped page tables are active (e.g.
-     * KdInitSystem walks a loader debug-block list this way).  Model it as a
-     * last-resort translation that survives the loader -> kernel handoff,
-     * bounded to the fixed KSEG0 window (region7_directmap_limit = base +
-     * min(RAM, IA64_FW_REGION7_DIRECTMAP_SIZE)) so that kernel system space,
-     * KI_USER_SHARED_DATA/PCR, and the recursive page-table self-map window
-     * -- all region-7 VAs at or above KSEG2_BASE -- still take ordinary
-     * TLB-miss faults instead of being shadowed by a RAM-sized alias.
+     * This models SAL's boot-time TLB miss handler, which exists only while
+     * SAL still owns the IVT (until ExitBootServices() completes); it is a
+     * miss fallback only.  Most calls are ordinary kernel misses, so reject
+     * them before the linear scan of the TR/TC table below.
      */
-    region7_directmap = ia64_rr_index(va) == 7 &&
-        phys >= IA64_FW_REGION7_DIRECTMAP_BASE &&
-        phys < env->mmu.region7_directmap_limit &&
-        !ia64_region7_is_identity_os(env);
-
-    /*
-     * The remaining identity behaviour models SAL's boot-time TLB miss handler
-     * and only applies while SAL still owns the IVT (until ExitBootServices()
-     * completes).  It is a miss fallback only.
-     */
-    boot_identity = ia64_sal_boot_environment_active(env) &&
-        phys < IA64_FW_BOOT_IDENTITY_LIMIT;
-
-    /*
-     * Neither identity path applies: reject cheaply.  This is the common case
-     * for ordinary kernel VAs and is reached on every fill and miss, so it is
-     * checked before the linear scan of the TR/TC table below.
-     */
-    if (!region7_directmap && !boot_identity) {
+    if (!ia64_sal_boot_environment_active(env) ||
+        phys >= IA64_FW_BOOT_IDENTITY_LIMIT) {
         return false;
     }
 
@@ -1659,10 +1593,7 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
      * ITRs and DTRs are independent translation resources (SDM Vol.2 4.1.1):
      * a data reference must only defer to data TRs and an instruction fetch
      * only to instruction TRs.  The XP-era loader installs a 4th ITR for its
-     * [64-80MB] decompression range but no matching DTR; a *data* read there
-     * (e.g. KdInitSystem walking a loader debug block) must therefore still
-     * reach the region-7 direct map below rather than deferring to that ITR
-     * and taking a VHPT fault into the not-yet-installed self-map (0x2B).
+     * [64-80MB] decompression range but no matching DTR.
      */
     if (is_inst) {
         if (ia64_tlb_has_explicit_va_mapping(
@@ -1674,12 +1605,6 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
                 env->mmu.tlb_data, env->mmu.tlb_data_count, va)) {
             return false;
         }
-    }
-
-    /* region7_directmap wins over boot_identity when both apply. */
-    if (region7_directmap) {
-        *pa = phys - IA64_FW_REGION7_DIRECTMAP_BASE;
-        return true;
     }
 
     if (phys >= IA64_FW_REGION7_DIRECTMAP_BASE) {

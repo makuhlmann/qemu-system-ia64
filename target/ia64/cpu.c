@@ -972,17 +972,6 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
      */
     cpu->env.cr[IA64_CR_LRR0] = 1ULL << 16;
     cpu->env.cr[IA64_CR_LRR1] = 1ULL << 16;
-    /*
-     * Bound of the persistent region-7 KSEG physical alias (see
-     * ia64_sal_boot_identity_pa_type()): the kernel reaches KSEG0 structures
-     * through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE.  Clamp the
-     * window to the fixed KSEG0 span (IA64_FW_REGION7_DIRECTMAP_SIZE) and to
-     * backed RAM, whichever is smaller: a window that grows with RAM would
-     * shadow kernel system space and corrupt large-memory guests.
-     */
-    cpu->env.mmu.region7_directmap_limit = IA64_FW_REGION7_DIRECTMAP_BASE +
-        MIN(current_machine ? current_machine->ram_size : 0,
-            IA64_FW_REGION7_DIRECTMAP_SIZE);
     cpu->env.alat_state.alat_full = cpu->alat_full;
     cpu->env.fp.fr[IA64_FR_ONE_INDEX] = IA64_FR_ONE;
     cpu->env.pr[IA64_PR_TRUE] = 1;

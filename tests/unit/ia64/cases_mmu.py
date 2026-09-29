@@ -7555,29 +7555,28 @@ test_sal_boot_identity_region7_directmap_bias = require_registers(
         "r31": REGION7_DIRECTMAP_DATA,
     }, entry=0x10)
 
-# The region-7 KSEG physical alias (VA = PA + 0x8000_0000) must persist after
-# the SAL boot environment ends (cr.iva != the firmware IVT): the early kernel
-# reaches loader-built structures near the top of RAM through it before its
-# self-mapped page tables are active.  Here cr.iva is a non-firmware (kernel)
-# IVT, so ia64_sal_boot_environment_active() is false, yet the region-7 offset
-# 0x8000_1240 must still resolve to PA 0x1240.  Bounded to backed RAM
-# (region7_directmap_limit), so it is a no-op outside physical memory.
-test_region7_kseg_alias_persists_without_sal = require_registers(
-    "region7_kseg_alias_persists_without_sal", [
+# Region 7 has no alias of low memory once the OS owns the IVT: a region-7
+# access with no TR, TC or VHPT translation takes an Alternate Data TLB fault
+# (SDM Vol 2 5.1.1), whatever its offset.  SAL's identity TCs exist only while
+# the firmware IVT serves the misses (SAL 3.3.1).
+test_region7_miss_without_sal_takes_alt_dtlb = require_registers(
+    "region7_miss_without_sal_takes_alt_dtlb", [
         (0x10, *movl_mlx(17, 0xe000000080001240)),
         (0x20, *movl_mlx(18, (1 << 8) | (13 << 2))),
-        (0x30, *movl_mlx(2, 0x100000)),
-        (0x40, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
-        (0x50, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
-        (0x60, *movl_mlx(19, (1 << 13) | (1 << 17))),
-        (0x70, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
-        (0x80, 0x08, ld8(31, 17), nop_i(), nop_i()),
-        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (0x30, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0x40, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x50, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x60, 0x08, ld8(31, 17), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+        (IA64_ALT_DTLB_VECTOR, 0x00, mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x10, IA64_ALT_DTLB_VECTOR + 0x10)),
         (0x1240, 0x00, 0x00c0ffee1234abcd, 0, 0),
     ], {
-        "ip": 0x90,
+        "ip": IA64_ALT_DTLB_VECTOR + 0x10,
         "exception": IA64_EXCP_NONE,
-        "r31": REGION7_DIRECTMAP_DATA,
+        "r30": 0xe000000080001240,
+        "r31": 0,
     }, entry=0x10)
 
 CASE_NAMES = (
@@ -7792,7 +7791,7 @@ CASE_NAMES = (
     'rfi_serializes_pending_ptr_i',
     'rsm_ic_inflight_dtlb_not_data_nested',
     'rsm_ic_serialized_data_nested_tlb',
-    'region7_kseg_alias_persists_without_sal',
+    'region7_miss_without_sal_takes_alt_dtlb',
     'sal_boot_identity_does_not_override_explicit_rid_miss',
     'sal_boot_identity_handles_nonzero_region7_rid',
     'sal_boot_identity_region7_directmap_bias',

@@ -82,13 +82,6 @@ typedef struct IA64MMUState {
     /* Transient bookkeeping for architected purge operations. */
     uint16_t pending_purge_data_count;
     uint16_t pending_purge_inst_count;
-
-    /*
-     * Upper bound (region-7 offset) of the persistent KSEG physical alias:
-     * IA64_FW_REGION7_DIRECTMAP_BASE + guest RAM size.  Set at reset from the
-     * machine RAM size; see ia64_sal_boot_identity_pa_type().
-     */
-    uint64_t region7_directmap_limit;
 } IA64MMUState;
 
 typedef struct IA64InterruptState {
