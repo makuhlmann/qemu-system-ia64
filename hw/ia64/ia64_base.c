@@ -4855,8 +4855,8 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 #endif
 #ifdef CONFIG_IA64_VPC_NETWORK
     /*
-     * Default to the 100 Mbit PRO/100 (i82557b, NET557.IN_ / DEV_1229).
-     * The 82543GC gigabit adapter (PCI\VEN_8086&DEV_1004&REV_02,
+     * The PRO/100 family (DEV_1229, NET557.IN_); each board sets the part it
+     * carries.  The 82543GC gigabit adapter (PCI\VEN_8086&DEV_1004&REV_02,
      * e1000w64.sys) remains available via -nic model=e1000-82543gc; the
      * plain e1000 (82540EM, DEV_100E) has no inbox IA-64 driver.
      */

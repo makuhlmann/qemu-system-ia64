@@ -481,6 +481,13 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
 
     (void)data;
     mc->desc = "Intel SDV / HP i2000 (460GX chipset, Merced)";
+#ifdef CONFIG_IA64_VPC_NETWORK
+    /*
+     * The I/O board's LAN is an Intel 82559 (i2000 Owner's Guide 2.5); the
+     * guide names no stepping.
+     */
+    mc->default_nic = "i82559c";
+#endif
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("merced");
     /*
      * On the i2000 the interrupt controller is the 460GX Programmable

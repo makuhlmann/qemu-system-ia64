@@ -349,6 +349,10 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
 
     (void)data;
     mc->desc = "HP rx2600 / zx2000 / zx6000 (zx1 chipset, Itanium 2)";
+#ifdef CONFIG_IA64_VPC_NETWORK
+    /* "The LAN controller is an Intel 82550 chip" (O&M Guide App. B). */
+    mc->default_nic = "i82550";
+#endif
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("madison");
     /*
      * The zx1 generation dropped PS/2 entirely: an rx2600 or zx6000 has USB

@@ -157,15 +157,15 @@ static const ExpectedPCIDevice expected_e1000 = {
 };
 
 /*
- * The default adapter is the 100 Mbit PRO/100 (i82557b, DEV_1229), the
- * device Windows IA-64 actually ships an inbox driver for (NET557.IN_).
- * Unlike the e1000 it exposes three BARs: a 4 KiB prefetchable CSR memory
- * BAR, a 32-byte I/O BAR, and the 1 MiB Flash aperture this controller
- * generation decodes.  The machine's generic per-BAR NIC allocator hands
- * each one a naturally aligned slice of the per-index memory / I/O window,
- * so the Flash BAR lands at the next 1 MiB boundary above the CSR BAR.
+ * The i2000's LAN is an Intel 82559 (Owner's Guide 2.5): the PRO/100 family
+ * (DEV_1229) that Windows IA-64 has an inbox driver for (NET557.IN_).  It
+ * exposes three BARs: a 4 KiB CSR memory BAR, a 64-byte I/O BAR and a
+ * 128 KiB Flash aperture.  The machine's generic per-BAR NIC allocator
+ * hands each one a naturally aligned slice of the per-index memory / I/O
+ * window, so the Flash BAR lands at the next 128 KiB boundary above the CSR
+ * BAR.
  */
-static const ExpectedPCIDevice expected_i82557b = {
+static const ExpectedPCIDevice expected_i82559 = {
     .slot = IA64_E1000_SLOT,
     .vendor = PCI_VENDOR_ID_INTEL,
     .device = 0x1229,
@@ -173,9 +173,9 @@ static const ExpectedPCIDevice expected_i82557b = {
     .irq_line = IA64_E1000_GSI,
     .irq_pin = 1,
     .bars = {
-        [0] = IA64_E1000_MMIO_BASE | PCI_BASE_ADDRESS_MEM_PREFETCH,
+        [0] = IA64_E1000_MMIO_BASE,
         [1] = IA64_E1000_IO_BASE | PCI_BASE_ADDRESS_SPACE_IO,
-        [2] = (IA64_E1000_MMIO_BASE + 0x100000) & ~0xfffffULL,
+        [2] = (IA64_E1000_MMIO_BASE + 0x20000) & ~0x1ffffULL,
     },
 };
 
@@ -5782,7 +5782,7 @@ static void test_pci_default_layout(void)
             .irq_line = 39, .irq_pin = 1,
             .bars = { [0] = 0xee010000 },
         },
-        expected_i82557b,
+        expected_i82559,
     };
     /*
      * The south bridge is the 82468GX I/O and Firmware Bridge at 00:03: a
@@ -5912,7 +5912,7 @@ static void test_pci_default_layout(void)
                                 QPCI_DEVFN(IA64_460GX_WXB1_SCSI_SLOT, 0));
         g_assert_null(scsi);
     }
-    assert_pci_device(&gbus.bus, &expected_i82557b);
+    assert_pci_device(&gbus.bus, &expected_i82559);
     qtest_quit(qts);
 }
 
