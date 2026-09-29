@@ -787,6 +787,9 @@ static void assert_nvram_defaults(QTestState *qts, uint64_t console,
      IA64_FW_QUIRK_LOW_BOUNDARIES | IA64_FW_QUIRK_LOW_ANCHOR | \
      IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF)
 
+/* The RTC battery area the sdv board keeps after its flash image. */
+#define IA64_RTC_BATTERY_SIZE   512
+
 /*
  * A synthetic flash image large enough to carry the NVRAM sector at
  * 0xFFF90000: 512 KiB ending at 4 GiB, with a reset pointer block and a
@@ -3221,7 +3224,8 @@ static void test_nvram_commit_and_restart(void)
 
     g_assert_true(g_file_get_contents(path, &contents, &length, &error));
     g_assert_no_error(error);
-    g_assert_cmpuint(length, ==, image_size);
+    /* The flash, then the RTC battery area (test_nvram_rtc_battery). */
+    g_assert_cmpuint(length, ==, image_size + IA64_RTC_BATTERY_SIZE);
     g_assert_cmphex(ldq_le_p(contents + sector), ==, test_value);
 
     qts = qtest_initf("-machine 460gx,nvram=%s -bios %s -m 256M -S",
@@ -4165,6 +4169,76 @@ static void gpio_outl(QTestState *qts, uint16_t port, uint32_t value)
 {
     qtest_writel(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port),
                  value);
+}
+
+/*
+ * The 460gx `nvram=` file keeps the RTC's battery-backed RAM after the flash
+ * image: a tag, the standard bank, the extended bank.  The clock and the
+ * century byte come from -rtc; the rest of both banks survives a restart.
+ */
+#define IA64_RTC_BATTERY_BANKS  16
+
+static void test_nvram_rtc_battery(void)
+{
+    const uint64_t image_size = 0x80000;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *flash = NULL;
+    g_autofree char *quoted_flash = NULL;
+    g_autofree char *path = NULL;
+    g_autofree char *quoted_path = NULL;
+    g_autofree char *contents = NULL;
+    g_autoptr(GError) error = NULL;
+    const uint8_t *area;
+    gsize length = 0;
+    QTestState *qts;
+
+    tmpdir = g_dir_make_tmp("ia64-vpc-rtc-XXXXXX", &error);
+    g_assert_no_error(error);
+    flash = ia64_make_nvram_flash_image(tmpdir);
+    quoted_flash = g_shell_quote(flash);
+    path = g_build_filename(tmpdir, "nvram.bin", NULL);
+    quoted_path = g_shell_quote(path);
+
+    qts = qtest_initf("-machine 460gx,nvram=%s -bios %s -m 256M -S",
+                      quoted_path, quoted_flash);
+    /* A new battery. */
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x03), ==, 0);
+    rtc_bank_write(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH, 0xa5);
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x03, 0x08);
+    /* The area is written when the machine stops. */
+    qtest_qmp_assert_success(qts, "{ 'execute': 'cont' }");
+    qtest_qmp_assert_success(qts, "{ 'execute': 'stop' }");
+    g_assert_true(g_file_get_contents(path, &contents, &length, &error));
+    g_assert_no_error(error);
+    g_assert_cmpuint(length, ==, image_size + IA64_RTC_BATTERY_SIZE);
+    area = (const uint8_t *)contents + image_size;
+    g_assert_cmpmem(area, 8, "IFB-RTC1", 8);
+    g_assert_cmphex(area[IA64_RTC_BATTERY_BANKS + IA64_RTC_SCRATCH], ==, 0xa5);
+    g_assert_cmphex(area[IA64_RTC_BATTERY_BANKS + 128 + 0x03], ==, 0x08);
+    qtest_quit(qts);
+
+    qts = qtest_initf("-machine 460gx,nvram=%s -bios %s -m 256M -S",
+                      quoted_path, quoted_flash);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH), ==,
+                    0xa5);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x03), ==, 0x08);
+    qtest_quit(qts);
+
+    /* A file of the flash alone gets a new battery. */
+    g_assert_true(g_file_set_contents(path, contents, image_size, &error));
+    g_assert_no_error(error);
+    qts = qtest_initf("-machine 460gx,nvram=%s -bios %s -m 256M -S",
+                      quoted_path, quoted_flash);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x03), ==, 0);
+    qtest_quit(qts);
+    g_free(contents);
+    contents = NULL;
+    g_assert_true(g_file_get_contents(path, &contents, &length, &error));
+    g_assert_cmpuint(length, ==, image_size + IA64_RTC_BATTERY_SIZE);
+
+    g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_unlink(flash), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
 static void test_460gx_south_bridge_gpio(void)
@@ -8908,6 +8982,7 @@ int main(int argc, char **argv)
                    test_460gx_spd_follows_ram_size);
     qtest_add_func("/ia64-vpc/pci/460gx-pcis-window", test_460gx_pcis_window);
     qtest_add_func("/ia64-vpc/pci/460gx-smbus-hwmon", test_460gx_smbus_hwmon);
+    qtest_add_func("/ia64-vpc/nvram/rtc-battery", test_nvram_rtc_battery);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-gpio",
                    test_460gx_south_bridge_gpio);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",

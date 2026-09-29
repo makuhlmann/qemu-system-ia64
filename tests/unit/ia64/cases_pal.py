@@ -1392,15 +1392,24 @@ def _sale_two_call_bundles():
     return bundles
 
 
-def _sale_flash_image():
+def _sale_flash_image(indirect=False):
     image = bytearray(b"\xff" * SALE_FLASH_SIZE)
     fit = 0x100
     image[fit:fit + 8] = b"_FIT_   "
     struct.pack_into("<Q", image, fit + 8, 0x0100000000000001)
-    low, high = _enc.bundle_words(
-        *_enc.brl_cond_mlx(SALE_ENTRY_ADDR, SALE_CODE))
-    struct.pack_into("<QQ", image, SALE_ENTRY_ADDR - SALE_FLASH_BASE,
-                     low, high)
+    if indirect:
+        # Merced has no brl: it takes an Illegal Operation fault (SDM Vol 2
+        # Part 2 7.4, Long Branch).
+        entry = [_enc.movl_mlx(2, SALE_CODE),
+                 (0x01, _enc.nop_m(), _enc.mov_br_gr(6, 2), _enc.nop_i()),
+                 (0x11, _enc.nop_m(), _enc.nop_i(), _enc.br_indirect(6))]
+    else:
+        entry = [_enc.brl_cond_mlx(SALE_ENTRY_ADDR, SALE_CODE)]
+    for i, bundle in enumerate(entry):
+        low, high = _enc.bundle_words(*bundle)
+        struct.pack_into("<QQ", image,
+                         SALE_ENTRY_ADDR - SALE_FLASH_BASE + 16 * i,
+                         low, high)
     struct.pack_into("<Q", image, SALE_FLASH_SIZE - 32,
                      (1 << 63) | (SALE_FLASH_BASE + fit))
     struct.pack_into("<Q", image, SALE_FLASH_SIZE - 24,
@@ -1432,6 +1441,30 @@ test_sale_entry_two_calls = IA64Case(
     bundles=tuple(tuple(b) for b in _sale_two_call_bundles()),
     expected=dict(SALE_TWO_CALL_EXPECTED),
     metadata=CaseMetadata(required_features=frozenset({"alat:full"})),
+)
+
+
+# The sdv board makes the same two calls (G21): its firmware's recovery check
+# reads the J29 lines from the south bridge's GPIO block.
+def _sale_entry_two_calls_sdv(qemu):
+    with tempfile.TemporaryDirectory(prefix="ia64-sale-") as tmpdir:
+        flash = os.path.join(tmpdir, "flash.bin")
+        with open(flash, "wb") as f:
+            f.write(_sale_flash_image(indirect=True))
+        _enc.run_program(qemu, _sale_two_call_bundles(),
+                         entry=None,
+                         expected=SALE_TWO_CALL_EXPECTED,
+                         name="sale_entry_two_calls_sdv",
+                         machine="460gx", cpu="merced",
+                         extra_args=("-bios", flash))
+
+
+test_sale_entry_two_calls_sdv = IA64Case(
+    name="sale_entry_two_calls_sdv", runner=_sale_entry_two_calls_sdv,
+    bundles=tuple(tuple(b) for b in _sale_two_call_bundles()),
+    expected=dict(SALE_TWO_CALL_EXPECTED),
+    metadata=CaseMetadata(required_features=frozenset(
+        {"alat:full", "machine:460gx", "cpu-model:merced"})),
 )
 
 test_pal_fixed_addr_reserved_arg = require_registers(
@@ -2159,6 +2192,7 @@ CASE_NAMES = (
     'pal_vm_tr_read_misaligned_buffer',
     'pal_vm_tr_read_rejects_first_non_tr',
     'sale_entry_two_calls',
+    'sale_entry_two_calls_sdv',
 )
 
 CASE_METADATA = {

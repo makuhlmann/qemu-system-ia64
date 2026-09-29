@@ -3573,19 +3573,8 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                  */
                 .raw_pal_proc = IA64_PAL_ROM_BASE,
                 .raw_pal_auth = IA64_PAL_ROM_BASE,
-                /*
-                 * PAL_RESET's return address for the RECOVERY_CHECK call,
-                 * on the boards that make it.  0 = this board calls
-                 * SALE_ENTRY once, with function RESET: the vendor 460GX
-                 * firmware's recovery-check pass initializes the DRAM,
-                 * resets the platform itself and then spins in a software
-                 * delay loop of its RAM-resident recovery module (bios130.BIN
-                 * PspRecover, loop at RAM 0x02011C10), so it never reaches
-                 * its boot manager (0edbeda).
-                 */
-                .raw_pal_reset_return =
-                    IA64_VPC_MACHINE_GET_CLASS(s)->sale_recovery_check ?
-                    IA64_PAL_RESET_RETURN : 0,
+                /* PAL_RESET's return address for the RECOVERY_CHECK call. */
+                .raw_pal_reset_return = IA64_PAL_RESET_RETURN,
                 .raw_pal_pmi_return = IA64_PAL_PMI_RETURN,
                 /*
                  * Every processor leaves reset together and runs SAL_A,
@@ -3676,7 +3665,9 @@ static const uint8_t ia64_pal_stub[96] = {
  *
  * A missing or empty file is created from the image, and a file holding
  * just the 64 KiB variable store of the earlier NVRAM window is imported
- * into the NVRAM sector.  Every other file is refused and left unchanged,
+ * into the NVRAM sector.  A board whose RTC RAM is battery-backed keeps it
+ * after the image (nvram_battery_size); a file without that area gets a new
+ * battery's.  Every other file is refused and left unchanged,
  * as a flash update tool refuses to keep NVRAM it cannot keep (WFlash64:
  * "NVRAM not found or size mismatch.  Unable to preserve NVRAM"): one of
  * another size, a 64 KiB store the image has no NVRAM block for, and a
@@ -3839,9 +3830,11 @@ static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
 {
     const uint8_t *image = s->fw_image;
     uint64_t image_size = s->fw_image_size;
+    uint64_t battery = IA64_VPC_MACHINE_GET_CLASS(s)->nvram_battery_size;
     uint64_t sector = IA64_NVRAM_BASE - (IA64_REALFW_WINDOW_END - image_size);
     IA64FlashNvramLayout image_layout;
     g_autofree uint8_t *contents = NULL;
+    g_autofree uint8_t *tail = NULL;
     g_autofree char *existing = NULL;
     gsize existing_size = 0;
     GError *gerr = NULL;
@@ -3864,6 +3857,12 @@ static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
         error_setg(errp, "nvram '%s': cannot read: %s", path, gerr->message);
         g_error_free(gerr);
         return NULL;
+    }
+    /* Any file without the battery area gets a new battery's. */
+    tail = g_malloc0(battery);
+    if (battery != 0 && existing_size == image_size + battery) {
+        memcpy(tail, existing + image_size, battery);
+        existing_size = image_size;
     }
     if (existing_size == image_size) {
         IA64FlashNvramLayout file_layout;
@@ -3918,8 +3917,10 @@ static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
                    image_size);
         return NULL;
     }
-    if (!g_file_set_contents(path, (const gchar *)contents, image_size,
-                             &gerr)) {
+    contents = g_realloc(contents, image_size + battery);
+    memcpy(contents + image_size, tail, battery);
+    if (!g_file_set_contents(path, (const gchar *)contents,
+                             image_size + battery, &gerr)) {
         error_setg(errp, "nvram '%s': cannot write: %s", path,
                    gerr->message);
         g_error_free(gerr);
@@ -3928,9 +3929,29 @@ static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
 
     options = qdict_new();
     qdict_put_str(options, "driver", "raw");
+    qdict_put_int(options, "size", image_size);
     blk = blk_new_open(path, NULL, options, BDRV_O_RDWR, errp);
     if (blk == NULL) {
         error_prepend(errp, "nvram '%s': ", path);
+        return NULL;
+    }
+    if (battery != 0) {
+        /*
+         * A second view of the same file.  It writes only past the flash, so
+         * it takes no image lock of its own.
+         */
+        options = qdict_new();
+        qdict_put_str(options, "driver", "raw");
+        qdict_put_int(options, "offset", image_size);
+        qdict_put_int(options, "size", battery);
+        qdict_put_str(options, "file.locking", "off");
+        s->nvram_battery = blk_new_open(path, NULL, options, BDRV_O_RDWR,
+                                        errp);
+        if (s->nvram_battery == NULL) {
+            error_prepend(errp, "nvram '%s': ", path);
+            blk_unref(blk);
+            return NULL;
+        }
     }
     return blk;
 }

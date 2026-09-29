@@ -117,6 +117,11 @@ struct IA64VpcMachineClass {
      */
     bool nvram_is_pdh_store;
     /*
+     * Bytes after the flash image in the `nvram=` file that keep the RTC's
+     * battery-backed RAM (the 460GX board's south bridge); 0 = none.
+     */
+    uint32_t nvram_battery_size;
+    /*
      * The board's boot flash part.  A size of zero makes the part exactly
      * the -bios image, which is what the SDV's Firmware Hubs look like: the
      * board carries as many 1 MiB parts as the image needs.  A board with
@@ -155,14 +160,6 @@ struct IA64VpcMachineClass {
      */
     const uint8_t *processor_ids;
     unsigned int nprocessor_ids;
-    /*
-     * PALE_RESET calls SALE_ENTRY twice on this board, the first time with
-     * function RECOVERY_CHECK (SDM vol. 2 11.2.2).  The zx1 firmware needs
-     * the call: it rendezvouses its processors there.  The vendor 460GX
-     * firmware's recovery-check pass does not complete under emulation, so
-     * that board makes the RESET call only -- see ia64_base.c's boot info.
-     */
-    bool sale_recovery_check;
 
     /* Board-specific configuration checks; NULL = none. */
     bool (*validate)(IA64VpcMachineState *s, Error **errp);
@@ -226,6 +223,8 @@ struct IA64VpcMachineState {
     uint64_t firmware_console;
     uint16_t firmware_boot_timeout;
     char *nvram_path;
+    /* The RTC battery area of the `nvram=` file, or NULL. */
+    BlockBackend *nvram_battery;
     uint64_t realfw_entry;
     uint64_t realfw_base;
     PFlashCFI01 *realfw_flash;

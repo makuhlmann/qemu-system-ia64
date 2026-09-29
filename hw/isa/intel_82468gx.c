@@ -15,7 +15,13 @@
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
+#include "hw/block/block.h"
+#include "system/block-backend.h"
+#include "qemu/timer.h"
+#include "qemu/log.h"
 #include "hw/rtc/mc146818rtc.h"
+#include "hw/rtc/mc146818rtc_regs.h"
 #include "hw/timer/i8254.h"
 #include "hw/southbridge/intel_82468gx.h"
 #include "migration/vmstate.h"
@@ -153,6 +159,11 @@ struct Intel82468GXIFBState {
     uint32_t gpio_inputs;
     uint8_t rtc_ext_index;
     uint8_t rtc_ext_ram[IFB_RTC_BANK_SIZE];
+    /* The board's battery for both RTC banks; NULL keeps them volatile. */
+    BlockBackend *battery;
+    uint8_t *battery_shadow;
+    QEMUTimer *battery_timer;
+    VMChangeStateEntry *battery_vmstate;
 };
 
 #define IFB_ACPI_PM_IO_SIZE 0x40
@@ -809,6 +820,115 @@ static void ifb_remove_function(PCIDevice **pci)
     *pci = NULL;
 }
 
+/*
+ * The clock registers (00h-0Dh) and the century byte come from -rtc at each
+ * start, as the part's own clock would have kept counting; the rest of both
+ * banks is what the battery kept.
+ */
+#define IFB_BATTERY_HEADER      16
+#define IFB_BATTERY_PERIOD_MS   1000
+
+static bool ifb_battery_restores(unsigned index)
+{
+    return index >= IFB_RTC_BANK_SIZE ||
+           (index > RTC_REG_D && index != RTC_CENTURY);
+}
+
+static void ifb_battery_image(Intel82468GXIFBState *s, uint8_t *area)
+{
+    memset(area, 0, INTEL_82468GX_IFB_BATTERY_SIZE);
+    memcpy(area, INTEL_82468GX_IFB_BATTERY_MAGIC, 8);
+    memcpy(area + IFB_BATTERY_HEADER, s->rtc->cmos_data, IFB_RTC_BANK_SIZE);
+    memcpy(area + IFB_BATTERY_HEADER + IFB_RTC_BANK_SIZE, s->rtc_ext_ram,
+           IFB_RTC_BANK_SIZE);
+}
+
+/*
+ * The banks are written through I/O ports that do not trap here, so compare
+ * the banks with what the file holds and write only a change, once a second
+ * while the machine runs and whenever it stops.  A ticking clock alone is
+ * not a change.
+ */
+static void ifb_battery_flush(Intel82468GXIFBState *s)
+{
+    g_autofree uint8_t *area = g_malloc(INTEL_82468GX_IFB_BATTERY_SIZE);
+    unsigned i;
+
+    ifb_battery_image(s, area);
+    for (i = 0; i < 2 * IFB_RTC_BANK_SIZE; i++) {
+        if (ifb_battery_restores(i) &&
+            area[IFB_BATTERY_HEADER + i] !=
+            s->battery_shadow[IFB_BATTERY_HEADER + i]) {
+            break;
+        }
+    }
+    if (i == 2 * IFB_RTC_BANK_SIZE &&
+        memcmp(area, s->battery_shadow, IFB_BATTERY_HEADER) == 0) {
+        return;
+    }
+    memcpy(s->battery_shadow, area, INTEL_82468GX_IFB_BATTERY_SIZE);
+    if (blk_pwrite(s->battery, 0, INTEL_82468GX_IFB_BATTERY_SIZE, area,
+                   0) < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "82468gx: cannot write the RTC battery area\n");
+    }
+}
+
+static void ifb_battery_timer(void *opaque)
+{
+    Intel82468GXIFBState *s = opaque;
+
+    ifb_battery_flush(s);
+    timer_mod(s->battery_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+              IFB_BATTERY_PERIOD_MS);
+}
+
+static void ifb_battery_vm_state(void *opaque, bool running, RunState state)
+{
+    Intel82468GXIFBState *s = opaque;
+
+    if (running) {
+        timer_mod(s->battery_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                  IFB_BATTERY_PERIOD_MS);
+    } else {
+        timer_del(s->battery_timer);
+        ifb_battery_flush(s);
+    }
+}
+
+static bool ifb_battery_load(Intel82468GXIFBState *s, Error **errp)
+{
+    g_autofree uint8_t *area = g_malloc(INTEL_82468GX_IFB_BATTERY_SIZE);
+    unsigned i;
+
+    if (blk_set_perm(s->battery, BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE,
+                     BLK_PERM_ALL, errp) < 0 ||
+        !blk_check_size_and_read_all(s->battery, DEVICE(s), area,
+                                     INTEL_82468GX_IFB_BATTERY_SIZE, errp)) {
+        return false;
+    }
+    if (memcmp(area, INTEL_82468GX_IFB_BATTERY_MAGIC, 8) == 0) {
+        for (i = 0; i < 2 * IFB_RTC_BANK_SIZE; i++) {
+            uint8_t byte = area[IFB_BATTERY_HEADER + i];
+
+            if (!ifb_battery_restores(i)) {
+                continue;
+            }
+            if (i < IFB_RTC_BANK_SIZE) {
+                s->rtc->cmos_data[i] = byte;
+            } else {
+                s->rtc_ext_ram[i - IFB_RTC_BANK_SIZE] = byte;
+            }
+        }
+    }
+    /* A new battery reads as zeros and is written once the banks change. */
+    s->battery_shadow = g_steal_pointer(&area);
+    s->battery_timer = timer_new_ms(QEMU_CLOCK_REALTIME, ifb_battery_timer, s);
+    s->battery_vmstate = qemu_add_vm_change_state_handler(ifb_battery_vm_state,
+                                                          s);
+    return true;
+}
+
 static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
 {
     Intel82468GXIFBState *s = INTEL_82468GX_IFB(pci);
@@ -849,6 +969,9 @@ static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
 
     /* The bridge carries the RTC too (SSDM 15.5), both of its banks. */
     s->rtc = mc146818_rtc_init(s->isa_bus, 2000, NULL);
+    if (s->battery && !ifb_battery_load(s, errp)) {
+        return;
+    }
     memory_region_init_io(&s->rtc_ext, OBJECT(s), &ifb_rtc_ext_ops, s,
                           TYPE_INTEL_82468GX_IFB ".rtc-ext", 2);
     memory_region_init_alias(&s->rtc_ext_alias, OBJECT(s),
@@ -914,6 +1037,12 @@ static void ifb_lpc_exit(PCIDevice *pci)
 {
     Intel82468GXIFBState *s = INTEL_82468GX_IFB(pci);
 
+    if (s->battery_vmstate) {
+        qemu_del_vm_change_state_handler(s->battery_vmstate);
+        s->battery_vmstate = NULL;
+    }
+    g_clear_pointer(&s->battery_timer, timer_free);
+    g_clear_pointer(&s->battery_shadow, g_free);
 
     ifb_remove_function(&s->functions[3]);
     ifb_remove_function(&s->functions[2]);
@@ -1003,6 +1132,8 @@ static const Property ifb_lpc_properties[] = {
                        Intel82468GXIFBState, init_acpi_base, 0),
     DEFINE_PROP_UINT32(INTEL_82468GX_IFB_PROP_GPIO_INPUTS,
                        Intel82468GXIFBState, gpio_inputs, UINT32_MAX),
+    DEFINE_PROP_DRIVE(INTEL_82468GX_IFB_PROP_BATTERY, Intel82468GXIFBState,
+                      battery),
 };
 
 static void ifb_lpc_class_init(ObjectClass *klass, const void *data)
@@ -1163,6 +1294,7 @@ DEFINE_TYPES(intel_82468gx_ifb_types)
 
 Intel82468GXIFBState *intel_82468gx_ifb_create(PCIBus *bus, int devfn,
                                                uint32_t gpio_inputs,
+                                               BlockBackend *battery,
                                                uint16_t init_acpi_base,
                                                Error **errp)
 {
@@ -1182,6 +1314,10 @@ Intel82468GXIFBState *intel_82468gx_ifb_create(PCIBus *bus, int devfn,
                          init_acpi_base);
     qdev_prop_set_uint32(DEVICE(pci), INTEL_82468GX_IFB_PROP_GPIO_INPUTS,
                          gpio_inputs);
+    if (battery) {
+        qdev_prop_set_drive_err(DEVICE(pci), INTEL_82468GX_IFB_PROP_BATTERY,
+                                battery, &error_abort);
+    }
     if (!pci_realize_and_unref(pci, bus, errp)) {
         return NULL;
     }

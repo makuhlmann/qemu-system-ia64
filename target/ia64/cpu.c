@@ -830,13 +830,7 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
     CPUIA64State *env = &cpu->env;
     const IA64BootInfo *info = &cpu->boot_info;
 
-    /*
-     * A board without a PAL_RESET return address makes the RESET call only
-     * (ia64_base.c: the vendor 460GX firmware's recovery-check pass does not
-     * run under emulation).
-     */
-    bool reset_call = cpu->sale_reset_call ||
-                      cpu->boot_info.raw_pal_reset_return == 0;
+    bool reset_call = cpu->sale_reset_call;
 
     cpu->sale_reset_call = false;
     if (!cpu->boot_info_valid || !cpu->boot_info_pending) {

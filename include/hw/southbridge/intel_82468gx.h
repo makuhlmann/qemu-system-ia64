@@ -29,6 +29,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(Intel82468GXIFBState, INTEL_82468GX_IFB)
 /* ACPI I/O base the board firmware programs at POST; 0 = part reset state. */
 #define INTEL_82468GX_IFB_PROP_INIT_ACPI_BASE "init-acpi-base"
 #define INTEL_82468GX_IFB_PROP_GPIO_INPUTS    "gpio-inputs"
+#define INTEL_82468GX_IFB_PROP_BATTERY        "battery"
+/*
+ * The battery-backed RTC RAM as a board keeps it in a file: a tag, then the
+ * standard and the extended bank, 128 bytes each.  An area without the tag
+ * is a new battery.
+ */
+#define INTEL_82468GX_IFB_BATTERY_SIZE        512
+#define INTEL_82468GX_IFB_BATTERY_MAGIC       "IFB-RTC1"
 
 #define INTEL_82468GX_IFB_VENDOR_ID       0x8086
 #define INTEL_82468GX_IFB_LPC_DEVICE_ID   0x7600
@@ -42,6 +50,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Intel82468GXIFBState, INTEL_82468GX_IFB)
 
 Intel82468GXIFBState *intel_82468gx_ifb_create(PCIBus *bus, int devfn,
                                                uint32_t gpio_inputs,
+                                               BlockBackend *battery,
                                                uint16_t init_acpi_base,
                                                Error **errp);
 MC146818RtcState *intel_82468gx_ifb_rtc(Intel82468GXIFBState *s);
