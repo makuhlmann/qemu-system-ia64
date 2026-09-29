@@ -6087,6 +6087,119 @@ static void test_e1000_packet_transfer(void)
     close(sockets[0]);
 }
 
+/*
+ * The PRO/100 on the NIC slot (CSR BAR at IA64_E1000_MMIO_BASE), with the
+ * 82559's extended TxCB (configure byte 6 bit 4 clear): the frame is in the
+ * two TBDs inside the TCB, and the TBD array address is a null pointer
+ * because there is no third one (8255x manual 6.4.2.5).  A received frame's
+ * RFD has EOF and F set with the actual count (Figure 25).
+ */
+#define IA64_E100_SCB_CMD       2U
+#define IA64_E100_CU_START      0x10U
+#define IA64_E100_CU_BASE       0x60U
+#define IA64_E100_RU_START      0x01U
+#define IA64_E100_RU_BASE       0x06U
+#define IA64_E100_CB_ADDR       0x00120000U
+#define IA64_E100_TCB_ADDR      0x00120100U
+#define IA64_E100_TX_BUF_ADDR   0x00121000U
+#define IA64_E100_RFD_ADDR      0x00122000U
+#define IA64_E100_RFD_DATA      16U
+#define IA64_E100_CB_C          0x8000U
+
+static void e100_scb_command(QTestState *qts, uint32_t pointer, uint8_t cmd)
+{
+    qtest_writel(qts, IA64_E1000_MMIO_BASE + IA64_E100_SCB_POINTER, pointer);
+    qtest_writeb(qts, IA64_E1000_MMIO_BASE + IA64_E100_SCB_CMD, cmd);
+}
+
+static bool e100_wait_complete(QTestState *qts, uint32_t addr)
+{
+    int i;
+
+    for (i = 0; i < IA64_E1000_TEST_TIMEOUT_MS; i++) {
+        if (qtest_readw(qts, addr) & IA64_E100_CB_C) {
+            return true;
+        }
+        qtest_clock_step(qts, 1000);
+        g_usleep(1000);
+    }
+    return false;
+}
+
+static void test_e100_packet_transfer(void)
+{
+    static const uint8_t mac[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+    uint8_t packet[64];
+    uint8_t config[22] = { [0] = 22, [8] = 0x01 };
+    uint8_t received[sizeof(packet)];
+    uint32_t frame_length;
+    g_autofree char *args = NULL;
+    QTestState *qts;
+    int sockets[2];
+    unsigned i;
+
+    /* Addressed to the adapter itself, so its receive filter takes it. */
+    for (i = 0; i < sizeof(packet); i++) {
+        packet[i] = i * 7;
+    }
+    memcpy(packet, mac, sizeof(mac));
+    g_assert_cmpint(qemu_socketpair(PF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    qemu_clear_cloexec(sockets[1]);
+    args = g_strdup_printf("-nic socket,fd=%d,model=i82559c,"
+                           "mac=52:54:00:12:34:56", sockets[1]);
+    qts = qtest_initf("-machine 460gx -m 256M %s", args);
+    close(sockets[1]);
+
+    e100_scb_command(qts, 0, IA64_E100_CU_BASE);
+    e100_scb_command(qts, 0, IA64_E100_RU_BASE);
+
+    /* Configure (extended TxCB), then one transmit of two buffers. */
+    qtest_writel(qts, IA64_E100_CB_ADDR, 0x0002U << 16);
+    qtest_writel(qts, IA64_E100_CB_ADDR + 4, IA64_E100_TCB_ADDR);
+    qtest_memwrite(qts, IA64_E100_CB_ADDR + 8, config, sizeof(config));
+    qtest_writel(qts, IA64_E100_TCB_ADDR, 0x800cU << 16);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 4, 0);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 8, 0xffffffffU);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 12, (2U << 24) | 0x8000U);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 16, IA64_E100_TX_BUF_ADDR);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 20, 20);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 24, IA64_E100_TX_BUF_ADDR + 0x800);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 28, (1U << 16) | 44);
+    qtest_memwrite(qts, IA64_E100_TX_BUF_ADDR, packet, 20);
+    qtest_memwrite(qts, IA64_E100_TX_BUF_ADDR + 0x800, packet + 20, 44);
+    e100_scb_command(qts, IA64_E100_CB_ADDR, IA64_E100_CU_START);
+
+    g_assert_true(e100_wait_complete(qts, IA64_E100_TCB_ADDR));
+    g_assert_true(socket_receive_all(sockets[0], &frame_length,
+                                     sizeof(frame_length)));
+    g_assert_cmpuint(ntohl(frame_length), ==, sizeof(packet));
+    g_assert_true(socket_receive_all(sockets[0], received, sizeof(received)));
+    g_assert_cmpmem(received, sizeof(received), packet, sizeof(packet));
+
+    /* One simplified RFD, the last in the RFA. */
+    qtest_writel(qts, IA64_E100_RFD_ADDR, 0x8000U << 16);
+    qtest_writel(qts, IA64_E100_RFD_ADDR + 4, 0);
+    qtest_writel(qts, IA64_E100_RFD_ADDR + 8, 0xffffffffU);
+    qtest_writel(qts, IA64_E100_RFD_ADDR + 12, 1536U << 16);
+    e100_scb_command(qts, IA64_E100_RFD_ADDR, IA64_E100_RU_START);
+    frame_length = htonl(sizeof(packet));
+    g_assert_cmpint(qemu_write_full(sockets[0], &frame_length,
+                                    sizeof(frame_length)), ==,
+                    sizeof(frame_length));
+    g_assert_cmpint(qemu_write_full(sockets[0], packet, sizeof(packet)), ==,
+                    sizeof(packet));
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
+    g_assert_true(e100_wait_complete(qts, IA64_E100_RFD_ADDR));
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR + 12), ==,
+                    0xc000U | sizeof(packet));
+    qtest_memread(qts, IA64_E100_RFD_ADDR + IA64_E100_RFD_DATA,
+                  received, sizeof(received));
+    g_assert_cmpmem(received, sizeof(received), packet, sizeof(packet));
+
+    qtest_quit(qts);
+    close(sockets[0]);
+}
+
 static void assert_cmd646_at_slot0(QTestState *qts)
 {
     QGenericPCIBus gbus;
@@ -8908,6 +9021,8 @@ int main(int argc, char **argv)
                    test_e1000_intx_route);
     qtest_add_func("/ia64-vpc/network/packet-transfer",
                    test_e1000_packet_transfer);
+    qtest_add_func("/ia64-vpc/e100/packet-transfer",
+                   test_e100_packet_transfer);
     qtest_add_func("/ia64-vpc/lsi/async-nodata-command",
                    test_lsi_async_nodata_command);
     qtest_add_func("/ia64-vpc/lsi/dbms-no-leak",

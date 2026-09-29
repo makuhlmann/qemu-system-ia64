@@ -893,6 +893,18 @@ static void tx_command(EEPRO100State *s)
     uint8_t buf[2600];
     uint16_t size = 0;
     uint32_t tbd_address = s->cb_address + 0x10;
+    /*
+     * The SF bit selects simplified or flexible mode.  An extended TxCB
+     * (82558 and later, configure byte 6 bit 4 clear) is always flexible:
+     * its last 4 Dwords are the first two TBDs, the TBD array address
+     * points to the third, and the TBD number counts all of them (8255x
+     * manual 6.4.2.5).
+     */
+    bool extended = s->has_extended_tcb_support &&
+                    !(s->configuration[6] & BIT(4));
+    bool flexible = extended || (s->tx.command & COMMAND_SF);
+    uint8_t tbd_count = 0;
+    bool el = false;
     TRACE(RXTX, logout
         ("transmit, TBD array address 0x%08x, TCB byte count 0x%04x, TBD count %u\n",
          tbd_array, tcb_bytes, s->tx.tbd_count));
@@ -901,48 +913,23 @@ static void tx_command(EEPRO100State *s)
         logout("TCB byte count too large, using 2600\n");
         tcb_bytes = 2600;
     }
-    if (!((tcb_bytes > 0) || (tbd_array != 0xffffffff))) {
-        logout
-            ("illegal values of TBD array address and TCB byte count!\n");
+    /* Data in the TCB comes first, right after the TCB. */
+    if (tcb_bytes > 0) {
+        pci_dma_read(&s->dev, tbd_address + (extended ? 0x10 : 0),
+                     buf, tcb_bytes);
+        size = tcb_bytes;
     }
-    assert(tcb_bytes <= sizeof(buf));
-    while (size < tcb_bytes) {
-        TRACE(RXTX, logout
-            ("TBD (simplified mode): buffer address 0x%08x, size 0x%04x\n",
-             tbd_address, tcb_bytes));
-        pci_dma_read(&s->dev, tbd_address, &buf[size], tcb_bytes);
-        size += tcb_bytes;
-    }
-    if (tbd_array == 0xffffffff) {
-        /* Simplified mode. Was already handled by code above. */
-    } else {
-        /* Flexible mode. */
-        uint8_t tbd_count = 0;
-        uint32_t tx_buffer_address;
-        uint16_t tx_buffer_size;
-        uint16_t tx_buffer_el;
+    if (flexible) {
+        for (; !el && tbd_count < s->tx.tbd_count; tbd_count++) {
+            uint32_t tx_buffer_address;
+            uint16_t tx_buffer_size;
+            uint16_t tx_buffer_el;
 
-        if (s->has_extended_tcb_support && !(s->configuration[6] & BIT(4))) {
-            /* Extended Flexible TCB. */
-            for (; tbd_count < 2; tbd_count++) {
-                ldl_le_pci_dma(&s->dev, tbd_address, &tx_buffer_address, attrs);
-                lduw_le_pci_dma(&s->dev, tbd_address + 4, &tx_buffer_size, attrs);
-                lduw_le_pci_dma(&s->dev, tbd_address + 6, &tx_buffer_el, attrs);
-                tbd_address += 8;
-                TRACE(RXTX, logout
-                    ("TBD (extended flexible mode): buffer address 0x%08x, size 0x%04x\n",
-                     tx_buffer_address, tx_buffer_size));
-                tx_buffer_size = MIN(tx_buffer_size, sizeof(buf) - size);
-                pci_dma_read(&s->dev, tx_buffer_address,
-                             &buf[size], tx_buffer_size);
-                size += tx_buffer_size;
-                if (tx_buffer_el & 1) {
-                    break;
-                }
+            if (extended && tbd_count == 2) {
+                tbd_address = tbd_array;
+            } else if (!extended && tbd_count == 0) {
+                tbd_address = tbd_array;
             }
-        }
-        tbd_address = tbd_array;
-        for (; tbd_count < s->tx.tbd_count; tbd_count++) {
             ldl_le_pci_dma(&s->dev, tbd_address, &tx_buffer_address, attrs);
             lduw_le_pci_dma(&s->dev, tbd_address + 4, &tx_buffer_size, attrs);
             lduw_le_pci_dma(&s->dev, tbd_address + 6, &tx_buffer_el, attrs);
@@ -950,13 +937,11 @@ static void tx_command(EEPRO100State *s)
             TRACE(RXTX, logout
                 ("TBD (flexible mode): buffer address 0x%08x, size 0x%04x\n",
                  tx_buffer_address, tx_buffer_size));
-            tx_buffer_size = MIN(tx_buffer_size, sizeof(buf) - size);
+            tx_buffer_size = MIN(tx_buffer_size & 0x3fff, sizeof(buf) - size);
             pci_dma_read(&s->dev, tx_buffer_address,
                          &buf[size], tx_buffer_size);
             size += tx_buffer_size;
-            if (tx_buffer_el & 1) {
-                break;
-            }
+            el = tx_buffer_el & 1;
         }
     }
     TRACE(RXTX, logout("%p sending frame, len=%d,%s\n", s, size, nic_dump(buf, size)));
@@ -2080,8 +2065,9 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
           rfd_command, rx.link, rx.rx_buf_addr, rfd_size));
     stw_le_pci_dma(&s->dev, s->ru_base + s->ru_offset +
                 offsetof(eepro100_rx_t, status), rfd_status, attrs);
+    /* The device sets EOF and F with the actual count (manual Figure 25). */
     stw_le_pci_dma(&s->dev, s->ru_base + s->ru_offset +
-                offsetof(eepro100_rx_t, count), size, attrs);
+                offsetof(eepro100_rx_t, count), size | 0xc000, attrs);
     /* Early receive interrupt not supported. */
 #if 0
     eepro100_er_interrupt(s);
