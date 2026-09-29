@@ -26,7 +26,7 @@ fw_pal_buffer:
      * with the C preprocessor); the per-CPU stride below (shl 17 = 128 KiB)
      * equals IA64_FW_CPU_STACK_SIZE, enforced by a static assert there.
      */
-    .equ FW_PCI_MMIO_BASE, IA64_PCI_MMIO_BASE
+    .equ FW_460GX_LOW_RAM_END, IA64_460GX_LOW_RAM_END
     .equ FW_ZX1_MEMORY0_END, IA64_ZX1_MEMORY0_END
     .equ FW_CHIPSET_ZX1, IA64_FW_CHIPSET_ZX1
     .equ FW_LOW_RAM_MIN, IA64_FW_LOW_RAM_MIN
@@ -203,7 +203,7 @@ fw_flash_entry:
     mov r4 = r8                 /* r4 = installed DRAM, bytes */
     ;;
     ld8 r3 = [r14]              /* r3 = chipset (IA64_FW_CHIPSET_*) */
-    movl r19 = FW_PCI_MMIO_BASE
+    movl r19 = FW_460GX_LOW_RAM_END
     movl r22 = FW_LOW_RAM_ALIGN_MASK
     ;;
     /* The zx1 DRAM run at 0 ends at the I/O virtual region (mio ERS 2.1). */

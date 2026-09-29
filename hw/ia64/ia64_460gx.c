@@ -218,7 +218,8 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
  * its AGP child.  A below-4-GiB base is represented and placed intact.
  *
  * So when a write leaves BAPBASE naming an address at or above 4 GiB, re-base
- * the aperture inside PCI3's producer window, below the graphics framebuffer.
+ * the aperture inside PCI3's producer window, below the graphics framebuffer,
+ * at the base our own firmware uses (IA64_460GX_AGP_APERTURE_BASE).
  * Only an above-4-GiB base is clamped -- a legitimate below-4-GiB base (agp460
  * writes the aperture back once the OS owns it) is left as written.  AGPSIZ
  * bit 3 stays set: it only selects the 64-bit register, not an above-4-GiB
@@ -236,7 +237,6 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
 #define IA64_460GX_GXB_BAPBASE_LAST    0x9f
 #define IA64_460GX_GXB_GXBCTL_REG      0xa0
 #define IA64_460GX_GXB_AGPSIZ_REG      0xa2
-#define IA64_460GX_GXB_AGP_APERTURE_BASE 0x00000000d0000000ULL
 
 static bool ia64_460gx_gxb_aperture_reg(IA64460GXState *s, uint8_t dev,
                                         uint8_t fn, unsigned off)
@@ -814,10 +814,10 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
             if (pci_get_quad(agp->config + IA64_460GX_GXB_BAPBASE_REG) >> 32) {
                 pci_host_config_write_common(
                     agp, IA64_460GX_GXB_BAPBASE_REG, pci_config_size(agp),
-                    IA64_460GX_GXB_AGP_APERTURE_BASE, 4);
+                    IA64_460GX_AGP_APERTURE_BASE, 4);
                 pci_host_config_write_common(
                     agp, IA64_460GX_GXB_BAPBASE_REG + 4, pci_config_size(agp),
-                    IA64_460GX_GXB_AGP_APERTURE_BASE >> 32, 4);
+                    IA64_460GX_AGP_APERTURE_BASE >> 32, 4);
             }
         }
         return;

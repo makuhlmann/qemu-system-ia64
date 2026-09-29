@@ -14,7 +14,7 @@ from ia64.media import make_el_torito_iso, make_fat_disk
 
 SMOKE_CASES = {
     "entry", "system-table", "loaded-image", "device-path",
-    "acpi-enable", "console-output",
+    "acpi-enable", "agp-aperture", "console-output",
 }
 
 
@@ -42,9 +42,12 @@ class Ia64FirmwareSmoke(Ia64FirmwareTest):
         self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
 
     def test_460gx_cold_boot(self):
+        # 4 GiB: the DRAM band then reaches the variable gap that holds the
+        # AGP aperture.
         vm = self.launch_ia64(
             machine="460gx", media=self.make_disk("460gx.img"),
-            machine_options="firmware-console=serial,nvram=none")
+            machine_options="firmware-console=serial,nvram=none",
+            memory="4G")
         result = self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
         self.assert_post_self_tests_pass(result.raw_console)
 

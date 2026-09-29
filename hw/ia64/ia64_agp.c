@@ -22,19 +22,14 @@
  *     clear, or the non-header BAPBASE (0x98) when it is set;
  *   - GATT entry = 0x03000000 | (paddr[35:12]); bit24 valid, bit25 coherent.
  *
- * Aperture placement (SSDM 248704-001 sec 7.2.1).  The AGP master here is an
- * ATI Rage 128, whose AGP_BASE register (0x170) is only 32 bits wide -- it
- * cannot issue the dual-address cycles a >4 GiB aperture would need -- so the
- * aperture bus address must live below 4 GiB, and the GART translates those
- * 32-bit aperture pages up to 36-bit DRAM physical addresses (which may be
- * above 4 GiB).  The only sub-4 GiB range clear of DRAM on this platform is the
- * PCI MMIO hole [0xEE000000, 0xFE000000), so the aperture reuses it -- exactly
- * the SSDM "reserved gap in the PCI address space" placement.  Because the
- * aperture is never touched by the processor (i460-agp sets cant_use_aperture),
- * it is not a header BAR mapped into CPU space (which would collide with the
- * VGA framebuffer BAR and trip the guest PCI resource allocator); it is exposed
- * only in the per-bus DMA address space through the IOMMU below, and its base
- * is advertised through BAPBASE with AGPSIZ bit3 set.
+ * Aperture placement (SSDM 248704-001 sec 7.2.1).  The firmware programs
+ * BAPBASE.  The ATI Rage 128's AGP_BASE register (0x170) is only 32 bits
+ * wide, so our firmware takes the SSDM's second case: a 256 MB range of the
+ * variable gap below 4 GiB, at IA64_460GX_AGP_APERTURE_BASE, clear of DRAM
+ * and of the PCI windows (7.2.3).  The GART translates those pages to 36-bit
+ * DRAM addresses, above 4 GiB too.  The processor never touches the aperture
+ * (i460-agp sets cant_use_aperture), so it exists only in the per-bus DMA
+ * address space through the IOMMU below.
  *
  * On the board these registers are the GXB's function 1 on the chipset bus
  * (CBN device 14h), where the vendor firmware and Windows' agp460 program
@@ -90,13 +85,10 @@
  * chipset's 32 GiB with 4 MiB pages.  The vendor SDV firmware sets up the
  * aperture from the SRAM it finds, and with 1 MiB its DSDT's AGP bus window
  * (\_SB.PCI3._CRS) starts at 0, so XP 2600 stops the AGP bridge (Code 12).
- * The aperture bus range starts at the platform PCI MMIO hole (see the
- * placement note above); an out-of-aperture DMA still passes straight
- * through to system memory.
+ * An out-of-aperture DMA passes straight through to system memory.
  */
 #define I460_GART_SRAM_SIZE     (256 * KiB)
 #define I460_GATT_ENTRIES       (I460_GART_SRAM_SIZE / sizeof(uint32_t))
-#define I460_APERTURE_BASE      IA64_PCI_MMIO_BASE
 
 static IA64AGPState *ia64_agp_from_iommu(IOMMUMemoryRegion *iommu)
 {
@@ -257,11 +249,11 @@ static void ia64_agp_config_write(PCIDevice *dev, uint32_t addr,
  * i460-agp reads GXBCTL bit1 (must be 0 = 4 KiB pages) and AGPSIZ[2:0]
  * (1 = 256 MiB).  AGPSIZ bit3 (BAPBASE_ENABLE) is set so the driver takes
  * the aperture base from BAPBASE (a >4 GiB-capable, non-header BAR) rather
- * than the standard header BAR -- see the placement note at the top.  When
- * the machine turns the GART off (agp=off), also assert bit4
- * (SRAM_IO_DISABLE), on which i460_fetch_size() bails ("GART SRAMS
- * disabled") so the OS keeps to the Rage 128's own PCI GART.  Our firmware
- * programs none of them, so these values stand in for its setup.
+ * than the standard header BAR.  When the machine turns the GART off
+ * (agp=off), also assert bit4 (SRAM_IO_DISABLE), on which i460_fetch_size()
+ * bails ("GART SRAMS disabled") so the OS keeps to the Rage 128's own PCI
+ * GART.  BAPBASE comes out of reset without a base, and the aperture stays
+ * off until the firmware places it.
  */
 static void ia64_agp_reset_regs(IA64AGPState *s)
 {
@@ -270,8 +262,7 @@ static void ia64_agp_reset_regs(IA64AGPState *s)
     c[I460_GXBCTL] = 0x00;
     c[I460_AGPSIZ] = I460_AGPSIZ_SIZE_256M | I460_AGPSIZ_BAPBASE_EN |
                      (s->gart_enabled ? 0 : I460_AGPSIZ_SRAM_IO_DIS);
-    pci_set_quad(c + I460_BAPBASE,
-                 I460_APERTURE_BASE | PCI_BASE_ADDRESS_MEM_TYPE_64);
+    pci_set_quad(c + I460_BAPBASE, PCI_BASE_ADDRESS_MEM_TYPE_64);
 }
 
 static void ia64_agp_realize(PCIDevice *dev, Error **errp)
@@ -285,11 +276,10 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
     dev->wmask[I460_GXBCTL] = 0x07;           /* OOG, 4 MB pages, BWC */
     dev->wmask[I460_AGPSIZ] = 0x07;           /* size_value RMW, keep [7:3] */
     /*
-     * The GXB decodes 40 address bits (SSDM 7.2.1).  The SSDM hardwires
-     * bits 27:12 to 0; bits 27:24 stay writable so that the register can
-     * hold the placement above, which is not 256 MB aligned.
+     * The GXB decodes 40 address bits (SSDM 7.2.1), and AGP_BASE bits 27:12
+     * are hardwired to 0 (7.1).
      */
-    pci_set_quad(dev->wmask + I460_BAPBASE, 0x000000ffff000000ULL);
+    pci_set_quad(dev->wmask + I460_BAPBASE, 0x000000fff0000000ULL);
     ia64_agp_reset_regs(s);
 
     /* Mandatory: an AGP capability, or the driver returns -ENODEV. */

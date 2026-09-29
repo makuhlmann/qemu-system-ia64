@@ -223,7 +223,7 @@
 /*
  * low_ram_end for an installed RAM size, as both QEMU and the firmware see it;
  * low_top is where the board's DRAM run at 0 ends when RAM fills it
- * (IA64_PCI_MMIO_BASE on the 460GX, IA64_ZX1_MEMORY0_END on zx1).
+ * (IA64_460GX_LOW_RAM_END on the 460GX, IA64_ZX1_MEMORY0_END on zx1).
  */
 #define IA64_FW_LOW_RAM_END(ram_size, low_top) \
     ((((ram_size) < (low_top) ? (ram_size) : (low_top))) & \
@@ -259,6 +259,17 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  */
 #define IA64_PCI_MMIO_BASE            IA64_U64(0x00000000ee000000)
 #define IA64_PCI_MMIO_SIZE            IA64_U64(0x0000000010000000)
+
+/*
+ * The 460GX's variable gap also holds the GXB's AGP aperture, below the PCI
+ * windows (SSDM 7.2.1, the reserved-gap case): 256 MB, on a 256 MB boundary
+ * because AGP_BASE bits 27:12 are hardwired (7.1), and clear of DRAM and PCI
+ * space (7.2.3).  The DRAM band at 0 ends where the gap starts; the gap plus
+ * the fixed 32 MB is then 768 MB, a multiple of 64 MB as 4.1.3.1 requires.
+ */
+#define IA64_460GX_AGP_APERTURE_BASE  IA64_U64(0x00000000d0000000)
+#define IA64_460GX_AGP_APERTURE_SIZE  IA64_U64(0x0000000010000000)
+#define IA64_460GX_LOW_RAM_END        IA64_460GX_AGP_APERTURE_BASE
 
 /*
  * IA-64 legacy I/O port block and PCI config space.  (Deviation from real

@@ -5,9 +5,13 @@
 static UINT8 loaded_image_guid[16] = IA64_GUID_LOADED_IMAGE;
 static UINT8 device_path_guid[16] = IA64_GUID_DEVICE_PATH;
 static UINT8 acpi20_guid[16] = IA64_GUID_ACPI20;
+static UINT8 pci_root_guid[16] = IA64_GUID_PCI_ROOT_IO;
 
 #define SMOKE_LEGACY_IO_BASE 0x00000ffffc000000ULL
 #define SMOKE_SCI_EN_POLLS   1000000U
+#define SMOKE_GXB(reg)       ((0x1fULL << 16) | (reg))
+#define SMOKE_GXB_ID         0x84ea8086U
+#define SMOKE_APERTURE_SIZE  0x10000000ULL
 
 static UINT64 smoke_get(const UINT8 *Address, UINTN Size)
 {
@@ -93,6 +97,76 @@ static BOOLEAN smoke_acpi_enable(EFI_SYSTEM_TABLE *SystemTable)
     return smoke_wait_sci_en(pm1a_cnt, 0);
 }
 
+static BOOLEAN smoke_range_free(EFI_SYSTEM_TABLE *SystemTable, UINT64 Base,
+                                UINT64 End)
+{
+    EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
+    EFI_MEMORY_DESCRIPTOR *map = NULL;
+    UINTN map_size = 0, key, descriptor_size = 0;
+    UINT32 version;
+    BOOLEAN ok;
+    UINTN i;
+
+    if (bs->GetMemoryMap(&map_size, NULL, &key, &descriptor_size,
+                         &version) != EFI_BUFFER_TOO_SMALL ||
+        descriptor_size < sizeof(EFI_MEMORY_DESCRIPTOR)) {
+        return 0;
+    }
+    map_size += 4U * descriptor_size;
+    if (bs->AllocatePool(EfiLoaderData, map_size, (VOID **)&map) !=
+        EFI_SUCCESS) {
+        return 0;
+    }
+    ok = bs->GetMemoryMap(&map_size, map, &key, &descriptor_size,
+                          &version) == EFI_SUCCESS;
+    for (i = 0; ok && i < map_size / descriptor_size; i++) {
+        const EFI_MEMORY_DESCRIPTOR *d = (const EFI_MEMORY_DESCRIPTOR *)
+            ((UINT8 *)map + i * descriptor_size);
+        UINT64 end = d->PhysicalStart + (d->NumberOfPages << 12);
+
+        ok = d->PhysicalStart >= End || end <= Base;
+    }
+    (void)bs->FreePool(map);
+    return ok;
+}
+
+/*
+ * The 460GX's GXB, where Linux finds it (8086:84EA at 00:1f.0): the firmware
+ * gives it a 256 MB aperture from BAPBASE, on a 256 MB boundary (AGP_BASE
+ * bits 27:12 are hardwired, SSDM 7.1), clear of DRAM and of everything else
+ * the memory map describes (7.2.3).  A board without it passes.
+ */
+static BOOLEAN smoke_agp_aperture(EFI_SYSTEM_TABLE *SystemTable)
+{
+    EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *root = NULL;
+    UINT32 id = 0, low = 0, high = 0;
+    UINT8 size = 0;
+    UINT64 base;
+
+    if (SystemTable->BootServices->LocateProtocol(
+            pci_root_guid, NULL, (VOID **)&root) != EFI_SUCCESS ||
+        root == NULL ||
+        root->Pci.Read(root, EfiPciWidthUint32, SMOKE_GXB(0), 1, &id) !=
+            EFI_SUCCESS) {
+        return 0;
+    }
+    if (id != SMOKE_GXB_ID) {
+        return 1;
+    }
+    if (root->Pci.Read(root, EfiPciWidthUint8, SMOKE_GXB(0xa2), 1, &size) !=
+            EFI_SUCCESS ||
+        root->Pci.Read(root, EfiPciWidthUint32, SMOKE_GXB(0x98), 1, &low) !=
+            EFI_SUCCESS ||
+        root->Pci.Read(root, EfiPciWidthUint32, SMOKE_GXB(0x9c), 1, &high) !=
+            EFI_SUCCESS) {
+        return 0;
+    }
+    base = (((UINT64)high << 32) | low) & ~0xfULL;
+    return (size & 0x0fU) == 0x09U && base != 0 &&
+           (base & (SMOKE_APERTURE_SIZE - 1U)) == 0 &&
+           smoke_range_free(SystemTable, base, base + SMOKE_APERTURE_SIZE);
+}
+
 static BOOLEAN system_table_crc_valid(EFI_SYSTEM_TABLE *SystemTable)
 {
     UINT8 copy[256];
@@ -162,6 +236,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
     ia64_test_check(&context, "acpi-enable", smoke_acpi_enable(SystemTable),
                     EFI_DEVICE_ERROR, "sci-en");
+
+    ia64_test_check(&context, "agp-aperture", smoke_agp_aperture(SystemTable),
+                    EFI_DEVICE_ERROR, "bapbase");
 
     ia64_test_check(&context, "console-output",
                     SystemTable != NULL && SystemTable->ConOut != NULL &&

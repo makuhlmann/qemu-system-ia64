@@ -27,12 +27,11 @@
 #include "qemu/timer.h"
 
 /*
- * Low (sub-aperture) DRAM runs contiguously from 0 up to the PCI/MMIO
- * aperture, exactly as the real 460GX keeps a single MMIO gap at the top of
- * the 32-bit space; RAM displaced by that gap is remapped above 4 GiB.  There
- * is no DRAM island between the aperture and the chipset/SAPIC region.
+ * Low DRAM runs contiguously from 0 up to the 460GX's variable gap, which
+ * holds the AGP aperture and the PCI windows; RAM displaced by the gap is
+ * remapped above 4 GiB (SSDM 4.1.5).
  */
-#define IA64_LOW_RAM_LIMIT IA64_PCI_MMIO_BASE
+#define IA64_LOW_RAM_LIMIT IA64_460GX_LOW_RAM_END
 
 /*
  * The spare Programmable Interrupt Device inputs a 460gx root swizzles an

@@ -188,7 +188,9 @@ BOOLEAN fw_acpi_sci_override(UINT32 *Gsi, UINT16 *Flags)
  * the two WXBs, 14h the GXB.  Port 10h is the compatibility bus, bus 0
  * whatever its pair says.  The numbers are the ones this firmware's DSDT
  * reports for the roots; the chipset's PCIS windows stay unprogrammed so
- * the DRAM band keeps the layout the memory map describes.
+ * the DRAM band keeps the layout the memory map describes.  Then the GXB's
+ * function 1 gets its AGP aperture, 256 MB from BAPBASE, in the variable
+ * gap below the PCI windows (SSDM 7.2.1).
  */
 void fw_platform_init_expander_ports(void)
 {
@@ -211,6 +213,11 @@ void fw_platform_init_expander_ports(void)
         pci_config_write_value(0, IA64_460GX_CBN_BUS, ports[i].Device, 0,
                                0x49, 1, ports[i].Bus);
     }
+    pci_config_write_value(0, IA64_460GX_CBN_BUS, 0x14, 1, 0xa2, 1, 0x09);
+    pci_config_write_value(0, IA64_460GX_CBN_BUS, 0x14, 1, 0x98, 4,
+                           (UINT32)IA64_460GX_AGP_APERTURE_BASE);
+    pci_config_write_value(0, IA64_460GX_CBN_BUS, 0x14, 1, 0x9c, 4,
+                           IA64_460GX_AGP_APERTURE_BASE >> 32);
 }
 
 /*

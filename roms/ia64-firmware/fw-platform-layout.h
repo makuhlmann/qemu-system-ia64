@@ -179,11 +179,10 @@ extern UINT64 mAcpiRegionBase;
 #define FW_LOW_ANCHOR_SIZE       0x0000000000002000ULL
 #define FW_LOW_RUNTIME_IMAGE_BASE 0x0000000008010000ULL
 /*
- * Low (sub-aperture) DRAM ends at the PCI/MMIO aperture: it runs contiguously
- * from 0 to here, matching real 460GX, and any RAM beyond it is remapped above
- * 4 GiB.  There is no sub-4 GiB DRAM island above the aperture.
+ * Low DRAM ends at the 460GX's variable gap (the AGP aperture, then the PCI
+ * windows); any RAM beyond it is remapped above 4 GiB.
  */
-#define FW_LOW_RAM_LIMIT  IA64_PCI_MMIO_BASE
+#define FW_LOW_RAM_LIMIT  IA64_460GX_LOW_RAM_END
 #define FW_HIGH_RAM_AFTER_PCI_BASE (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE)
 /* Shared with the machine model via hw/ia64/ia64_vpc_abi.h. */
 #define FW_LOCAL_SAPIC_BASE IA64_LOCAL_SAPIC_BASE

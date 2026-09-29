@@ -112,10 +112,14 @@ static const struct {
                                ARRAY_SIZE(ia64_i2000_gxb_intx) },
 };
 
-/* The lowest programmed expander-port PCIS moved the top of the low DRAM band. */
+/*
+ * The lowest programmed expander-port PCIS moved the top of the low DRAM
+ * band; with none programmed (~0) the band is our firmware's layout.
+ */
 static void ia64_vpc_460gx_window_moved(void *opaque, uint64_t base)
 {
-    ia64_vpc_set_low_ram_limit(opaque, MIN(base, IA64_LOW_RAM_LIMIT));
+    ia64_vpc_set_low_ram_limit(opaque, base == ~0ULL ? IA64_LOW_RAM_LIMIT :
+                                       MIN(base, IA64_PCI_MMIO_BASE));
 }
 
 /*

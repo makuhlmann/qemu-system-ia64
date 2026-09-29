@@ -2758,14 +2758,14 @@ static void test_mercury_config_dispatch(void)
 }
 
 /*
- * Real 460GX layout: low DRAM is a single contiguous run from 0 up to the PCI
- * aperture (0xEE000000, ~3.72 GiB); only RAM displaced by that top-of-memory
- * gap spills above 4 GiB.  There is no sub-4 GiB DRAM island and no hole at
- * 2 GiB (the IOSAPIC no longer parks there).  Probe where DRAM actually lands
- * for both the below-aperture and above-4 GiB cases.  The -m values reserve a
- * large address space but qtest only touches a couple of pages, so RSS stays
- * tiny.  Keep in lockstep with ia64_vpc_map_ram() /
- * fw_init_guest_high_ram_ranges().
+ * Real 460GX layout: low DRAM is a single contiguous run from 0 up to the
+ * variable gap (IA64_460GX_LOW_RAM_END, 3.25 GiB: the AGP aperture, then the
+ * PCI windows); only RAM displaced by the gap spills above 4 GiB.  There is
+ * no sub-4 GiB DRAM island and no hole at 2 GiB (the IOSAPIC no longer parks
+ * there).  Probe where DRAM actually lands for both the below-gap and
+ * above-4 GiB cases.  The -m values reserve a large address space but qtest
+ * only touches a couple of pages, so RSS stays tiny.  Keep in lockstep with
+ * ia64_vpc_map_ram() / fw_init_guest_high_ram_ranges().
  */
 #define IA64_RAM_AT_2GIB             0x0000000080000000ULL /* was the hole */
 #define IA64_HIGH_RAM_BELOW_PCI_BASE 0x0000000080200000ULL
@@ -2774,6 +2774,7 @@ static void test_mercury_config_dispatch(void)
 static void test_ram_high_remap(void)
 {
     const uint64_t magic = 0x0123456789abcdefULL;
+    const uint64_t high_end = IA64_HIGH_RAM_ABOVE_4G_BASE + 768 * MiB;
 
     /*
      * 2304 MiB fits entirely below the aperture, so DRAM is contiguous across
@@ -2792,14 +2793,22 @@ static void test_ram_high_remap(void)
     qtest_quit(qts);
 
     /*
-     * 4096 MiB exceeds the aperture: DRAM is contiguous up to it AND the
-     * displaced remainder is remapped above 4 GiB.
+     * 4096 MiB exceeds the band: DRAM is contiguous up to the gap AND the
+     * displaced 768 MiB are remapped above 4 GiB.  The gap holds no DRAM.
      */
     qts = qtest_init("-machine 460gx -m 4096M -S");
     qtest_writeq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE, magic);
     g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_BELOW_PCI_BASE), ==, magic);
+    qtest_writeq(qts, IA64_460GX_LOW_RAM_END - 8, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_460GX_LOW_RAM_END - 8), ==, magic);
+    qtest_writeq(qts, IA64_460GX_LOW_RAM_END, magic);
+    g_assert_cmphex(qtest_readq(qts, IA64_460GX_LOW_RAM_END), !=, magic);
     qtest_writeq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE, magic);
     g_assert_cmphex(qtest_readq(qts, IA64_HIGH_RAM_ABOVE_4G_BASE), ==, magic);
+    qtest_writeq(qts, high_end - 8, magic);
+    g_assert_cmphex(qtest_readq(qts, high_end - 8), ==, magic);
+    qtest_writeq(qts, high_end, magic);
+    g_assert_cmphex(qtest_readq(qts, high_end), !=, magic);
     qtest_quit(qts);
 }
 
@@ -7072,14 +7081,15 @@ static void ati_pll_wr(ATITestDev *a, uint32_t idx, uint32_t v)
  * GART SRAM window at 0xFE200000: writing a GATT entry through it reads back,
  * so the driver's create_gatt_table zero+read-back works.  AGPSIZ bit3
  * (BAPBASE_ENABLE) is set, so the aperture base is read from BAPBASE (0x98) --
- * a non-header 64-bit BAR the driver masks to gart_bus_addr; it sits in the
- * platform PCI MMIO hole (below 4 GiB, as the 32-bit r128 AGP_BASE requires).
+ * a non-header 64-bit BAR the driver masks to gart_bus_addr.  It comes out of
+ * reset without a base, which the firmware programs; the GXB decodes 40 bits
+ * and hardwires bits 27:12 (SSDM 7.1, 7.2.1).
  */
 #define IA64_AGP_BAPBASE        0x98
 #define IA64_AGP_GXBCTL         0xa0
 #define IA64_AGP_AGPSIZ         0xa2
 #define IA64_AGP_GART_WINDOW    0x00000000fe200000ULL
-#define IA64_AGP_APERTURE_BASE  0x00000000ee000000ULL
+#define IA64_AGP_APERTURE_BASE  IA64_460GX_AGP_APERTURE_BASE
 
 static void test_agp_gxb(void)
 {
@@ -7115,11 +7125,20 @@ static void test_agp_gxb(void)
     g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_GXBCTL) & 0x02, ==, 0);
     g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x07, ==, 1);
 
-    /* BAPBASE_ENABLE set, and BAPBASE holds the sub-4 GiB aperture base. */
+    /* BAPBASE_ENABLE set; BAPBASE is a 64-bit BAR without a base yet. */
     g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x08, ==, 0x08);
     bapbase = ((uint64_t)qpci_config_readl(dev, IA64_AGP_BAPBASE + 4) << 32) |
               qpci_config_readl(dev, IA64_AGP_BAPBASE);
-    g_assert_cmphex(bapbase & ~7ULL, ==, IA64_AGP_APERTURE_BASE);
+    g_assert_cmphex(bapbase, ==, 0x4);
+
+    /* Bits 39:28 take a write; a 256 MB boundary is the finest base. */
+    qpci_config_writel(dev, IA64_AGP_BAPBASE, 0xffffffff);
+    qpci_config_writel(dev, IA64_AGP_BAPBASE + 4, 0xffffffff);
+    g_assert_cmphex(qpci_config_readl(dev, IA64_AGP_BAPBASE), ==, 0xf0000004);
+    g_assert_cmphex(qpci_config_readl(dev, IA64_AGP_BAPBASE + 4), ==, 0xff);
+    qpci_config_writel(dev, IA64_AGP_BAPBASE, 0xdfff0000);
+    qpci_config_writel(dev, IA64_AGP_BAPBASE + 4, 0);
+    g_assert_cmphex(qpci_config_readl(dev, IA64_AGP_BAPBASE), ==, 0xd0000004);
 
     /*
      * The GART SRAM window is writable at its fixed address.  Parity bit 26
@@ -7934,11 +7953,15 @@ static void agp_gart_dma_fill(ATITestDev *a, uint32_t aperture)
     }
 }
 
+/* The aperture our firmware programs, set where Linux finds the GXB. */
 static void test_agp_gart_dma(void)
 {
     ATITestDev a;
 
     ati_dev_open(&a, NULL);
+    cf8_writel(a.qts, 0, IA64_AGP_SLOT, 0, IA64_AGP_BAPBASE,
+               IA64_AGP_APERTURE_BASE);
+    cf8_writel(a.qts, 0, IA64_AGP_SLOT, 0, IA64_AGP_BAPBASE + 4, 0);
     agp_gart_dma_fill(&a, IA64_AGP_APERTURE_BASE);
     ati_dev_close(&a);
 }
@@ -7952,9 +7975,9 @@ static void test_agp_gart_dma_moved(void)
     ATITestDev a;
 
     ati_dev_open(&a, NULL);
-    cf8_writel(a.qts, 0xff, 0x14, 1, 0x98, 0xd0000000);
+    cf8_writel(a.qts, 0xff, 0x14, 1, 0x98, 0xc0000000);
     cf8_writel(a.qts, 0xff, 0x14, 1, 0x9c, 0x00000000);
-    agp_gart_dma_fill(&a, 0xd0000000);
+    agp_gart_dma_fill(&a, 0xc0000000);
     ati_dev_close(&a);
 }
 
