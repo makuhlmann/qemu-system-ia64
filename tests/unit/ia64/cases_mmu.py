@@ -7528,31 +7528,29 @@ test_no_ic_data_access_enters_vector_with_ni = require_registers(
 )
 
 GROUP = 'mmu'
-# Region-7 boot accesses above the 0x8000_0000 direct-map base resolve to
-# physical memory biased down by that base: VA 0xe000_0000_8000_1240 (region-7
-# offset 0x8000_1240) must read PA 0x1240, not the unbiased identity alias
-# 0x8000_1240.  The IA-64 loaders rely on this to reach top-of-RAM free-memory
-# descriptors that no explicit TR covers; without the bias those pages alias
-# unbacked physical memory 0x8000_0000 too high (see
-# IA64_FW_REGION7_DIRECTMAP_BASE) and the loader's free list reads back a NULL
-# link.
-REGION7_DIRECTMAP_DATA = bundle_words(0x00, 0x00c0ffee1234abcd, 0, 0)[0]
-test_sal_boot_identity_region7_directmap_bias = require_registers(
-    "sal_boot_identity_region7_directmap_bias", [
+# While the firmware IVT serves TLB misses, SAL inserts identity TCs: VA = PA
+# with the region bits removed and no bias (SAL 245359-007 3.3.1; the i2000
+# SAL_B data-miss handler).  tpa of offset 0x8000_1240 gives 0x8000_1240 in
+# region 7 and in region 1 (tpa, because the harness has no RAM at 2 GiB).
+test_sal_boot_identity_has_no_bias = require_registers(
+    "sal_boot_identity_has_no_bias", [
         (0x10, *movl_mlx(17, 0xe000000080001240)),
-        (0x20, *movl_mlx(18, (1 << 8) | (13 << 2))),
-        (0x30, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
-        (0x40, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
-        (0x50, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
-        (0x60, *movl_mlx(19, (1 << 13) | (1 << 17))),
-        (0x70, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
-        (0x80, 0x08, ld8(31, 17), nop_i(), nop_i()),
-        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
-        (0x1240, 0x00, 0x00c0ffee1234abcd, 0, 0),
+        (0x20, *movl_mlx(16, 0x2000000080001240)),
+        (0x30, *movl_mlx(18, (1 << 8) | (13 << 2))),
+        (0x40, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
+        (0x50, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0x60, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0x70, 0x00, mov_rr_write(18, 16), nop_i(), nop_i()),
+        (0x80, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x90, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0xa0, 0x00, tpa(31, 17), nop_i(), nop_i()),
+        (0xb0, 0x00, tpa(30, 16), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
     ], {
-        "ip": 0x90,
+        "ip": 0xc0,
         "exception": IA64_EXCP_NONE,
-        "r31": REGION7_DIRECTMAP_DATA,
+        "r30": 0x80001240,
+        "r31": 0x80001240,
     }, entry=0x10)
 
 # Region 7 has no alias of low memory once the OS owns the IVT: a region-7
@@ -7794,7 +7792,7 @@ CASE_NAMES = (
     'region7_miss_without_sal_takes_alt_dtlb',
     'sal_boot_identity_does_not_override_explicit_rid_miss',
     'sal_boot_identity_handles_nonzero_region7_rid',
-    'sal_boot_identity_region7_directmap_bias',
+    'sal_boot_identity_has_no_bias',
     'short_vhpt_entry_not_present_aborts_to_dtlb_miss',
     'short_vhpt_ifetch_read_only_raises_inst_access',
     'short_vhpt_not_present_entry_is_cached',

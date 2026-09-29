@@ -184,15 +184,6 @@
 #define IA64_REGION7_PHYS_MASK ((1ULL << IA64_REGION_SHIFT) - 1)
 #define IA64_PHYS_UC_BIT (1ULL << 63)
 #define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
-/*
- * IA-64 OS loaders alias physical memory through region 7 with a fixed
- * 0x8000_0000 virtual base (region-7 VA = PA + 0x8000_0000).  The loader's
- * own region-7 TRs map e.g. 0xe000_0000_8100_0000 -> PA 0x0100_0000, and its
- * free-memory descriptors near the top of RAM carry addresses such as
- * 0xe000_0000_bf7f_ffe0 for PA 0x3f7f_ffe0.  SAL's boot-time TLB-miss handler
- * fills otherwise-unmapped region-7 pages with the same bias.
- */
-#define IA64_FW_REGION7_DIRECTMAP_BASE 0x0000000080000000ULL
 #define IA64_LOCAL_SAPIC_PA   IA64_LOCAL_SAPIC_BASE
 /*
  * The architected I/O block: the top 64 MB of the processor's *implemented*
@@ -1576,8 +1567,10 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
     /*
      * This models SAL's boot-time TLB miss handler, which exists only while
      * SAL still owns the IVT (until ExitBootServices() completes); it is a
-     * miss fallback only.  Most calls are ordinary kernel misses, so reject
-     * them before the linear scan of the TR/TC table below.
+     * miss fallback only.  It inserts VA = PA with the region bits removed
+     * (SAL 245359-007 3.3.1; the i2000 SAL_B data-miss handler drops the
+     * region bits with dep r29=0,r29,61,3).  Most calls are ordinary kernel
+     * misses, so reject them before the linear scan of the TR/TC table.
      */
     if (!ia64_sal_boot_environment_active(env) ||
         phys >= IA64_FW_BOOT_IDENTITY_LIMIT) {
@@ -1605,10 +1598,6 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
                 env->mmu.tlb_data, env->mmu.tlb_data_count, va)) {
             return false;
         }
-    }
-
-    if (phys >= IA64_FW_REGION7_DIRECTMAP_BASE) {
-        phys -= IA64_FW_REGION7_DIRECTMAP_BASE;
     }
 
     *pa = phys;
