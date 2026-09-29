@@ -22,6 +22,7 @@
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "system/runstate.h"
+#include "trace.h"
 
 typedef struct Intel82468GXSMBusState {
     PCIDevice parent_obj;
@@ -54,6 +55,34 @@ typedef struct Intel82468GXSMBusState {
  * reset; the bit therefore resets set here, and stays writable so software can
  * still select the alias.
  */
+/*
+ * General-purpose I/O (SSDM 11.1.21-22, 11.2.9): 64 bytes of I/O space at
+ * GPIOBA (D0h) bits 15:6, decoded while GPIOE (D4h) bit 0 is set.  In each
+ * register bits 28:24 are the muxed GPIO[22:18], bits 19:16 the muxed
+ * GPIO[13:10] and bits 8:0 the dedicated GPIO[8:0].  An input reads the level
+ * the board puts on its pin ("gpio-inputs"); nothing on the board listens to
+ * an output.  Blink, SMI routing, pulse and core-well control are latches
+ * only, and MGPIOC (84h), whose bits the SSDM leaves undocumented, does not
+ * gate the muxed pins.
+ */
+#define IFB_GPIOBA             0xd0
+#define IFB_GPIOE              0xd4
+#define IFB_GPIO_SIZE          64
+#define IFB_GP_OUTPUT          0x00
+#define IFB_GP_DATA            0x04
+#define IFB_GP_TTL             0x08
+#define IFB_GP_BLINK           0x0c
+#define IFB_GP_LOCK            0x10
+#define IFB_GP_INVERT          0x14
+#define IFB_GP_SMI             0x1c
+#define IFB_GP_PULSE           0x20
+#define IFB_GP_CORE            0x24
+#define IFB_GP_PULLUP          0x28
+#define IFB_GP_REGS            (IFB_GP_PULLUP / 4 + 1)
+#define IFB_GP_ALL             0x1f0f01ffU
+#define IFB_GP_DEDICATED       0x000001ffU
+#define IFB_GP_PULLUP_RESET    0x000003ffU
+
 #define IFB_FREQ_MAILBOX       0xd0
 #define IFB_FREQ_MAILBOX_DONE  0x8000
 #define IFB_RTC_CFG            0xc8
@@ -118,6 +147,10 @@ struct Intel82468GXIFBState {
      * reboot repeat forever; b18d80a).
      */
     uint32_t freq_mailbox;
+    MemoryRegion gpio;
+    uint32_t gp[IFB_GP_REGS];
+    /* Pin levels in GP Data bit positions, as the board drives or pulls them. */
+    uint32_t gpio_inputs;
     uint8_t rtc_ext_index;
     uint8_t rtc_ext_ram[IFB_RTC_BANK_SIZE];
 };
@@ -294,6 +327,7 @@ static void ifb_rtc_ext_write(void *opaque, hwaddr addr, uint64_t value,
     }
     if (!ifb_rtc_ext_locked(s)) {
         s->rtc_ext_ram[s->rtc_ext_index] = value;
+        trace_ifb_rtc_ext_write(s->rtc_ext_index, value);
     }
 }
 
@@ -460,6 +494,99 @@ static const MemoryRegionOps ifb_apm_ops = {
     },
 };
 
+static const uint32_t ifb_gp_mask[IFB_GP_REGS] = {
+    [IFB_GP_OUTPUT / 4] = IFB_GP_ALL,
+    [IFB_GP_DATA / 4] = IFB_GP_ALL,
+    [IFB_GP_TTL / 4] = IFB_GP_ALL,
+    [IFB_GP_BLINK / 4] = IFB_GP_DEDICATED,
+    [IFB_GP_LOCK / 4] = IFB_GP_ALL,
+    [IFB_GP_INVERT / 4] = IFB_GP_DEDICATED,
+    [IFB_GP_SMI / 4] = IFB_GP_DEDICATED,
+    [IFB_GP_PULSE / 4] = IFB_GP_DEDICATED,
+    [IFB_GP_CORE / 4] = IFB_GP_DEDICATED,
+    [IFB_GP_PULLUP / 4] = IFB_GP_PULLUP_RESET,
+};
+
+static uint32_t ifb_gp_read_reg(Intel82468GXIFBState *s, unsigned reg)
+{
+    uint32_t out, in;
+
+    if (reg != IFB_GP_DATA / 4) {
+        return s->gp[reg];
+    }
+    /* An input is inverted "before entering the data register" (11.2.9.6). */
+    out = s->gp[IFB_GP_OUTPUT / 4];
+    in = (s->gpio_inputs ^ s->gp[IFB_GP_INVERT / 4]) & IFB_GP_ALL;
+    return (s->gp[reg] & out) | (in & ~out);
+}
+
+static uint64_t ifb_gpio_read(void *opaque, hwaddr addr, unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+    unsigned reg = addr / 4;
+    uint32_t value;
+
+    if (reg >= IFB_GP_REGS) {
+        return 0;
+    }
+    value = extract32(ifb_gp_read_reg(s, reg), (addr & 3) * 8, size * 8);
+    if (reg == IFB_GP_DATA / 4) {
+        trace_ifb_gp_data_read(value);
+    }
+    return value;
+}
+
+static void ifb_gpio_write(void *opaque, hwaddr addr, uint64_t value,
+                           unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+    unsigned reg = addr / 4;
+    unsigned shift = (addr & 3) * 8;
+    uint32_t wmask;
+
+    if (reg >= IFB_GP_REGS) {
+        return;
+    }
+    wmask = ifb_gp_mask[reg] & MAKE_64BIT_MASK(shift, size * 8);
+    value <<= shift;
+    if (reg == IFB_GP_LOCK / 4) {
+        /* Set-only: "it can only be cleared by a PCIRST#" (11.2.9.5). */
+        s->gp[reg] |= value & wmask;
+        return;
+    }
+    wmask &= ~s->gp[IFB_GP_LOCK / 4];
+    if (reg == IFB_GP_DATA / 4) {
+        wmask &= s->gp[IFB_GP_OUTPUT / 4];
+    }
+    s->gp[reg] = (s->gp[reg] & ~wmask) | (value & wmask);
+}
+
+static const MemoryRegionOps ifb_gpio_ops = {
+    .read = ifb_gpio_read,
+    .write = ifb_gpio_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+};
+
+/*
+ * Decode at the written base: the D0h read-back carries the frequency
+ * mailbox's done flag (bit 15, see freq_mailbox), which is not an address.
+ */
+static void ifb_gpio_io_update(Intel82468GXIFBState *s)
+{
+    PCIDevice *pci = PCI_DEVICE(s);
+
+    memory_region_transaction_begin();
+    memory_region_set_address(&s->gpio,
+                              pci_get_long(pci->config + IFB_GPIOBA) &
+                              0xffc0U);
+    memory_region_set_enabled(&s->gpio, pci->config[IFB_GPIOE] & BIT(0));
+    memory_region_transaction_commit();
+}
+
 static void ifb_acpi_io_update(Intel82468GXIFBState *s)
 {
     PCIDevice *pci = PCI_DEVICE(s);
@@ -510,6 +637,9 @@ static void ifb_lpc_reset(DeviceState *dev)
 
     s->nmisc_value = 0;
     s->rtc_ext_index = 0;
+    memset(s->gp, 0, sizeof(s->gp));
+    s->gp[IFB_GP_PULLUP / 4] = IFB_GP_PULLUP_RESET;
+    ifb_gpio_io_update(s);
 
     acpi_pm1_evt_reset(&s->acpi_regs);
     acpi_pm1_cnt_reset(&s->acpi_regs);
@@ -609,6 +739,9 @@ static void ifb_lpc_write_config(PCIDevice *pci, uint32_t address,
     ifb_rtc_bank_update(INTEL_82468GX_IFB(pci));
     if (ranges_overlap(address, length, 0x40, 5)) {
         ifb_acpi_io_update(INTEL_82468GX_IFB(pci));
+    }
+    if (ranges_overlap(address, length, IFB_GPIOBA, 5)) {
+        ifb_gpio_io_update(s);
     }
 }
 
@@ -748,6 +881,10 @@ static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
                           IFB_ACPI_SMI_LENGTH);
     memory_region_add_subregion(&s->acpi_pm, IFB_ACPI_SMI_OFFSET,
                                 &s->acpi_smi);
+    memory_region_init_io(&s->gpio, OBJECT(s), &ifb_gpio_ops, s,
+                          TYPE_INTEL_82468GX_IFB ".gpio", IFB_GPIO_SIZE);
+    memory_region_add_subregion(pci_address_space_io(pci), 0, &s->gpio);
+    memory_region_set_enabled(&s->gpio, false);
     memory_region_init_io(&s->apm, OBJECT(s), &ifb_apm_ops, s,
                           TYPE_INTEL_82468GX_IFB ".apm", 2);
     memory_region_add_subregion(pci_address_space_io(pci), IFB_APM_IOPORT,
@@ -777,6 +914,7 @@ static void ifb_lpc_exit(PCIDevice *pci)
 {
     Intel82468GXIFBState *s = INTEL_82468GX_IFB(pci);
 
+
     ifb_remove_function(&s->functions[3]);
     ifb_remove_function(&s->functions[2]);
     ifb_remove_function(&s->functions[1]);
@@ -802,13 +940,14 @@ static int ifb_lpc_post_load(void *opaque, int version_id)
         QEMU_WAKEUP_REASON_PMTIMER,
         (pm_enable & ACPI_BITMASK_TIMER_ENABLE) != 0);
     ifb_acpi_io_update(s);
+    ifb_gpio_io_update(s);
     ifb_acpi_update_sci(&s->acpi_regs);
     return 0;
 }
 
 static const VMStateDescription vmstate_ifb_lpc = {
     .name = TYPE_INTEL_82468GX_IFB,
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 1,
     .post_load = ifb_lpc_post_load,
     .fields = (const VMStateField[]) {
@@ -834,6 +973,7 @@ static const VMStateDescription vmstate_ifb_lpc = {
         VMSTATE_UINT8_V(apms, Intel82468GXIFBState, 3),
         VMSTATE_UINT16_V(glbsts, Intel82468GXIFBState, 4),
         VMSTATE_BOOL_V(smi_asserted, Intel82468GXIFBState, 4),
+        VMSTATE_UINT32_ARRAY_V(gp, Intel82468GXIFBState, IFB_GP_REGS, 5),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -861,6 +1001,8 @@ static void ifb_lpc_init(Object *obj)
 static const Property ifb_lpc_properties[] = {
     DEFINE_PROP_UINT16(INTEL_82468GX_IFB_PROP_INIT_ACPI_BASE,
                        Intel82468GXIFBState, init_acpi_base, 0),
+    DEFINE_PROP_UINT32(INTEL_82468GX_IFB_PROP_GPIO_INPUTS,
+                       Intel82468GXIFBState, gpio_inputs, UINT32_MAX),
 };
 
 static void ifb_lpc_class_init(ObjectClass *klass, const void *data)
@@ -1020,6 +1162,7 @@ static const TypeInfo intel_82468gx_ifb_types[] = {
 DEFINE_TYPES(intel_82468gx_ifb_types)
 
 Intel82468GXIFBState *intel_82468gx_ifb_create(PCIBus *bus, int devfn,
+                                               uint32_t gpio_inputs,
                                                uint16_t init_acpi_base,
                                                Error **errp)
 {
@@ -1037,6 +1180,8 @@ Intel82468GXIFBState *intel_82468gx_ifb_create(PCIBus *bus, int devfn,
     pci = pci_new_multifunction(devfn, TYPE_INTEL_82468GX_IFB);
     qdev_prop_set_uint16(DEVICE(pci), INTEL_82468GX_IFB_PROP_INIT_ACPI_BASE,
                          init_acpi_base);
+    qdev_prop_set_uint32(DEVICE(pci), INTEL_82468GX_IFB_PROP_GPIO_INPUTS,
+                         gpio_inputs);
     if (!pci_realize_and_unref(pci, bus, errp)) {
         return NULL;
     }

@@ -28,6 +28,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Intel82468GXIFBState, INTEL_82468GX_IFB)
 #define INTEL_82468GX_IFB_GPIO_SMI    "smi"
 /* ACPI I/O base the board firmware programs at POST; 0 = part reset state. */
 #define INTEL_82468GX_IFB_PROP_INIT_ACPI_BASE "init-acpi-base"
+#define INTEL_82468GX_IFB_PROP_GPIO_INPUTS    "gpio-inputs"
 
 #define INTEL_82468GX_IFB_VENDOR_ID       0x8086
 #define INTEL_82468GX_IFB_LPC_DEVICE_ID   0x7600
@@ -40,6 +41,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Intel82468GXIFBState, INTEL_82468GX_IFB)
 #define INTEL_82468GX_IFB_IDETIM_DECODE   BIT(15)
 
 Intel82468GXIFBState *intel_82468gx_ifb_create(PCIBus *bus, int devfn,
+                                               uint32_t gpio_inputs,
                                                uint16_t init_acpi_base,
                                                Error **errp);
 MC146818RtcState *intel_82468gx_ifb_rtc(Intel82468GXIFBState *s);

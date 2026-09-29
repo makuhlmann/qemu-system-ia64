@@ -4146,6 +4146,85 @@ static uint8_t rtc_bank_read(QTestState *qts, uint16_t index_port,
                        ia64_sparse_io_offset(index_port + 1));
 }
 
+/*
+ * The south bridge's GPIO block (SSDM 11.1.21-22, 11.2.9): 64 bytes of I/O
+ * at GPIOBA (D0h) bits 15:6, decoded while GPIOE (D4h) bit 0 is set, at the
+ * written base -- the D0h read-back carries the frequency mailbox's done flag
+ * (bit 15), which is not part of the address.  The pins are the sdv board's.
+ */
+#define IA64_IFB_GPIOBA         0xd0
+#define IA64_IFB_GPIOE          0xd4
+#define IA64_GPIO_BASE          0x0400
+
+static uint32_t gpio_inl(QTestState *qts, uint16_t port)
+{
+    return qtest_readl(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port));
+}
+
+static void gpio_outl(QTestState *qts, uint16_t port, uint32_t value)
+{
+    qtest_writel(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port),
+                 value);
+}
+
+static void test_460gx_south_bridge_gpio(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    uint32_t data;
+
+    /* Out of reset the block is not decoded: open bus. */
+    g_assert_cmphex(gpio_inl(qts, IA64_GPIO_BASE + 4), ==, 0xffffffff);
+
+    ia64_cfg_writel(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_IFB_GPIOBA,
+                    IA64_GPIO_BASE);
+    ia64_cfg_writeb(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_IFB_GPIOE, 1);
+
+    /* Every pin an input: GP Data reads the pins, reserved bits read 0. */
+    data = gpio_inl(qts, IA64_GPIO_BASE + 4);
+    g_assert_cmphex(data & ~0x1f0f01ffu, ==, 0);
+    g_assert_cmphex(data & 0x1ff, ==, 0x1ff);
+    /* The board's J29 in NORM: GPIO[13] and GPIO[18] are not both high. */
+    g_assert_cmphex(data & (BIT(19) | BIT(24)), !=, BIT(19) | BIT(24));
+
+    /* GP Invert applies to the dedicated pins only. */
+    gpio_outl(qts, IA64_GPIO_BASE + 0x14, 0xffffffff);
+    g_assert_cmphex(gpio_inl(qts, IA64_GPIO_BASE + 0x14), ==, 0x1ff);
+    g_assert_cmphex(gpio_inl(qts, IA64_GPIO_BASE + 4) & 0x1ff, ==, 0);
+    gpio_outl(qts, IA64_GPIO_BASE + 0x14, 0);
+
+    /* Outputs hold what is written; inputs ignore writes. */
+    gpio_outl(qts, IA64_GPIO_BASE + 0, 0x0e000000);
+    gpio_outl(qts, IA64_GPIO_BASE + 4, 0);
+    g_assert_cmphex(gpio_inl(qts, IA64_GPIO_BASE + 4) & 0x0e000000, ==, 0);
+    g_assert_cmphex(gpio_inl(qts, IA64_GPIO_BASE + 4) & 0x1ff, ==, 0x1ff);
+    gpio_outl(qts, IA64_GPIO_BASE + 4, 0x0f0f0000);
+    g_assert_cmphex(gpio_inl(qts, IA64_GPIO_BASE + 4) & 0x0e000000, ==,
+                    0x0e000000);
+
+    /* GP Lock freezes a locked output and cannot be cleared by software. */
+    gpio_outl(qts, IA64_GPIO_BASE + 0x10, BIT(25));
+    gpio_outl(qts, IA64_GPIO_BASE + 0x10, 0);
+    g_assert_cmphex(gpio_inl(qts, IA64_GPIO_BASE + 0x10), ==, BIT(25));
+    gpio_outl(qts, IA64_GPIO_BASE + 4, 0);
+    g_assert_cmphex(gpio_inl(qts, IA64_GPIO_BASE + 4) & 0x0e000000, ==,
+                    BIT(25));
+
+    /* GP Pull-up resets to 3FFh and keeps bits 9:0 only. */
+    g_assert_cmphex(gpio_inl(qts, IA64_GPIO_BASE + 0x28), ==, 0x3ff);
+    gpio_outl(qts, IA64_GPIO_BASE + 0x28, 0x1fff01ff);
+    g_assert_cmphex(gpio_inl(qts, IA64_GPIO_BASE + 0x28), ==, 0x1ff);
+
+    /* The block follows GPIOBA. */
+    ia64_cfg_writel(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_IFB_GPIOBA, 0x0440);
+    g_assert_cmphex(gpio_inl(qts, 0x0440 + 0x28), ==, 0x1ff);
+    g_assert_cmphex(gpio_inl(qts, IA64_GPIO_BASE + 0x28), ==, 0xffffffff);
+
+    /* GPIOE clear: open bus again. */
+    ia64_cfg_writeb(qts, 0, IA64_460GX_IFB_SLOT, 0, IA64_IFB_GPIOE, 0);
+    g_assert_cmphex(gpio_inl(qts, 0x0440 + 4), ==, 0xffffffff);
+    qtest_quit(qts);
+}
+
 static void test_460gx_south_bridge_rtc_banks(void)
 {
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
@@ -8829,6 +8908,8 @@ int main(int argc, char **argv)
                    test_460gx_spd_follows_ram_size);
     qtest_add_func("/ia64-vpc/pci/460gx-pcis-window", test_460gx_pcis_window);
     qtest_add_func("/ia64-vpc/pci/460gx-smbus-hwmon", test_460gx_smbus_hwmon);
+    qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-gpio",
+                   test_460gx_south_bridge_gpio);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",
                    test_460gx_south_bridge_rtc_banks);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-timer",

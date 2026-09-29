@@ -320,6 +320,18 @@ static void sdv_wire_intx(IA64VpcMachineState *s, DeviceState *pci_host,
     }
 }
 
+
+/*
+ * The IFB's GPIO inputs as the board drives them, in GP Data bit positions.
+ * J29 (Owner's Guide Table 21: NORM 1-2, OVRD/CLRCMOS 2-3, RECOVERY no
+ * jumper) reaches the firmware on GPIO[13] (bit 19) and GPIO[18] (bit 24):
+ * SAL_A FFFDE8D6 takes both high as a recovery request.  NORM grounds
+ * GPIO[13]; with GPIO[18] grounded instead, bios130.BIN opens its BIOS
+ * Configuration Manager at every boot.  Every other input is pulled high.
+ */
+#define SDV_GPIO_J29_NORM       (1U << 19)
+#define SDV_GPIO_INPUTS         (UINT32_MAX & ~SDV_GPIO_J29_NORM)
+
 static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
                              MemoryRegion *pci_io, DeviceState *iosapic,
                              Error **errp)
@@ -341,7 +353,7 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
     s->ifb = intel_82468gx_ifb_create(
         pci_bus, PCI_DEVFN(IA64_460GX_IFB_SLOT,
                            IA64_460GX_IFB_LPC_FUNCTION),
-        IA64_460GX_ACPI_PM_IO_BASE, errp);
+        SDV_GPIO_INPUTS, IA64_460GX_ACPI_PM_IO_BASE, errp);
     if (s->ifb == NULL) {
         return NULL;
     }
