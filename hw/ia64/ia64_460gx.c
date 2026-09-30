@@ -204,9 +204,10 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
  * the AGP aperture registers and the AGP capability; ia64_agp.c answers for
  * them, so the GART decodes what firmware and the OS program here.  The
  * vendor firmware writes AGPSIZ from its GART SRAM probe and then BAPBASE =
- * max(4 GiB, TOM) (`sal_b` 4B4E0C-4B510C); it stays as written.  XP 2600
- * RTM's agp460 keeps only the low 32 bits of that base, so it asks for the
- * aperture at TOM mod 4 GiB, as on the board.
+ * max(4 GiB, TOM) (`sal_b` 4B4E0C-4B510C).  When an AGP master answers, it
+ * clears AGPSIZ bit 3 and places APBASE below 4 GiB (4B513C-4B595C).
+ * Without one, XP 2600 RTM's agp460 keeps only the low 32 bits of BAPBASE
+ * and asks for the aperture at TOM mod 4 GiB, as on the board.
  */
 #define IA64_460GX_GXB_DEV              0x14
 #define IA64_460GX_GXB_BRIDGE_FN       1

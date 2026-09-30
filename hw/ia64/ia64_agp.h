@@ -30,7 +30,8 @@ struct IA64AGPState {
     /* Function 1 registers (SSDM ch. 7; agp460.h, i460-agp for the layout). */
     uint8_t gxbctl;
     uint8_t agpsiz;
-    uint64_t apbase;             /* one base, at 10h or 98h by AGPSIZ bit 3  */
+    uint64_t apbase;             /* 10h, the base while AGPSIZ bit 3 is 0    */
+    uint64_t bapbase;            /* 98h, the base while AGPSIZ bit 3 is 1    */
     uint32_t agp_command;
 
     uint64_t aperture_base;      /* decoded from the registers above         */

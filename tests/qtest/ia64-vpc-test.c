@@ -4952,11 +4952,12 @@ static void test_460gx_config_ports(void)
 }
 
 /*
- * The GXB's function 1 on the chipset bus (FFh out of reset) holds one
- * aperture base.  It shows as the header BAR APBASE (10h) while AGPSIZ bit 3
- * is clear, as BAPBASE (98h) while it is set, and nowhere without a size;
- * it is a 64-bit memory BAR whose bits below the size and bits 27:12 read 0
- * (SSDM 7.1, 7.2.1).  The vendor firmware's 4 GiB BAPBASE stays as written.
+ * The GXB's function 1 on the chipset bus (FFh out of reset) has two aperture
+ * bases: the header BAR APBASE (10h) shows while AGPSIZ bit 3 is clear,
+ * BAPBASE (98h) while it is set, and neither without a size.  Each is a
+ * 64-bit memory BAR whose bits below the size and bits 27:12 read 0 (SSDM
+ * 7.1, 7.2.1) and keeps its own contents.  The vendor firmware's 4 GiB
+ * BAPBASE stays as written, and so does its later APBASE.
  */
 static void test_460gx_agp_aperture(void)
 {
@@ -4979,18 +4980,31 @@ static void test_460gx_agp_aperture(void)
     g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0xa0) & 0x00ff00ff, ==,
                     0x00090004);
 
-    /* Bit 3 clear: the same base shows as APBASE, BAPBASE reads 0. */
+    /* Bit 3 clear: APBASE shows its own contents, BAPBASE reads 0. */
     cf8_writel(qts, 0xff, 0x14, 1, 0xa0, 0x00010004);
     g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x10), ==, 0x00000004);
-    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x14), ==, 0x00000001);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x14), ==, 0);
     g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0);
     cf8_writel(qts, 0xff, 0x14, 1, 0x10, 0xd0000000);
-    cf8_writel(qts, 0xff, 0x14, 1, 0x14, 0);
     g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x10), ==, 0xd0000004);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x14), ==, 0);
+    cf8_writel(qts, 0xff, 0x14, 1, 0xa0, 0x00090004);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0x00000004);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x00000001);
+
+    /*
+     * With an AGP master the vendor firmware then clears bit 3 and writes
+     * only APBASE's low dword (`sal_b` 4B513C-4B595C).
+     */
+    cf8_writel(qts, 0xff, 0x14, 1, 0xa0, 0x00020004);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x10, 0x80000000);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x10), ==, 0x80000004);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x14), ==, 0);
 
     /* 1 GB: the base BAR sizes as 1 GB over the GXB's 40 address bits. */
     cf8_writel(qts, 0xff, 0x14, 1, 0xa0, 0x000a0004);
-    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xc0000004);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0x00000004);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x00000001);
     cf8_writel(qts, 0xff, 0x14, 1, 0x98, 0xffffffff);
     cf8_writel(qts, 0xff, 0x14, 1, 0x9c, 0xffffffff);
     g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xc0000004);

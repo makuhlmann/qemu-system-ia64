@@ -15,13 +15,17 @@
  * GXBCTL (A0h) bit 1 selects 4 MB GART pages; AGPSIZ (A2h) bits 2:0 give the
  * size (1 = 256 MB, 2 = 1 GB, 4 = 32 GB, 0 = none, the power-on value), bit 3
  * selects BAPBASE and bit 4 turns the SRAM I/O off (Linux i460-agp.c).  The
- * aperture has one base register: the header BAR APBASE (10h) shows it while
- * bit 3 is clear, BAPBASE (98h) while bit 3 is set, and neither shows it
- * without a size (WXPSP1/NT/base/busdrv/agp/agp460/agp460.h:41-47).  SSDM
- * 7.2.1 gives the two uses: BAPBASE for an aperture above the top of memory,
- * "exactly the same as the standard PCI-defined BAR", and the standard BAR
- * in the PCIS range of device 14h.  Bits 27:12 are hardwired (7.1), the size
- * clears the bits below it as in any BAR, and the GXB decodes 40 bits.
+ * aperture base is the header BAR APBASE (10h) while bit 3 is clear and
+ * BAPBASE (98h) while it is set; both are 64 bits wide, only the selected one
+ * shows, and neither without a size
+ * (WXPSP1/NT/base/busdrv/agp/agp460/agp460.h:41-47).  SSDM 7.2.1 gives the
+ * two uses: BAPBASE for an aperture above the top of memory, "exactly the
+ * same as the standard PCI-defined BAR", and the standard BAR in the PCIS
+ * range of device 14h.  The vendor firmware uses both: BAPBASE at max(4 GiB,
+ * TOM), and when an AGP master answers, bit 3 clear and only the low dword
+ * of APBASE written below 4 GiB (`sal_b` 4B513C-4B595C), so the two keep
+ * their own contents.  Bits 27:12 are hardwired (7.1), the size clears the
+ * bits below it as in any BAR, and the GXB decodes 40 bits.
  *
  * The SAC does not decode the aperture for the processor (Table 4-1): it
  * exists only on the AGP master's side, as the DMA translation below.
@@ -232,9 +236,14 @@ static int ia64_agp_base_reg(IA64AGPState *s)
     return s->agpsiz & I460_AGPSIZ_BAPBASE_EN ? I460_BAPBASE : I460_APBASE;
 }
 
+static uint64_t *ia64_agp_base(IA64AGPState *s)
+{
+    return s->agpsiz & I460_AGPSIZ_BAPBASE_EN ? &s->bapbase : &s->apbase;
+}
+
 static uint64_t ia64_agp_base_value(IA64AGPState *s)
 {
-    return (s->apbase & ~(ia64_agp_size(s->agpsiz) - 1)) |
+    return (*ia64_agp_base(s) & ~(ia64_agp_size(s->agpsiz) - 1)) |
            PCI_BASE_ADDRESS_MEM_TYPE_64;
 }
 
@@ -317,9 +326,10 @@ void ia64_agp_cfg_writeb(IA64AGPState *s, unsigned off, uint8_t val)
     default:
         if (base >= 0 && off >= base && off < base + 8) {
             unsigned shift = (off - base) * 8;
+            uint64_t *reg = ia64_agp_base(s);
 
-            s->apbase = ((s->apbase & ~(0xffULL << shift)) |
-                         ((uint64_t)val << shift)) & I460_BASE_BITS;
+            *reg = ((*reg & ~(0xffULL << shift)) |
+                    ((uint64_t)val << shift)) & I460_BASE_BITS;
         }
         break;
     }
@@ -367,6 +377,7 @@ static void ia64_agp_reset(DeviceState *dev)
     s->gxbctl = 0;
     s->agpsiz = 0;
     s->apbase = 0;
+    s->bapbase = 0;
     s->agp_command = 0;
     ia64_agp_update_aperture(s);
 }
