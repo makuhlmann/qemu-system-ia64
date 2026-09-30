@@ -9,7 +9,9 @@ static UINT8 pci_root_guid[16] = IA64_GUID_PCI_ROOT_IO;
 
 #define SMOKE_LEGACY_IO_BASE 0x00000ffffc000000ULL
 #define SMOKE_SCI_EN_POLLS   1000000U
-#define SMOKE_GXB(reg)       ((0x1fULL << 16) | (reg))
+/* The GXB's function 1, device 14h on the chipset bus (CBN, EEh after POST). */
+#define SMOKE_GXB(reg) \
+    ((0xeeULL << 24) | (0x14ULL << 16) | (1ULL << 8) | (reg))
 #define SMOKE_GXB_ID         0x84ea8086U
 #define SMOKE_APERTURE_SIZE  0x10000000ULL
 
@@ -131,7 +133,7 @@ static BOOLEAN smoke_range_free(EFI_SYSTEM_TABLE *SystemTable, UINT64 Base,
 }
 
 /*
- * The 460GX's GXB, where Linux finds it (8086:84EA at 00:1f.0): the firmware
+ * The 460GX's GXB (8086:84EA): with its GART SRAM found, the firmware
  * gives it a 256 MB aperture from BAPBASE, on a 256 MB boundary (AGP_BASE
  * bits 27:12 are hardwired, SSDM 7.1), clear of DRAM and of everything else
  * the memory map describes (7.2.3).  A board without it passes.

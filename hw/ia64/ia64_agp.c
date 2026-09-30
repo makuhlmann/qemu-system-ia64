@@ -1,72 +1,81 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Intel 460GX GXB AGP host bridge + GART, minimal model.
+ * Intel 460GX GXB AGP bridge and GART.
  *
- * Models just enough of the 460GX "expander/graphics bridge" (chipset device
- * 14h) for Linux's i460-agp driver to bind and for an AGP master (the ATI
- * Rage 128) to DMA through the graphics aperture into DRAM above 4 GiB, which a
- * 32-bit PCI master cannot reach on its own.  Per the 460GX SSDM (248704-001,
- * ch. 7) the GART is not an in-DRAM table with a base pointer: it is on-chip
- * SRAM the OS programs through a fixed physical MMIO window at 0xFE200000, with
- * no TLB and no flush register.  A GATT entry translates a 4 KiB aperture page
- * to a 36-bit physical page.
+ * The GXB (82465GX) is expander port 2 of the SAC, device 14h on the chipset
+ * bus (SSDM Table 2-1), and the vendor DSDT keeps that bus from the OS
+ * (CBN._STA is 08h).  Its function 1 holds the aperture registers, which
+ * firmware and Windows' agp460 program through CF8/CFC on bus CBN;
+ * ia64_460gx.c sends those offsets here.  The GART is SRAM on the GXB,
+ * programmed through the fixed window at FE20_0000 (SSDM 7.1.2); a GATT entry
+ * translates one aperture page to a 36-bit physical page.
  *
- * Contract taken from Linux 2.6.8 drivers/char/agp/i460-agp.c:
- *   - binds to class host-bridge, 8086:84ea, and requires a PCI AGP capability;
- *   - GXBCTL[0xa0] bit1 selects 4 MiB GART pages; AGPSIZ[0xa2] bits[2:0] select
- *     the size (1 = 256 MiB, 2 = 1 GiB, 4 = 32 GiB, the last with 4 MiB pages
- *     only); bit3 (BAPBASE_ENABLE) picks which register holds the aperture
- *     base;
- *   - the aperture base register is APBASE (BAR0, 0x10) when AGPSIZ bit3 is
- *     clear, or the non-header BAPBASE (0x98) when it is set;
- *   - GATT entry = 0x03000000 | (paddr[35:12]); bit24 valid, bit25 coherent.
+ * The SSDM does not lay out function 1.  The drivers that use it agree on:
+ * GXBCTL (A0h) bit 1 selects 4 MB GART pages; AGPSIZ (A2h) bits 2:0 give the
+ * size (1 = 256 MB, 2 = 1 GB, 4 = 32 GB, 0 = none, the power-on value), bit 3
+ * selects BAPBASE and bit 4 turns the SRAM I/O off (Linux i460-agp.c).  The
+ * aperture has one base register: the header BAR APBASE (10h) shows it while
+ * bit 3 is clear, BAPBASE (98h) while bit 3 is set, and neither shows it
+ * without a size (WXPSP1/NT/base/busdrv/agp/agp460/agp460.h:41-47).  SSDM
+ * 7.2.1 gives the two uses: BAPBASE for an aperture above the top of memory,
+ * "exactly the same as the standard PCI-defined BAR", and the standard BAR
+ * in the PCIS range of device 14h.  Bits 27:12 are hardwired (7.1), the size
+ * clears the bits below it as in any BAR, and the GXB decodes 40 bits.
  *
- * Aperture placement (SSDM 248704-001 sec 7.2.1).  The firmware programs
- * BAPBASE.  The ATI Rage 128's AGP_BASE register (0x170) is only 32 bits
- * wide, so our firmware takes the SSDM's second case: a 256 MB range of the
- * variable gap below 4 GiB, at IA64_460GX_AGP_APERTURE_BASE, clear of DRAM
- * and of the PCI windows (7.2.3).  The GART translates those pages to 36-bit
- * DRAM addresses, above 4 GiB too.  The processor never touches the aperture
- * (i460-agp sets cant_use_aperture), so it exists only in the per-bus DMA
- * address space through the IOMMU below.
- *
- * On the board these registers are the GXB's function 1 on the chipset bus
- * (CBN device 14h), where the vendor firmware and Windows' agp460 program
- * them; ia64_460gx.c sends the accesses there to this device, so the GART
- * decodes whatever aperture either place last programmed.
+ * The SAC does not decode the aperture for the processor (Table 4-1): it
+ * exists only on the AGP master's side, as the DMA translation below.
  */
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "hw/ia64/ia64_agp.h"
-#include "hw/ia64/ia64_vpc_abi.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
 #include "hw/core/qdev-properties.h"
 #include "system/address-spaces.h"
-#include "qemu/log.h"
 #include "qapi/error.h"
 
 /*
- * Fixed physical window through which the OS reads/writes the GART SRAM.  The
- * GXB ignores A22 and A21 (SSDM 7.1.2), but the SAC forwards only
- * FE20_0000-FE3F_FFFF to it (SSDM p.4-3), so the SRAM has no other window.
+ * The GART SRAM window.  The GXB has SADDR[17:0] and SDATA[31:0] (Datasheet
+ * p.2-12), so it decodes 1 MB of 32-bit entries at FE20_0000; FE30_0000 and
+ * up are "not decoded by the GXB as a GART access" (SSDM 7.1.2).
  */
 #define I460_GART_WINDOW_BASE   0x00000000fe200000ULL
+#define I460_GART_DECODE        (1 * MiB)
 
-/* Config-space registers the i460-agp driver touches. */
-#define I460_BAPBASE            0x98    /* 64-bit: above-header aperture base  */
-#define I460_GXBCTL             0xa0    /* 8-bit: bit1 = 4 MiB page select */
-#define I460_AGPSIZ             0xa2    /* 8-bit: [2:0] size, bit3/4 flags   */
+#define I460_APBASE             PCI_BASE_ADDRESS_0
+#define I460_BAPBASE            0x98
+#define I460_GXBCTL             0xa0
+#define I460_AGPSIZ             0xa2
+#define I460_AGP_CAP            0xe0
 
 #define I460_GXBCTL_4M_PS       0x02
 #define I460_AGPSIZ_SIZE_MASK   0x07
-#define I460_AGPSIZ_SIZE_256M   0x01    /* size_value 1 */
+#define I460_AGPSIZ_SIZE_256M   0x01
 #define I460_AGPSIZ_SIZE_1G     0x02
 #define I460_AGPSIZ_SIZE_32G    0x04
-#define I460_AGPSIZ_BAPBASE_EN  0x08    /* bit3: aperture base is in BAPBASE   */
-#define I460_AGPSIZ_SRAM_IO_DIS 0x10    /* bit4: GART SRAM I/O disabled        */
+#define I460_AGPSIZ_BAPBASE_EN  0x08
+#define I460_AGPSIZ_SRAM_IO_DIS 0x10
+#define I460_AGPSIZ_WRITABLE    0x1f
+
+/* Base bits 39:28: 40-bit decode (7.2.1), 27:12 hardwired (7.1). */
+#define I460_BASE_BITS          0x000000fff0000000ULL
+
+/*
+ * AGP status: sideband, fast writes and 1x/2x/4x (SSDM 1.5.3), 16
+ * outstanding requests (p.2-25, p.6-24), and the 4G bit that the Spec
+ * Update's GXB erratum 2 describes.
+ */
+#define I460_AGP_STATUS         ((15u << 24) | PCI_AGP_STATUS_SBA | \
+                                 PCI_AGP_STATUS_64BIT | PCI_AGP_STATUS_FW | \
+                                 PCI_AGP_STATUS_RATE4 | PCI_AGP_STATUS_RATE2 | \
+                                 PCI_AGP_STATUS_RATE1)
+/* The request depth is the master's field; a target has none. */
+#define I460_AGP_COMMAND_WRITABLE \
+    (PCI_AGP_COMMAND_SBA | PCI_AGP_COMMAND_AGP | PCI_AGP_COMMAND_64BIT | \
+     PCI_AGP_COMMAND_FW | PCI_AGP_COMMAND_RATE4 | PCI_AGP_COMMAND_RATE2 | \
+     PCI_AGP_COMMAND_RATE1)
 
 /*
  * GATT entry bits (SSDM 7.1.1, Figures 7-3/7-4): the page address is bits
@@ -80,15 +89,13 @@
 #define I460_GATT_4M_PFN_MASK   0x3fffu         /* phys[35:22] */
 
 /*
- * The board populates 256 KiB of GART SRAM, one of the two sizes SSDM 7.1.1
- * allows: 64K entries, a 256 MiB aperture with 4 KiB pages, and up to the
- * chipset's 32 GiB with 4 MiB pages.  The vendor SDV firmware sets up the
- * aperture from the SRAM it finds, and with 1 MiB its DSDT's AGP bus window
- * (\_SB.PCI3._CRS) starts at 0, so XP 2600 stops the AGP bridge (Code 12).
- * An out-of-aperture DMA passes straight through to system memory.
+ * A smaller SRAM leaves the top SADDR lines open, so it repeats through the
+ * GXB's 1 MB range: an index wraps to the entries that exist.
  */
-#define I460_GART_SRAM_SIZE     (256 * KiB)
-#define I460_GATT_ENTRIES       (I460_GART_SRAM_SIZE / sizeof(uint32_t))
+static bool ia64_agp_sram_on(IA64AGPState *s)
+{
+    return s->gatt_entries != 0 && !(s->agpsiz & I460_AGPSIZ_SRAM_IO_DIS);
+}
 
 static IA64AGPState *ia64_agp_from_iommu(IOMMUMemoryRegion *iommu)
 {
@@ -122,7 +129,7 @@ static IOMMUTLBEntry ia64_agp_translate(IOMMUMemoryRegion *iommu, hwaddr addr,
     }
 
     index = (addr - apbase) >> s->page_shift;
-    entry = index < I460_GATT_ENTRIES ? s->gatt[index] : 0;
+    entry = s->gatt[index & (s->gatt_entries - 1)];
     /* "treated as GART misses and the address is passed on untranslated" */
     if (!(entry & I460_GATT_VALID)) {
         return ret;
@@ -145,11 +152,11 @@ static uint64_t ia64_agp_gart_read(void *opaque, hwaddr addr, unsigned size)
     unsigned index = addr >> 2;
     uint32_t entry;
 
-    if (index >= I460_GATT_ENTRIES) {
+    if (!ia64_agp_sram_on(s)) {
         return 0;
     }
     /* Even parity over the whole entry, reserved bits included (7.1.1.3). */
-    entry = s->gatt[index];
+    entry = s->gatt[index & (s->gatt_entries - 1)];
     return entry | (ctpop32(entry) & 1 ? I460_GATT_PARITY : 0);
 }
 
@@ -159,7 +166,7 @@ static void ia64_agp_gart_write(void *opaque, hwaddr addr, uint64_t val,
     IA64AGPState *s = opaque;
     unsigned index = addr >> 2;
 
-    if (index >= I460_GATT_ENTRIES) {
+    if (!ia64_agp_sram_on(s)) {
         return;
     }
     /*
@@ -168,7 +175,7 @@ static void ia64_agp_gart_write(void *opaque, hwaddr addr, uint64_t val,
      * every access via ia64_agp_translate(), so a fresh entry is live at once
      * with no invalidation needed.
      */
-    s->gatt[index] = (uint32_t)val & ~I460_GATT_PARITY;
+    s->gatt[index & (s->gatt_entries - 1)] = (uint32_t)val & ~I460_GATT_PARITY;
 }
 
 static const MemoryRegionOps ia64_agp_gart_ops = {
@@ -202,98 +209,136 @@ static const PCIIOMMUOps ia64_agp_iommu_ops = {
     .get_address_space = ia64_agp_dma_as,
 };
 
-/*
- * The aperture base is the BAPBASE register (0x98) without its BAR type bits
- * -- the same value the i460-agp driver reads and stores in gart_bus_addr
- * (see i460_configure()).  Translation is live whenever it is programmed; the
- * GART's per-entry valid bit gates individual pages.
- */
-static void ia64_agp_update_aperture(IA64AGPState *s)
+static uint64_t ia64_agp_size(uint8_t agpsiz)
 {
-    PCIDevice *dev = PCI_DEVICE(s);
-    uint64_t base = pci_get_quad(dev->config + I460_BAPBASE) &
-                    PCI_BASE_ADDRESS_MEM_MASK;
-    bool large = dev->config[I460_GXBCTL] & I460_GXBCTL_4M_PS;
-
-    s->page_shift = large ? 22 : 12;
-    switch (dev->config[I460_AGPSIZ] & I460_AGPSIZ_SIZE_MASK) {
+    switch (agpsiz & I460_AGPSIZ_SIZE_MASK) {
     case I460_AGPSIZ_SIZE_256M:
-        s->aperture_size = 256 * MiB;
-        break;
+        return 256 * MiB;
     case I460_AGPSIZ_SIZE_1G:
-        s->aperture_size = 1 * GiB;
-        break;
+        return 1 * GiB;
     case I460_AGPSIZ_SIZE_32G:
-        /* 32 GB "requires 4 MB pages" (SSDM 7.1.1). */
-        s->aperture_size = large ? 32 * GiB : 0;
-        break;
+        return 32 * GiB;
     default:
-        s->aperture_size = 0;
-        break;
+        return 0;
     }
-    s->aperture_base = base;
-    s->aperture_enabled = s->gart_enabled && base != 0 &&
-                          s->aperture_size != 0;
 }
 
-static void ia64_agp_config_write(PCIDevice *dev, uint32_t addr,
-                                  uint32_t val, int len)
+/* Where the base register shows: APBASE, BAPBASE, or nowhere (-1). */
+static int ia64_agp_base_reg(IA64AGPState *s)
 {
-    IA64AGPState *s = IA64_AGP(dev);
+    if (ia64_agp_size(s->agpsiz) == 0) {
+        return -1;
+    }
+    return s->agpsiz & I460_AGPSIZ_BAPBASE_EN ? I460_BAPBASE : I460_APBASE;
+}
 
-    pci_default_write_config(dev, addr, val, len);
+static uint64_t ia64_agp_base_value(IA64AGPState *s)
+{
+    return (s->apbase & ~(ia64_agp_size(s->agpsiz) - 1)) |
+           PCI_BASE_ADDRESS_MEM_TYPE_64;
+}
+
+static void ia64_agp_update_aperture(IA64AGPState *s)
+{
+    uint64_t size = ia64_agp_size(s->agpsiz);
+    bool large = s->gxbctl & I460_GXBCTL_4M_PS;
+
+    s->page_shift = large ? 22 : 12;
+    /* 32 GB "requires 4 MB pages" (SSDM 7.1.1). */
+    s->aperture_size = size == 32 * GiB && !large ? 0 : size;
+    s->aperture_base = size ? ia64_agp_base_value(s) & PCI_BASE_ADDRESS_MEM_MASK
+                            : 0;
+    s->aperture_enabled = ia64_agp_sram_on(s) && s->aperture_size != 0;
+}
+
+bool ia64_agp_cfg_owns(unsigned off)
+{
+    return (off >= I460_APBASE && off < I460_APBASE + 8) ||
+           (off >= I460_BAPBASE && off < I460_BAPBASE + 8) ||
+           off == I460_GXBCTL || off == I460_AGPSIZ ||
+           off == PCI_STATUS || off == PCI_STATUS + 1 ||
+           off == PCI_CAPABILITY_LIST ||
+           (off >= I460_AGP_CAP && off < I460_AGP_CAP + PCI_AGP_SIZEOF);
+}
+
+uint8_t ia64_agp_cfg_readb(IA64AGPState *s, unsigned off)
+{
+    unsigned cap = off - I460_AGP_CAP;
+    int base = ia64_agp_base_reg(s);
+
+    if (off >= I460_AGP_CAP && off < I460_AGP_CAP + PCI_AGP_SIZEOF) {
+        if (cap >= PCI_AGP_COMMAND) {
+            return s->agp_command >> ((cap - PCI_AGP_COMMAND) * 8);
+        }
+        if (cap >= PCI_AGP_STATUS) {
+            return I460_AGP_STATUS >> ((cap - PCI_AGP_STATUS) * 8);
+        }
+        return cap == 0 ? PCI_CAP_ID_AGP : cap == PCI_AGP_VERSION ? 0x20 : 0;
+    }
+    switch (off) {
+    case PCI_STATUS:
+        return PCI_STATUS_CAP_LIST;
+    case PCI_STATUS + 1:
+        return PCI_STATUS_DEVSEL_MEDIUM >> 8;
+    case PCI_CAPABILITY_LIST:
+        return I460_AGP_CAP;
+    case I460_GXBCTL:
+        return s->gxbctl;
+    case I460_AGPSIZ:
+        return s->agpsiz;
+    }
+    if (base >= 0 && off >= base && off < base + 8) {
+        return ia64_agp_base_value(s) >> ((off - base) * 8);
+    }
+    return 0;
+}
+
+void ia64_agp_cfg_writeb(IA64AGPState *s, unsigned off, uint8_t val)
+{
+    unsigned cap = off - I460_AGP_CAP;
+    int base = ia64_agp_base_reg(s);
+
+    if (off >= I460_AGP_CAP + PCI_AGP_COMMAND &&
+        off < I460_AGP_CAP + PCI_AGP_SIZEOF) {
+        unsigned shift = (cap - PCI_AGP_COMMAND) * 8;
+
+        s->agp_command = (s->agp_command & ~(0xffu << shift)) |
+                         (((uint32_t)val << shift) & I460_AGP_COMMAND_WRITABLE &
+                          (0xffu << shift));
+        return;
+    }
+    switch (off) {
+    case I460_GXBCTL:
+        s->gxbctl = val & 0x07;         /* OOG, 4 MB pages, BWC */
+        break;
+    case I460_AGPSIZ:
+        s->agpsiz = val & I460_AGPSIZ_WRITABLE;
+        break;
+    default:
+        if (base >= 0 && off >= base && off < base + 8) {
+            unsigned shift = (off - base) * 8;
+
+            s->apbase = ((s->apbase & ~(0xffULL << shift)) |
+                         ((uint64_t)val << shift)) & I460_BASE_BITS;
+        }
+        break;
+    }
     ia64_agp_update_aperture(s);
 }
 
-/*
- * i460-agp reads GXBCTL bit1 (must be 0 = 4 KiB pages) and AGPSIZ[2:0]
- * (1 = 256 MiB).  AGPSIZ bit3 (BAPBASE_ENABLE) is set so the driver takes
- * the aperture base from BAPBASE (a >4 GiB-capable, non-header BAR) rather
- * than the standard header BAR.  When the machine turns the GART off
- * (agp=off), also assert bit4 (SRAM_IO_DISABLE), on which i460_fetch_size()
- * bails ("GART SRAMS disabled") so the OS keeps to the Rage 128's own PCI
- * GART.  BAPBASE comes out of reset without a base, and the aperture stays
- * off until the firmware places it.
- */
-static void ia64_agp_reset_regs(IA64AGPState *s)
-{
-    uint8_t *c = PCI_DEVICE(s)->config;
-
-    c[I460_GXBCTL] = 0x00;
-    c[I460_AGPSIZ] = I460_AGPSIZ_SIZE_256M | I460_AGPSIZ_BAPBASE_EN |
-                     (s->gart_enabled ? 0 : I460_AGPSIZ_SRAM_IO_DIS);
-    pci_set_quad(c + I460_BAPBASE, PCI_BASE_ADDRESS_MEM_TYPE_64);
-}
-
-static void ia64_agp_realize(PCIDevice *dev, Error **errp)
+static void ia64_agp_realize(DeviceState *dev, Error **errp)
 {
     IA64AGPState *s = IA64_AGP(dev);
-    uint8_t *c = dev->config;
 
-    /* Host-bridge class so i460-agp's pci_device_id table matches. */
-    pci_config_set_prog_interface(c, 0);
-
-    dev->wmask[I460_GXBCTL] = 0x07;           /* OOG, 4 MB pages, BWC */
-    dev->wmask[I460_AGPSIZ] = 0x07;           /* size_value RMW, keep [7:3] */
-    /*
-     * The GXB decodes 40 address bits (SSDM 7.2.1), and AGP_BASE bits 27:12
-     * are hardwired to 0 (7.1).
-     */
-    pci_set_quad(dev->wmask + I460_BAPBASE, 0x000000fff0000000ULL);
-    ia64_agp_reset_regs(s);
-
-    /* Mandatory: an AGP capability, or the driver returns -ENODEV. */
-    if (pci_add_capability(dev, PCI_CAP_ID_AGP, 0, 8, errp) < 0) {
+    if (s->sram_size != 0 && s->sram_size != 256 * KiB &&
+        s->sram_size != 1 * MiB) {
+        error_setg(errp, "sram-size must be 0, 256 KiB or 1 MiB");
         return;
     }
-    /* Advertise AGP 2.0, 1x/2x/4x so agp_generic_enable negotiates a rate. */
-    pci_set_long(c + pci_find_capability(dev, PCI_CAP_ID_AGP) + PCI_AGP_STATUS,
-                 0x1f000207);
-
-    /* GART SRAM, exposed to the CPU at the fixed 0xFE200000 window. */
-    s->gatt = g_new0(uint32_t, I460_GATT_ENTRIES);
+    s->gatt_entries = s->sram_size / sizeof(uint32_t);
+    s->gatt = g_new0(uint32_t, MAX(s->gatt_entries, 1));
     memory_region_init_io(&s->gart_window, OBJECT(s), &ia64_agp_gart_ops, s,
-                          "ia64-agp-gart", I460_GART_SRAM_SIZE);
+                          "ia64-agp-gart", I460_GART_DECODE);
     memory_region_add_subregion(get_system_memory(), I460_GART_WINDOW_BASE,
                                 &s->gart_window);
 
@@ -302,16 +347,12 @@ static void ia64_agp_realize(PCIDevice *dev, Error **errp)
                              TYPE_IA64_AGP_IOMMU_MEMORY_REGION, OBJECT(s),
                              "ia64-agp-dma", UINT64_MAX);
     address_space_init(&s->dma_as, MEMORY_REGION(&s->iommu), "ia64-agp-dma");
-    pci_setup_iommu(pci_get_bus(dev), &ia64_agp_iommu_ops, s);
-
     ia64_agp_update_aperture(s);
 }
 
 /*
- * Extend the GART translation over another root bus.  The GXB bridge sits on
- * the chipset's own bus while the AGP master it translates is on the GXB's
- * downstream root, so that bus needs the same DMA routing: the master's devfn
- * is translated through the aperture, everything else passes through.
+ * The GART translates the master on the GXB's downstream root; every other
+ * device on that bus passes straight through (ia64_agp_dma_as).
  */
 void ia64_agp_attach_bus(IA64AGPState *s, PCIBus *bus)
 {
@@ -322,26 +363,24 @@ static void ia64_agp_reset(DeviceState *dev)
 {
     IA64AGPState *s = IA64_AGP(dev);
 
-    memset(s->gatt, 0, I460_GATT_ENTRIES * sizeof(uint32_t));
-    ia64_agp_reset_regs(s);
+    memset(s->gatt, 0, MAX(s->gatt_entries, 1) * sizeof(uint32_t));
+    s->gxbctl = 0;
+    s->agpsiz = 0;
+    s->apbase = 0;
+    s->agp_command = 0;
     ia64_agp_update_aperture(s);
 }
 
 static const Property ia64_agp_properties[] = {
     DEFINE_PROP_INT32("agp-master-devfn", IA64AGPState, agp_master_devfn, -1),
-    DEFINE_PROP_BOOL("gart-enabled", IA64AGPState, gart_enabled, true),
+    DEFINE_PROP_UINT32("sram-size", IA64AGPState, sram_size, 1 * MiB),
 };
 
 static void ia64_agp_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    k->realize = ia64_agp_realize;
-    k->config_write = ia64_agp_config_write;
-    k->vendor_id = PCI_VENDOR_ID_INTEL;
-    k->device_id = 0x84ea;              /* PCI_DEVICE_ID_INTEL_84460GX */
-    k->class_id = PCI_CLASS_BRIDGE_HOST;
+    dc->realize = ia64_agp_realize;
     dc->desc = "Intel 460GX GXB AGP bridge";
     device_class_set_legacy_reset(dc, ia64_agp_reset);
     device_class_set_props(dc, ia64_agp_properties);
@@ -351,13 +390,9 @@ static void ia64_agp_class_init(ObjectClass *klass, const void *data)
 
 static const TypeInfo ia64_agp_info = {
     .name          = TYPE_IA64_AGP,
-    .parent        = TYPE_PCI_DEVICE,
+    .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(IA64AGPState),
     .class_init    = ia64_agp_class_init,
-    .interfaces = (const InterfaceInfo[]) {
-        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
-        { },
-    },
 };
 
 static void ia64_agp_iommu_class_init(ObjectClass *klass, const void *data)

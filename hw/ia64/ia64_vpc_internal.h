@@ -244,7 +244,7 @@ struct IA64VpcMachineState {
     bool vga_model_set;
     bool alat_full;
 
-    PCIDevice *agp_dev;
+    DeviceState *agp_dev;
     PCIDevice *sba_dev;
     DeviceState *lba_dev;
     DeviceState *rope0_lba_dev;     /* zx1: the primary root's ioa   */

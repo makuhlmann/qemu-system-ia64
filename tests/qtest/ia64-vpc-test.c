@@ -3599,22 +3599,16 @@ static void check_root_window_containment(const char *args)
  * WXB bus.  A guest enumerating the buses must find them where the i2000 has
  * them, with no BARs and no interrupt to arbitrate.
  */
-/* The AGP bridge's own seat: the host bridge at the top of bus 0. */
-#define IA64_AGP_SLOT           31U
-
 /*
  * The machine presents the four PCI buses the i2000's expander bridges carry
  * and no fifth: the chipset's own configuration space -- the SAC, the SDC,
  * the memory cards and the expander ports -- stays firmware-facing.
  *
- * That is a decision, not an omission, and this pins it.  Nothing a guest
- * does reads those registers: an OS takes its resource map from ACPI, and
- * the one driver that touches 460GX chipset config, Linux's i460-agp, binds
- * to the AGP bridge by device ID, which the machine presents at 00:1f.0.
- * The software that does read them is firmware, which has them through
- * CF8/CFC on the bus number it programs itself (CBN, FFh out of reset,
- * EEh once POST is done) -- test_460gx_no_chipset_bus below stops short of
- * that bus.
+ * The vendor DSDT hides that bus from the OS (CBN._STA is 08h); firmware
+ * and Windows' agp460 reach it through CF8/CFC on the bus number firmware
+ * programs (CBN, FFh out of reset, EEh once POST is done).  The GXB's
+ * function 1 is there and nowhere else: no host bridge on bus 0 stands in
+ * for it.
  */
 static void test_460gx_no_chipset_bus(void)
 {
@@ -3648,14 +3642,8 @@ static void test_460gx_no_chipset_bus(void)
         }
     }
 
-    /*
-     * The AGP bridge the GART path binds to keeps its seat.  On the board it
-     * is an expander port on the chipset bus; here it is the host bridge at
-     * 00:1f.0, which is where Linux finds it ("Found an AGP 0.0 compliant
-     * device at 0000:00:1f.0") and where >4 GB graphics DMA was validated.
-     */
-    g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_AGP_SLOT, 0, 0), ==,
-                    0x84ea8086);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, 0x1f, 0, 0), ==, 0xffffffff);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0xff, 0x14, 1, 0), ==, 0x84ea8086);
     qtest_quit(qts);
 }
 
@@ -4964,40 +4952,57 @@ static void test_460gx_config_ports(void)
 }
 
 /*
- * The GXB AGP host bridge (dev 14h fn 1) holds the graphics aperture base in
- * the 64-bit BAPBASE register (98h).  The vendor firmware programs it at 4 GiB
- * (low dword 0, high dword 1); an above-4-GiB base makes Windows XP-64 fail the
- * AGP root with Code 12, so the realfw config path clamps an above-4-GiB base
- * below 4 GiB while leaving a legitimate below-4-GiB base as written.  The
- * register is the one the GART decodes, which Linux reads at 00:1f.0.  Bits
- * 3:0 mark a 64-bit memory BAR.
+ * The GXB's function 1 on the chipset bus (FFh out of reset) holds one
+ * aperture base.  It shows as the header BAR APBASE (10h) while AGPSIZ bit 3
+ * is clear, as BAPBASE (98h) while it is set, and nowhere without a size;
+ * it is a 64-bit memory BAR whose bits below the size and bits 27:12 read 0
+ * (SSDM 7.1, 7.2.1).  The vendor firmware's 4 GiB BAPBASE stays as written.
  */
-static void test_460gx_agp_aperture_rebased(void)
+static void test_460gx_agp_aperture(void)
 {
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
 
-    /* Firmware's 4 GiB BAPBASE (low 0, high 1) reads back clamped below 4 GiB. */
+    /* Out of reset there is no size, so neither face shows a base. */
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0xa0) >> 16, ==, 0);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x98, 0xf0000000);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x10), ==, 0);
+
+    /* The vendor firmware: AGPSIZ 09h, then BAPBASE at 4 GiB. */
+    cf8_writel(qts, 0xff, 0x14, 1, 0xa0, 0x000900b4);
     cf8_writel(qts, 0xff, 0x14, 1, 0x98, 0x00000000);
     cf8_writel(qts, 0xff, 0x14, 1, 0x9c, 0x00000001);
-    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xd0000004);
-    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x00000000);
-    g_assert_cmphex(cf8_readl(qts, 0, IA64_AGP_SLOT, 0, 0x98), ==, 0xd0000004);
-    g_assert_cmphex(cf8_readl(qts, 0, IA64_AGP_SLOT, 0, 0x9c), ==, 0x00000000);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0x00000004);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x00000001);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x10), ==, 0);
+    /* GXBCTL keeps its three control bits; AGPSIZ bits 4:0 are writable. */
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0xa0) & 0x00ff00ff, ==,
+                    0x00090004);
 
-    /* A below-4-GiB base is legitimate (agp460 writes the aperture back once
-     * the OS owns it) and is stored verbatim -- only above-4-GiB is clamped. */
-    cf8_writel(qts, 0xff, 0x14, 1, 0x98, 0xc0000000);
-    cf8_writel(qts, 0xff, 0x14, 1, 0x9c, 0x00000000);
+    /* Bit 3 clear: the same base shows as APBASE, BAPBASE reads 0. */
+    cf8_writel(qts, 0xff, 0x14, 1, 0xa0, 0x00010004);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x10), ==, 0x00000004);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x14), ==, 0x00000001);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x10, 0xd0000000);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x14, 0);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x10), ==, 0xd0000004);
+
+    /* 1 GB: the base BAR sizes as 1 GB over the GXB's 40 address bits. */
+    cf8_writel(qts, 0xff, 0x14, 1, 0xa0, 0x000a0004);
     g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xc0000004);
-    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x00000000);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x98, 0xffffffff);
+    cf8_writel(qts, 0xff, 0x14, 1, 0x9c, 0xffffffff);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0xc0000004);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x9c), ==, 0x000000ff);
 
-    /* GXBCTL and AGPSIZ are the GART's too: the vendor firmware's values. */
-    cf8_writel(qts, 0xff, 0x14, 1, 0xa0, 0x000900b4);
-    g_assert_cmphex(cf8_readl(qts, 0, IA64_AGP_SLOT, 0, 0xa0) & 0x00ff00ff,
-                    ==, 0x00090004);
+    /* No size (the firmware found no SRAM): nothing shows, nothing sticks. */
+    cf8_writel(qts, 0xff, 0x14, 1, 0xa0, 0x00100004);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x98), ==, 0);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0x10), ==, 0);
+    g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 1, 0xa0) >> 16, ==, 0x10);
 
-    /* Scope: only dev 14h function 1's BAPBASE.  Function 0 (the SAC) is not
-     * clamped, and registers outside 98h-9fh are ordinary config storage. */
+    /* Scope: function 0 and the rest of function 1 are plain storage. */
     cf8_writel(qts, 0xff, 0x14, 0, 0x9c, 0x00000001);
     g_assert_cmphex(cf8_readl(qts, 0xff, 0x14, 0, 0x9c), ==, 0x00000001);
     cf8_writel(qts, 0xff, 0x14, 1, 0x94, 0xdeadbeef);
@@ -7188,74 +7193,47 @@ static void ati_pll_wr(ATITestDev *a, uint32_t idx, uint32_t v)
 }
 
 /*
- * 460GX GXB AGP host bridge + GART.  Lock in exactly what Linux's i460-agp
- * driver inspects to bind (8086:84ea host bridge with an AGP capability,
- * GXBCTL bit1 = 0 for 4 KiB pages, AGPSIZ size_value = 1 for 256 MiB) and the
- * GART SRAM window at 0xFE200000: writing a GATT entry through it reads back,
- * so the driver's create_gatt_table zero+read-back works.  AGPSIZ bit3
- * (BAPBASE_ENABLE) is set, so the aperture base is read from BAPBASE (0x98) --
- * a non-header 64-bit BAR the driver masks to gart_bus_addr.  It comes out of
- * reset without a base, which the firmware programs; the GXB decodes 40 bits
- * and hardwires bits 27:12 (SSDM 7.1, 7.2.1).
+ * The GXB's function 1 on the chipset bus: the AGP bridge's identity, its AGP
+ * capability at E0h (agp460 reads the target capability there), and the GART
+ * SRAM window at FE20_0000.  Status: sideband, fast writes, 1x/2x/4x (SSDM
+ * 1.5.3), 16 requests (p.2-25) and 4G (Spec Update, GXB erratum 2).
  */
 #define IA64_AGP_BAPBASE        0x98
 #define IA64_AGP_GXBCTL         0xa0
 #define IA64_AGP_AGPSIZ         0xa2
+#define IA64_AGP_CAP            0xe0
 #define IA64_AGP_GART_WINDOW    0x00000000fe200000ULL
 #define IA64_AGP_APERTURE_BASE  IA64_460GX_AGP_APERTURE_BASE
+#define IA64_GXB_READB(q, r)    ia64_cfg_readb((q), 0xff, 0x14, 1, (r))
+#define IA64_GXB_READL(q, r)    cf8_readl((q), 0xff, 0x14, 1, (r))
+#define IA64_GXB_WRITEL(q, r, v) cf8_writel((q), 0xff, 0x14, 1, (r), (v))
 
 static void test_agp_gxb(void)
 {
     QTestState *qts = qtest_init("-machine 460gx -m 256M -S");
-    QGenericPCIBus gbus;
-    QPCIDevice *dev;
-    uint8_t cap;
-    uint64_t bapbase;
-    bool have_agp_cap = false;
 
-    ia64_qpci_init(&gbus, qts);
-    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(IA64_AGP_SLOT, 0));
-    g_assert_nonnull(dev);
-
-    /* i460-agp binds by vendor/device + host-bridge class. */
-    g_assert_cmphex(qpci_config_readw(dev, PCI_VENDOR_ID), ==, 0x8086);
-    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x84ea);
-    g_assert_cmphex(qpci_config_readw(dev, PCI_CLASS_DEVICE), ==,
+    g_assert_cmphex(IA64_GXB_READL(qts, PCI_VENDOR_ID), ==, 0x84ea8086);
+    g_assert_cmphex(IA64_GXB_READL(qts, PCI_CLASS_REVISION) >> 16, ==,
                     PCI_CLASS_BRIDGE_HOST);
+    g_assert_cmphex(IA64_GXB_READB(qts, PCI_STATUS) & PCI_STATUS_CAP_LIST, ==,
+                    PCI_STATUS_CAP_LIST);
+    g_assert_cmphex(IA64_GXB_READB(qts, PCI_CAPABILITY_LIST), ==,
+                    IA64_AGP_CAP);
+    g_assert_cmphex(IA64_GXB_READL(qts, IA64_AGP_CAP), ==, 0x00200002);
+    g_assert_cmphex(IA64_GXB_READL(qts, IA64_AGP_CAP + PCI_AGP_STATUS), ==,
+                    0x0f000237);
+    /* The command takes rate, fast write, 4G, AGP and sideband enables. */
+    IA64_GXB_WRITEL(qts, IA64_AGP_CAP + PCI_AGP_COMMAND, 0xffffffff);
+    g_assert_cmphex(IA64_GXB_READL(qts, IA64_AGP_CAP + PCI_AGP_COMMAND), ==,
+                    0x00000337);
 
-    /* And it requires an AGP capability (id 0x02) or returns -ENODEV. */
-    cap = qpci_config_readb(dev, PCI_CAPABILITY_LIST);
-    while (cap != 0 && cap != 0xff) {
-        if (qpci_config_readb(dev, cap) == PCI_CAP_ID_AGP) {
-            have_agp_cap = true;
-            break;
-        }
-        cap = qpci_config_readb(dev, cap + PCI_CAP_LIST_NEXT);
-    }
-    g_assert_true(have_agp_cap);
-
-    /* 4 KiB GART pages (GXBCTL bit1 clear) and a 256 MiB aperture (AGPSIZ=1). */
-    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_GXBCTL) & 0x02, ==, 0);
-    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x07, ==, 1);
-
-    /* BAPBASE_ENABLE set; BAPBASE is a 64-bit BAR without a base yet. */
-    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x08, ==, 0x08);
-    bapbase = ((uint64_t)qpci_config_readl(dev, IA64_AGP_BAPBASE + 4) << 32) |
-              qpci_config_readl(dev, IA64_AGP_BAPBASE);
-    g_assert_cmphex(bapbase, ==, 0x4);
-
-    /* Bits 39:28 take a write; a 256 MB boundary is the finest base. */
-    qpci_config_writel(dev, IA64_AGP_BAPBASE, 0xffffffff);
-    qpci_config_writel(dev, IA64_AGP_BAPBASE + 4, 0xffffffff);
-    g_assert_cmphex(qpci_config_readl(dev, IA64_AGP_BAPBASE), ==, 0xf0000004);
-    g_assert_cmphex(qpci_config_readl(dev, IA64_AGP_BAPBASE + 4), ==, 0xff);
-    qpci_config_writel(dev, IA64_AGP_BAPBASE, 0xdfff0000);
-    qpci_config_writel(dev, IA64_AGP_BAPBASE + 4, 0);
-    g_assert_cmphex(qpci_config_readl(dev, IA64_AGP_BAPBASE), ==, 0xd0000004);
+    /* 4 KiB GART pages, and no aperture until firmware sets a size. */
+    g_assert_cmphex(IA64_GXB_READB(qts, IA64_AGP_GXBCTL) & 0x02, ==, 0);
+    g_assert_cmphex(IA64_GXB_READB(qts, IA64_AGP_AGPSIZ), ==, 0);
 
     /*
-     * The GART SRAM window is writable at its fixed address.  Parity bit 26
-     * is the hardware's: it reads back even parity over the entry (SSDM
+     * The SRAM window is writable at its fixed address.  Parity bit 26 is
+     * the hardware's: it reads back even parity over the entry (SSDM
      * 7.1.1.3), whatever was written there.
      */
     qtest_writel(qts, IA64_AGP_GART_WINDOW + 4 * 7, 0x03001234);
@@ -7265,52 +7243,52 @@ static void test_agp_gxb(void)
     g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 4 * 8), ==,
                     0x00000005);
     /*
-     * The SRAM is 256 KiB, and the SAC sends only FE20_0000-FE3F_FFFF to the
-     * GXB (SSDM p.4-3): FE00_0000 is not the SRAM, and nothing is stored
-     * past its end.
+     * The board's 1 MB SRAM fills the GXB's SADDR[17:0]: the vendor
+     * firmware's probe entry at FE2F_FFF0 holds a value of its own.  The
+     * SAC sends FE20_0000-FE3F_FFFF to the GXB (p.4-3), which does not
+     * decode FE30_0000 up (7.1.2), and FE00_0000 is not the SRAM.
      */
+    qtest_writel(qts, IA64_AGP_GART_WINDOW + 0xffff0, 0x005a5a5a);
+    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 0xffff0), ==,
+                    0x005a5a5a);
+    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW), ==, 0);
+    qtest_writel(qts, IA64_AGP_GART_WINDOW + 1 * MiB, 0x03005678);
+    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 1 * MiB), ==, 0);
     g_assert_cmphex(qtest_readl(qts, 0xfe000000ULL + 4 * 7), ==, 0);
-    qtest_writel(qts, IA64_AGP_GART_WINDOW + 256 * KiB, 0x03005678);
-    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 256 * KiB), ==, 0);
 
-    g_free(dev);
     qtest_quit(qts);
 }
 
 /*
- * agp=off disables the GART: the AGP capability stays present (as on real
- * silicon), but AGPSIZ asserts SRAM_IO_DISABLE (bit4) so i460-agp's
- * fetch_size() bails and the guest keeps to the Rage 128's own PCI GART.
+ * A 256 KB SRAM leaves SADDR[17:16] open, so it repeats through the GXB's
+ * 1 MB range: the vendor firmware's probe at FE2F_FFF0 finds a cell there too.
+ */
+static void test_agp_sram_alias(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -m 256M -S "
+                                 "-global ia64-agp-gxb.sram-size=262144");
+
+    qtest_writel(qts, IA64_AGP_GART_WINDOW + 0xffff0, 0x005a5a5a);
+    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW + 0x3fff0), ==,
+                    0x005a5a5a);
+    qtest_writel(qts, IA64_AGP_GART_WINDOW + 256 * KiB, 0x00000011);
+    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW), ==, 0x00000011);
+    qtest_quit(qts);
+}
+
+/*
+ * agp=off leaves the GART SRAM out: the window keeps nothing, and the
+ * bridge's AGP capability is still there, as on the silicon.
  */
 static void test_agp_off(void)
 {
     QTestState *qts = qtest_init("-machine 460gx,agp=off -m 3G -S");
-    QGenericPCIBus gbus;
-    QPCIDevice *dev;
-    uint8_t cap;
-    bool have_agp_cap = false;
 
-    ia64_qpci_init(&gbus, qts);
-    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(IA64_AGP_SLOT, 0));
-    g_assert_nonnull(dev);
-    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x84ea);
-
-    /* The AGP capability is unchanged -- only the GART SRAM I/O is off. */
-    cap = qpci_config_readb(dev, PCI_CAPABILITY_LIST);
-    while (cap != 0 && cap != 0xff) {
-        if (qpci_config_readb(dev, cap) == PCI_CAP_ID_AGP) {
-            have_agp_cap = true;
-            break;
-        }
-        cap = qpci_config_readb(dev, cap + PCI_CAP_LIST_NEXT);
-    }
-    g_assert_true(have_agp_cap);
-
-    /* SRAM_IO_DISABLE (bit4) set; size/BAPBASE_ENABLE fields intact. */
-    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x10, ==, 0x10);
-    g_assert_cmphex(qpci_config_readb(dev, IA64_AGP_AGPSIZ) & 0x0f, ==, 0x09);
-
-    g_free(dev);
+    g_assert_cmphex(IA64_GXB_READL(qts, PCI_VENDOR_ID), ==, 0x84ea8086);
+    g_assert_cmphex(IA64_GXB_READL(qts, IA64_AGP_CAP) & 0xff, ==,
+                    PCI_CAP_ID_AGP);
+    qtest_writel(qts, IA64_AGP_GART_WINDOW, 0x005a5a5a);
+    g_assert_cmphex(qtest_readl(qts, IA64_AGP_GART_WINDOW), ==, 0);
     qtest_quit(qts);
 }
 
@@ -8066,30 +8044,31 @@ static void agp_gart_dma_fill(ATITestDev *a, uint32_t aperture)
     }
 }
 
-/* The aperture our firmware programs, set where Linux finds the GXB. */
+/* The aperture our firmware programs: 256 MB from BAPBASE. */
 static void test_agp_gart_dma(void)
 {
     ATITestDev a;
 
     ati_dev_open(&a, NULL);
-    cf8_writel(a.qts, 0, IA64_AGP_SLOT, 0, IA64_AGP_BAPBASE,
-               IA64_AGP_APERTURE_BASE);
-    cf8_writel(a.qts, 0, IA64_AGP_SLOT, 0, IA64_AGP_BAPBASE + 4, 0);
+    IA64_GXB_WRITEL(a.qts, IA64_AGP_GXBCTL, 0x00090000);
+    IA64_GXB_WRITEL(a.qts, IA64_AGP_BAPBASE, IA64_AGP_APERTURE_BASE);
+    IA64_GXB_WRITEL(a.qts, IA64_AGP_BAPBASE + 4, 0);
     agp_gart_dma_fill(&a, IA64_AGP_APERTURE_BASE);
     ati_dev_close(&a);
 }
 
 /*
- * The GART follows the aperture the GXB's function 1 on the chipset bus is
- * programmed with, as the vendor firmware and Windows' agp460 do it.
+ * With AGPSIZ bit 3 clear the GART follows APBASE, the header BAR, as it
+ * does after agp460 writes a base back there.
  */
 static void test_agp_gart_dma_moved(void)
 {
     ATITestDev a;
 
     ati_dev_open(&a, NULL);
-    cf8_writel(a.qts, 0xff, 0x14, 1, 0x98, 0xc0000000);
-    cf8_writel(a.qts, 0xff, 0x14, 1, 0x9c, 0x00000000);
+    IA64_GXB_WRITEL(a.qts, IA64_AGP_GXBCTL, 0x00010000);
+    IA64_GXB_WRITEL(a.qts, PCI_BASE_ADDRESS_0, 0xc0000000);
+    IA64_GXB_WRITEL(a.qts, PCI_BASE_ADDRESS_1, 0);
     agp_gart_dma_fill(&a, 0xc0000000);
     ati_dev_close(&a);
 }
@@ -9053,6 +9032,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/realfw/ifb-acpi-block",
                    test_realfw_ifb_acpi_block);
     qtest_add_func("/ia64-vpc/agp/off", test_agp_off);
+    qtest_add_func("/ia64-vpc/agp/sram-alias", test_agp_sram_alias);
     qtest_add_func("/ia64-vpc/ati/config-ids", test_ati_config_ids);
     qtest_add_func("/ia64-vpc/ati/pll-regfile", test_ati_pll_regfile);
     qtest_add_func("/ia64-vpc/ati/dac-load-sense", test_ati_dac_load_sense);
@@ -9106,8 +9086,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/460gx-platform-identities",
                    test_460gx_platform_identities);
     qtest_add_func("/ia64-vpc/pci/460gx-config-ports", test_460gx_config_ports);
-    qtest_add_func("/ia64-vpc/pci/460gx-agp-aperture-rebased",
-                   test_460gx_agp_aperture_rebased);
+    qtest_add_func("/ia64-vpc/pci/460gx-agp-aperture",
+                   test_460gx_agp_aperture);
     qtest_add_func("/ia64-vpc/isa/460gx-superio", test_460gx_superio);
     qtest_add_func("/ia64-vpc/isa/460gx-superio-irq",
                    test_460gx_superio_irq);

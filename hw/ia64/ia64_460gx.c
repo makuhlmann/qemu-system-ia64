@@ -19,6 +19,7 @@
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pci_host.h"
 #include "hw/ia64/ia64_460gx.h"
+#include "hw/ia64/ia64_agp.h"
 #include "hw/ia64/ia64_pci.h"
 #include "system/address-spaces.h"
 #include "system/runstate.h"
@@ -199,54 +200,22 @@ static const uint8_t ia64_460gx_chipset_devs[] = { 0x00, 0x01, 0x04, 0x05,
 #define IA64_460GX_COMPAT_PORT   0x10
 
 /*
- * The GXB AGP host bridge (chipset device 14h, function 1 -- "BRI4") holds the
- * AGP graphics aperture base.  AGPSIZ (reg A2h) bit 3 selects which register
- * supplies it: the 32-bit APBASE (reg 10h) when clear, or the 64-bit BAPBASE
- * (reg 98h) when set (460GX SSDM 7).  The vendor firmware programs AGPSIZ=09h
- * (bit 3 set, bit 0 = 256 MiB) and BAPBASE=0x1_00000000, i.e. a 256 MiB
- * aperture based at 4 GiB.
- *
- * That above-4-GiB base is what makes Windows XP 64-bit (build 2600) fail the
- * GXB/AGP root with Code 12.  agp460.sys reads AGPSIZ then BAPBASE
- * (WSRV03 base/busdrv/agp/agp460/gart.c AgpQueryAperture) and agplib appends a
- * *pinned*, non-relocatable memory requirement [base, base+size-1] for the
- * aperture -- on IA-64 PnP may not move the aperture base, so only that one
- * "preferred" descriptor is offered (agplib/resource.c ~205, 262-271).  This
- * build serialises the aperture as a 32-bit CmResourceTypeMemory descriptor,
- * so a 4 GiB base truncates to [0, 0x0FFFFFFF]; that range lies inside RAM,
- * the arbiter cannot grant it, and the root gets Code 12 and never enumerates
- * its AGP child.  A below-4-GiB base is represented and placed intact.
- *
- * So when a write leaves BAPBASE naming an address at or above 4 GiB, re-base
- * the aperture inside PCI3's producer window, below the graphics framebuffer,
- * at the base our own firmware uses (IA64_460GX_AGP_APERTURE_BASE).
- * Only an above-4-GiB base is clamped -- a legitimate below-4-GiB base (agp460
- * writes the aperture back once the OS owns it) is left as written.  AGPSIZ
- * bit 3 stays set: it only selects the 64-bit register, not an above-4-GiB
- * address (our own firmware's setup runs bit 3 set with a below-4-GiB base
- * too).  Vendor-firmware-only: the project firmware never writes this
- * register.
- *
- * BAPBASE, GXBCTL (A0h) and AGPSIZ are the GART model's registers
- * (ia64_agp.c), which answers for them at 00:1f.0 too, where Linux finds the
- * bridge.  The GART therefore decodes the aperture programmed here.
+ * The GXB's function 1 (chipset device 14h, "BRI4" in the vendor DSDT) holds
+ * the AGP aperture registers and the AGP capability; ia64_agp.c answers for
+ * them, so the GART decodes what firmware and the OS program here.  The
+ * vendor firmware writes AGPSIZ from its GART SRAM probe and then BAPBASE =
+ * max(4 GiB, TOM) (`sal_b` 4B4E0C-4B510C); it stays as written.  XP 2600
+ * RTM's agp460 keeps only the low 32 bits of that base, so it asks for the
+ * aperture at TOM mod 4 GiB, as on the board.
  */
 #define IA64_460GX_GXB_DEV              0x14
 #define IA64_460GX_GXB_BRIDGE_FN       1
-#define IA64_460GX_GXB_BAPBASE_REG     0x98    /* 64-bit AGP aperture base */
-#define IA64_460GX_GXB_BAPBASE_LAST    0x9f
-#define IA64_460GX_GXB_GXBCTL_REG      0xa0
-#define IA64_460GX_GXB_AGPSIZ_REG      0xa2
 
 static bool ia64_460gx_gxb_aperture_reg(IA64460GXState *s, uint8_t dev,
                                         uint8_t fn, unsigned off)
 {
     return s->gxb_agp != NULL && dev == IA64_460GX_GXB_DEV &&
-           fn == IA64_460GX_GXB_BRIDGE_FN &&
-           ((off >= IA64_460GX_GXB_BAPBASE_REG &&
-             off <= IA64_460GX_GXB_BAPBASE_LAST) ||
-            off == IA64_460GX_GXB_GXBCTL_REG ||
-            off == IA64_460GX_GXB_AGPSIZ_REG);
+           fn == IA64_460GX_GXB_BRIDGE_FN && ia64_agp_cfg_owns(off);
 }
 
 /*
@@ -696,8 +665,7 @@ static uint64_t ia64_460gx_cfg_read(void *opaque, hwaddr addr, unsigned size)
             uint64_t byte;
 
             if (ia64_460gx_gxb_aperture_reg(s, dev, fn, off)) {
-                byte = pci_host_config_read_common(
-                    s->gxb_agp, off, pci_config_size(s->gxb_agp), 1);
+                byte = ia64_agp_cfg_readb(s->gxb_agp, off);
             } else {
                 byte = file != NULL ? *file : cfg[off];
             }
@@ -781,9 +749,7 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
                 continue;
             }
             if (ia64_460gx_gxb_aperture_reg(s, dev, fn, off)) {
-                pci_host_config_write_common(s->gxb_agp, off,
-                                             pci_config_size(s->gxb_agp),
-                                             byte, 1);
+                ia64_agp_cfg_writeb(s->gxb_agp, off, byte);
                 continue;
             }
             if (file != NULL) {
@@ -794,30 +760,6 @@ static void ia64_460gx_cfg_write(void *opaque, hwaddr addr, uint64_t data,
             if (bus != 0 && fn == 0 && off == IA64_460GX_XXB_PCIS_REG &&
                 ia64_460gx_expander_port_root(dev) != IA64_460GX_ROOT_NONE) {
                 ia64_460gx_update_low_mmio_window(s);
-            }
-        }
-        /*
-         * Re-base an above-4-GiB GXB AGP aperture below 4 GiB (see
-         * IA64_460GX_GXB_BAPBASE_REG above).  Clamp only when the stored 64-bit
-         * BAPBASE actually names an address at or above 4 GiB, so the firmware's
-         * 0x1_00000000 is corrected while a legitimate below-4-GiB base -- such
-         * as agp460's own AgpSetAperture write-back -- is stored verbatim.  The
-         * check runs when this access touches the register (its high dword
-         * arrives as a separate size-4 write at 0x9c, per the POST trace).
-         */
-        if (ia64_460gx_gxb_aperture_reg(s, dev, fn,
-                                        IA64_460GX_GXB_BAPBASE_REG) &&
-            reg <= IA64_460GX_GXB_BAPBASE_LAST &&
-            reg + size > IA64_460GX_GXB_BAPBASE_REG) {
-            PCIDevice *agp = s->gxb_agp;
-
-            if (pci_get_quad(agp->config + IA64_460GX_GXB_BAPBASE_REG) >> 32) {
-                pci_host_config_write_common(
-                    agp, IA64_460GX_GXB_BAPBASE_REG, pci_config_size(agp),
-                    IA64_460GX_AGP_APERTURE_BASE, 4);
-                pci_host_config_write_common(
-                    agp, IA64_460GX_GXB_BAPBASE_REG + 4, pci_config_size(agp),
-                    IA64_460GX_AGP_APERTURE_BASE >> 32, 4);
             }
         }
         return;
@@ -1142,7 +1084,7 @@ IA64460GXState *ia64_460gx_create(Object *parent, MemoryRegion *pci_io,
     return s;
 }
 
-void ia64_460gx_attach_gxb_agp(IA64460GXState *s, PCIDevice *agp)
+void ia64_460gx_attach_gxb_agp(IA64460GXState *s, struct IA64AGPState *agp)
 {
     s->gxb_agp = agp;
 }

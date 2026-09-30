@@ -196,17 +196,21 @@ static bool sdv_build_chipset(IA64VpcMachineState *s, DeviceState *pci_host,
 {
     MachineState *machine = MACHINE(s);
 
-    s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
     /*
-     * The AGP master is the graphics adapter on the GXB's downstream
-     * root, so the GART translates that bus's device 0.
+     * The GXB's aperture registers live on the chipset bus only, so the
+     * model sits on no PCI bus.  The AGP master is the graphics adapter on
+     * the GXB's downstream root, so the GART translates that bus's device 0.
+     * agp=off leaves the GART SRAM unfitted.
      */
+    s->agp_dev = qdev_new(TYPE_IA64_AGP);
     object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
                             PCI_DEVFN(IA64_460GX_GXB_VGA_SLOT, 0),
                             &error_abort);
-    object_property_set_bool(OBJECT(s->agp_dev), "gart-enabled",
-                            s->agp_enabled, &error_abort);
-    if (!pci_realize_and_unref(s->agp_dev, pci_bus, errp)) {
+    if (!s->agp_enabled) {
+        object_property_set_uint(OBJECT(s->agp_dev), "sram-size", 0,
+                                 &error_abort);
+    }
+    if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(s->agp_dev), errp)) {
         return false;
     }
 
@@ -216,7 +220,7 @@ static bool sdv_build_chipset(IA64VpcMachineState *s, DeviceState *pci_host,
     if (s->chipset == NULL) {
         return false;
     }
-    ia64_460gx_attach_gxb_agp(s->chipset, s->agp_dev);
+    ia64_460gx_attach_gxb_agp(s->chipset, IA64_AGP(s->agp_dev));
     ia64_460gx_attach_root(s->chipset, -1, pci_bus);
     ia64_iosapic_set_redirect(iosapic, sdv_redirect, s);
 
@@ -276,11 +280,7 @@ static bool sdv_build_chipset(IA64VpcMachineState *s, DeviceState *pci_host,
             }
         }
 
-        /*
-         * The GART translates the AGP master, which lives on the GXB's
-         * downstream root, so that bus needs the same DMA routing as the
-         * bus the GXB bridge itself sits on.
-         */
+        /* The GART translates the AGP master on the GXB's downstream root. */
         if (s->agp_dev != NULL) {
             ia64_agp_attach_bus(IA64_AGP(s->agp_dev),
                                 s->expander_bus[IA64_460GX_ROOT_GXB]);

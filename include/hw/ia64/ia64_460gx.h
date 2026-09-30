@@ -77,7 +77,7 @@ struct IA64460GXState {
     /* The primary PCI host bridge (its routed low MMIO window follows PCIS). */
     DeviceState *pci_host;
     /* The GART model that holds the GXB's aperture registers. */
-    PCIDevice *gxb_agp;
+    struct IA64AGPState *gxb_agp;
     /* The compatibility bus and the expander roots, attached by the board. */
     PCIBus *compat_bus;
     PCIBus *root_bus[IA64_460GX_EXPANDER_ROOTS];
@@ -101,10 +101,10 @@ IA64460GXState *ia64_460gx_create(Object *parent, MemoryRegion *pci_io,
 void ia64_460gx_attach_root(IA64460GXState *s, int root, PCIBus *bus);
 
 /*
- * Make @agp (TYPE_IA64_AGP) answer for the aperture registers of the GXB's
- * function 1 on the chipset bus.
+ * Make @agp (TYPE_IA64_AGP) answer for the aperture registers and the AGP
+ * capability of the GXB's function 1 on the chipset bus.
  */
-void ia64_460gx_attach_gxb_agp(IA64460GXState *s, PCIDevice *agp);
+void ia64_460gx_attach_gxb_agp(IA64460GXState *s, struct IA64AGPState *agp);
 
 /*
  * The XTPR update special cycle of symmetric agent @agent carrying the XTP

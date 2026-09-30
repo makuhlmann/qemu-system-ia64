@@ -4935,12 +4935,11 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_set_agp);
     object_class_property_set_description(oc, "agp",
         "AGP support (default on for both chipsets, as on real hardware). On "
-        "460gx it enables the GXB AGP GART; off makes the Rage 128 fall back to "
-        "its 32-bit PCI GART (clean 2D, but graphics DMA cannot reach RAM above "
-        "4 GiB). On zx1 it gives the Rage 128 a PCI AGP capability so Linux "
-        "hp-agp negotiates AGP mode reusing the SBA IOPDIR as the GART; off "
-        "keeps the Rage 128 on the SBA's PCI-GART path (which already reaches "
-        ">4 GiB)");
+        "460gx it fits the GXB's 1 MB GART SRAM; off leaves the SRAM out, so "
+        "firmware finds none and sets no aperture. On zx1 it gives the Rage "
+        "128 a PCI AGP capability so Linux hp-agp negotiates AGP mode reusing "
+        "the SBA IOPDIR as the GART; off keeps the Rage 128 on the SBA's "
+        "PCI-GART path (which already reaches >4 GiB)");
     object_class_property_add_str(oc, "vga",
                                   ia64_vpc_get_vga,
                                   ia64_vpc_set_vga);

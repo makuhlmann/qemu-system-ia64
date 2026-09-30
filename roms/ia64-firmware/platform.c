@@ -181,6 +181,29 @@ BOOLEAN fw_acpi_sci_override(UINT32 *Gsi, UINT16 *Flags)
 }
 
 /*
+ * The GART SRAM is optional and no pin reports it (Datasheet p.2-12), so it
+ * is found by writing an entry and reading it back, as the vendor firmware
+ * does (`sal_b` 4B6750).  A board without it gets AGPSIZ bit 4 (SRAM I/O
+ * off) and no aperture: "The GXB will fully work when there is no SRAM"
+ * (SSDM 7.1.1).
+ */
+static BOOLEAN fw_platform_gart_sram_present(void)
+{
+    UINT64 base = IA64_460GX_GART_SRAM_BASE;
+    volatile UINT32 *entry;     /* an SRAM cell on the GXB, not DRAM */
+    BOOLEAN present;
+
+    if (fw_data_translation_enabled()) {
+        base |= IA64_REGION6_BASE;
+    }
+    entry = (volatile UINT32 *)(UINTN)base;     /* each access reaches it */
+    *entry = 0x5a5a5aU;
+    present = (*entry & 0xffffffU) == 0x5a5a5aU;
+    *entry = 0;
+    return present;
+}
+
+/*
  * Give the 460GX's expander ports their bus numbers, as POST does before it
  * scans them: each port claims configuration cycles for the bus range
  * [BUSNO, SUBNO] (SSDM 2.3.1).  The ports sit on bus CBN (programmed to EEh
@@ -212,6 +235,10 @@ void fw_platform_init_expander_ports(void)
                                0x48, 1, ports[i].Bus);
         pci_config_write_value(0, IA64_460GX_CBN_BUS, ports[i].Device, 0,
                                0x49, 1, ports[i].Bus);
+    }
+    if (!fw_platform_gart_sram_present()) {
+        pci_config_write_value(0, IA64_460GX_CBN_BUS, 0x14, 1, 0xa2, 1, 0x10);
+        return;
     }
     pci_config_write_value(0, IA64_460GX_CBN_BUS, 0x14, 1, 0xa2, 1, 0x09);
     pci_config_write_value(0, IA64_460GX_CBN_BUS, 0x14, 1, 0x98, 4,
