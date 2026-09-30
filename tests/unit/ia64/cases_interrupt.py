@@ -5802,6 +5802,9 @@ GROUP = 'interrupt'
 # while CPU 0 takes a Break fault in a loop with PSR.i set: faults, which are
 # delivered without the BQL, and interrupts, which read the IRR under it,
 # interleave on CPU 0 while CPU 1 writes that IRR.  A lost IPI hangs CPU 1.
+# Each round trip needs both vCPU threads on a host CPU, and each poll stops
+# both: beside running guests CPU 1 got through 220 IPIs in 2 s, so the case
+# polls less often and waits far longer than a quiet host needs (under 2 s).
 _IPI_COUNTER = 0x8000
 _IPI_DONE = 0x8008
 _IPI_IVA = 0x200000
@@ -5864,7 +5867,8 @@ test_ipis_during_break_faults_all_arrive = require_registers(
         "exception": IA64_EXCP_NONE,
         "r5": 0,
         "r6": 2001,
-    }, entry=0x10, alat=None, smp="2", state_cpu=1)
+    }, entry=0x10, alat=None, smp="2", state_cpu=1, timeout=60.0,
+    poll_max_s=0.250)
 
 # PSR.i enables NMI (vector 2) like any external interrupt; only TPR and the
 # in-service priority do not mask it (SDM Vol. 2 rev 1.0 Table 5-7).  A
