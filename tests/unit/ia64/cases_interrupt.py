@@ -6191,16 +6191,18 @@ def _ia32_flat_data_case(name, code, vector, expected, dsd=IA32_FLAT_DSD,
                          pre=(), data=()):
     """Enter IA-32 code at 0x9000 by rfi with IPSR = ic, is and psr.
 
-    dtrs maps 4 KiB pages (va, pa) while PSR.ic is still clear; pre holds
-    further IA-64 bundles, or ("movl", gr, value); the handler at vector
-    records IIP, ISR and IFA in r20, r21 and r22.
+    dtrs maps 4 KiB pages (va, pa[, pte_flags]) while PSR.ic is still clear;
+    pre holds further IA-64 bundles, or ("movl", gr, value); the handler at
+    vector records IIP, ISR and IFA in r20, r21 and r22.
     """
     bundles = list(ia32_environment_bundles(0x700, 0x10, csd=csd, dsd=dsd,
                                             ssd=ssd))
     addr = 0x10
-    for slot, (va, pa) in enumerate(dtrs):
+    for slot, (va, pa, *flags) in enumerate(dtrs):
         bundles += dtr_setup_bundles(addr, va, pa, page_shift=12,
-                                     slot=5 + slot)
+                                     slot=5 + slot,
+                                     pte_flags=flags[0] if flags else
+                                     DTR_PTE_WB)
         addr += 0x60
     steps = [("movl", 3, eflags), (0x00, mov_m_gr_ar(3, 24), nop_i(), nop_i())]
     if cflg is not None:
@@ -6397,6 +6399,47 @@ test_ia32_pop_m_destination_checked_against_ds = _ia32_flat_data_case(
     {"r20": IA32_FLAT_CODE + 6},
     ssd=IA32_TEST_DSD,
     data=[(0xa800, bytes.fromhex("78 56 34 12"))])
+
+# PREFETCHh "does not cause any exceptions (except for code breakpoints)"
+# (SDM rev 2.3 Vol. 4 p.4:580), and the hint NOPs never access their
+# operand: neither faults on an unmapped or a read-only page.  The second
+# case repeats dsound.dll's prefetcht0 [esi+0x80].
+_IA32_HINT_OPERANDS = bytes.fromhex(
+    "0f 18 0d 00 c0 00 00 "      # prefetcht0 [0xc000]
+    "0f 18 05 00 c0 00 00 "      # prefetchnta [0xc000]
+    "0f 1f 05 00 c0 00 00 "      # nop dword [0xc000]
+    "0f 18 8e 80 00 00 00 "      # prefetcht0 [esi+0x80]
+    "0f 0b")                     # ud2
+_IA32_READ_ONLY_PTE = DTR_PTE_WB & ~(7 << 9)
+
+test_ia32_hint_operands_skip_unmapped_page = _ia32_flat_data_case(
+    "ia32_hint_operands_skip_unmapped_page",
+    _IA32_HINT_OPERANDS, IA64_IA32_INTERCEPT_VECTOR,
+    {"r20": IA32_FLAT_CODE + 28},
+    psr=IA64_PSR_DT, pre=[("movl", 14, 0xbf80)])
+
+test_ia32_hint_operands_skip_read_only_page = _ia32_flat_data_case(
+    "ia32_hint_operands_skip_read_only_page",
+    _IA32_HINT_OPERANDS, IA64_IA32_INTERCEPT_VECTOR,
+    {"r20": IA32_FLAT_CODE + 28},
+    psr=IA64_PSR_DT, pre=[("movl", 14, 0xbf80)],
+    dtrs=[(0xc000, 0xc000, _IA32_READ_ONLY_PTE)])
+
+# UD1 and UD0 decode a ModRM operand but never access it: an unmapped one
+# still gives the invalid-opcode intercept, not a TLB fault.
+test_ia32_ud1_unmapped_operand_intercepts = _ia32_flat_data_case(
+    "ia32_ud1_unmapped_operand_intercepts",
+    bytes.fromhex("0f b9 05 00 c0 00 00"),   # ud1 eax,[0xc000]
+    IA64_IA32_INTERCEPT_VECTOR,
+    {"r20": IA32_FLAT_CODE},
+    psr=IA64_PSR_DT)
+
+test_ia32_ud0_unmapped_operand_intercepts = _ia32_flat_data_case(
+    "ia32_ud0_unmapped_operand_intercepts",
+    bytes.fromhex("0f ff 05 00 c0 00 00"),   # ud0 eax,[0xc000]
+    IA64_IA32_INTERCEPT_VECTOR,
+    {"r20": IA32_FLAT_CODE},
+    psr=IA64_PSR_DT)
 
 # PAUSE leaves for the main loop; it must still complete like any other
 # instruction: a PSR.ss trap after it, and PSR.id cleared.
@@ -6984,6 +7027,10 @@ CASE_NAMES = (
     'ia32_flat_pop_m_probes_destination_first',
     'ia32_flat_rmw_reports_write_miss',
     'ia32_pop_m_destination_checked_against_ds',
+    'ia32_hint_operands_skip_unmapped_page',
+    'ia32_hint_operands_skip_read_only_page',
+    'ia32_ud1_unmapped_operand_intercepts',
+    'ia32_ud0_unmapped_operand_intercepts',
     'ia32_pause_psr_ss_traps_after_it',
     'ia32_pause_clears_psr_id',
     'ia32_flat_movaps_store_tlb_miss_precedes_alignment',
