@@ -4986,7 +4986,7 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "'rage128gl' (ATI Rage 128 GL AGP), 'mach64' "
         "(ATI Mach64 3D Rage, a PCI 2D adapter with no AGP), 'nv15gl' "
         "(NVIDIA Quadro2 Pro), 'std' or 'none'. Each board defaults to its "
-        "own adapter");
+        "own adapter (460gx: rage128gl, zx1: mach64)");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);

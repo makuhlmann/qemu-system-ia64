@@ -351,7 +351,8 @@ static void test_assert_ppm_pixel(const char *filename, unsigned width,
     g_assert_cmphex(pixel[2], ==, blue);
 }
 
-static void test_int10_rom(void)
+static void check_int10_rom(const char *extra, uint16_t device,
+                            uint32_t pll_max)
 {
     uint8_t rom[IA64_INT10_ROM_SIZE];
     uint8_t zero[IA64_INT10_ROM_SIZE] = { 0 };
@@ -360,7 +361,7 @@ static void test_int10_rom(void)
     uint16_t ati_header;
     uint16_t ati_pll;
     unsigned checksum = 0;
-    QTestState *qts = ia64_vpc_start(NULL);
+    QTestState *qts = ia64_vpc_start(extra);
     size_t i;
 
     qtest_memread(qts, IA64_INT10_ROM_BASE, rom, sizeof(rom));
@@ -377,7 +378,7 @@ static void test_int10_rom(void)
     g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 4),
                     ==, 0x1002);
     g_assert_cmphex(lduw_le_p(rom + IA64_INT10_ROM_PCIR_OFFSET + 6),
-                    ==, 0x5046);
+                    ==, device);
     /* the marker string follows the 0xffff terminator of the mode list */
     for (i = IA64_INT10_ROM_MODES_OFFSET; i + 2 <= sizeof(rom); i += 2) {
         if (lduw_le_p(rom + i) == 0xffff) {
@@ -400,13 +401,14 @@ static void test_int10_rom(void)
     /*
      * PLL values as published by real Rage 128 Pro BIOSes (identical in the
      * XPERT128 retail, Connect3D AGP and generic PCI dumps): XCLK 120.00 MHz,
-     * 29.50 MHz reference with divider 65, 125-400 MHz VCO range.
+     * 29.50 MHz reference with divider 65, 125-400 MHz VCO range.  The GL's
+     * PLLs stop at 250 MHz (GCS-C04100 section 4.7).
      */
     g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x08), ==, 12000);
     g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x0e), ==, 2950);
     g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x10), ==, 65);
     g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x12), ==, 12500);
-    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x16), ==, 40000);
+    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x16), ==, pll_max);
     /*
      * The Rage 128 miniport (ati2mpaa) reads 50 bytes of the PLL block and a
      * 12-byte table through header+14h; the fields past +20h decide its
@@ -414,9 +416,9 @@ static void test_int10_rom(void)
      */
     g_assert_cmphex(lduw_le_p(rom + ati_header + 0x14), ==, ati_header);
     g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x0a), ==, 12000);
-    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x22), ==, 40000);
-    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x2e), ==, 40000 & 0xffff);
-    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x30), ==, 40000 >> 16);
+    g_assert_cmpuint(ldl_le_p(rom + ati_pll + 0x22), ==, pll_max);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x2e), ==, pll_max & 0xffff);
+    g_assert_cmpuint(lduw_le_p(rom + ati_pll + 0x30), ==, pll_max >> 16);
     g_assert_cmpint(ati_pll + 0x32, <=, IA64_INT10_ROM_HANDLER_OFFSET);
     g_assert_cmpmem(rom + IA64_INT10_ROM_OEM_OFFSET, 13,
                     "QEMU IA64 VBE", 13);
@@ -451,6 +453,17 @@ static void test_int10_rom(void)
     g_assert_cmphex(lduw_le_p(vector + 2), ==,
                     IA64_INT10_ROM_BASE >> 4);
     qtest_quit(qts);
+}
+
+static void test_int10_rom(void)
+{
+    check_int10_rom("-machine vga=rage128", 0x5046, 40000);
+}
+
+/* The 460gx board's own card is the Rage 128 GL AGP. */
+static void test_int10_rom_gl(void)
+{
+    check_int10_rom(NULL, 0x5246, 25000);
 }
 
 static void test_int10_vbe_for_device(const char *extra_args)
@@ -5853,7 +5866,7 @@ static void test_pci_default_layout(void)
         uint32_t reg;
         uint32_t value;
     } gxb_vga[] = {
-        { PCI_VENDOR_ID, 0x50461002 },
+        { PCI_VENDOR_ID, 0x52461002 },
         { PCI_BASE_ADDRESS_0, 0xf0000008 },
         { PCI_BASE_ADDRESS_1, 0x0000d801 },
         { PCI_BASE_ADDRESS_2, 0xf5000000 },
@@ -7179,9 +7192,13 @@ static void ati_dev_open_chip(ATITestDev *a, const char *extra,
     g_assert_cmphex(a->fb, ==, 0xf0000000);
 }
 
+/* The Pro tests name it: the 460gx board's own card is the GL. */
 static void ati_dev_open(ATITestDev *a, const char *extra)
 {
-    ati_dev_open_chip(a, extra, 0x5046);
+    g_autofree char *args = g_strdup_printf("-machine vga=rage128 %s",
+                                            extra ?: "");
+
+    ati_dev_open_chip(a, args, 0x5046);
 }
 
 static void ati_dev_close(ATITestDev *a)
@@ -7358,7 +7375,7 @@ static void test_ati_gl_capabilities(void)
 {
     ATITestDev a;
 
-    ati_dev_open_chip(&a, "-machine vga=rage128gl", 0x5246);
+    ati_dev_open_chip(&a, NULL, 0x5246);
     g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_VENDOR_ID), ==,
                     0x1002);
     g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_ID), ==, 0x5246);
@@ -7380,7 +7397,7 @@ static void test_ati_gl_capabilities(void)
     g_assert_cmphex(qpci_config_readw(a.dev, 0x60), ==, 0x0000);
     ati_dev_close(&a);
 
-    ati_dev_open_chip(&a, "-machine vga=rage128gl,agp=off", 0x5246);
+    ati_dev_open_chip(&a, "-machine agp=off", 0x5246);
     g_assert_cmphex(qpci_config_readb(a.dev, PCI_CAPABILITY_LIST), ==, 0x5c);
     ati_dev_close(&a);
 }
@@ -7547,13 +7564,13 @@ static void ati_check_rom_bar_tables(const char *extra, uint16_t device,
 
 static void test_ati_rom_bar_tables(void)
 {
-    ati_check_rom_bar_tables(NULL, 0x5046, 40000);
+    ati_check_rom_bar_tables("-machine vga=rage128", 0x5046, 40000);
 }
 
 /* The GL's PLLs reach 250 MHz (GCS-C04100 section 4.7). */
 static void test_ati_gl_rom_bar_tables(void)
 {
-    ati_check_rom_bar_tables("-machine vga=rage128gl", 0x5246, 25000);
+    ati_check_rom_bar_tables(NULL, 0x5246, 25000);
 }
 
 /*
@@ -9014,6 +9031,7 @@ int main(int argc, char **argv)
                    test_acpi_reset_register);
     qtest_add_func("/ia64-vpc/acpi-pm-mmio", test_acpi_pm_mmio);
     qtest_add_func("/ia64-vpc/vga/int10-rom", test_int10_rom);
+    qtest_add_func("/ia64-vpc/vga/int10-rom-gl", test_int10_rom_gl);
     qtest_add_func("/ia64-vpc/vga/int10-vbe", test_int10_vbe);
     qtest_add_func("/ia64-vpc/vga/int10-vbe-std", test_int10_vbe_std);
     qtest_add_func("/ia64-vpc/vga/int10-legacy", test_int10_legacy);

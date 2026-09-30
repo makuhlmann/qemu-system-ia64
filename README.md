@@ -76,9 +76,7 @@ To disable networking, use `-nic none`
 
 By default, QEMU will show a GTK window when launched, letting you see the graphical output of the guest. Alternatively you can use the more basic SDL output as well (`-display sdl`) or have no output at all (`-display none`), which might be useful for server systems.
 
-The default graphics card attached to guests is an ATI Rage 128 Pro (AGP) with rudimentary 2D acceleration. To attach it via PCI instead (may be needed for some guests), you can add the setting `agp=off` to the machine flag: `-machine ia64-vpc,agp=off`.
-
-Experimental support for mach64 based GPUs is present as well and can be enabled via `-machine ia64-vpc,vga=mach64`.
+The default graphics card depends on the machine: an ATI Rage 128 GL (AGP) on `-M 460gx` and an ATI Mach64 3D Rage (PCI) on `-M zx1`, both with rudimentary 2D acceleration. `vga=rage128` selects the ATI Rage 128 Pro (AGP) and `vga=rage128gl` the Rage 128 GL, for example `-machine zx1,vga=rage128`. To attach a Rage 128 without its AGP capability (may be needed for some guests), add `agp=off` to the machine flag: `-machine 460gx,agp=off`.
 
 To fall back to a standard VGA capable graphics card, use the flag `-vga std` flag.
 

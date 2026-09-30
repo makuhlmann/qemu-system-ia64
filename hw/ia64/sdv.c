@@ -516,6 +516,8 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
      * it.  Either default can be overridden with i8042=on|off.
      */
     imc->i8042_default = true;
+    /* The Rage 128 GL AGP, as on a real SDV with firmware 1.30. */
+    imc->vga_default = "rage128gl";
     imc->legacy_com1_console = true;
     imc->nvram_battery_size = INTEL_82468GX_IFB_BATTERY_SIZE;
     imc->processor_ids = sdv_processor_ids;
