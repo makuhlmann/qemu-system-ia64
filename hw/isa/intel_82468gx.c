@@ -1147,7 +1147,7 @@ static void ifb_lpc_class_init(ObjectClass *klass, const void *data)
     pc->config_write = ifb_lpc_write_config;
     pc->vendor_id = INTEL_82468GX_IFB_VENDOR_ID;
     pc->device_id = INTEL_82468GX_IFB_LPC_DEVICE_ID;
-    pc->revision = 0;
+    pc->revision = INTEL_82468GX_IFB_REVISION;
     pc->class_id = PCI_CLASS_BRIDGE_ISA;
     dc->desc = "Intel 82468GX I/O and Firmware Bridge";
     dc->user_creatable = false;
@@ -1256,7 +1256,7 @@ static void ifb_smbus_class_init(ObjectClass *klass, const void *data)
     pc->config_write = ifb_smbus_write_config;
     pc->vendor_id = INTEL_82468GX_IFB_VENDOR_ID;
     pc->device_id = INTEL_82468GX_IFB_SMBUS_DEVICE_ID;
-    pc->revision = 0;
+    pc->revision = INTEL_82468GX_IFB_REVISION;
     pc->class_id = PCI_CLASS_SERIAL_SMBUS;
     dc->desc = "Intel 82468GX SMBus controller";
     dc->user_creatable = false;

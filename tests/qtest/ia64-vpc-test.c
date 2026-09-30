@@ -5884,6 +5884,8 @@ static void test_pci_default_layout(void)
                         PCI_VENDOR_ID_INTEL);
         g_assert_cmphex(qpci_config_readw(fn, PCI_DEVICE_ID), ==,
                         ifb_functions[i].device);
+        /* A-0 stepping, revision 01h (Specification Update p.55). */
+        g_assert_cmphex(qpci_config_readb(fn, PCI_REVISION_ID), ==, 0x01);
         g_assert_cmphex(qpci_config_readw(fn, PCI_CLASS_DEVICE), ==,
                         ifb_functions[i].class_id);
         g_assert_cmphex(qpci_config_readw(fn, PCI_SUBSYSTEM_VENDOR_ID),
