@@ -28,6 +28,8 @@
 #define PCI_VENDOR_ID_ATI 0x1002
 /* Rage128 Pro GL */
 #define PCI_DEVICE_ID_ATI_RAGE128_PF 0x5046
+/* Rage128 GL, AGP 1x/2x (RRG-G04100-C DEVICE_ID, "RF") */
+#define PCI_DEVICE_ID_ATI_RAGE128_RF 0x5246
 /* Radeon RV100 (VE) */
 #define PCI_DEVICE_ID_ATI_RADEON_QY 0x5159
 
@@ -179,6 +181,13 @@ const char *ati_reg_name(int num);
  * negative coordinates, so sign-extend bit 13 rather than treating the field
  * as unsigned.
  */
+/* The Rage 128 chips share one register layout; the Radeon's differs. */
+static inline bool ati_is_rage128(const ATIVGAState *s)
+{
+    return s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF ||
+           s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_RF;
+}
+
 static inline int ati_sext14(unsigned v)
 {
     return ((int)(v & 0x3fff) ^ 0x2000) - 0x2000;

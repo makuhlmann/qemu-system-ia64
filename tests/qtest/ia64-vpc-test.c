@@ -7164,18 +7164,24 @@ typedef struct {
     uint64_t fb;                       /* BAR0 - linear framebuffer      */
 } ATITestDev;
 
-static void ati_dev_open(ATITestDev *a, const char *extra)
+static void ati_dev_open_chip(ATITestDev *a, const char *extra,
+                              uint16_t device)
 {
     a->qts = extra ? ia64_vpc_start(extra) : ia64_vpc_start(NULL);
     ia64_qpci_init_on_bus(&a->gbus, a->qts, IA64_460GX_GXB_BUS);
     a->dev = qpci_device_find(&a->gbus.bus, QPCI_DEVFN(ATI_SLOT, 0));
     g_assert_nonnull(a->dev);
     g_assert_cmphex(qpci_config_readw(a->dev, PCI_VENDOR_ID), ==, 0x1002);
-    g_assert_cmphex(qpci_config_readw(a->dev, PCI_DEVICE_ID), ==, 0x5046);
+    g_assert_cmphex(qpci_config_readw(a->dev, PCI_DEVICE_ID), ==, device);
     a->mmio = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_2) & 0xfffffff0;
     a->fb = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_0) & 0xfffffff0;
     g_assert_cmphex(a->mmio, ==, 0xf5000000);
     g_assert_cmphex(a->fb, ==, 0xf0000000);
+}
+
+static void ati_dev_open(ATITestDev *a, const char *extra)
+{
+    ati_dev_open_chip(a, extra, 0x5046);
 }
 
 static void ati_dev_close(ATITestDev *a)
@@ -7321,6 +7327,65 @@ static void test_ati_config_ids(void)
 }
 
 /*
+ * With agp=on the Rage 128 Pro shows its AGP 2.0 capability at 50h: 1x, 2x
+ * and 4x, sideband, 32 requests, SBA_EN read-only 1 (RRG-G04500-C).
+ */
+static void test_ati_pro_agp_capability(void)
+{
+    ATITestDev a;
+
+    ati_dev_open(&a, NULL);
+    g_assert_true(qpci_config_readw(a.dev, PCI_STATUS) & PCI_STATUS_CAP_LIST);
+    g_assert_cmphex(qpci_config_readb(a.dev, PCI_CAPABILITY_LIST), ==, 0x50);
+    g_assert_cmphex(qpci_config_readl(a.dev, 0x50), ==, 0x00200002);
+    g_assert_cmphex(qpci_config_readl(a.dev, 0x54), ==, 0x1f000207);
+    g_assert_cmphex(qpci_config_readl(a.dev, 0x58), ==, 0x00000200);
+    qpci_config_writel(a.dev, 0x58, 0xffffffff);
+    g_assert_cmphex(qpci_config_readl(a.dev, 0x58), ==, 0xff000307);
+    ati_dev_close(&a);
+
+    ati_dev_open(&a, "-machine agp=off");
+    g_assert_false(qpci_config_readw(a.dev, PCI_STATUS) & PCI_STATUS_CAP_LIST);
+    ati_dev_close(&a);
+}
+
+/*
+ * The Rage 128 GL AGP (1002:5246, RRG-G04100-C): AGP 1.0 at 50h with 1x and
+ * 2x, pointing on to power management at 5Ch, the end of the list: PMI 1.0,
+ * D1 but not D2, only POWER_STATE writable.
+ */
+static void test_ati_gl_capabilities(void)
+{
+    ATITestDev a;
+
+    ati_dev_open_chip(&a, "-machine vga=rage128gl", 0x5246);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_VENDOR_ID), ==,
+                    0x1002);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_SUBSYSTEM_ID), ==, 0x5246);
+    g_assert_cmphex(qpci_config_readb(a.dev, PCI_CAPABILITY_LIST), ==, 0x50);
+    g_assert_cmphex(qpci_config_readl(a.dev, 0x50), ==, 0x00105c02);
+    g_assert_cmphex(qpci_config_readl(a.dev, 0x54), ==, 0x1f000203);
+    g_assert_cmphex(qpci_config_readl(a.dev, 0x58), ==, 0x00000200);
+    qpci_config_writel(a.dev, 0x58, 0xffffffff);
+    g_assert_cmphex(qpci_config_readl(a.dev, 0x58), ==, 0xff000303);
+    qpci_config_writel(a.dev, 0x58, 0);
+    g_assert_cmphex(qpci_config_readl(a.dev, 0x58), ==, 0);
+
+    g_assert_cmphex(qpci_config_readl(a.dev, 0x5c), ==, 0x02010001);
+    qpci_config_writew(a.dev, 0x60, 0xffff);
+    g_assert_cmphex(qpci_config_readw(a.dev, 0x60), ==, 0x0003);
+    qpci_config_writew(a.dev, 0x60, 0x0002);            /* no D2 */
+    g_assert_cmphex(qpci_config_readw(a.dev, 0x60), ==, 0x0003);
+    qpci_config_writew(a.dev, 0x60, 0x0000);
+    g_assert_cmphex(qpci_config_readw(a.dev, 0x60), ==, 0x0000);
+    ati_dev_close(&a);
+
+    ati_dev_open_chip(&a, "-machine vga=rage128gl,agp=off", 0x5246);
+    g_assert_cmphex(qpci_config_readb(a.dev, PCI_CAPABILITY_LIST), ==, 0x5c);
+    ati_dev_close(&a);
+}
+
+/*
  * Indirect PLL register file: power-up defaults, PLL_WR_EN gating, the 6-bit
  * index mask, and the PPLL_ATOMIC_UPDATE "update pending" bit (bit 15 of
  * indices 0x03..0x07) that hardware reports as clear once settled.
@@ -7400,10 +7465,11 @@ static void test_ati_mm_index_indirect(void)
 /*
  * PCI ROM BAR: the machine patches the stock SeaVGABIOS with the ATI tables a
  * native Rage 128 driver validates (ia64_vpc_install_ati_rom_tables): the
- * " 761295520" signature at 0x30, a PCIR structure restated to 1002:5046, and
- * a valid overall checksum over the (grown) declared image.
+ * " 761295520" signature at 0x30, a PCIR structure restated to the
+ * adapter's id, and a valid overall checksum over the (grown) declared image.
  */
-static void test_ati_rom_bar_tables(void)
+static void ati_check_rom_bar_tables(const char *extra, uint16_t device,
+                                     uint32_t pll_max)
 {
     ATITestDev a;
     uint32_t rom_bar;
@@ -7413,7 +7479,7 @@ static void test_ati_rom_bar_tables(void)
     uint8_t checksum = 0;
     int sig_at = -1;
 
-    ati_dev_open(&a, NULL);
+    ati_dev_open_chip(&a, extra, device);
     /*
      * The machine assigns the ROM BAR but deliberately leaves decode OFF (an
      * XP VideoPortGetAccessRanges workaround); readers enable it transiently,
@@ -7456,9 +7522,9 @@ static void test_ati_rom_bar_tables(void)
         g_assert_cmpuint(lduw_le_p(rom + pll + 0x08), ==, 12000);
         g_assert_cmpuint(lduw_le_p(rom + pll + 0x0a), ==, 12000);
         g_assert_cmpuint(lduw_le_p(rom + pll + 0x0e), ==, 2950);
-        g_assert_cmpuint(ldl_le_p(rom + pll + 0x16), ==, 40000);
-        g_assert_cmpuint(ldl_le_p(rom + pll + 0x22), ==, 40000);
-        g_assert_cmpuint(lduw_le_p(rom + pll + 0x2e), ==, 40000 & 0xffff);
+        g_assert_cmpuint(ldl_le_p(rom + pll + 0x16), ==, pll_max);
+        g_assert_cmpuint(ldl_le_p(rom + pll + 0x22), ==, pll_max);
+        g_assert_cmpuint(lduw_le_p(rom + pll + 0x2e), ==, pll_max & 0xffff);
     }
 
     /* PCIR restated to this adapter (EFI 1.10 wants it to match the header) */
@@ -7466,7 +7532,7 @@ static void test_ati_rom_bar_tables(void)
     g_assert_cmpuint(pcir + 0x18, <=, declared);
     g_assert_cmpmem(rom + pcir, 4, "PCIR", 4);
     g_assert_cmphex(lduw_le_p(rom + pcir + 4), ==, 0x1002);
-    g_assert_cmphex(lduw_le_p(rom + pcir + 6), ==, 0x5046);
+    g_assert_cmphex(lduw_le_p(rom + pcir + 6), ==, device);
     g_assert_cmphex(lduw_le_p(rom + pcir + 0x10), ==, declared / 512);
 
     /* the grown image checksums to zero */
@@ -7477,6 +7543,17 @@ static void test_ati_rom_bar_tables(void)
 
     g_free(rom);
     ati_dev_close(&a);
+}
+
+static void test_ati_rom_bar_tables(void)
+{
+    ati_check_rom_bar_tables(NULL, 0x5046, 40000);
+}
+
+/* The GL's PLLs reach 250 MHz (GCS-C04100 section 4.7). */
+static void test_ati_gl_rom_bar_tables(void)
+{
+    ati_check_rom_bar_tables("-machine vga=rage128gl", 0x5246, 25000);
 }
 
 /*
@@ -9050,6 +9127,11 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/agp/off", test_agp_off);
     qtest_add_func("/ia64-vpc/agp/sram-alias", test_agp_sram_alias);
     qtest_add_func("/ia64-vpc/ati/config-ids", test_ati_config_ids);
+    qtest_add_func("/ia64-vpc/ati/pro-agp-capability",
+                   test_ati_pro_agp_capability);
+    qtest_add_func("/ia64-vpc/ati/gl-capabilities", test_ati_gl_capabilities);
+    qtest_add_func("/ia64-vpc/ati/gl-rom-bar-tables",
+                   test_ati_gl_rom_bar_tables);
     qtest_add_func("/ia64-vpc/ati/pll-regfile", test_ati_pll_regfile);
     qtest_add_func("/ia64-vpc/ati/dac-load-sense", test_ati_dac_load_sense);
     qtest_add_func("/ia64-vpc/ati/mm-index-indirect",

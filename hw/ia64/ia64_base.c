@@ -291,11 +291,14 @@
 #define IA64_BDA_VIDEO_SWITCHES  0x00000488U
 #define IA64_ATI_VENDOR_ID        0x1002U
 #define IA64_ATI_RAGE128_PF_ID    0x5046U
+#define IA64_ATI_RAGE128_RF_ID    0x5246U
 #define IA64_ATI_PLL_XCLK         12000U
 #define IA64_ATI_PLL_REFERENCE_FREQ 2950U
 #define IA64_ATI_PLL_REFERENCE_DIV  65U
 #define IA64_ATI_PLL_MIN_FREQ     12500U
 #define IA64_ATI_PLL_MAX_FREQ     40000U
+/* The GL's PLLs reach 250 MHz (GCS-C04100 §4.7). */
+#define IA64_ATI_GL_PLL_MAX_FREQ  25000U
 #endif
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
@@ -1339,8 +1342,18 @@ static const MemoryRegionOps ia64_int10_io_ops = {
 #define IA64_ATI_HDR_SIZE  0x40U
 #define IA64_ATI_PLL_SIZE  0x32U
 
-static void ia64_ati_write_bios_tables(uint8_t *rom, uint32_t hdr, uint32_t pll)
+static bool ia64_ati_is_rage128(uint16_t device)
 {
+    return device == IA64_ATI_RAGE128_PF_ID ||
+           device == IA64_ATI_RAGE128_RF_ID;
+}
+
+static void ia64_ati_write_bios_tables(uint8_t *rom, uint32_t hdr, uint32_t pll,
+                                       uint16_t device)
+{
+    uint32_t max = device == IA64_ATI_RAGE128_RF_ID ?
+                   IA64_ATI_GL_PLL_MAX_FREQ : IA64_ATI_PLL_MAX_FREQ;
+
     memset(rom + hdr, 0, IA64_ATI_HDR_SIZE);
     memset(rom + pll, 0, IA64_ATI_PLL_SIZE);
     stw_le_p(rom + hdr + 0x14, hdr);
@@ -1350,10 +1363,10 @@ static void ia64_ati_write_bios_tables(uint8_t *rom, uint32_t hdr, uint32_t pll)
     stw_le_p(rom + pll + 0x0e, IA64_ATI_PLL_REFERENCE_FREQ);
     stw_le_p(rom + pll + 0x10, IA64_ATI_PLL_REFERENCE_DIV);
     stl_le_p(rom + pll + 0x12, IA64_ATI_PLL_MIN_FREQ);
-    stl_le_p(rom + pll + 0x16, IA64_ATI_PLL_MAX_FREQ);
-    stl_le_p(rom + pll + 0x22, IA64_ATI_PLL_MAX_FREQ);
-    stw_le_p(rom + pll + 0x2e, IA64_ATI_PLL_MAX_FREQ & 0xffffU);
-    stw_le_p(rom + pll + 0x30, IA64_ATI_PLL_MAX_FREQ >> 16);
+    stl_le_p(rom + pll + 0x16, max);
+    stl_le_p(rom + pll + 0x22, max);
+    stw_le_p(rom + pll + 0x2e, max & 0xffffU);
+    stw_le_p(rom + pll + 0x30, max >> 16);
 }
 
 static void ia64_int10_install_ati_bios_info(uint8_t *rom,
@@ -1383,7 +1396,7 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      */
     memcpy(rom + IA64_INT10_ROM_ATI_SIG_OFFSET, " 761295520", 10);
 
-    if (device != IA64_ATI_RAGE128_PF_ID) {
+    if (!ia64_ati_is_rage128(device)) {
         /*
          * mach64 (DEV_4752 Rage XL): do not publish the Rage128-format
          * header/PLL block below.  The mach64 miniports (XP atimpae.sys,
@@ -1409,7 +1422,7 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      */
     stw_le_p(rom + 0x48, IA64_INT10_ROM_ATI_HEADER_OFFSET);
     ia64_ati_write_bios_tables(rom, IA64_INT10_ROM_ATI_HEADER_OFFSET,
-                               IA64_INT10_ROM_ATI_PLL_OFFSET);
+                               IA64_INT10_ROM_ATI_PLL_OFFSET, device);
 }
 
 static void ia64_vpc_install_int10(IA64VpcMachineState *s)
@@ -1992,13 +2005,14 @@ static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
     if (g_strcmp0(value, "rage128") != 0 &&
+        g_strcmp0(value, "rage128gl") != 0 &&
         g_strcmp0(value, "mach64") != 0 &&
         g_strcmp0(value, "nv15gl") != 0 &&
         g_strcmp0(value, "none") != 0 &&
         g_strcmp0(value, "std") != 0) {
         error_setg(errp,
-                   "vga must be 'rage128', 'mach64', 'nv15gl', 'std' or "
-                   "'none'");
+                   "vga must be 'rage128', 'rage128gl', 'mach64', 'nv15gl', "
+                   "'std' or 'none'");
         return;
     }
     g_free(s->vga_model);
@@ -2026,6 +2040,27 @@ const char *ia64_vpc_vga_model(IA64VpcMachineState *s)
     }
     return s->vga_model;
 }
+
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+/*
+ * With agp=on the board's Rage 128 presents its AGP capability.
+ * pci_vga_init() realizes the adapter internally, so a global property
+ * reaches it; register it only when a Rage 128 is this run's adapter,
+ * because an unused global is reported as a warning.
+ */
+void ia64_vpc_rage128_agp(IA64VpcMachineState *s)
+{
+    static GlobalProperty ati_agp = {
+        .driver = "ati-vga", .property = "agp", .value = "on",
+    };
+    const char *model = ia64_vpc_vga_model(s);
+
+    if (s->agp_enabled && (g_strcmp0(model, "rage128") == 0 ||
+                           g_strcmp0(model, "rage128gl") == 0)) {
+        qdev_prop_register_global(&ati_agp);
+    }
+}
+#endif
 
 static char *ia64_vpc_get_alat(Object *obj, Error **errp)
 {
@@ -2758,8 +2793,8 @@ static void ia64_vpc_configure_lsi(IA64VpcMachineState *s, PCIDevice *pci_dev)
  *
  * The blocks written here are ours, not ATI's - the layout is the documented
  * one (signature at 30h, header pointer at 48h, PLL pointer at header+30h)
- * and the clock parameters are the Rage 128 Pro's published values, which is
- * also what the synthesised INT 10h ROM publishes.  Nothing is copied out of
+ * and the clock parameters are the chip's published values, which is also
+ * what the synthesised INT 10h ROM publishes.  Nothing is copied out of
  * a retail BIOS image.
  *
  * A user-supplied romfile that already carries the signature is left strictly
@@ -2768,6 +2803,7 @@ static void ia64_vpc_configure_lsi(IA64VpcMachineState *s, PCIDevice *pci_dev)
 static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
 {
     static const char ati_signature[] = " 761295520";
+    uint16_t device = pci_get_word(pci_dev->config + PCI_DEVICE_ID);
     uint8_t *rom;
     uint64_t rom_size;
     uint32_t declared;
@@ -2779,8 +2815,7 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
 
     if (pci_get_word(pci_dev->config + PCI_VENDOR_ID) !=
             IA64_ATI_VENDOR_ID ||
-        pci_get_word(pci_dev->config + PCI_DEVICE_ID) !=
-            IA64_ATI_RAGE128_PF_ID) {
+        !ia64_ati_is_rage128(device)) {
         return;
     }
     if (pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
@@ -2851,7 +2886,7 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
 
     memcpy(rom + 0x30, ati_signature, sizeof(ati_signature) - 1);
     stw_le_p(rom + 0x48, hdr);
-    ia64_ati_write_bios_tables(rom, hdr, pll);
+    ia64_ati_write_bios_tables(rom, hdr, pll, device);
 
     /* Grow the declared image so a bounds-checking parser sees the tables. */
     if (pll + IA64_ATI_PLL_SIZE > declared) {
@@ -2871,10 +2906,10 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
          * the PCIR vendor/device ID to match the adapter's configuration
          * header, and a driver that validates the ROM against the device it
          * bound to will reject an image belonging to another chip.  We only
-         * get here when the header really is 1002:5046, so restate that.
+         * get here for a Rage 128 header, so restate its id.
          */
         stw_le_p(rom + pcir + 0x04, IA64_ATI_VENDOR_ID);
-        stw_le_p(rom + pcir + 0x06, IA64_ATI_RAGE128_PF_ID);
+        stw_le_p(rom + pcir + 0x06, device);
     }
     rom[declared - 1] = 0;
     for (i = 0; i < declared - 1U; i++) {
@@ -4567,6 +4602,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
             type = "VGA";
         }
         s->vga_dev = pci_new(PCI_DEVFN(vga_slot, 0), type);
+        if (g_strcmp0(vga_model, "rage128gl") == 0) {
+            qdev_prop_set_string(DEVICE(s->vga_dev), "model", "rage128gl");
+        }
         if (!pci_realize_and_unref(s->vga_dev, vga_bus, errp)) {
             return false;
         }
@@ -4944,7 +4982,8 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                   ia64_vpc_get_vga,
                                   ia64_vpc_set_vga);
     object_class_property_set_description(oc, "vga",
-        "Display adapter: 'rage128' (ATI Rage 128, honours -vga), 'mach64' "
+        "Display adapter: 'rage128' (ATI Rage 128 Pro, honours -vga), "
+        "'rage128gl' (ATI Rage 128 GL AGP), 'mach64' "
         "(ATI Mach64 3D Rage, a PCI 2D adapter with no AGP), 'nv15gl' "
         "(NVIDIA Quadro2 Pro), 'std' or 'none'. Each board defaults to its "
         "own adapter");

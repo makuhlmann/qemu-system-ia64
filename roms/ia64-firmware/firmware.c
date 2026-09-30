@@ -9972,8 +9972,8 @@ static UINT32 fw_pci_io_device_id(const FW_PCI_IO_DEVICE *Dev)
 
 static BOOLEAN fw_pci_vga_id_supported(UINT32 Id)
 {
-    return Id == PCI_VGA_ATI_ID || Id == PCI_VGA_MACH64_ID ||
-           Id == PCI_VGA_STD_ID;
+    return Id == PCI_VGA_ATI_ID || Id == PCI_VGA_ATI_GL_ID ||
+           Id == PCI_VGA_MACH64_ID || Id == PCI_VGA_STD_ID;
 }
 
 static UINT32 fw_pci_io_expected_id(const FW_PCI_IO_DEVICE *Dev)

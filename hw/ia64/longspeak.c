@@ -210,21 +210,11 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     /*
-     * On zx1 with agp=on, give the Rage 128 a PCI AGP capability so Linux
-     * sba_iommu reserves the SBA IOVA GART half (and writes the cookie hp-agp
-     * handshakes on) and hp-agp can negotiate AGP mode.  The Rage 128 is
-     * created by pci_vga_init() below, which realizes it internally, so opt it
-     * in through a global property applied to the ati-vga it creates; register
-     * the global only when that adapter is the one this run gets, because an
-     * unused global is reported as a warning.  460gx uses the GXB GART
-     * instead and never needs this.
+     * With the Rage 128's AGP capability Linux sba_iommu reserves the SBA
+     * IOVA GART half (and writes the cookie hp-agp handshakes on), and
+     * hp-agp can negotiate AGP mode.
      */
-    if (s->agp_enabled && g_strcmp0(ia64_vpc_vga_model(s), "rage128") == 0) {
-        static GlobalProperty ati_agp = {
-            .driver = "ati-vga", .property = "agp", .value = "on",
-        };
-        qdev_prop_register_global(&ati_agp);
-    }
+    ia64_vpc_rage128_agp(s);
 
 #endif
     return true;

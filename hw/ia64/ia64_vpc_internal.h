@@ -148,7 +148,7 @@ struct IA64VpcMachineClass {
      * what rx2600/zx2000 carry; false the QLogic ISP12160 of the i2000.
      */
     bool lsi_default;
-    /* The board's own graphics adapter ("rage128", "mach64", "nv15gl"). */
+    /* The board's own graphics adapter ("rage128", "rage128gl", ...). */
     const char *vga_default;
     /* The console is COM1 (3F8h, IRQ 4); a debug port is COM2 (2F8h, IRQ 3). */
     bool legacy_com1_console;
@@ -309,6 +309,7 @@ struct IA64VpcMachineState {
 /* Base-machine helpers the boards use. */
 void ia64_vpc_add_compat_defaults(MachineClass *mc);
 const char *ia64_vpc_vga_model(IA64VpcMachineState *s);
+void ia64_vpc_rage128_agp(IA64VpcMachineState *s);
 
 /*
  * Open the `nvram=` file of a board that keeps its settings in the PDH

@@ -213,6 +213,13 @@ static bool sdv_build_chipset(IA64VpcMachineState *s, DeviceState *pci_host,
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(s->agp_dev), errp)) {
         return false;
     }
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+    /*
+     * agp460 starts the AGP master only when the card has its capability
+     * (WXPSP1/NT/base/busdrv/agp/agp460/init.c:142-147).
+     */
+    ia64_vpc_rage128_agp(s);
+#endif
 
     s->chipset = ia64_460gx_create(OBJECT(s), pci_io, pci_host,
                                    machine->ram_size,
