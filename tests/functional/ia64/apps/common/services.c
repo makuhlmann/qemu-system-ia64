@@ -2129,12 +2129,12 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
         }
     }
     /*
-     * The root bridge must NOT publish a producer window for the UART: a
-     * sub-page window above 4 GB BSODs Windows XP with STOP 0x50 during PnP
-     * arbitration (dropped in 5a58a91).  UAR0 describes its own registers in
-     * the SSDT instead, so a reappearing DSDT window is a regression.
+     * UAR0 is a child of PCI0, so PCI0 produces the window for its 8 bytes,
+     * as HP's zx1 DSDT does for its serial ports (\CLIB.LGMR); without it
+     * Server 2003 leaves COM1 at code 12.  The window that 5a58a91 dropped
+     * (XP 2600: STOP 0x50) was in the 460gx tables, which XP 2600 reads.
      */
-    return bus && io_a && io_b && io_c && memory && !uart_window && end_tag;
+    return bus && io_a && io_b && io_c && memory && uart_window && end_tag;
 }
 
 static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
