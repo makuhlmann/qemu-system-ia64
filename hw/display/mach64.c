@@ -688,14 +688,38 @@ static void mach64_ddc_access(Mach64VGAState *s, unsigned byte, uint32_t data)
 }
 
 /*
- * I2C_CNTL_0 (reg 0x0F) hardware-I2C engine status.  ati2mpad issues a CRT-DDC
- * transfer and then polls the low-byte status field for I2C_CNTL_DONE.  The
- * modelled engine has no latency, so every transfer is already complete: report
- * DONE with the rest of the status field (NACK/HALT/FULL) clear.
+ * One byte through the hardware I2C engine, started by a write to byte 1 of
+ * I2C_CNTL_0: START sends I2C_CNTL_1's data byte as the address, RECEIVE
+ * reads a byte into it, else the byte is written; STOP ends the transfer.
+ * The engine has no latency.  Nothing on the board answers on its pins, so
+ * an address gets NACK and a read gets the pulled-up FFh; ati2mpad's
+ * expander probe (0x70, 0x78, 0x76) then finds no multimedia chips.
  */
-static uint32_t mach64_i2c0_readback(uint32_t val)
+static void mach64_i2c_engine(Mach64VGAState *s)
 {
-    return (val & ~I2C_CNTL_STAT) | I2C_CNTL_DONE;
+    uint32_t cntl = s->regs[I2C_CNTL_0];
+    uint8_t data = s->regs[I2C_CNTL_1] & I2C_DATA_PORT;
+    bool nack = false;
+
+    if (cntl & I2C_CNTL_START) {
+        if (s->amc_active) {
+            i2c_end_transfer(s->amc_bus);
+        }
+        nack = i2c_start_transfer(s->amc_bus, data >> 1, data & 1);
+        s->amc_active = !nack;
+    } else if (cntl & I2C_CNTL_RECEIVE) {
+        data = s->amc_active ? i2c_recv(s->amc_bus) : 0xff;
+        s->regs[I2C_CNTL_1] = (s->regs[I2C_CNTL_1] & ~I2C_DATA_PORT) | data;
+    } else {
+        nack = !s->amc_active || i2c_send(s->amc_bus, data);
+    }
+    if ((cntl & I2C_CNTL_STOP) && s->amc_active) {
+        i2c_end_transfer(s->amc_bus);
+        s->amc_active = false;
+    }
+    cntl &= ~(I2C_CNTL_STAT | I2C_CNTL_START | I2C_CNTL_STOP | I2C_CNTL_GO |
+              I2C_CNTL_RECEIVE);
+    s->regs[I2C_CNTL_0] = cntl | I2C_CNTL_DONE | (nack ? I2C_CNTL_NACK : 0);
 }
 
 /* Diagnostic wrapper: log the VBE/scanout state each render (MACH64_TRACE=1). */
@@ -928,10 +952,6 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
         /* LCD register 7 is the DDC I2C GPIO; other indices are plain latches. */
         val = (s->lcd_index == MACH64_LCD_DDC_INDEX) ? s->ddc_gpio : s->regs[reg];
         break;
-    case I2C_CNTL_0:
-        /* CRT DDC bit-bang: patch bit4 with the live wired-AND SDA level. */
-        val = mach64_i2c0_readback(s->regs[reg]);
-        break;
     case DAC_REGS:
         if (size == 1) {
             return mach64_dac_read(s, byte);
@@ -1127,6 +1147,13 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
     mach64_reg_store(s, reg, byte, size, data);
 
     switch (reg) {
+    case I2C_CNTL_0:
+        if (byte <= 1 && byte + size > 1 &&
+            (s->regs[reg] & (I2C_CNTL_START | I2C_CNTL_STOP | I2C_CNTL_GO |
+                             I2C_CNTL_RECEIVE))) {
+            mach64_i2c_engine(s);
+        }
+        break;
     case CLOCK_CNTL:
         /*
          * Indirect PLL write: when PLL_WR_EN is set, byte 2 is committed to the
@@ -1330,7 +1357,7 @@ static const VMStateDescription vmstate_mach64_host_data = {
 
 static const VMStateDescription vmstate_mach64_vga = {
     .name = "mach64-vga",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = mach64_post_load,
     .fields = (const VMStateField[]) {
@@ -1353,6 +1380,7 @@ static const VMStateDescription vmstate_mach64_vga = {
         VMSTATE_UINT8(ddc_buf, Mach64VGAState),
         VMSTATE_UINT8(ddc_read_nacked, Mach64VGAState),
         VMSTATE_INT16(ddc_addr, Mach64VGAState),
+        VMSTATE_BOOL_V(amc_active, Mach64VGAState, 2),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -1447,6 +1475,7 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
 
     /* DDC/EDID: an i2c-ddc slave at 0x50 driven by the LCD-reg-7 bit-bang. */
     s->ddc_bus = i2c_init_bus(DEVICE(s), "mach64.ddc");
+    s->amc_bus = i2c_init_bus(DEVICE(s), "mach64.amc");
     i2c_slave_set_address(I2C_SLAVE(&s->i2cddc), 0x50);
     qdev_realize(DEVICE(&s->i2cddc), BUS(s->ddc_bus), &error_abort);
     s->ddc_scl = 1;
@@ -1476,6 +1505,7 @@ static void mach64_vga_reset(DeviceState *dev)
     s->ddc_buf = 0;
     s->ddc_read_nacked = 0;
     s->ddc_addr = -1;
+    s->amc_active = false;
     /* Engine out of reset on 264xT parts. */
     s->regs[GEN_TEST_CNTL] = GEN_GUI_RESETB;
     s->regs[CONFIG_CNTL] = CFG_MEM_AP_SIZE_2X8M;   /* read-only, RRG 0_37 */

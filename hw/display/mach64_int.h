@@ -103,6 +103,8 @@ struct Mach64VGAState {
      * back the bus with an i2c-ddc slave.
      */
     I2CBus *ddc_bus;
+    I2CBus *amc_bus;            /* the hardware I2C engine's pins */
+    bool amc_active;            /* an addressed slave acknowledged */
     I2CDDCState i2cddc;
     uint8_t lcd_index;
     uint8_t ddc_dir;            /* pin directions   (SDA/SCL bit5/bit6; 1=output) */

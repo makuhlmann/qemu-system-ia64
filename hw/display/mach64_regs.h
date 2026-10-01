@@ -94,22 +94,23 @@
 #define MACH64_DDC_SCL_DIR      (1u << 30)     /* dword: SCL dir   (byte3 bit6) */
 
 /*
- * Rage XL hardware I2C engine control (Block-0 reg 0x0F, "I2C_CNTL_0" in the
- * Rage Pro register set; the Rage XL/XC guide leaves 0_0F undocumented but the
- * silicon inherits it).  The native ATI miniport (ati2mpad) uses this engine for
- * CRT-monitor DDC: it loads the transfer into I2C_CNTL_1 and I2C_CNTL_0
- * (START/GO/clock-divider), then polls the low-byte status field until
- * I2C_CNTL_DONE goes high.  Our engine has no latency, so a transfer is complete
- * the instant it is issued and the status always reads DONE with no error;
- * without this the miniport spins forever in its CRT-DDC probe.  (This is a
- * distinct path from the LCD-register-7 DDC above, which the miniport bit-bangs
- * for the LCD/DFP.)
+ * Rage XL hardware I2C engine (Block-0 0x0F and 0x2F, I2C_CNTL_0/1 of the
+ * Rage Pro register set; the XL guide leaves both undocumented, the bit
+ * names are the X.Org mach64 driver's).  The engine drives the AMC
+ * connector's I2C pins (GPIO 12/13, CHS-R3L sec 3.6), where multimedia
+ * boards carry their tuner and decoder; monitor DDC uses other pins.
  */
 #define I2C_CNTL_0              0x0f
 #define I2C_CNTL_STAT           0x0000000ful   /* byte 0: status field */
 #define I2C_CNTL_DONE           0x00000001ul   /* transfer complete */
 #define I2C_CNTL_NACK           0x00000002ul   /* slave did not acknowledge */
-#define I2C_CNTL_GO             0x00000400ul   /* byte 1: issue the transfer */
+#define I2C_CNTL_HALT           0x00000004ul
+#define I2C_CNTL_START          0x00000100ul
+#define I2C_CNTL_STOP           0x00000200ul
+#define I2C_CNTL_GO             0x00000400ul
+#define I2C_CNTL_RECEIVE        0x00000800ul
+#define I2C_CNTL_1              0x2f
+#define I2C_DATA_PORT           0x000000fful
 #define MEM_VGA_WP_SEL          0x2d
 #define MEM_VGA_RP_SEL          0x2e
 #define MEM_VGA_PS0             0x0000fffful   /* page of the 0xA0000 window */
