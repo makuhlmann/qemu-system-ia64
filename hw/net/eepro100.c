@@ -31,6 +31,7 @@
 #include "migration/vmstate.h"
 #include "net/net.h"
 #include "net/eth.h"
+#include "net/checksum.h"
 #include "hw/nvram/eeprom93xx.h"
 #include "system/system.h"
 #include "system/dma.h"
@@ -290,8 +291,8 @@ typedef struct {
      * It must be dword aligned to allow direct access to 32 bit values. */
     uint8_t mem[PCI_MEM_SIZE] __attribute__((aligned(8)));
 
-    /* Configuration bytes. */
-    uint8_t configuration[22];
+    /* Configuration bytes: 22, and 32 on the 82550 and 82551. */
+    uint8_t configuration[32];
 
     /* vmstate for each particular nic */
     VMStateDescription *vmstate;
@@ -759,6 +760,7 @@ enum commands {
     CmdTDR = 5,                 /* load microcode */
     CmdDump = 6,
     CmdDiagnose = 7,
+    CmdIPCB = 9,                /* 82550/82551 (manual B.1) */
 
     /* And some extra flags: */
     CmdSuspend = 0x4000,        /* Suspend after completion. */
@@ -884,6 +886,265 @@ static MemTxResult read_cb(EEPRO100State *s)
     return result;
 }
 
+static bool e100_is_82550(const EEPRO100State *s)
+{
+    return s->device == i82550 || s->device == i82551;
+}
+
+/*
+ * A configure command sets its byte count's worth of bytes, at least 8
+ * (manual 6.4.2.3); the bytes past the count keep their values.
+ */
+static void eepro100_configure(EEPRO100State *s)
+{
+    size_t max = e100_is_82550(s) ? 32 : 22;
+    uint8_t count;
+
+    pci_dma_read(&s->dev, s->cb_address + 8, &count, 1);
+    count = MIN(MAX(count & 0x3f, 8), max);
+    pci_dma_read(&s->dev, s->cb_address + 8, &s->configuration[0], count);
+    eepro100_update_stats_size(s);
+}
+
+/* The 82550's IPv4 parser: Ethernet II or SNAP, after an optional VLAN tag. */
+static bool e100_parse_ipv4(const uint8_t *f, size_t len, size_t *l3,
+                            size_t *l4, uint8_t *proto)
+{
+    size_t off = 12;
+    uint16_t type;
+    size_t ihl;
+
+    if (len < 14) {
+        return false;
+    }
+    type = lduw_be_p(f + off);
+    if (type == ETH_P_VLAN) {
+        off += 4;
+        if (len < off + 2) {
+            return false;
+        }
+        type = lduw_be_p(f + off);
+    }
+    off += 2;
+    if (type <= ETH_MTU) {
+        /* An 802.3 length: SNAP with control field 03h (manual B.4.1.1). */
+        if (len < off + 8 || f[off] != 0xaa || f[off + 1] != 0xaa ||
+            f[off + 2] != 0x03) {
+            return false;
+        }
+        type = lduw_be_p(f + off + 6);
+        off += 8;
+    }
+    if (type != ETH_P_IP || len < off + 20 || (f[off] >> 4) != 4) {
+        return false;
+    }
+    ihl = (f[off] & 0x0f) * 4;
+    if (ihl < 20 || len < off + ihl) {
+        return false;
+    }
+    *l3 = off;
+    *l4 = off + ihl;
+    *proto = f[off + 9];
+    return true;
+}
+
+static size_t e100_l4_csum_offset(bool tcp)
+{
+    return tcp ? 16 : 6;
+}
+
+/*
+ * The checksums the 82550 inserts (manual B.2): the IP header checksum, and
+ * the TCP or UDP checksum over the segment the IP total length gives, with
+ * the pseudo-header partial sum the driver left in the checksum field.
+ */
+static void e100_insert_csum(uint8_t *f, size_t len, size_t l3, size_t l4,
+                             bool tcp, bool ip_csum, bool l4_csum)
+{
+    size_t ip_end;
+    uint16_t sum;
+
+    if (l3 + 20 > len || l4 + (tcp ? 20 : 8) > len) {
+        return;
+    }
+    ip_end = MIN(len, l3 + lduw_be_p(f + l3 + 2));
+    if (ip_csum && l3 + (f[l3] & 0x0f) * 4 <= len) {
+        /* Over the header length the frame gives (manual B.2.3). */
+        stw_be_p(f + l3 + 10, 0);
+        stw_be_p(f + l3 + 10, net_raw_checksum(f + l3, (f[l3] & 0x0f) * 4));
+    }
+    if (l4_csum && ip_end > l4) {
+        sum = net_raw_checksum(f + l4, ip_end - l4);
+        if (!tcp && sum == 0) {
+            sum = 0xffff;
+        }
+        stw_be_p(f + l4 + e100_l4_csum_offset(tcp), sum);
+    }
+}
+
+static void e100_send(EEPRO100State *s, uint8_t *f, size_t len, bool vlan,
+                      uint16_t tci)
+{
+    if (vlan && len >= 12) {
+        g_autofree uint8_t *tagged = g_malloc(len + 4);
+
+        memcpy(tagged, f, 12);
+        stw_be_p(tagged + 12, ETH_P_VLAN);
+        stw_be_p(tagged + 14, tci);
+        memcpy(tagged + 16, f + 12, len - 12);
+        qemu_send_packet(qemu_get_queue(s->nic), tagged, len + 4);
+    } else {
+        qemu_send_packet(qemu_get_queue(s->nic), f, len);
+    }
+    s->statistics.tx_good_frames++;
+}
+
+static uint16_t e100_ones_add(uint16_t a, uint16_t b)
+{
+    uint32_t sum = a + b;
+
+    return (sum & 0xffff) + (sum >> 16);
+}
+
+/* IP activation word at IPCB offset 12h (manual Tables 70 and 71). */
+#define IPCB_IP_CSUM        BIT(4)
+#define IPCB_L4_CSUM        BIT(5)
+#define IPCB_TCP            BIT(6)
+#define IPCB_LARGE_SEND     BIT(7)
+#define IPCB_HW_PARSE       BIT(8)
+#define IPCB_INSERT_VLAN    BIT(9)
+/* A Large Send buffer holds up to 64 KiB of payload behind its headers. */
+#define IPCB_MAX_FRAME      (64 * KiB + 256)
+
+/*
+ * The IP command block (manual B.1, Table 69).  Only an extended TxCB can be
+ * an IPCB.  Its last two dwords are the first TBD, whose upper word is the
+ * total TCP payload, so the TBD end-of-list bit moves to bit 15; the TBD
+ * array address points to the second TBD.  A Large Send uses the TBD number
+ * field for the maximum TCP payload, so its TBDs end with the EL bit.
+ */
+static void ipcb_command(EEPRO100State *s)
+{
+    const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
+    g_autofree uint8_t *f = g_malloc(IPCB_MAX_FRAME);
+    uint32_t cb = s->cb_address;
+    uint16_t imm, act, mss, tci, tbd0_size;
+    uint32_t tbd_addr, tbd0 = 0, tbd_array;
+    uint8_t tbd_count, sw_l3, sw_l4, proto = 0;
+    size_t len = 0, l3 = 0, l4 = 0;
+    unsigned i;
+    bool el = false, tcp, parsed;
+
+    lduw_le_pci_dma(&s->dev, cb + 0x0c, &imm, attrs);
+    lduw_le_pci_dma(&s->dev, cb + 0x0e, &mss, attrs);
+    lduw_le_pci_dma(&s->dev, cb + 0x12, &act, attrs);
+    lduw_be_pci_dma(&s->dev, cb + 0x14, &tci, attrs);
+    ldub_pci_dma(&s->dev, cb + 0x16, &sw_l3, attrs);
+    ldub_pci_dma(&s->dev, cb + 0x17, &sw_l4, attrs);
+    ldl_le_pci_dma(&s->dev, cb + 0x08, &tbd_array, attrs);
+    tbd_count = (act & IPCB_LARGE_SEND) ? 0xff : mss >> 8;
+
+    imm &= 0x3fff;
+    if (imm) {
+        pci_dma_read(&s->dev, cb + 0x20, f, MIN(imm, IPCB_MAX_FRAME));
+        len = MIN(imm, IPCB_MAX_FRAME);
+    }
+    tbd_addr = cb + 0x18;
+    /* FFh: the list ends at the EL bit; never read more than 256 TBDs. */
+    for (i = 0; !el && i < (tbd_count == 0xff ? 256 : tbd_count); i++) {
+        uint32_t addr, size;
+
+        if (i == 1) {
+            tbd_addr = tbd_array;
+        }
+        ldl_le_pci_dma(&s->dev, tbd_addr, &addr, attrs);
+        ldl_le_pci_dma(&s->dev, tbd_addr + 4, &size, attrs);
+        tbd_addr += 8;
+        if (i == 0) {
+            tbd0 = size;
+        }
+        if (addr == 0) {
+            break;
+        }
+        el = size & BIT(15);
+        size = MIN(size & 0x3fff, IPCB_MAX_FRAME - len);
+        pci_dma_read(&s->dev, addr, f + len, size);
+        len += size;
+    }
+    if (len == 0) {
+        return;
+    }
+    tbd0_size = i ? tbd0 >> 16 : 0;
+
+    if (act & IPCB_HW_PARSE) {
+        parsed = e100_parse_ipv4(f, len, &l3, &l4, &proto);
+        tcp = proto == IP_PROTO_TCP;
+        parsed = parsed && (tcp || proto == IP_PROTO_UDP);
+    } else {
+        l3 = sw_l3;
+        l4 = sw_l4;
+        tcp = act & IPCB_TCP;
+        parsed = true;
+    }
+
+    if ((act & IPCB_LARGE_SEND) && parsed && tcp && l4 + 20 <= len) {
+        size_t thl = (f[l4 + 12] >> 4) * 4;
+        size_t hdr = l4 + thl;
+        size_t total, off = 0;
+        uint16_t id0 = lduw_be_p(f + l3 + 4);
+        uint32_t seq0 = ldl_be_p(f + l4 + 4);
+        uint8_t flags0 = f[l4 + 13];
+        uint16_t partial0 = lduw_be_p(f + l4 + 16);
+        uint16_t first_len;
+        g_autofree uint8_t *seg = NULL;
+
+        if (hdr > len) {
+            return;
+        }
+        total = len - hdr;
+        if (tbd0_size && tbd0_size < total) {
+            total = tbd0_size;
+        }
+        if (mss == 0) {
+            mss = total;
+        }
+        seg = g_malloc(hdr + MAX(mss, 1));
+        first_len = thl + MIN(mss, total);
+        /*
+         * Each frame carries the prototype headers with its own IP length,
+         * an IP identification one higher than the last, the sequence
+         * number of its first byte, FIN and PSH only in the last frame, and
+         * the pseudo-header sum adjusted from the first frame's TCP length
+         * (manual B.3.4).
+         */
+        for (i = 0; i == 0 || off < total; i++) {
+            size_t chunk = MIN(mss, total - off);
+            bool last = off + chunk >= total;
+
+            memcpy(seg, f, hdr);
+            memcpy(seg + hdr, f + hdr + off, chunk);
+            stw_be_p(seg + l3 + 2, (l4 - l3) + thl + chunk);
+            stw_be_p(seg + l3 + 4, id0 + i);
+            stl_be_p(seg + l4 + 4, seq0 + off);
+            seg[l4 + 13] = last ? flags0 : flags0 & ~(0x01 | 0x08);
+            stw_be_p(seg + l4 + 16,
+                     e100_ones_add(e100_ones_add(partial0, thl + chunk),
+                                   ~first_len));
+            e100_insert_csum(seg, hdr + chunk, l3, l4, true,
+                             act & IPCB_IP_CSUM, act & IPCB_L4_CSUM);
+            e100_send(s, seg, hdr + chunk, act & IPCB_INSERT_VLAN, tci);
+            off += chunk;
+        }
+        return;
+    }
+
+    if (parsed && (act & (IPCB_IP_CSUM | IPCB_L4_CSUM))) {
+        e100_insert_csum(f, len, l3, l4, tcp, act & IPCB_IP_CSUM,
+                         act & IPCB_L4_CSUM);
+    }
+    e100_send(s, f, len, act & IPCB_INSERT_VLAN, tci);
+}
+
 static void tx_command(EEPRO100State *s)
 {
     const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
@@ -988,6 +1249,7 @@ static bool action_command(EEPRO100State *s, cu_queue_t queue)
         bool bit_nc;
         uint16_t cb_status;
         uint16_t cb_command;
+        uint16_t cb_cmd;
         uint32_t cb_link;
         uint16_t ok_status = STATUS_OK;
 
@@ -1022,7 +1284,16 @@ static bool action_command(EEPRO100State *s, cu_queue_t queue)
         TRACE(OTHER,
               logout("val=(cu start), status=0x%04x, command=0x%04x, link=0x%08x\n",
                      s->tx.status, s->tx.command, s->tx.link));
-        switch (s->tx.command & COMMAND_CMD) {
+        cb_cmd = s->tx.command & COMMAND_CMD;
+        /*
+         * The IPCB's command field is 1001b in bits 19:16 (manual Table 69);
+         * in the other commands bit 19 is the SF bit.
+         */
+        if (e100_is_82550(s) &&
+            (s->tx.command & (COMMAND_SF | COMMAND_CMD)) == CmdIPCB) {
+            cb_cmd = CmdIPCB;
+        }
+        switch (cb_cmd) {
         case CmdNOp:
             /* Do nothing. */
             break;
@@ -1031,9 +1302,7 @@ static bool action_command(EEPRO100State *s, cu_queue_t queue)
             TRACE(OTHER, logout("macaddr: %s\n", nic_dump(&s->conf.macaddr.a[0], 6)));
             break;
         case CmdConfigure:
-            pci_dma_read(&s->dev, s->cb_address + 8,
-                         &s->configuration[0], sizeof(s->configuration));
-            eepro100_update_stats_size(s);
+            eepro100_configure(s);
             TRACE(OTHER, logout("configuration: %s\n",
                                 nic_dump(&s->configuration[0], 16)));
             TRACE(OTHER, logout("configuration: %s\n",
@@ -1053,6 +1322,14 @@ static bool action_command(EEPRO100State *s, cu_queue_t queue)
                 break;
             }
             tx_command(s);
+            break;
+        case CmdIPCB:
+            if (s->configuration[6] & BIT(4)) {
+                missing("IPCB without an 82550 extended TxCB");
+                ok_status = 0;
+                break;
+            }
+            ipcb_command(s);
             break;
         case CmdTDR:
             TRACE(OTHER, logout("load microcode\n"));
@@ -1943,6 +2220,74 @@ static const MemoryRegionOps eepro100_flash_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+/* The 82550 and 82551 extended RFD, configure byte 7 bit 5. */
+static bool e100_ext_rfa(const EEPRO100State *s)
+{
+    return e100_is_82550(s) && (s->configuration[7] & BIT(5));
+}
+
+#define RFD_STATUS_PARSE        BIT(3)
+#define RFD_STATUS_VLAN         BIT(12)
+#define RFDX_P_TCP              0x00
+#define RFDX_P_UDP              0x01
+#define RFDX_P_IP               0x03
+#define RFDX_P_PARSE            BIT(3)
+#define RFDX_CS_IP_CHECKED      BIT(0)
+#define RFDX_CS_IP_VALID        BIT(1)
+#define RFDX_CS_L4_CHECKED      BIT(4)
+#define RFDX_CS_L4_VALID        BIT(5)
+
+/*
+ * The 16 bytes an extended RFD adds at 10h (manual B.4, B.5): the VLAN tag,
+ * the parser status, the security status and the checksum status.
+ * Configure byte 22 bit 0 enables the receive parser, bit 1 strips the tag.
+ * Returns the frame length after stripping.
+ */
+static size_t e100_rx_extended(EEPRO100State *s, uint8_t *f, size_t len,
+                               uint16_t *status, uint8_t ext[16])
+{
+    size_t l3, l4, ihl, tot;
+    uint8_t proto;
+    bool tcp;
+
+    memset(ext, 0, 16);
+    if (len >= 18 && lduw_be_p(f + 12) == ETH_P_VLAN) {
+        *status |= RFD_STATUS_VLAN;
+        memcpy(ext, f + 14, 2);
+        if (s->configuration[22] & BIT(1)) {
+            memmove(f + 12, f + 16, len - 16);
+            len -= 4;
+        }
+    }
+    if (!(s->configuration[22] & BIT(0)) ||
+        !e100_parse_ipv4(f, len, &l3, &l4, &proto)) {
+        return len;
+    }
+    *status |= RFD_STATUS_PARSE;
+    ext[2] = RFDX_P_PARSE | RFDX_P_IP;
+    ext[6] = RFDX_CS_IP_CHECKED;
+    ihl = l4 - l3;
+    if (net_raw_checksum(f + l3, ihl) == 0) {
+        ext[6] |= RFDX_CS_IP_VALID;
+    }
+    tcp = proto == IP_PROTO_TCP;
+    tot = lduw_be_p(f + l3 + 2);
+    /* Fragments carry no checkable TCP or UDP header (manual B.4.1.2). */
+    if ((!tcp && proto != IP_PROTO_UDP) ||
+        (lduw_be_p(f + l3 + 6) & 0x3fff) ||
+        l3 + tot > len || tot < ihl + (tcp ? 20 : 8)) {
+        return len;
+    }
+    ext[2] = RFDX_P_PARSE | (tcp ? RFDX_P_TCP : RFDX_P_UDP);
+    ext[6] |= RFDX_CS_L4_CHECKED;
+    /* A UDP checksum of 0 means none was sent: a match (manual B.4). */
+    if ((!tcp && lduw_be_p(f + l4 + 6) == 0) ||
+        net_checksum_tcpudp(tot - ihl, proto, f + l3 + 12, f + l4) == 0) {
+        ext[6] |= RFDX_CS_L4_VALID;
+    }
+    return len;
+}
+
 static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
 {
     /* TODO:
@@ -2050,6 +2395,17 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
                  &rx, sizeof(eepro100_rx_t));
     uint16_t rfd_command = le16_to_cpu(rx.command);
     uint16_t rfd_size = le16_to_cpu(rx.size);
+    size_t rfd_header = sizeof(eepro100_rx_t);
+    g_autofree uint8_t *frame = NULL;
+    uint8_t rfd_ext[16];
+
+    if (e100_ext_rfa(s)) {
+        /* The data follows the 16 extended bytes. */
+        frame = g_memdup2(buf, size);
+        size = e100_rx_extended(s, frame, size, &rfd_status, rfd_ext);
+        buf = frame;
+        rfd_header += sizeof(rfd_ext);
+    }
 
     if (size > rfd_size) {
         logout("Receive buffer (%" PRId16 " bytes) too small for data "
@@ -2081,8 +2437,11 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
 #if 0
     assert(!(s->configuration[17] & BIT(0)));
 #endif
-    pci_dma_write(&s->dev, s->ru_base + s->ru_offset +
-                  sizeof(eepro100_rx_t), buf, size);
+    if (frame) {
+        pci_dma_write(&s->dev, s->ru_base + s->ru_offset +
+                      sizeof(eepro100_rx_t), rfd_ext, sizeof(rfd_ext));
+    }
+    pci_dma_write(&s->dev, s->ru_base + s->ru_offset + rfd_header, buf, size);
     s->statistics.rx_good_frames++;
     eepro100_fr_interrupt(s);
     s->ru_offset = le32_to_cpu(rx.link);
@@ -2165,7 +2524,7 @@ static int eepro100_post_load(void *opaque, int version_id)
 }
 
 static const VMStateDescription vmstate_eepro100 = {
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 2,
     .post_load = eepro100_post_load,
     .fields = (const VMStateField[]) {
@@ -2217,7 +2576,8 @@ static const VMStateDescription vmstate_eepro100 = {
         VMSTATE_UINT16(statistics.xmt_tco_frames, EEPRO100State),
         VMSTATE_UINT16(statistics.rcv_tco_frames, EEPRO100State),
         /* Configuration bytes. */
-        VMSTATE_BUFFER(configuration, EEPRO100State),
+        VMSTATE_PARTIAL_BUFFER(configuration, EEPRO100State, 22),
+        VMSTATE_BUFFER_START_MIDDLE_V(configuration, EEPRO100State, 22, 5),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -2360,8 +2720,12 @@ static E100PCIDeviceInfo e100_devices[] = {
         .desc = "Intel i82550 Ethernet",
         .device = i82550,
         .device_id = PCI_DEVICE_ID_INTEL_82557,
-        /* Revision ID: 0x0c, 0x0d, 0x0e. */
-        .revision = 0x0e,
+        /*
+         * The 82550 reports 0Ch-0Eh (manual Table 2).  Server 2003's inbox
+         * net557.inf installs 0Ch and 0Dh as an 82550 (D102SCNG, D102mG)
+         * and has no 0Eh.
+         */
+        .revision = 0x0d,
         .bar = &e100_bar_nonprefetch_64_128k,
         /* TODO: check size of statistical counters. */
         .stats_size = 80,
