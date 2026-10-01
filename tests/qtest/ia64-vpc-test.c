@@ -2594,8 +2594,8 @@ static void test_ohci_reset_suspended_port(void)
  * eepro100 CSR windows.  The dword at the Flash CSR spans Flash control
  * (bits 15:0) and EEPROM control (bits 31:16), and the MDI CSR reaches PHY
  * registers 0 to 31, not just 0 to 6.  The NIC is added on a free slot of
- * the root bus that "-device" defaults to and given a BAR by hand, because
- * the machine only assigns BARs to the devices it creates itself.
+ * the Mercury root and given a BAR by hand, because the machine only
+ * assigns BARs to the devices it creates itself.
  */
 #define IA64_E100_SLOT          8U
 #define IA64_E100_CSR_BASE      0x00000000f6000000ULL

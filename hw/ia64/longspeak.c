@@ -207,6 +207,14 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     /* The Mercury CSR CONFIG_ADDRESS/DATA pair does config on this bus. */
     ia64_lba_set_config_bus(IA64_LBA(s->lba_dev), s->mercury_bus);
     ia64_lba_set_config_bus(IA64_LBA(s->rope0_lba_dev), pci_bus);
+    /*
+     * QEMU gives a -device without bus= to the youngest PCI root, which is
+     * now Mercury's: the AGP port, with the one slot of the graphics seat.
+     * There a card has no _CRS window and no _PRT entry (Server 2003: code
+     * 12).  Re-inserting the primary host makes its root the youngest, as
+     * sdv.c orders its roots for the same reason.
+     */
+    qdev_set_parent_bus(pci_host, sysbus_get_default(), &error_abort);
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     /*
