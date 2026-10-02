@@ -41,6 +41,7 @@ from .encoding import (
     IA64_GENEX_UNIMPL_INST_ADDR,
     IA64_IMPL_PA_BITS,
     IA64_IA32_EXCEPTION_VECTOR,
+    IA64_IA32_INTERRUPT_VECTOR,
     IA64_IA32_INTERCEPT_VECTOR,
     IA64_ISR_EI_SHIFT,
     IA64_ISR_CODE_SS,
@@ -2931,6 +2932,42 @@ test_ia32_amd_prefetch_opcode_intercepts = require_registers(
         "r9": 0,
         "r10": 0x0d0f,
         "r11": 0x100,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_int_n_raises_ia32_interrupt = require_registers(
+    "ia32_int_n_raises_ia32_interrupt", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, *movl_mlx(8, 0x100)),
+        (0x50, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "cd 80 "             # int 0x80 (the Linux IA-32 system call)
+            "0f b8 00 03")),     # jmpe 0x300 (must not execute)
+        (0x300, 0x10, nop_m(), nop_i(), br_cond(0x300, 0x300)),
+        (IA64_IA32_EXCEPTION_VECTOR, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_EXCEPTION_VECTOR, IA64_IA32_EXCEPTION_VECTOR)),
+        (IA64_IA32_INTERRUPT_VECTOR, 0x00,
+         mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_IA32_INTERRUPT_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_IA32_INTERRUPT_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(10, 22), nop_i(), nop_i()),
+        (IA64_IA32_INTERRUPT_VECTOR + 0x30, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_INTERRUPT_VECTOR + 0x30,
+                 IA64_IA32_INTERRUPT_VECTOR + 0x30)),
+    ], {
+        # SDM Vol. 2 sec. 9.2: INT n is a trap on the IA-32 Interrupt
+        # vector with ISR.vector = n; IIP is the next instruction.
+        "ip": IA64_IA32_INTERRUPT_VECTOR + 0x30,
+        "r8": 0x102,
+        "r9": 0x80 << 16,
+        "r10": 0x100,
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
@@ -7046,6 +7083,7 @@ CASE_NAMES = (
     'ia32_high_iobase_read_triggers_data_breakpoint',
     'ia32_ibr_precedes_start_page_instruction_tlb_fault',
     'ia32_int3_clears_rf_and_psr_id_after_completion',
+    'ia32_int_n_raises_ia32_interrupt',
     'ia32_illegal_x87_opcode_intercepts_with_cr0_em',
     'ia32_amd_prefetch_opcode_intercepts',
     'ia32_instruction_intercept_records_prefix_and_opcode',
