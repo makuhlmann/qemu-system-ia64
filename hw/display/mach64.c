@@ -959,9 +959,12 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
         val |= s->regs[reg] & CRTC_VLINE;   /* keep the programmed compare value */
         break;
     case CRTC_INT_CNTL:
-        val = s->regs[reg] & ~CRTC_VBLANK;
+        val = s->regs[reg] & ~CRTC_INT_LIVE;
         if (mach64_in_vblank(s)) {
-            val |= CRTC_VBLANK;             /* live vblank status bit */
+            val |= CRTC_VBLANK;
+        }
+        if (mach64_crtc_vline(s) & 1) {
+            val |= CRTC_VLINE_SYNC;
         }
         break;
     case CLOCK_CNTL: {
@@ -1176,17 +1179,26 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         mach64_switch_mode(s);
         return;
     }
-    case CRTC_INT_CNTL:
+    case CRTC_INT_CNTL: {
         /*
-         * Plain R/W: the hardware sets the _INT status bits on the event (the
-         * vblank timer ORs CRTC_VBLANK_INT in); the driver's ISR clears them by
-         * reading the register and writing it back with the bit cleared (a
-         * read-modify-write to 0), not write-1-to-ack.  Store the value as
-         * written and re-evaluate the interrupt line.
+         * Writing 1 to an _INT status bit clears it ("to clear interrupt,
+         * write '1'", RAGE XL RRG pp. 4-51..4-53, which also asks for the ack
+         * and the enable in two separate writes); writing 0 keeps it.  The
+         * X driver acks so (atilock.c, CRTC_INT_ACKS), and ati2drad's vsync
+         * flip ORs bit 31 into its write-back.  An ISR that writes the value
+         * back with the status bits at 0, as under the forced interrupt line
+         * of 31f3af06, leaves the sources it did not handle pending.
          */
-        s->regs[reg] = data;
+        uint32_t lanes = size >= 4 ? UINT32_MAX :
+                         ((1u << (size * 8)) - 1) << (byte * 8);
+        uint32_t written = ((uint32_t)data << (byte * 8)) & lanes;
+        uint32_t v = s->regs[reg];
+
+        v = (v & ~(lanes & CRTC_INT_ENS)) | (written & CRTC_INT_ENS);
+        s->regs[reg] = v & ~(written & CRTC_INT_ACKS);
         mach64_update_irq(s);
         return;
+    }
     case DP_SET_GUI_ENGINE:
         mach64_dp_set_gui_engine(s, data);
         return;

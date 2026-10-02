@@ -8285,6 +8285,7 @@ static inline uint32_t m64_rd(Mach64TestDev *a, unsigned reg)
 #define M64_CRTC_OFF_PITCH          0x05
 #define M64_CRTC_OFFSET_LOCK        0x00100000u
 #define M64_CRTC_INT_CNTL           0x06
+#define M64_CRTC_VBLANK_INT_EN      0x00000002u
 #define M64_CRTC_VBLANK_INT         0x00000004u
 #define M64_CRTC_VBLANK_BIT2_INT    0x80000000u
 #define M64_HW_DEBUG                0x1f
@@ -8331,7 +8332,7 @@ static void test_mach64_vblank_bit2(void)
 
     /* Double-buffer mode: only the blank that uses a new offset. */
     m64_wr(&a, M64_HW_DEBUG, M64_SEL_VBLANK_DBL_BUF);
-    m64_wr(&a, M64_CRTC_INT_CNTL, 0);
+    m64_wr(&a, M64_CRTC_INT_CNTL, M64_CRTC_VBLANK_BIT2_INT);
     qtest_clock_step(a.qts, M64_VBLANK_STEP_NS);
     g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) &
                     M64_CRTC_VBLANK_BIT2_INT, ==, 0);
@@ -8342,6 +8343,54 @@ static void test_mach64_vblank_bit2(void)
     g_assert_cmphex(m64_rd(&a, M64_CRTC_OFF_PITCH), ==, (80u << 22) | 0x100);
     g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) &
                     M64_CRTC_VBLANK_BIT2_INT, !=, 0);
+    mach64_dev_close(&a);
+}
+
+/*
+ * The CRTC_INT_CNTL status bits clear when 1 is written to them and stay
+ * when 0 is written (RAGE XL RRG pp. 4-51..4-53); the interrupt line is the
+ * OR of the enabled status bits.
+ */
+static void test_mach64_int_ack(void)
+{
+    const uint32_t both = M64_CRTC_VBLANK_BIT2_INT | M64_CRTC_VBLANK_INT;
+    Mach64TestDev a;
+
+    mach64_zx1_open(&a);
+    m64_wr(&a, M64_CRTC_INT_CNTL, M64_CRTC_VBLANK_BIT2_INT);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) &
+                    M64_CRTC_VBLANK_BIT2_INT, ==, 0);
+    qtest_clock_step(a.qts, M64_VBLANK_STEP_NS);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) & both, ==, both);
+
+    /* Writing 0 to the status bits keeps them. */
+    m64_wr(&a, M64_CRTC_INT_CNTL, 0);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) & both, ==, both);
+    qtest_writeb(a.qts, a.mmio + M64_REG(M64_CRTC_INT_CNTL) + 3, 0);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) & both, ==, both);
+
+    /* A 1 clears only its own bit, also as a byte write. */
+    qtest_writeb(a.qts, a.mmio + M64_REG(M64_CRTC_INT_CNTL),
+                 M64_CRTC_VBLANK_INT);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) & both, ==,
+                    M64_CRTC_VBLANK_BIT2_INT);
+
+    /* An enabled status bit raises INTA; its ack lowers it. */
+    qtest_clock_step(a.qts, M64_VBLANK_STEP_NS);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_STATUS) &
+                    PCI_STATUS_INTERRUPT, ==, 0);
+    m64_wr(&a, M64_CRTC_INT_CNTL, M64_CRTC_VBLANK_INT_EN);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) &
+                    (M64_CRTC_VBLANK_INT_EN | M64_CRTC_VBLANK_INT), ==,
+                    M64_CRTC_VBLANK_INT_EN | M64_CRTC_VBLANK_INT);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_STATUS) &
+                    PCI_STATUS_INTERRUPT, !=, 0);
+    m64_wr(&a, M64_CRTC_INT_CNTL,
+           M64_CRTC_VBLANK_INT_EN | M64_CRTC_VBLANK_INT);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_STATUS) &
+                    PCI_STATUS_INTERRUPT, ==, 0);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) &
+                    M64_CRTC_VBLANK_INT_EN, !=, 0);
     mach64_dev_close(&a);
 }
 
@@ -9233,6 +9282,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/agp/gart-dma-moved", test_agp_gart_dma_moved);
     qtest_add_func("/ia64-vpc/mach64/ids", test_mach64_ids);
     qtest_add_func("/ia64-vpc/mach64/vblank-bit2", test_mach64_vblank_bit2);
+    qtest_add_func("/ia64-vpc/mach64/int-ack", test_mach64_int_ack);
     qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
                    test_mach64_2d_solid_fill);
     qtest_add_func("/ia64-vpc/mach64/negative-x", test_mach64_negative_x);

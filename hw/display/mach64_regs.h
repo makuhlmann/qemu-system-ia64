@@ -246,8 +246,17 @@
 #define CRTC_VBLANK_INT         0x00000004ul   /* status; write 1 to ack */
 #define CRTC_VLINE_INT_EN       0x00000008ul
 #define CRTC_VLINE_INT          0x00000010ul   /* status; write 1 to ack */
+#define CRTC_VLINE_SYNC         0x00000020ul   /* odd scan line (read-only) */
 #define CRTC_VBLANK_BIT2_INT    0x80000000ul   /* status, no enable bit */
-#define CRTC_INT_STATUS_BITS    (CRTC_VBLANK_INT | CRTC_VLINE_INT)
+/*
+ * RAGE XL RRG pp. 4-51..4-53: the _INT status bits (2, 4, 8, 10, 13, 15, 17,
+ * 19, 21, 23, 25, 27, 30, 31) clear when 1 is written to them, the _INT_EN
+ * bits are read/write, and the rest (VBLANK, VLINE_SYNC, FRAME, CRTC2_VBLANK,
+ * CRTC2_VLINE_SYNC) is live status that ignores writes.
+ */
+#define CRTC_INT_ACKS           0xcaaaa514ul
+#define CRTC_INT_ENS            0x2555528aul
+#define CRTC_INT_LIVE           0x10000861ul
 
 /* ---- HW_DEBUG (reg 0x1F), RAGE XL RRG p. 4-30 ---- */
 #define HW_DEBUG_BLOCK_DBL_BUF       0x00008000ul
