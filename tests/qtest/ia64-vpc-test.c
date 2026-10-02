@@ -8348,6 +8348,182 @@ static void test_mach64_vblank_bit2(void)
     mach64_dev_close(&a);
 }
 
+#define M64_CRTC_H_TOTAL_DISP       0x00
+#define M64_CRTC_V_TOTAL_DISP       0x02
+#define M64_CRTC_GEN_CNTL           0x07
+#define M64_CRTC_OVERLAY_EOF_INT    0x00200000u
+#define M64_OVL_Y_X_START           0x100
+#define M64_OVL_Y_X_END             0x101
+#define M64_OVL_GRAPHICS_KEY_CLR    0x104
+#define M64_OVL_GRAPHICS_KEY_MSK    0x105
+#define M64_OVL_KEY_CNTL            0x106
+#define M64_OVL_SCALE_INC           0x108
+#define M64_OVL_SCALE_CNTL          0x109
+#define M64_SCALER_HEIGHT_WIDTH     0x10a
+#define M64_SCALER_BUF0_OFFSET      0x10d
+#define M64_SCALER_BUF_PITCH        0x10f
+#define M64_CAPTURE_Y_X             0x110
+#define M64_VIDEO_FORMAT            0x112
+#define M64_OVL_LOCK                0x80000000u
+#define M64_OVL_ON                  0xc0000000u  /* SCALE_EN | OVERLAY_EN */
+#define M64_OVL_REPLICATE           0x0000000cu  /* SCALE_HORZ/VERT_MODE */
+#define M64_OVL_W                   64
+#define M64_OVL_H                   32
+#define M64_OVL_SRC                 0x10000u
+#define M64_OVL_KEY                 0x00100010u
+#define M64_OVL_GFX                 0x00203040u
+
+/* Block 1 sits below block 0 in BAR2: index 0x100 + n at BAR2 + n * 4. */
+static void m64_wr1(Mach64TestDev *a, unsigned reg, uint32_t v)
+{
+    qtest_writel(a->qts, a->mmio + (reg - 0x100) * 4, v);
+}
+
+static uint32_t m64_rd1(Mach64TestDev *a, unsigned reg)
+{
+    return qtest_readl(a->qts, a->mmio + (reg - 0x100) * 4);
+}
+
+static void m64_ovl_pixel(Mach64TestDev *a, const char *ppm, unsigned x,
+                          unsigned y, uint32_t rgb)
+{
+    qtest_qmp_assert_success(a->qts,
+                             "{'execute':'screendump','arguments':"
+                             " {'filename':%s}}", ppm);
+    test_assert_ppm_pixel(ppm, M64_OVL_W, M64_OVL_H, x, y, rgb >> 16,
+                          (rgb >> 8) & 0xff, rgb & 0xff);
+}
+
+/*
+ * A 64x32 32 bpp screen in M64_OVL_GFX, with the key colour on columns
+ * 8..23 of lines 4..11 except for one pixel at (20, 10), and a 4x2 video
+ * source scaled 4:1 into the window (8, 4)-(23, 11).
+ */
+static void m64_ovl_setup(Mach64TestDev *a, uint32_t format,
+                          const void *src, size_t src_bytes,
+                          unsigned src_pitch)
+{
+    g_autofree uint32_t *fb = g_new(uint32_t, M64_OVL_W * M64_OVL_H);
+
+    for (unsigned y = 0; y < M64_OVL_H; y++) {
+        for (unsigned x = 0; x < M64_OVL_W; x++) {
+            bool key = x >= 8 && x <= 23 && y >= 4 && y <= 11 &&
+                       !(x == 20 && y == 10);
+
+            fb[y * M64_OVL_W + x] = cpu_to_le32(key ? M64_OVL_KEY
+                                                    : M64_OVL_GFX);
+        }
+    }
+    qtest_memwrite(a->qts, a->fb, fb, M64_OVL_W * M64_OVL_H * 4);
+    qtest_memwrite(a->qts, a->fb + M64_OVL_SRC, src, src_bytes);
+
+    m64_wr(a, M64_CRTC_H_TOTAL_DISP, ((M64_OVL_W / 8 - 1) << 16) | 9);
+    m64_wr(a, M64_CRTC_V_TOTAL_DISP, ((M64_OVL_H - 1) << 16) | 40);
+    m64_wr(a, M64_CRTC_OFF_PITCH, (M64_OVL_W / 8) << 22);
+    m64_wr(a, M64_CRTC_GEN_CNTL, 0x03000000 | (M64_PIX_WIDTH_32BPP << 8));
+
+    m64_wr1(a, M64_OVL_GRAPHICS_KEY_CLR, M64_OVL_KEY);
+    m64_wr1(a, M64_OVL_GRAPHICS_KEY_MSK, 0x00ffffff);
+    m64_wr1(a, M64_OVL_KEY_CNTL, 0x50);        /* graphics == key */
+    m64_wr1(a, M64_VIDEO_FORMAT, format);
+    m64_wr1(a, M64_SCALER_HEIGHT_WIDTH, (4 << 16) | 2);
+    m64_wr1(a, M64_SCALER_BUF_PITCH, src_pitch);
+    m64_wr1(a, M64_SCALER_BUF0_OFFSET, M64_OVL_SRC);
+    m64_wr1(a, M64_OVL_SCALE_INC, (0x400 << 16) | 0x400);
+    m64_wr1(a, M64_OVL_Y_X_START, M64_OVL_LOCK | (8 << 16) | 4);
+    m64_wr1(a, M64_OVL_Y_X_END, (23 << 16) | 11);
+}
+
+/*
+ * The overlay shows its scaled video where the graphics pixel matches the
+ * key, once the next vertical sync takes the double-buffered registers
+ * (RAGE XL RRG p. 4-30, BYPASS_SUBPIC_DBF clear).  An RGB source goes
+ * through 565, and with SCALE_PIX_EXPAND clear its low bits read 0.
+ */
+static void test_mach64_overlay_rgb(void)
+{
+    g_autofree char *tmpdir = g_dir_make_tmp("ia64-m64ovl-XXXXXX", NULL);
+    g_autofree char *ppm = g_build_filename(tmpdir, "ovl.ppm", NULL);
+    const uint32_t src[8] = {
+        cpu_to_le32(0x00f80000), cpu_to_le32(0x0000fc00),
+        cpu_to_le32(0x000000f8), cpu_to_le32(0x00ffffff),
+        cpu_to_le32(0x00808080), cpu_to_le32(0x00f8fcf8),
+        cpu_to_le32(0x00000000), cpu_to_le32(0x00123456),
+    };
+    Mach64TestDev a;
+
+    g_assert_nonnull(tmpdir);
+    mach64_zx1_open(&a);
+    a.fb = qpci_config_readl(a.dev, PCI_BASE_ADDRESS_0) & 0xfffffff0;
+    m64_ovl_setup(&a, 0x00060000, src, sizeof(src), 4);
+    m64_wr1(&a, M64_OVL_SCALE_CNTL, M64_OVL_ON);
+    g_assert_cmphex(m64_rd1(&a, M64_SCALER_BUF_PITCH), ==, 4);
+    g_assert_cmphex(m64_rd1(&a, M64_CAPTURE_Y_X), ==, 0);
+
+    /* Not yet taken: the key colour still shows. */
+    m64_ovl_pixel(&a, ppm, 8, 4, M64_OVL_KEY);
+
+    qtest_clock_step(a.qts, M64_VBLANK_STEP_NS);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) & M64_CRTC_OVERLAY_EOF_INT,
+                    !=, 0);
+    m64_ovl_pixel(&a, ppm, 8, 4, 0xf80000);
+    m64_ovl_pixel(&a, ppm, 13, 7, 0x00fc00);
+    m64_ovl_pixel(&a, ppm, 23, 4, 0xf8fcf8);    /* ffffff through 565 */
+    m64_ovl_pixel(&a, ppm, 21, 11, 0x103450);   /* 123456 through 565 */
+    m64_ovl_pixel(&a, ppm, 20, 10, M64_OVL_GFX);    /* no key there */
+    m64_ovl_pixel(&a, ppm, 7, 4, M64_OVL_GFX);
+    m64_ovl_pixel(&a, ppm, 24, 4, M64_OVL_GFX);
+
+    /* A locked start waits for an unlocking write of the pair. */
+    m64_wr1(&a, M64_OVL_Y_X_START, M64_OVL_LOCK | (12 << 16) | 4);
+    qtest_clock_step(a.qts, M64_VBLANK_STEP_NS);
+    m64_ovl_pixel(&a, ppm, 8, 4, 0xf80000);
+    m64_wr1(&a, M64_OVL_Y_X_END, (23 << 16) | 11);
+    qtest_clock_step(a.qts, M64_VBLANK_STEP_NS);
+    m64_ovl_pixel(&a, ppm, 8, 4, M64_OVL_KEY);
+
+    /* Disabled, the key colour shows again. */
+    m64_wr1(&a, M64_OVL_SCALE_CNTL, 0);
+    qtest_clock_step(a.qts, M64_VBLANK_STEP_NS);
+    m64_ovl_pixel(&a, ppm, 13, 7, M64_OVL_KEY);
+
+    g_assert_cmpint(g_unlink(ppm), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+    mach64_dev_close(&a);
+}
+
+/*
+ * A VYUY422 (YUY2) source converts to RGB by the CCIR-601 equations of the
+ * RAGE PRO PRG sec 8.4.5: Y 235 gives f6f6f6 and Y 16 black.
+ */
+static void test_mach64_overlay_yuv(void)
+{
+    g_autofree char *tmpdir = g_dir_make_tmp("ia64-m64ovl-XXXXXX", NULL);
+    g_autofree char *ppm = g_build_filename(tmpdir, "ovl.ppm", NULL);
+    /* Bytes Y0 U Y1 V, two pixel pairs per line, two lines. */
+    const uint8_t src[16] = {
+        235, 128, 16, 128,  16, 128, 235, 128,
+        16, 128, 16, 128,   235, 128, 235, 128,
+    };
+    Mach64TestDev a;
+
+    g_assert_nonnull(tmpdir);
+    mach64_zx1_open(&a);
+    a.fb = qpci_config_readl(a.dev, PCI_BASE_ADDRESS_0) & 0xfffffff0;
+    m64_ovl_setup(&a, 0x000b0000, src, sizeof(src), 4);
+    m64_wr1(&a, M64_OVL_SCALE_CNTL, M64_OVL_ON | M64_OVL_REPLICATE);
+    qtest_clock_step(a.qts, M64_VBLANK_STEP_NS);
+    m64_ovl_pixel(&a, ppm, 8, 4, 0xf6f6f6);
+    m64_ovl_pixel(&a, ppm, 12, 4, 0x000000);
+    m64_ovl_pixel(&a, ppm, 23, 7, 0xf6f6f6);
+    m64_ovl_pixel(&a, ppm, 8, 8, 0x000000);
+    m64_ovl_pixel(&a, ppm, 23, 11, 0xf6f6f6);
+
+    g_assert_cmpint(g_unlink(ppm), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+    mach64_dev_close(&a);
+}
+
 /*
  * The CRTC_INT_CNTL status bits clear when 1 is written to them and stay
  * when 0 is written (RAGE XL RRG pp. 4-51..4-53); the interrupt line is the
@@ -9285,6 +9461,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ids", test_mach64_ids);
     qtest_add_func("/ia64-vpc/mach64/vblank-bit2", test_mach64_vblank_bit2);
     qtest_add_func("/ia64-vpc/mach64/int-ack", test_mach64_int_ack);
+    qtest_add_func("/ia64-vpc/mach64/overlay-rgb", test_mach64_overlay_rgb);
+    qtest_add_func("/ia64-vpc/mach64/overlay-yuv", test_mach64_overlay_yuv);
     qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
                    test_mach64_2d_solid_fill);
     qtest_add_func("/ia64-vpc/mach64/negative-x", test_mach64_negative_x);

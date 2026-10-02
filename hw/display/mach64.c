@@ -26,8 +26,6 @@
 #include "migration/vmstate.h"
 #include "ui/console.h"
 
-enum { VGA_MODE, EXT_MODE };
-
 static const GraphicHwOps *mach64_vga_hw_ops;
 static GraphicHwOps mach64_hw_ops;
 
@@ -181,7 +179,7 @@ void mach64_2d_set_dirty(Mach64VGAState *s, uint32_t base, int x, int y,
  * driving the VGACommonState VBE machinery, exactly as hw/display/ati.c does.
  * When the extended display enable is clear we fall back to the VGA core.
  */
-static void mach64_switch_mode(Mach64VGAState *s)
+static void mach64_apply_mode(Mach64VGAState *s)
 {
     VGACommonState *vga = &s->vga;
 
@@ -274,6 +272,13 @@ static void mach64_switch_mode(Mach64VGAState *s)
     M64_TRACE("  -> EXT_MODE %dx%d bpp=%d pitch_px=%d offs=%#x start=%#x "
               "off_ok=%d vbe_size=%#x", h, v, bpp, pitch_px, offs,
               vga->vbe_start_addr, off_ok, vga->vbe_size);
+}
+
+/* The overlay shows in the extended display mode only. */
+static void mach64_switch_mode(Mach64VGAState *s)
+{
+    mach64_apply_mode(s);
+    mach64_update_shadow(s);
 }
 
 /* ---- hardware cursor ---- */
@@ -431,6 +436,43 @@ static void mach64_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
     }
 }
 
+/*
+ * The VGA core calls these for a shadow surface only, which the guest cursor
+ * and the overlay request through force_shadow.  The cursor sits above the
+ * overlay.
+ */
+static void mach64_display_invalidate(VGACommonState *vga)
+{
+    Mach64VGAState *s = container_of(vga, Mach64VGAState, vga);
+
+    mach64_ovl_invalidate(s);
+    if (s->cursor_guest_mode) {
+        mach64_cursor_invalidate(vga);
+    }
+}
+
+static void mach64_display_draw_line(VGACommonState *vga, uint8_t *d,
+                                     int scr_y)
+{
+    Mach64VGAState *s = container_of(vga, Mach64VGAState, vga);
+
+    mach64_ovl_draw_line(s, d, scr_y);
+    if (s->cursor_guest_mode) {
+        mach64_cursor_draw_line(vga, d, scr_y);
+    }
+}
+
+void mach64_update_shadow(Mach64VGAState *s)
+{
+    bool shadow = (s->cursor_guest_mode && mach64_cursor_enabled(s)) ||
+                  mach64_ovl_active(s);
+
+    if (s->vga.force_shadow != shadow) {
+        s->vga.force_shadow = shadow;
+        graphic_hw_invalidate(s->vga.con);
+    }
+}
+
 /* ---- DAC palette access via the MMIO DAC_REGS byte window ---- */
 
 static void mach64_dac_write(Mach64VGAState *s, unsigned byte, uint8_t val)
@@ -529,13 +571,12 @@ static int64_t mach64_next_vblank_start(Mach64VGAState *s, int64_t now)
     return start;
 }
 
+/* Each _INT_EN bit enables the _INT status bit above it (RRG pp. 4-51..4-53). */
 static void mach64_update_irq(Mach64VGAState *s)
 {
     uint32_t ic = s->regs[CRTC_INT_CNTL];
-    bool level = ((ic & CRTC_VBLANK_INT) && (ic & CRTC_VBLANK_INT_EN)) ||
-                 ((ic & CRTC_VLINE_INT) && (ic & CRTC_VLINE_INT_EN));
 
-    pci_set_irq(&s->dev, level);
+    pci_set_irq(&s->dev, !!(ic & ((ic & CRTC_INT_ENS) << 1)));
 }
 
 /* The start of the vertical blank, as CRTC_VBLANK reports it. */
@@ -564,6 +605,7 @@ static void mach64_vblank_timer(void *opaque)
         status |= CRTC_VBLANK_BIT2_INT;
     }
     s->regs[CRTC_OFF_PITCH] &= ~CRTC_OFFSET_LOCK;
+    status |= mach64_ovl_vblank(s);
     s->regs[CRTC_INT_CNTL] |= status;
     mach64_update_irq(s);
 }
@@ -941,8 +983,10 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
     uint32_t val;
 
     if (reg >= MACH64_NREGS) {
-        mach64_trace_access('r', reg, 0);
-        return 0; /* Block 1 (overlay/scaler): not modelled yet */
+        val = 0;
+        mach64_ovl_read(s, reg, &val);
+        mach64_trace_access('r', reg, val);
+        return size < 4 ? (val >> (byte * 8)) & ((1u << (size * 8)) - 1) : val;
     }
 
     switch (reg) {
@@ -1125,7 +1169,8 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
 
     if (reg >= MACH64_NREGS) {
         mach64_trace_access('w', reg, data);
-        return; /* Block 1 (overlay/scaler): not modelled yet */
+        mach64_ovl_write(s, reg, byte, size, data);
+        return;
     }
 
     /* Host-data stream: any of HOST_DATA0..F feeds the active blit. */
@@ -1253,7 +1298,7 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         bool en = mach64_cursor_enabled(s);
 
         if (s->cursor_guest_mode) {
-            s->vga.force_shadow = en;
+            mach64_update_shadow(s);
             graphic_hw_invalidate(s->vga.con);
         } else if (en) {
             mach64_cursor_define(s);
@@ -1406,11 +1451,12 @@ static int mach64_post_load(void *opaque, int version_id)
     s->mode = (s->regs[CRTC_GEN_CNTL] & CRTC_EXT_DISP_EN) ? EXT_MODE : VGA_MODE;
     s->vga.graphic_mode = -1;
     if (s->cursor_guest_mode) {
-        s->vga.force_shadow = mach64_cursor_enabled(s);
         s->cursor_size = UINT16_MAX;
     } else if (mach64_cursor_enabled(s)) {
         mach64_cursor_define(s);
     }
+    s->ovl_drawn_y0 = -1;
+    mach64_update_shadow(s);
     mach64_update_irq(s);
     mach64_vga_aper_update(s);
     graphic_hw_invalidate(s->vga.con);
@@ -1432,7 +1478,7 @@ static const VMStateDescription vmstate_mach64_host_data = {
 
 static const VMStateDescription vmstate_mach64_vga = {
     .name = "mach64-vga",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = mach64_post_load,
     .fields = (const VMStateField[]) {
@@ -1456,6 +1502,9 @@ static const VMStateDescription vmstate_mach64_vga = {
         VMSTATE_UINT8(ddc_read_nacked, Mach64VGAState),
         VMSTATE_INT16(ddc_addr, Mach64VGAState),
         VMSTATE_BOOL_V(amc_active, Mach64VGAState, 2),
+        VMSTATE_UINT32_ARRAY_V(regs1, Mach64VGAState, MACH64_NREGS1, 3),
+        VMSTATE_UINT32_ARRAY_V(ovl, Mach64VGAState, MACH64_NREGS1, 3),
+        VMSTATE_BOOL_V(ovl_locked, Mach64VGAState, 3),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -1501,10 +1550,8 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
     mach64_hw_ops = *vga->hw_ops;
     mach64_hw_ops.gfx_update = mach64_gfx_update;
     vga->con = graphic_console_init(DEVICE(s), 0, &mach64_hw_ops, vga);
-    if (s->cursor_guest_mode) {
-        vga->cursor_invalidate = mach64_cursor_invalidate;
-        vga->cursor_draw_line = mach64_cursor_draw_line;
-    }
+    vga->cursor_invalidate = mach64_display_invalidate;
+    vga->cursor_draw_line = mach64_display_draw_line;
 
     /*
      * Paged VGA aperture, disabled until CFG_MEM_VGA_AP_EN turns it on.  It
@@ -1565,6 +1612,7 @@ static void mach64_vga_reset(DeviceState *dev)
 
     memset(s->regs, 0, sizeof(s->regs));
     memset(&s->host_data, 0, sizeof(s->host_data));
+    mach64_ovl_reset(s);
     s->mode = VGA_MODE;
     s->cursor_size = 0;
     s->cursor_offset = 0;
@@ -1586,6 +1634,7 @@ static void mach64_vga_reset(DeviceState *dev)
     s->regs[CONFIG_CNTL] = CFG_MEM_AP_SIZE_2X8M;   /* read-only, RRG 0_37 */
     mach64_update_irq(s);
     mach64_vga_aper_update(s);
+    mach64_update_shadow(s);
 
     /*
      * Seed the internal PLL with divider values a real video-BIOS POST would

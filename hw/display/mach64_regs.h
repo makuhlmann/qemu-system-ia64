@@ -5,7 +5,7 @@
  * 0x1ff), NOT a byte offset.  A guest reaches a register through MMIO BAR2:
  * Block 0 registers (index 0x00-0xff, the CRTC/DAC/config plus the GUI engine)
  * sit at BAR2 + 0x400 + index*4; Block 1 registers (index 0x100-0x1ff, the
- * overlay/scaler, not modelled here yet) sit at BAR2 + (index-0x100)*4.  See
+ * overlay/scaler among them) sit at BAR2 + (index-0x100)*4.  See
  * xf86-video-mach64 atimach64io.h and the Mach64 Register Reference Guide.
  *
  * This work is licensed under the GNU GPL license version 2 or later.
@@ -30,6 +30,9 @@
 
 /* Number of Block-0 register slots we back with storage. */
 #define MACH64_NREGS            0x100
+/* Block 1 starts at index 0x100; the overlay/scaler set lies below 0x180. */
+#define MACH64_BLOCK1           0x100
+#define MACH64_NREGS1           0x80
 
 /* ---- Block 0: CRTC / DAC / clock / config / cursor ---- */
 #define CRTC_H_TOTAL_DISP       0x00
@@ -247,6 +250,7 @@
 #define CRTC_VLINE_INT_EN       0x00000008ul
 #define CRTC_VLINE_INT          0x00000010ul   /* status; write 1 to ack */
 #define CRTC_VLINE_SYNC         0x00000020ul   /* odd scan line (read-only) */
+#define CRTC_OVERLAY_EOF_INT    0x00200000ul   /* status; write 1 to ack */
 #define CRTC_VBLANK_BIT2_INT    0x80000000ul   /* status, no enable bit */
 /*
  * RAGE XL RRG pp. 4-51..4-53: the _INT status bits (2, 4, 8, 10, 13, 15, 17,
@@ -259,6 +263,7 @@
 #define CRTC_INT_LIVE           0x10000861ul
 
 /* ---- HW_DEBUG (reg 0x1F), RAGE XL RRG p. 4-30 ---- */
+#define HW_DEBUG_BYPASS_SUBPIC_DBF   0x00000001ul
 #define HW_DEBUG_BLOCK_DBL_BUF       0x00008000ul
 #define HW_DEBUG_SEL_VBLANK_DBL_BUF  0x00100000ul
 
@@ -416,5 +421,72 @@
 #define CLR_CMP_SRC             0x03000000ul
 #define CLR_CMP_SRC_DST         0x0
 #define CLR_CMP_SRC_2D          0x1
+
+/*
+ * ---- Block 1: overlay and back-end scaler (264VT/3D RAGE RRG chapter 5) ----
+ * The SCALER_BUF* and SCALER_COLOUR_CNTL/H_COEFF indices and the field
+ * positions follow xf86-video-mach64 atiregs.h for the GTPro family.
+ */
+#define OVERLAY_Y_X_START       0x100
+#define OVERLAY_Y_X_END         0x101
+#define OVERLAY_VIDEO_KEY_CLR   0x102
+#define OVERLAY_VIDEO_KEY_MSK   0x103
+#define OVERLAY_GRAPHICS_KEY_CLR 0x104
+#define OVERLAY_GRAPHICS_KEY_MSK 0x105
+#define OVERLAY_KEY_CNTL        0x106
+#define OVERLAY_SCALE_INC       0x108
+#define OVERLAY_SCALE_CNTL      0x109
+#define SCALER_HEIGHT_WIDTH     0x10a
+#define OVERLAY_TEST            0x10b
+#define SCALER_THRESHOLD        0x10c
+#define SCALER_BUF0_OFFSET      0x10d
+#define SCALER_BUF1_OFFSET      0x10e
+#define SCALER_BUF_PITCH        0x10f
+#define VIDEO_FORMAT            0x112
+#define SCALER_COLOUR_CNTL      0x154
+#define SCALER_H_COEFF0         0x155
+#define SCALER_H_COEFF4         0x159
+#define SCALER_BUF0_OFFSET_U    0x175
+#define SCALER_BUF0_OFFSET_V    0x176
+#define SCALER_BUF1_OFFSET_U    0x177
+#define SCALER_BUF1_OFFSET_V    0x178
+
+/* OVERLAY_Y_X_START / _END */
+#define OVERLAY_Y_MASK          0x000003fful
+#define OVERLAY_X_MASK          0x03ff0000ul
+#define OVERLAY_X_SHIFT         16
+#define OVERLAY_LOCK            0x80000000ul
+
+/* OVERLAY_KEY_CNTL; the CMP_MIX field width is from the ATI SDK DEFINEVT.H */
+#define OVERLAY_VIDEO_FN        0x00000007ul
+#define OVERLAY_GRAPHICS_FN     0x00000070ul
+#define OVERLAY_GRAPHICS_FN_SHIFT 4
+#define OVERLAY_CMP_MIX         0x00000f00ul
+#define OVERLAY_CMP_MIX_SHIFT   8
+
+/* OVERLAY_SCALE_CNTL */
+#define SCALE_PIX_EXPAND        0x00000001ul
+#define SCALE_Y2R_TEMP          0x00000002ul
+#define SCALE_HORZ_MODE         0x00000004ul
+#define SCALE_VERT_MODE         0x00000008ul
+#define SCALE_SIGNED_UV         0x00000010ul
+#define SCALE_GAMMA_SEL         0x00000060ul
+#define SCALE_BANDWIDTH         0x04000000ul
+#define OVERLAY_EN              0x40000000ul
+#define SCALE_EN                0x80000000ul
+
+/* VIDEO_FORMAT.SCALER_IN */
+#define SCALER_IN_MASK          0x000f0000ul
+#define SCALER_IN_15BPP         0x00030000ul
+#define SCALER_IN_16BPP         0x00040000ul
+#define SCALER_IN_32BPP         0x00060000ul
+#define SCALER_IN_YUV9          0x00090000ul
+#define SCALER_IN_YUV12         0x000a0000ul
+#define SCALER_IN_VYUY422       0x000b0000ul
+#define SCALER_IN_YVYU422       0x000c0000ul
+
+/* Internal PLL register 5 (RAGE XL RRG, PLL_VCLK_CNTL) */
+#define PLL_VCLK_CNTL           0x05
+#define PLL_ECP_DIV             0x30
 
 #endif /* MACH64_REGS_H */

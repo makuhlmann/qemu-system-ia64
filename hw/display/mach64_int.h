@@ -39,6 +39,8 @@
 
 #define MACH64_LINEAR_APER_SIZE      (16 * MiB)
 
+enum { VGA_MODE, EXT_MODE };
+
 #define TYPE_MACH64_VGA "mach64-vga"
 OBJECT_DECLARE_SIMPLE_TYPE(Mach64VGAState, MACH64_VGA)
 
@@ -79,6 +81,15 @@ struct Mach64VGAState {
 
     /* Block-0 register file, indexed by Mach64 block index (see mach64_regs.h). */
     uint32_t regs[MACH64_NREGS];
+
+    /*
+     * Block-1 overlay/scaler registers as written, and the double-buffered
+     * set the display uses (mach64_overlay.c).
+     */
+    uint32_t regs1[MACH64_NREGS1];
+    uint32_t ovl[MACH64_NREGS1];
+    bool ovl_locked;
+    int ovl_drawn_y0, ovl_drawn_y1;
 
     /*
      * Internal PLL / clock generator.  The Mach64 exposes its PLL registers
@@ -126,7 +137,18 @@ void mach64_2d_dst_trigger(Mach64VGAState *s);
 void mach64_2d_line_trigger(Mach64VGAState *s);
 void mach64_2d_host_data(Mach64VGAState *s, uint32_t data);
 
+/* mach64_overlay.c */
+bool mach64_ovl_active(const Mach64VGAState *s);
+bool mach64_ovl_read(Mach64VGAState *s, unsigned reg, uint32_t *val);
+void mach64_ovl_write(Mach64VGAState *s, unsigned reg, unsigned byte,
+                      unsigned size, uint32_t data);
+uint32_t mach64_ovl_vblank(Mach64VGAState *s);
+void mach64_ovl_reset(Mach64VGAState *s);
+void mach64_ovl_invalidate(Mach64VGAState *s);
+void mach64_ovl_draw_line(Mach64VGAState *s, uint8_t *d, int scr_y);
+
 /* mach64.c helpers shared with the engine. */
+void mach64_update_shadow(Mach64VGAState *s);
 int mach64_dst_bpp(const Mach64VGAState *s);
 uint32_t mach64_dst_base(const Mach64VGAState *s);
 int mach64_dst_pitch_bytes(const Mach64VGAState *s);
