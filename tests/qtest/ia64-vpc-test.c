@@ -8288,6 +8288,7 @@ static inline uint32_t m64_rd(Mach64TestDev *a, unsigned reg)
 #define M64_CRTC_VBLANK_INT_EN      0x00000002u
 #define M64_CRTC_VBLANK_INT         0x00000004u
 #define M64_CRTC_VBLANK_BIT2_INT    0x80000000u
+#define M64_CRTC2_STATUS            0x1000a800u  /* CRTC2 VBLANK, its INTs, VLINE_SYNC */
 #define M64_HW_DEBUG                0x1f
 #define M64_SEL_VBLANK_DBL_BUF      0x00100000u
 #define M64_VBLANK_STEP_NS          (NANOSECONDS_PER_SECOND / 60 + 1000000)
@@ -8327,6 +8328,7 @@ static void test_mach64_vblank_bit2(void)
     v = m64_rd(&a, M64_CRTC_INT_CNTL);
     g_assert_cmphex(v & M64_CRTC_VBLANK_BIT2_INT, !=, 0);
     g_assert_cmphex(v & M64_CRTC_VBLANK_INT, !=, 0);
+    g_assert_cmphex(v & M64_CRTC2_STATUS, ==, 0);
     g_assert_cmphex(qpci_config_readw(a.dev, PCI_STATUS) &
                     PCI_STATUS_INTERRUPT, ==, 0);
 

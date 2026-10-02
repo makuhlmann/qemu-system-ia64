@@ -552,6 +552,12 @@ static void mach64_vblank_timer(void *opaque)
      * p. 4-30, CRTC_OFF_PITCH).  Its status bit has no enable and drives no
      * interrupt.  ati2drad's vsync flip acknowledges bit 31 and waits for it
      * to come back: without it the flip status never reads done.
+     *
+     * The XL has one CRTC, so CRTC2_VBLANK_INT (bit 13) stays 0 (RRG
+     * p. 4-52, "NOT supported").  ati2drad waits for bit 13 as well only
+     * when IOCTL_VIDEO_SET_CURRENT_MODE returns a controller mask that
+     * holds the second controller; on the XL its flips acknowledge bit 31
+     * alone.
      */
     if (!(s->regs[HW_DEBUG] & HW_DEBUG_SEL_VBLANK_DBL_BUF) ||
         (s->regs[CRTC_OFF_PITCH] & CRTC_OFFSET_LOCK)) {
