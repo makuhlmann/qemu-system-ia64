@@ -8282,6 +8282,69 @@ static inline uint32_t m64_rd(Mach64TestDev *a, unsigned reg)
     return qtest_readl(a->qts, a->mmio + M64_REG(reg));
 }
 
+#define M64_CRTC_OFF_PITCH          0x05
+#define M64_CRTC_OFFSET_LOCK        0x00100000u
+#define M64_CRTC_INT_CNTL           0x06
+#define M64_CRTC_VBLANK_INT         0x00000004u
+#define M64_CRTC_VBLANK_BIT2_INT    0x80000000u
+#define M64_HW_DEBUG                0x1f
+#define M64_SEL_VBLANK_DBL_BUF      0x00100000u
+#define M64_VBLANK_STEP_NS          (NANOSECONDS_PER_SECOND / 60 + 1000000)
+
+/*
+ * zx1's Rage XL, behind Mercury.  The machine runs (no -S) so that the
+ * virtual clock, and with it the vertical blank, moves with clock_step.
+ */
+static void mach64_zx1_open(Mach64TestDev *a)
+{
+    a->qts = qtest_init("-machine zx1 -m 256M");
+    ia64_qpci_init_on_bus(&a->gbus, a->qts, IA64_MERCURY_BUS);
+    a->dev = qpci_device_find(&a->gbus.bus,
+                              QPCI_DEVFN(IA64_MERCURY_VGA_SLOT, 0));
+    g_assert_nonnull(a->dev);
+    g_assert_cmphex(qpci_config_readw(a->dev, PCI_DEVICE_ID), ==, 0x4752);
+    a->mmio = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_2) & 0xfffffff0;
+    g_assert_cmphex(a->mmio, !=, 0);
+}
+
+/*
+ * VBLANK_BIT2_INT (CRTC_INT_CNTL bit 31) latches at the start of each
+ * vertical blank while HW_DEBUG.SEL_VBLANK_DBL_BUF is 0, and with it set
+ * only at the blank that uses a newly written CRTC_OFFSET.  ati2drad's
+ * vsync flip waits for the bit after acknowledging it.  It has no enable
+ * bit and raises no interrupt.
+ */
+static void test_mach64_vblank_bit2(void)
+{
+    Mach64TestDev a;
+    uint32_t v;
+
+    mach64_zx1_open(&a);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) &
+                    M64_CRTC_VBLANK_BIT2_INT, ==, 0);
+    qtest_clock_step(a.qts, M64_VBLANK_STEP_NS);
+    v = m64_rd(&a, M64_CRTC_INT_CNTL);
+    g_assert_cmphex(v & M64_CRTC_VBLANK_BIT2_INT, !=, 0);
+    g_assert_cmphex(v & M64_CRTC_VBLANK_INT, !=, 0);
+    g_assert_cmphex(qpci_config_readw(a.dev, PCI_STATUS) &
+                    PCI_STATUS_INTERRUPT, ==, 0);
+
+    /* Double-buffer mode: only the blank that uses a new offset. */
+    m64_wr(&a, M64_HW_DEBUG, M64_SEL_VBLANK_DBL_BUF);
+    m64_wr(&a, M64_CRTC_INT_CNTL, 0);
+    qtest_clock_step(a.qts, M64_VBLANK_STEP_NS);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) &
+                    M64_CRTC_VBLANK_BIT2_INT, ==, 0);
+    m64_wr(&a, M64_CRTC_OFF_PITCH, (80u << 22) | 0x100);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_OFF_PITCH), ==,
+                    (80u << 22) | M64_CRTC_OFFSET_LOCK | 0x100);
+    qtest_clock_step(a.qts, M64_VBLANK_STEP_NS);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_OFF_PITCH), ==, (80u << 22) | 0x100);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_INT_CNTL) &
+                    M64_CRTC_VBLANK_BIT2_INT, !=, 0);
+    mach64_dev_close(&a);
+}
+
 static void test_mach64_ids(void)
 {
     Mach64TestDev a;
@@ -9169,6 +9232,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/agp/gart-dma", test_agp_gart_dma);
     qtest_add_func("/ia64-vpc/agp/gart-dma-moved", test_agp_gart_dma_moved);
     qtest_add_func("/ia64-vpc/mach64/ids", test_mach64_ids);
+    qtest_add_func("/ia64-vpc/mach64/vblank-bit2", test_mach64_vblank_bit2);
     qtest_add_func("/ia64-vpc/mach64/2d-solid-fill",
                    test_mach64_2d_solid_fill);
     qtest_add_func("/ia64-vpc/mach64/negative-x", test_mach64_negative_x);

@@ -473,33 +473,60 @@ static uint8_t mach64_dac_read(Mach64VGAState *s, unsigned byte)
     return v;
 }
 
-/* Synthetic current scanline, so drivers polling CRTC_VLINE make progress. */
-static uint32_t mach64_crtc_vline(Mach64VGAState *s)
+#define MACH64_FRAME_NS (NANOSECONDS_PER_SECOND / 60)
+
+/* Total and displayed lines of the synthetic raster. */
+static void mach64_raster(Mach64VGAState *s, int *lines, int *vdisp)
 {
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     unsigned total = s->regs[CRTC_V_TOTAL_DISP] & 0x7ff;
+    unsigned vd = (s->regs[CRTC_V_TOTAL_DISP] & CRTC_V_DISP) >> 16;
+
     /*
      * The CRTC free-runs: it generates raster timing (and therefore a toggling
      * vblank status) whenever the chip is powered, even before software programs
      * a custom mode.  When CRTC_V_TOTAL is still zero (unprogrammed, or reset
-     * mid-init) fall back to a standard 525-line frame so the scanline counter
-     * keeps cycling; otherwise the count would be pinned at 0 and the vblank
-     * status could never toggle, hanging any driver that waits on it.
+     * mid-init) fall back to a standard 525-line frame with 480 active lines so
+     * the scanline counter keeps cycling; otherwise the count would be pinned at
+     * 0 and the vblank status could never toggle, hanging any driver that waits
+     * on it.
      */
-    int lines = total ? (int)total + 1 : 525;
-    int64_t frame_ns = NANOSECONDS_PER_SECOND / 60;
+    *lines = total ? (int)total + 1 : 525;
+    *vdisp = vd ? (int)vd + 1 : 480;
+}
 
-    return (now % frame_ns) * lines / frame_ns;
+/* Synthetic current scanline, so drivers polling CRTC_VLINE make progress. */
+static uint32_t mach64_crtc_vline(Mach64VGAState *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int lines, vdisp;
+
+    mach64_raster(s, &lines, &vdisp);
+    return (now % MACH64_FRAME_NS) * lines / MACH64_FRAME_NS;
 }
 
 /* True while the synthetic raster is in the vertical-blank region. */
 static bool mach64_in_vblank(Mach64VGAState *s)
 {
-    unsigned vd = (s->regs[CRTC_V_TOTAL_DISP] & CRTC_V_DISP) >> 16;
-    /* Match the crtc_vline free-run default: 480 active lines when unprogrammed. */
-    int vdisp = vd ? (int)vd + 1 : 480;
+    int lines, vdisp;
 
+    mach64_raster(s, &lines, &vdisp);
     return (int)mach64_crtc_vline(s) >= vdisp;
+}
+
+/* The next time after now at which mach64_in_vblank() turns true. */
+static int64_t mach64_next_vblank_start(Mach64VGAState *s, int64_t now)
+{
+    int64_t start = now - now % MACH64_FRAME_NS;
+    int lines, vdisp;
+
+    mach64_raster(s, &lines, &vdisp);
+    if (vdisp < lines) {
+        start += DIV_ROUND_UP((int64_t)vdisp * MACH64_FRAME_NS, lines);
+    }
+    if (start <= now) {
+        start += MACH64_FRAME_NS;
+    }
+    return start;
 }
 
 static void mach64_update_irq(Mach64VGAState *s)
@@ -511,13 +538,27 @@ static void mach64_update_irq(Mach64VGAState *s)
     pci_set_irq(&s->dev, level);
 }
 
+/* The start of the vertical blank, as CRTC_VBLANK reports it. */
 static void mach64_vblank_timer(void *opaque)
 {
     Mach64VGAState *s = opaque;
+    uint32_t status = CRTC_VBLANK_INT;
 
-    timer_mod(&s->vblank_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-              NANOSECONDS_PER_SECOND / 60);
-    s->regs[CRTC_INT_CNTL] |= CRTC_VBLANK_INT;
+    timer_mod(&s->vblank_timer,
+              mach64_next_vblank_start(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)));
+    /*
+     * VBLANK_BIT2 is VBLANK, or with HW_DEBUG.SEL_VBLANK_DBL_BUF the double
+     * buffer of CRTC_OFFSET, which takes a pending offset now (RAGE XL RRG
+     * p. 4-30, CRTC_OFF_PITCH).  Its status bit has no enable and drives no
+     * interrupt.  ati2drad's vsync flip acknowledges bit 31 and waits for it
+     * to come back: without it the flip status never reads done.
+     */
+    if (!(s->regs[HW_DEBUG] & HW_DEBUG_SEL_VBLANK_DBL_BUF) ||
+        (s->regs[CRTC_OFF_PITCH] & CRTC_OFFSET_LOCK)) {
+        status |= CRTC_VBLANK_BIT2_INT;
+    }
+    s->regs[CRTC_OFF_PITCH] &= ~CRTC_OFFSET_LOCK;
+    s->regs[CRTC_INT_CNTL] |= status;
     mach64_update_irq(s);
 }
 
@@ -1118,6 +1159,23 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         mach64_reg_store(s, reg, byte, size, data);
         mach64_gui_traj_split(s, s->regs[reg]);
         return;
+    case CRTC_OFF_PITCH: {
+        /*
+         * CRTC_OFFSET_LOCK reads 1 from a write of CRTC_OFFSET until the next
+         * vertical blank uses the offset, unless HW_DEBUG.BLOCK_DBL_BUF turns
+         * the double buffer off (RRG CRTC_OFF_PITCH, HW_DEBUG).  The display
+         * takes the new offset at once.
+         */
+        uint32_t lock = s->regs[reg] & CRTC_OFFSET_LOCK;
+
+        mach64_reg_store(s, reg, byte, size, data);
+        if (byte < 3 && !(s->regs[HW_DEBUG] & HW_DEBUG_BLOCK_DBL_BUF)) {
+            lock = CRTC_OFFSET_LOCK;
+        }
+        s->regs[reg] = (s->regs[reg] & ~CRTC_OFFSET_LOCK) | lock;
+        mach64_switch_mode(s);
+        return;
+    }
     case CRTC_INT_CNTL:
         /*
          * Plain R/W: the hardware sets the _INT status bits on the event (the
@@ -1170,7 +1228,6 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
     case CRTC_GEN_CNTL:
     case CRTC_H_TOTAL_DISP:
     case CRTC_V_TOTAL_DISP:
-    case CRTC_OFF_PITCH:
     case DAC_CNTL:
         mach64_switch_mode(s);
         break;
@@ -1470,8 +1527,8 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
 
     dev->config[PCI_INTERRUPT_PIN] = 1;
     timer_init_ns(&s->vblank_timer, QEMU_CLOCK_VIRTUAL, mach64_vblank_timer, s);
-    timer_mod(&s->vblank_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-              NANOSECONDS_PER_SECOND / 60);
+    timer_mod(&s->vblank_timer,
+              mach64_next_vblank_start(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)));
 
     /* DDC/EDID: an i2c-ddc slave at 0x50 driven by the LCD-reg-7 bit-bang. */
     s->ddc_bus = i2c_init_bus(DEVICE(s), "mach64.ddc");

@@ -50,6 +50,7 @@
 #define CUR_OFFSET              0x1a
 #define CUR_HORZ_VERT_POSN      0x1b
 #define CUR_HORZ_VERT_OFF       0x1c
+#define HW_DEBUG                0x1f
 #define SCRATCH_REG0            0x20
 #define SCRATCH_REG1            0x21
 #define SCRATCH_REG2            0x22
@@ -235,6 +236,7 @@
 
 /* ---- CRTC_OFF_PITCH ---- */
 #define CRTC_OFFSET_MASK        0x000ffffful   /* in units of 8 bytes */
+#define CRTC_OFFSET_LOCK        0x00100000ul   /* R: offset not yet used */
 #define CRTC_PITCH_MASK         0xffc00000ul   /* in units of 8 pixels */
 #define CRTC_PITCH_SHIFT        22
 
@@ -244,7 +246,12 @@
 #define CRTC_VBLANK_INT         0x00000004ul   /* status; write 1 to ack */
 #define CRTC_VLINE_INT_EN       0x00000008ul
 #define CRTC_VLINE_INT          0x00000010ul   /* status; write 1 to ack */
+#define CRTC_VBLANK_BIT2_INT    0x80000000ul   /* status, no enable bit */
 #define CRTC_INT_STATUS_BITS    (CRTC_VBLANK_INT | CRTC_VLINE_INT)
+
+/* ---- HW_DEBUG (reg 0x1F), RAGE XL RRG p. 4-30 ---- */
+#define HW_DEBUG_BLOCK_DBL_BUF       0x00008000ul
+#define HW_DEBUG_SEL_VBLANK_DBL_BUF  0x00100000ul
 
 /* ---- CRTC_VLINE_CRNT_VLINE (reg 0x04): current scanline ---- */
 #define CRTC_VLINE              0x000007fful   /* programmed compare value */
