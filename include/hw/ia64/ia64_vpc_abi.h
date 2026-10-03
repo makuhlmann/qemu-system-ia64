@@ -458,6 +458,16 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 /* The Cirrus Logic CS4281 on the i2000's I/O board. */
 #define IA64_460GX_AUDIO_SLOT         0x04
 #define IA64_MERCURY_VGA_SLOT        0x00
+/*
+ * zx1's PCI0 storage seats: the SCSI adapter at device 1, which the vendor
+ * firmware's SCRAM interrupt records route to the rope's first three
+ * interrupts (the rx2600 itself has its SCSI on rope 1), and the opt-in AHCI
+ * at device 4.  The i2000 keeps the AHCI at device 1 of its compatibility
+ * bus.
+ */
+#define IA64_ZX1_SCSI_SLOT            0x01
+#define IA64_ZX1_AHCI_SLOT            0x04
+#define IA64_460GX_AHCI_SLOT          0x01
 /* 16 MiB PAL/SAL firmware address space below 4 GiB. */
 #define IA64_FW_ADDRESS_SPACE_BASE    IA64_U64(0x00000000ff000000)
 #define IA64_FW_ADDRESS_SPACE_SIZE    IA64_U64(0x0000000001000000)

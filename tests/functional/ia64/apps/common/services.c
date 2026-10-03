@@ -210,6 +210,8 @@ typedef struct {
 /* PCI config window at the E8870 MMCFG home, 64 MiB = 64 buses (28ea66e). */
 #define TEST_ECAM_BASE               0x00000ffff8000000ULL
 #define TEST_ECAM_SIZE               0x0000000004000000ULL
+/* zx1's SCSI seat on PCI0, IA64_ZX1_SCSI_SLOT in hw/ia64/ia64_vpc_abi.h. */
+#define TEST_ZX1_SCSI_SLOT           1U
 #define TEST_PCI_MMIO_BASE           0x00000000ee000000ULL
 #define TEST_PCI_MMIO_SIZE           0x0000000010000000ULL
 #define TEST_SPARSE_IO_BASE          0x00000ffffc000000ULL
@@ -1813,6 +1815,63 @@ static BOOLEAN test_pci_io_protocol(EFI_SYSTEM_TABLE *SystemTable)
            identifier != 0 && identifier != 0xffffffffU;
 }
 
+/*
+ * The SCSI adapter on zx1's SCSI seat, the LSI 53c895a by default, has a PCI
+ * I/O controller at that location, and the controller's device path names
+ * the same PCI node.
+ */
+static BOOLEAN test_pci_io_scsi_seat(EFI_SYSTEM_TABLE *SystemTable)
+{
+    EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
+    EFI_HANDLE *handles = NULL;
+    UINTN count = 0;
+    UINTN i;
+    BOOLEAN found = 0;
+
+    if (bs->LocateHandleBuffer(EFI_LOCATE_BY_PROTOCOL, pci_io_guid, NULL,
+                               &count, &handles) != EFI_SUCCESS ||
+        handles == NULL) {
+        return 0;
+    }
+    for (i = 0; i < count && !found; i++) {
+        EFI_PCI_IO_PROTOCOL *pci = NULL;
+        TEST_DEVICE_PATH_NODE *node = NULL;
+        UINTN segment, bus, device, function;
+        UINT32 identifier = 0;
+        UINTN depth;
+
+        if (bs->HandleProtocol(handles[i], pci_io_guid,
+                               (VOID **)&pci) != EFI_SUCCESS || pci == NULL ||
+            pci->GetLocation(pci, &segment, &bus, &device, &function) !=
+                EFI_SUCCESS ||
+            segment != 0 || bus != 0 || device != TEST_ZX1_SCSI_SLOT ||
+            function != 0) {
+            continue;
+        }
+        if (pci->Pci.Read(pci, EfiPciWidthUint32, 0, 1, &identifier) !=
+                EFI_SUCCESS || identifier != 0x00121000U ||
+            bs->HandleProtocol(handles[i], device_path_guid,
+                               (VOID **)&node) != EFI_SUCCESS || node == NULL) {
+            break;
+        }
+        for (depth = 0; depth < 8U && node->Length >= sizeof(*node) &&
+                        !(node->Type == 0x7fU && node->SubType == 0xffU);
+             depth++) {
+            if (node->Type == 0x01U && node->SubType == 0x01U &&
+                node->Length == 6U) {
+                const UINT8 *pci_node = (const UINT8 *)node;
+
+                found = pci_node[4] == 0 && pci_node[5] == TEST_ZX1_SCSI_SLOT;
+                break;
+            }
+            node = (TEST_DEVICE_PATH_NODE *)((UINT8 *)node + node->Length);
+        }
+        break;
+    }
+    (void)bs->FreePool(handles);
+    return found;
+}
+
 static BOOLEAN test_gop_protocol(EFI_SYSTEM_TABLE *SystemTable)
 {
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
@@ -2985,6 +3044,9 @@ EFI_STATUS ia64_services_main(EFI_HANDLE ImageHandle,
         ia64_test_check(&context, "pci-io",
                         test_pci_io_protocol(SystemTable), EFI_DEVICE_ERROR,
                         "pci-location-config-read");
+        ia64_test_check(&context, "pci-io-scsi-seat",
+                        test_pci_io_scsi_seat(SystemTable), EFI_DEVICE_ERROR,
+                        "pci-io-scsi-location-path");
         ia64_test_check(&context, "graphics-output",
                         test_gop_protocol(SystemTable), EFI_DEVICE_ERROR,
                         "gop-query-mode");

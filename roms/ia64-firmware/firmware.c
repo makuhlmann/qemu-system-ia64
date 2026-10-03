@@ -9906,7 +9906,7 @@ static FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     },
     {
         &mPciAhciHandle, &mPciAhciIoProto, &mPciAhciDevicePath,
-        0, 1, 0, FW_PCI_AHCI_ATTRIBUTES, 0x29228086U,
+        0, IA64_460GX_AHCI_SLOT, 0, FW_PCI_AHCI_ATTRIBUTES, 0x29228086U,
         5, PCI_AHCI_MMIO_BAR, 0x1000, "AHCI", 1,
     },
     {
@@ -14675,34 +14675,40 @@ static void fw_retarget_south_bridge_device_paths(void)
 }
 
 /*
- * The LSI (lsi=on) takes the board's SCSI seat: device 4 of the single root
- * on zx1, the SCSI slot of the first WXB expander root (ACPI _UID
- * IA64_460GX_WXB0_BUS) on the i2000.  fw_storage_pci_device() in
- * filesystem.c names the same seat for the boot paths.  Retarget the LSI's
- * PCI I/O table entry and its device path together.  Same timing rule as
+ * The board's storage seats (ia64_vpc_abi.h): the LSI takes the SCSI seat,
+ * device IA64_ZX1_SCSI_SLOT of the single root on zx1 and the SCSI slot of
+ * the first WXB expander root (ACPI _UID IA64_460GX_WXB0_BUS) on the i2000;
+ * the opt-in AHCI sits on the compatibility bus.  fw_storage_pci_device() in
+ * filesystem.c names the same seats for the boot paths.  Retarget the PCI
+ * I/O table entries and their device paths together.  Same timing rule as
  * fw_retarget_vga_device_paths().
  */
-static void fw_retarget_scsi_device_paths(void)
+static void fw_retarget_storage_device_paths(void)
 {
-    UINT8 bus = fw_platform_is_zx1() ? 0 : IA64_460GX_WXB0_BUS;
-    UINT8 device = fw_platform_is_zx1() ? 4 : IA64_460GX_WXB0_SCSI_SLOT;
+    BOOLEAN zx1 = fw_platform_is_zx1();
+    UINT8 bus = zx1 ? 0 : IA64_460GX_WXB0_BUS;
+    UINT8 device = zx1 ? IA64_ZX1_SCSI_SLOT : IA64_460GX_WXB0_SCSI_SLOT;
+    UINT8 ahci = zx1 ? IA64_ZX1_AHCI_SLOT : IA64_460GX_AHCI_SLOT;
     UINTN i;
 
     for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
         if (mPciIoDevices[i].Protocol == &mPciLsiIoProto) {
             mPciIoDevices[i].Bus = bus;
             mPciIoDevices[i].Device = device;
+        } else if (mPciIoDevices[i].Protocol == &mPciAhciIoProto) {
+            mPciIoDevices[i].Device = ahci;
         }
     }
     mPciLsiDevicePath.Acpi.Uid = bus;
     mPciLsiDevicePath.Pci.Device = device;
+    mPciAhciDevicePath.Pci.Device = ahci;
 }
 
 static void fw_phase_efi_core_init(void)
 {
     fw_retarget_vga_device_paths();
     fw_retarget_south_bridge_device_paths();
-    fw_retarget_scsi_device_paths();
+    fw_retarget_storage_device_paths();
     efi_init_boot_services();
     efi_init_runtime_services();
     uart_puts("UEFI Time Services:   ");

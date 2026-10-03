@@ -34,8 +34,6 @@
  * 2026-10-03, DEV-4).
  */
 #define IA64_VPC_NIC_SLOT           3
-/* The SCSI adapter, which the rx2600 has on rope 1, still takes device 1. */
-#define LONGSPEAK_SCSI_SLOT         1
 /* How many of the ioa I/O SAPIC's pins the board wires. */
 #define LONGSPEAK_INTX_PINS         6
 /*
@@ -88,7 +86,7 @@ static DeviceState *longspeak_rope_ioa(uint32_t straps, Error **errp)
  * with the _PRT packages in roms/ia64-firmware/dsdt-pci-root-zx1.asl.
  */
 static const IA64IntxRoute longspeak_pci0_intx[] = {
-    { LONGSPEAK_SCSI_SLOT, { 0, 1, 2, 3 } },   /* rx2600: USB; here SCSI */
+    { IA64_ZX1_SCSI_SLOT, { 0, 1, 2, 3 } },    /* rx2600: USB; here SCSI */
     { 0x02, { 5, 5, 5, 5 } },                  /* rx2600: IDE; here OHCI */
     { IA64_VPC_NIC_SLOT, { 4, 4, 4, 4 } },     /* LAN */
 };
@@ -378,7 +376,7 @@ static void longspeak_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
 {
     switch (seat) {
     case IA64_VPC_SEAT_SCSI:
-        *devfn = PCI_DEVFN(LONGSPEAK_SCSI_SLOT, 0);
+        *devfn = PCI_DEVFN(IA64_ZX1_SCSI_SLOT, 0);
         break;
     case IA64_VPC_SEAT_SCSI_PARK:
         /* The second adapter takes the next free slot of the single root. */
@@ -502,7 +500,7 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->lsi_default = true;
     imc->vga_default = "mach64";
     /* Device 1 is core I/O on this board; the opt-in AHCI takes device 4. */
-    imc->ahci_slot = 4;
+    imc->ahci_slot = IA64_ZX1_AHCI_SLOT;
     imc->wire_intx = longspeak_wire_intx;
     imc->build_isa = longspeak_build_isa;
     imc->seat = longspeak_seat;

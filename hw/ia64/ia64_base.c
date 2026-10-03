@@ -4898,7 +4898,7 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
     (void)data;
     nc->nmi_monitor_handler = ia64_vpc_nmi;
 
-    imc->ahci_slot = 1;
+    imc->ahci_slot = IA64_460GX_AHCI_SLOT;
     imc->low_ram_top = IA64_LOW_RAM_LIMIT;
     /*
      * Intel 82802AC Firmware Hub, 8 Mbit, 64 KiB blocks, which locks every
