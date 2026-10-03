@@ -1131,7 +1131,8 @@ static const TCGCPUOps ia64_tcg_ops = {
  * (245320-003 sec 5.9) and Itanium 2 (251110-003 sec 5.4.2) implement the
  * t1, nt1, nt2 and nta locality hints.  Loads encode t1, nt1 and nta (bits
  * 0, 1 and 3 of Table 11-69; nt2 is an lfetch hint), stores t1 and nta (bits
- * 0 and 3 of Table 11-68).  Instruction caches report no hints.
+ * 0 and 3 of Table 11-68).  Instruction caches report no hints.  The
+ * madison profile has the vectors that the rx2600 reports instead.
  */
 #define IA64_PAL_CACHE_LOAD_HINTS_T1_NT1_NTA  0x0b
 #define IA64_PAL_CACHE_STORE_HINTS_T1_NTA     0x09
@@ -1184,29 +1185,38 @@ static const IA64PalProfile ia64_pal_profile_madison = {
     .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 4,
+    /*
+     * PAL_CACHE_INFO and PAL_CACHE_PROT_INFO of the rx2600 (capture
+     * 2026-10-03, CPU-9 and CPU-10): a 128-byte fc stride and an alias
+     * boundary of 4 KB on every level; L1D parity, L2 and L3 data ECC.
+     */
     .cache = {
         [0] = {
             [0] = { .size = 16 * KiB, .associativity = 4, .line_shift = 6,
-                    .stride_shift = 6, .store_latency = 0xff,
-                    .load_latency = 1, .tag_lsb = 12 },
+                    .stride_shift = 7, .attribute = 3, .store_latency = 0xff,
+                    .load_latency = 1, .tag_lsb = 12, .alias_boundary = 12,
+                    .load_hints = 0x01,
+                    .protection = { 0x08000000, 0x40000000 } },
             [1] = { .size = 16 * KiB, .associativity = 4, .line_shift = 6,
-                    .stride_shift = 6, .store_latency = 1,
-                    .load_latency = 1, .tag_lsb = 12,
-                    IA64_PAL_CACHE_DATA_HINTS },
+                    .stride_shift = 7, .store_latency = 3,
+                    .load_latency = 1, .tag_lsb = 12, .alias_boundary = 12,
+                    .load_hints = 0x01,
+                    .protection = { 0x04800040, 0x441c4c26 } },
         },
         /* Unified L2: reported on the data/unified type only. */
         [1] = {
             [1] = { .size = 256 * KiB, .associativity = 8, .line_shift = 7,
-                    .stride_shift = 7, .attribute = 1, .store_latency = 1,
-                    .load_latency = 5, .tag_lsb = 15, .unified = true,
-                    IA64_PAL_CACHE_DATA_HINTS },
+                    .stride_shift = 7, .attribute = 1, .store_latency = 7,
+                    .load_latency = 5, .tag_lsb = 15, .alias_boundary = 12,
+                    .unified = true, .store_hints = 0x02, .load_hints = 0x08,
+                    .protection = { 0x0c700020, 0x481c4f23 } },
         },
         [2] = {
-            /* L3 load latency: 251110-003 Table 2-5 (12 is McKinley's). */
             [1] = { .size = 3 * MiB, .associativity = 12, .line_shift = 7,
-                    .stride_shift = 7, .attribute = 1, .store_latency = 1,
-                    .load_latency = 14, .tag_lsb = 18, .unified = true,
-                    IA64_PAL_CACHE_DATA_HINTS },
+                    .stride_shift = 7, .attribute = 1, .store_latency = 7,
+                    .load_latency = 14, .tag_lsb = 18, .alias_boundary = 12,
+                    .unified = true, .store_hints = 0x02, .load_hints = 0x02,
+                    .protection = { 0x0c500080, 0x4c7c5220 } },
         },
     },
     .tc_levels = 2,

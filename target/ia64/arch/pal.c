@@ -1363,13 +1363,12 @@ static void pal_cache_info(CPUIA64State *env)
     /*
      * config_info_2{39:32} is alias_boundary: the binary log of the minimum
      * separation of aliased addresses for best performance (SDM Vol.2
-     * rev 1.1 Fig. 11-18) -- i.e. the way span, log2(size/associativity),
-     * which is by construction the same quantity as tag_lsb for every
-     * modelled cache.  It previously carried the line size, which belongs
-     * only in config_info_1.
+     * rev 1.1 Fig. 11-18).  Without a hardware value it is the way span,
+     * log2(size/associativity), the same quantity as tag_lsb.
      */
     env->gr[IA64_PAL_GR_RESULT2] = info->size |
-                  ((uint64_t)info->tag_lsb << 32) |
+                  ((uint64_t)(info->alias_boundary ? info->alias_boundary :
+                              info->tag_lsb) << 32) |
                   ((uint64_t)info->tag_lsb << 40) |
                   ((uint64_t)pal_cache_tag_msb(env) << 48);
     env->gr[IA64_PAL_GR_RESULT3] = 0;
@@ -1393,10 +1392,15 @@ static void pal_cache_prot_info(CPUIA64State *env)
         return;
     }
 
-    tag_none = (1U << 30) | ((uint32_t)info->tag_lsb << 8) |
-               ((uint32_t)pal_cache_tag_msb(env) << 14);
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-    env->gr[IA64_PAL_GR_RESULT1] = data_none | ((uint64_t)tag_none << 32);
+    if (info->protection[0] != 0 || info->protection[1] != 0) {
+        env->gr[IA64_PAL_GR_RESULT1] = info->protection[0] |
+                                       ((uint64_t)info->protection[1] << 32);
+    } else {
+        tag_none = (1U << 30) | ((uint32_t)info->tag_lsb << 8) |
+                   ((uint32_t)pal_cache_tag_msb(env) << 14);
+        env->gr[IA64_PAL_GR_RESULT1] = data_none | ((uint64_t)tag_none << 32);
+    }
     env->gr[IA64_PAL_GR_RESULT2] = 0;
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }

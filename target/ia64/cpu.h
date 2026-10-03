@@ -1891,13 +1891,24 @@ typedef struct IA64PalCacheLevel {
     uint8_t  associativity;
     uint8_t  line_shift;      /* log2 of the line size in bytes */
     uint8_t  stride_shift;
-    uint8_t  attribute;       /* 0 = write-through, 1 = write-back */
+    /* 0 = write-through, 1 = write-back; the rx2600's L1I reports 3. */
+    uint8_t  attribute;
     uint8_t  store_latency;
     uint8_t  load_latency;
     uint8_t  tag_lsb;
+    /*
+     * config_info_2{39:32}, log2 of the minimum separation of aliased
+     * addresses; 0 reports the way span, tag_lsb.
+     */
+    uint8_t  alias_boundary;
     uint8_t  store_hints;     /* SDM Vol. 2 Table 11-68 */
     uint8_t  load_hints;      /* SDM Vol. 2 Table 11-69 */
     bool     unified;
+    /*
+     * PAL_CACHE_PROT_INFO cache_protection[0] and [1] (SDM Vol. 2 figure
+     * 11-7); both zero report data and tag as unprotected.
+     */
+    uint32_t protection[2];
 } IA64PalCacheLevel;
 
 #define IA64_PAL_CACHE_LEVELS 3
