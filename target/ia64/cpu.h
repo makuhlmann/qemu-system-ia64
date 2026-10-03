@@ -1934,6 +1934,13 @@ typedef struct IA64PalTcLevel {
     uint64_t page_mask;       /* page sizes usable by this TC */
 } IA64PalTcLevel;
 
+/* features_avail, features_status at reset and features_control. */
+typedef struct IA64PalFeatures {
+    uint64_t avail;
+    uint64_t status;
+    uint64_t control;
+} IA64PalFeatures;
+
 typedef struct IA64PalProfile {
     /* PAL_FREQ_BASE base clock in Hz. */
     uint64_t freq_base_hz;
@@ -1945,10 +1952,16 @@ typedef struct IA64PalProfile {
     uint64_t io_block_pa;
     /*
      * PAL_PROC_GET/SET_FEATURES implementation-specific feature sets: bit n
-     * stands for set 16 + n.  The architected sets 1-15 answer -2 and set 0
-     * is always there (SDM Vol. 2, PAL_PROC_GET_FEATURES).
+     * stands for set 16 + n, described by impl_features[n].  The architected
+     * sets 1-15 answer -2 and set 0 is always there (SDM Vol. 2,
+     * PAL_PROC_GET_FEATURES).  A set above the last one answers -8, or -2
+     * with feature_set_beyond_invalid.
      */
     uint32_t impl_feature_sets;
+    IA64PalFeatures proc_features;
+    IA64PalFeatures impl_features[IA64_PAL_IMPL_FEATURE_SETS];
+    bool feature_set_beyond_invalid;
+    IA64PalFeatures bus_features;
     /* PAL_FREQ_RATIOS: each ratio is reported as (num << 32) | den. */
     uint32_t proc_ratio_num, proc_ratio_den;   /* processor / base */
     uint32_t bus_ratio_num, bus_ratio_den;      /* system bus / base */

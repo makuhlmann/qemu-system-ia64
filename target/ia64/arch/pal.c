@@ -1289,7 +1289,10 @@ static void pal_mem_for_test(CPUIA64State *env)
 
 static uint64_t pal_feature_set_status(CPUIA64State *env, uint64_t feature_set)
 {
-    uint32_t sets = ia64_env_cpu_class(env)->pal->impl_feature_sets;
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
+    uint64_t beyond = pal->feature_set_beyond_invalid ?
+                      PAL_STATUS_INVALID_ARGUMENT : PAL_STATUS_BEYOND_MAX;
+    uint32_t sets = pal->impl_feature_sets;
 
     if (feature_set == 0) {
         return PAL_STATUS_SUCCESS;
@@ -1297,19 +1300,36 @@ static uint64_t pal_feature_set_status(CPUIA64State *env, uint64_t feature_set)
     if (feature_set < 16) {
         return PAL_STATUS_INVALID_ARGUMENT;
     }
-    if (feature_set - 16 >= 32) {
-        return PAL_STATUS_BEYOND_MAX;
+    if (feature_set - 16 >= IA64_PAL_IMPL_FEATURE_SETS) {
+        return beyond;
     }
     sets >>= feature_set - 16;
     if (sets & 1) {
         return PAL_STATUS_SUCCESS;
     }
-    return sets != 0 ? PAL_STATUS_NEXT_HIGHER : PAL_STATUS_BEYOND_MAX;
+    return sets != 0 ? PAL_STATUS_NEXT_HIGHER : beyond;
+}
+
+/* The description and state slot of a feature set that exists. */
+static const IA64PalFeatures *pal_feature_set(CPUIA64State *env,
+                                              uint64_t feature_set,
+                                              unsigned *slot)
+{
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
+
+    if (feature_set == 0) {
+        *slot = 0;
+        return &pal->proc_features;
+    }
+    *slot = 1 + feature_set - 16;
+    return &pal->impl_features[feature_set - 16];
 }
 
 static void pal_proc_get_features(CPUIA64State *env)
 {
     uint64_t feature_set = env->gr[IA64_PAL_GR_ARG2];
+    const IA64PalFeatures *features;
+    unsigned slot;
 
     env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;
@@ -1321,11 +1341,11 @@ static void pal_proc_get_features(CPUIA64State *env)
     }
 
     env->gr[IA64_PAL_GR_STATUS] = pal_feature_set_status(env, feature_set);
-    if (env->gr[IA64_PAL_GR_STATUS] == PAL_STATUS_SUCCESS &&
-        feature_set == 18) {
-        /* Feature set 18, bit 18: Hyper-Threading is implemented. */
-        env->gr[IA64_PAL_GR_RESULT1] = 1ULL << 18;
-        env->gr[IA64_PAL_GR_RESULT2] = 1ULL << 18;
+    if (env->gr[IA64_PAL_GR_STATUS] == PAL_STATUS_SUCCESS) {
+        features = pal_feature_set(env, feature_set, &slot);
+        env->gr[IA64_PAL_GR_RESULT1] = features->avail;
+        env->gr[IA64_PAL_GR_RESULT2] = env->pal.proc_feature_status[slot];
+        env->gr[IA64_PAL_GR_RESULT3] = features->control;
     }
 }
 
@@ -1569,16 +1589,13 @@ static void pal_ptce_info(CPUIA64State *env)
 
 static void pal_bus_get_features(CPUIA64State *env)
 {
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
+
     if (pal_reserved_args_are_zero(env)) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        /*
-         * This model has no software-configurable processor-bus features.
-         * Bits 0 through 28 are reserved by the PAL specification, so do not
-         * expose the old placeholder mask in features_avail.
-         */
-        env->gr[IA64_PAL_GR_RESULT1] = 0;
-        env->gr[IA64_PAL_GR_RESULT2] = 0;
-        env->gr[IA64_PAL_GR_RESULT3] = 0;
+        env->gr[IA64_PAL_GR_RESULT1] = pal->bus_features.avail;
+        env->gr[IA64_PAL_GR_RESULT2] = env->pal.bus_feature_status;
+        env->gr[IA64_PAL_GR_RESULT3] = pal->bus_features.control;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
@@ -1587,14 +1604,49 @@ static void pal_bus_get_features(CPUIA64State *env)
     }
 }
 
-static void pal_set_features(CPUIA64State *env)
+/*
+ * Only the controllable bits of feature_select take effect; the request for
+ * any other feature is ignored (SDM Vol. 2, PAL_PROC_SET_FEATURES).
+ */
+static uint64_t pal_select_features(uint64_t status, uint64_t select,
+                                    uint64_t control)
 {
-    /* A feature that cannot be set is ignored (SDM Vol. 2). */
+    return (status & ~control) | (select & control);
+}
+
+static void pal_proc_set_features(CPUIA64State *env)
+{
+    uint64_t feature_set = env->gr[IA64_PAL_GR_ARG2];
+    const IA64PalFeatures *features;
+    unsigned slot;
+
     if (env->gr[IA64_PAL_GR_ARG3] != 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
     } else {
-        env->gr[IA64_PAL_GR_STATUS] =
-            pal_feature_set_status(env, env->gr[IA64_PAL_GR_ARG2]);
+        env->gr[IA64_PAL_GR_STATUS] = pal_feature_set_status(env, feature_set);
+    }
+    if (env->gr[IA64_PAL_GR_STATUS] == PAL_STATUS_SUCCESS) {
+        features = pal_feature_set(env, feature_set, &slot);
+        env->pal.proc_feature_status[slot] = pal_select_features(
+            env->pal.proc_feature_status[slot], env->gr[IA64_PAL_GR_ARG1],
+            features->control);
+    }
+    env->gr[IA64_PAL_GR_RESULT1] = 0;
+    env->gr[IA64_PAL_GR_RESULT2] = 0;
+    env->gr[IA64_PAL_GR_RESULT3] = 0;
+}
+
+static void pal_bus_set_features(CPUIA64State *env)
+{
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
+
+    if (env->gr[IA64_PAL_GR_ARG2] != 0 || env->gr[IA64_PAL_GR_ARG3] != 0) {
+        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
+    } else {
+        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
+        env->pal.bus_feature_status = pal_select_features(
+            env->pal.bus_feature_status, env->gr[IA64_PAL_GR_ARG1],
+            pal->bus_features.control);
     }
     env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;
@@ -1888,7 +1940,7 @@ uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
         pal_proc_get_features(env);
         break;
     case PAL_PROC_SET_FEATURES:
-        pal_set_features(env);
+        pal_proc_set_features(env);
         break;
     case PAL_CACHE_INFO:
         pal_cache_info(env);
@@ -1925,7 +1977,7 @@ uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
         pal_bus_get_features(env);
         break;
     case PAL_BUS_SET_FEATURES:
-        pal_set_features(env);
+        pal_bus_set_features(env);
         break;
     case PAL_REGISTER_INFO:
         pal_register_info(env);

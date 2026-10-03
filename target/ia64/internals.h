@@ -110,6 +110,9 @@ typedef struct IA64InterruptState {
     bool itm_last_match_valid;
 } IA64InterruptState;
 
+/* PAL_PROC_GET_FEATURES implementation-specific sets 16 up a model may have. */
+#define IA64_PAL_IMPL_FEATURE_SETS 3
+
 typedef struct IA64PalState {
     /* Architected PAL registration and machine-check state. */
     bool pal_mc_expected;
@@ -136,6 +139,12 @@ typedef struct IA64PalState {
     uint64_t pal_proc_copy_addr;
     uint64_t pal_interrupt_block_addr;
     uint64_t pal_io_block_addr;
+    /*
+     * features_status of PAL_PROC_GET_FEATURES set 0 and sets 16 up (index
+     * 1 + n for set 16 + n), and of PAL_BUS_GET_FEATURES.
+     */
+    uint64_t proc_feature_status[1 + IA64_PAL_IMPL_FEATURE_SETS];
+    uint64_t bus_feature_status;
 } IA64PalState;
 
 typedef struct IA64RSEState {

@@ -1241,20 +1241,85 @@ test_pal_proc_get_features_montecito_beyond_max = require_registers(
      "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+# The rx2600's feature sets (capture 2026-10-03, CPU-15 and CPU-16): set 0,
+# sets 16 and 17, and -2 above them.  The HP zx1 firmware stops its boot
+# when set 16 fails.
 test_pal_proc_get_features_madison_beyond_max = require_registers(
     "pal_proc_get_features_madison_beyond_max",
-    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 17), (31, 0)]),
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 18), (31, 0)]),
     {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
-     "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="madison")
 
-# Itanium 2 implements set 16 and no feature in it; the HP zx1 firmware stops
-# its boot when the call fails.
+test_pal_proc_get_features_madison_set0 = require_registers(
+    "pal_proc_get_features_madison_set0",
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x1180c60000000000,
+     "r10": 0x0000060000000000, "r11": 0x1180c00000000000},
+    entry=0x10, cpu="madison")
+
 test_pal_proc_get_features_madison_set16 = require_registers(
     "pal_proc_get_features_madison_set16",
     pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 16), (31, 0)]),
     {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES, "r8": 0,
-     "r9": 0, "r10": 0, "r11": 0}, entry=0x10, cpu="madison")
+     "r9": 0xef, "r10": 0xc8, "r11": 0xef}, entry=0x10, cpu="madison")
+
+test_pal_proc_get_features_madison_set17 = require_registers(
+    "pal_proc_get_features_madison_set17",
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 17), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x7, "r10": 0, "r11": 0x7},
+    entry=0x10, cpu="madison")
+
+test_pal_bus_get_features_madison = require_registers(
+    "pal_bus_get_features_madison", pal_call_program(PAL_BUS_GET_FEATURES),
+    {"ip": 0x30, "r8": 0, "r9": 0xbdf0000060000000,
+     "r10": 0x0000000040000000, "r11": 0xbdb0000040000000},
+    entry=0x10, cpu="madison")
+
+
+# A SET call, then the GET call that reads the state back.
+def _pal_set_get_features_program(set_index, get_index, select, feature_set):
+    return [
+        (0x10, *movl_mlx(29, select)),
+        (0x20, 0x00, nop_m(), addl(28, set_index, 0),
+         addl(30, feature_set, 0)),
+        (0x30, 0x00, nop_m(), addl(31, 0, 0), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, PAL_PROC_ENTRY)),
+        (0x50, 0x00, nop_m(), addl(28, get_index, 0), addl(29, 0, 0)),
+        (0x60, 0x00, nop_m(), addl(30, feature_set, 0), addl(31, 0, 0)),
+        (0x70, 0x10, nop_m(), nop_i(), br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ]
+
+
+# Only the controllable bits take a new value: bit 60 (CMCI promotion) does,
+# bit 61 (not implemented) and the read-only bits 42 and 41 keep theirs.
+test_pal_proc_set_features_madison_controllable = require_registers(
+    "pal_proc_set_features_madison_controllable",
+    _pal_set_get_features_program(PAL_PROC_SET_FEATURES,
+                                  PAL_PROC_GET_FEATURES,
+                                  (1 << 60) | (1 << 61), 0),
+    {"ip": 0x80, "r8": 0, "r9": 0x1180c60000000000,
+     "r10": 0x1000060000000000, "r11": 0x1180c00000000000},
+    entry=0x10, cpu="madison")
+
+test_pal_proc_set_features_madison_set16_readback = require_registers(
+    "pal_proc_set_features_madison_set16_readback",
+    _pal_set_get_features_program(PAL_PROC_SET_FEATURES,
+                                  PAL_PROC_GET_FEATURES, 0x13, 16),
+    {"ip": 0x80, "r8": 0, "r9": 0xef, "r10": 0x03, "r11": 0xef},
+    entry=0x10, cpu="madison")
+
+test_pal_bus_set_features_madison = require_registers(
+    "pal_bus_set_features_madison",
+    _pal_set_get_features_program(PAL_BUS_SET_FEATURES,
+                                  PAL_BUS_GET_FEATURES,
+                                  0xffffffffffffffff, 0),
+    {"ip": 0x80, "r8": 0, "r9": 0xbdf0000060000000,
+     "r10": 0xbdb0000040000000, "r11": 0xbdb0000040000000},
+    entry=0x10, cpu="madison")
 
 test_pal_proc_get_features_merced_beyond_max = require_registers(
     "pal_proc_get_features_merced_beyond_max",
@@ -2390,6 +2455,12 @@ CASE_NAMES = (
     'pal_proc_get_features',
     'pal_proc_get_features_madison_beyond_max',
     'pal_proc_get_features_madison_set16',
+    'pal_proc_get_features_madison_set0',
+    'pal_proc_get_features_madison_set17',
+    'pal_bus_get_features_madison',
+    'pal_proc_set_features_madison_controllable',
+    'pal_proc_set_features_madison_set16_readback',
+    'pal_bus_set_features_madison',
     'pal_proc_get_features_merced_beyond_max',
     'pal_proc_get_features_montecito_beyond_max',
     'pal_proc_get_features_montecito_next_set',

@@ -999,6 +999,12 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.pal.pal_proc_copy_addr = 0;
     cpu->env.pal.pal_interrupt_block_addr = IA64_LOCAL_SAPIC_PA;
     cpu->env.pal.pal_io_block_addr = icc->pal->io_block_pa;
+    cpu->env.pal.proc_feature_status[0] = icc->pal->proc_features.status;
+    for (int i = 0; i < IA64_PAL_IMPL_FEATURE_SETS; i++) {
+        cpu->env.pal.proc_feature_status[1 + i] =
+            icc->pal->impl_features[i].status;
+    }
+    cpu->env.pal.bus_feature_status = icc->pal->bus_features.status;
     /*
      * The no-firmware entry state stands in for a firmware that has
      * registered, on every reset; a firmware entry leaves this zero.
@@ -1186,8 +1192,23 @@ static const IA64PalProfile ia64_pal_profile_madison = {
      */
     .freq_base_hz = 200000000ULL,
     .io_block_pa = IA64_PAL_IO_BLOCK_ITANIUM2,
-    /* Set 16 exists and holds no feature this model implements. */
-    .impl_feature_sets = 1U << 0,
+    /*
+     * PAL_PROC_GET_FEATURES and PAL_BUS_GET_FEATURES of the rx2600 (capture
+     * 2026-10-03, CPU-15 and CPU-16): set 0, sets 16 and 17, -2 for every
+     * set above; the statuses as the vendor firmware leaves them.
+     */
+    .impl_feature_sets = (1U << 0) | (1U << 1),
+    .proc_features = { .avail = 0x1180c60000000000ULL,
+                       .status = 0x0000060000000000ULL,
+                       .control = 0x1180c00000000000ULL },
+    .impl_features = {
+        [0] = { .avail = 0xef, .status = 0xc8, .control = 0xef },
+        [1] = { .avail = 0x7, .status = 0x0, .control = 0x7 },
+    },
+    .feature_set_beyond_invalid = true,
+    .bus_features = { .avail = 0xbdf0000060000000ULL,
+                      .status = 0x0000000040000000ULL,
+                      .control = 0xbdb0000040000000ULL },
     .proc_ratio_num = 13, .proc_ratio_den = 2,   /* 1.3 GHz */
     .bus_ratio_num = 1,   .bus_ratio_den = 1,     /* 200 MHz */
     .itc_ratio_num = 13,  .itc_ratio_den = 2,     /* ITC at the core clock */
@@ -1280,6 +1301,10 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     .freq_base_hz = 100000000ULL,
     .io_block_pa = IA64_PAL_IO_BLOCK_ITANIUM2,
     .impl_feature_sets = 1U << 2,                  /* set 18 */
+    /* Feature set 18, bit 18: Hyper-Threading is implemented. */
+    .impl_features = {
+        [2] = { .avail = 1ULL << 18, .status = 1ULL << 18 },
+    },
     .proc_ratio_num = 16, .proc_ratio_den = 1,    /* 1.6 GHz */
     .bus_ratio_num = 16,  .bus_ratio_den = 3,      /* 533.33 MHz */
     .itc_ratio_num = 16,  .itc_ratio_den = 1,      /* ITC at the core clock */
