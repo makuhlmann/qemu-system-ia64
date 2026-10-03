@@ -6422,6 +6422,74 @@ static void test_e100_packet_transfer(void)
     close(sockets[0]);
 }
 
+/*
+ * The 82550's IPCB (manual Table 73) with hardware parsing and the IP
+ * checksum bit: the IP header checksum goes into every IPv4 frame, here an
+ * ICMP echo, which has no TCP or UDP checksum to compute (manual B.2.3).
+ */
+static void test_e100_ipcb_ip_checksum(void)
+{
+    static const uint8_t ip_header[20] = {
+        0x45, 0x00, 0x00, 0x3c, 0x12, 0x34, 0x00, 0x00, 0x80, 0x01,
+        0x00, 0x00, 10, 0, 2, 15, 10, 0, 2, 2,
+    };
+    uint8_t frame[74] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02,
+                          0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x08, 0x00 };
+    uint8_t config[22] = { [0] = 22, [8] = 0x01 };
+    uint8_t received[sizeof(frame)];
+    uint32_t frame_length, sum = 0;
+    g_autofree char *args = NULL;
+    QTestState *qts;
+    int sockets[2];
+    unsigned i;
+
+    memcpy(frame + 14, ip_header, sizeof(ip_header));
+    frame[34] = 8;
+    for (i = 42; i < sizeof(frame); i++) {
+        frame[i] = i;
+    }
+    for (i = 0; i < sizeof(ip_header); i += 2) {
+        sum += (ip_header[i] << 8) | ip_header[i + 1];
+    }
+    sum = (sum & 0xffff) + (sum >> 16);
+    sum = ~((sum & 0xffff) + (sum >> 16)) & 0xffff;
+
+    g_assert_cmpint(qemu_socketpair(PF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    qemu_clear_cloexec(sockets[1]);
+    args = g_strdup_printf("-nic socket,fd=%d,model=i82550,"
+                           "mac=52:54:00:12:34:56", sockets[1]);
+    qts = qtest_initf("-machine zx1 -m 256M %s", args);
+    close(sockets[1]);
+
+    e100_scb_command(qts, 0, IA64_E100_CU_BASE);
+    /* Configure (extended TxCB), then an IPCB with the frame in one TBD. */
+    qtest_writel(qts, IA64_E100_CB_ADDR, 0x0002U << 16);
+    qtest_writel(qts, IA64_E100_CB_ADDR + 4, IA64_E100_TCB_ADDR);
+    qtest_memwrite(qts, IA64_E100_CB_ADDR + 8, config, sizeof(config));
+    qtest_writel(qts, IA64_E100_TCB_ADDR, 0x8009U << 16);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 4, 0);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 8, 0);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 12, 1U << 24);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 16, 0x0110U << 16);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 20, 0);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 24, IA64_E100_TX_BUF_ADDR);
+    qtest_writel(qts, IA64_E100_TCB_ADDR + 28, 0x8000U | sizeof(frame));
+    qtest_memwrite(qts, IA64_E100_TX_BUF_ADDR, frame, sizeof(frame));
+    e100_scb_command(qts, IA64_E100_CB_ADDR, IA64_E100_CU_START);
+
+    g_assert_true(e100_wait_complete(qts, IA64_E100_TCB_ADDR));
+    g_assert_true(socket_receive_all(sockets[0], &frame_length,
+                                     sizeof(frame_length)));
+    g_assert_cmpuint(ntohl(frame_length), ==, sizeof(frame));
+    g_assert_true(socket_receive_all(sockets[0], received, sizeof(received)));
+    g_assert_cmphex((received[24] << 8) | received[25], ==, sum);
+    received[24] = received[25] = 0;
+    g_assert_cmpmem(received, sizeof(received), frame, sizeof(frame));
+
+    qtest_quit(qts);
+    close(sockets[0]);
+}
+
 static void assert_cmd646_at_slot0(QTestState *qts)
 {
     QGenericPCIBus gbus;
@@ -9642,6 +9710,8 @@ int main(int argc, char **argv)
                    test_e1000_packet_transfer);
     qtest_add_func("/ia64-vpc/e100/packet-transfer",
                    test_e100_packet_transfer);
+    qtest_add_func("/ia64-vpc/e100/ipcb-ip-checksum",
+                   test_e100_ipcb_ip_checksum);
     qtest_add_func("/ia64-vpc/lsi/async-nodata-command",
                    test_lsi_async_nodata_command);
     qtest_add_func("/ia64-vpc/lsi/dbms-no-leak",

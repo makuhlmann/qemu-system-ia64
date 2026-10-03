@@ -1135,7 +1135,7 @@ static void ipcb_command(EEPRO100State *s)
     uint8_t tbd_count, sw_l3, sw_l4, proto = 0;
     size_t len = 0, l3 = 0, l4 = 0;
     unsigned i;
-    bool el = false, tcp, parsed;
+    bool el = false, tcp, ip_found, parsed;
 
     lduw_le_pci_dma(&s->dev, cb + 0x0c, &imm, attrs);
     lduw_le_pci_dma(&s->dev, cb + 0x0e, &mss, attrs);
@@ -1178,15 +1178,20 @@ static void ipcb_command(EEPRO100State *s)
     }
     tbd0_size = i ? tbd0 >> 16 : 0;
 
+    /*
+     * The IP header checksum needs only an IPv4 header, whatever it
+     * carries; the TCP/UDP checksum needs a TCP or UDP header (manual
+     * B.2.3).
+     */
     if (act & IPCB_HW_PARSE) {
-        parsed = e100_parse_ipv4(f, len, &l3, &l4, &proto);
+        ip_found = e100_parse_ipv4(f, len, &l3, &l4, &proto);
         tcp = proto == IP_PROTO_TCP;
-        parsed = parsed && (tcp || proto == IP_PROTO_UDP);
+        parsed = ip_found && (tcp || proto == IP_PROTO_UDP);
     } else {
         l3 = sw_l3;
         l4 = sw_l4;
         tcp = act & IPCB_TCP;
-        parsed = true;
+        ip_found = parsed = true;
     }
 
     if ((act & IPCB_LARGE_SEND) && parsed && tcp && l4 + 20 <= len) {
@@ -1240,9 +1245,9 @@ static void ipcb_command(EEPRO100State *s)
         return;
     }
 
-    if (parsed && (act & (IPCB_IP_CSUM | IPCB_L4_CSUM))) {
+    if (ip_found && (act & (IPCB_IP_CSUM | IPCB_L4_CSUM))) {
         e100_insert_csum(f, len, l3, l4, tcp, act & IPCB_IP_CSUM,
-                         act & IPCB_L4_CSUM);
+                         parsed && (act & IPCB_L4_CSUM));
     }
     e100_send(s, f, len, act & IPCB_INSERT_VLAN, tci);
 }
