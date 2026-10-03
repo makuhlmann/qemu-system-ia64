@@ -15,10 +15,12 @@
  *              SAL_A's rendezvous record, SAL_B's first memory stack and RSE
  *              backing store in the rest.  "nvram=" stands in for the battery.
  *   FF48_0000  SRAM, 512 KiB, volatile.
- *   FF5B_0000  the BMC.  The firmware probes an IPMI BT at FF5B_00E4 and
- *              three IPMI KCS, which it calls KCS1 at FF5B_0CA2 (the
- *              standard SMS base), KCS2 at FF5B_0000 and KCS3 at FF5B_0062.
- *              Only BT and KCS1 are modelled; the firmware needs no more.
+ *   FF5B_0000  the BMC: an IPMI BT at FF5B_00E4 and three IPMI KCS, which
+ *              the firmware calls KCS1 at FF5B_0CA2 (the standard SMS base),
+ *              KCS2 at FF5B_0000 and KCS3 at FF5B_0062.  A port that does
+ *              not answer is a "bmc port failure" (event 0x005) and leaves
+ *              its SCRAM BMC record invalid; the vendor DSDT then has no
+ *              IPI0001 at KCS2.
  *   FF5B_8000  the clock, a DS1501/1511-class part.
  *   FF5C_0000  processor presence, bits 3:0 active low (SAL_A FFFE0E60).
  *   FF5C_0018  POST byte (SAL_A writes (id << 4) | step).
@@ -343,8 +345,8 @@ static const MemoryRegionOps longspeak_pdh_ops = {
 };
 
 /*
- * The board has one BMC on two interfaces, but the IPMI core links a BMC to a
- * single interface, so each one gets its own.
+ * The board has one BMC on four interfaces, but the IPMI core links a BMC to
+ * a single interface, so each one gets its own.
  */
 static DeviceState *longspeak_pdh_bmc_port(LongspeakPDHState *s,
                                            const char *type, const char *name,
@@ -365,6 +367,9 @@ static DeviceState *longspeak_pdh_bmc_port(LongspeakPDHState *s,
         qdev_prop_set_uint8(port, "output-size", IA64_PDH_BMC_BT_BUFFER);
         qdev_prop_set_uint8(port, "retries", IA64_PDH_BMC_BT_RETRIES);
     }
+    qdev_prop_set_uint8(bmc, "fwrev1", IA64_PDH_BMC_FW_MAJOR);
+    qdev_prop_set_uint8(bmc, "fwrev2", IA64_PDH_BMC_FW_MINOR);
+    qdev_prop_set_uint8(bmc, "ipmi_version", IA64_PDH_BMC_IPMI_VERSION);
     object_property_add_child(OBJECT(s), bmc_name, OBJECT(bmc));
     object_property_add_child(OBJECT(s), name, OBJECT(port));
     if (!qdev_realize_and_unref(bmc, NULL, errp)) {
@@ -541,10 +546,22 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
     if (s->bt == NULL) {
         return;
     }
-    s->kcs = longspeak_pdh_bmc_port(s, TYPE_IPMI_KCS_MM, "kcs",
-                                    IA64_PDH_BMC_KCS, errp);
-    if (s->kcs == NULL) {
-        return;
+    for (i = 0; i < ARRAY_SIZE(s->kcs); i++) {
+        static const struct {
+            const char *name;
+            hwaddr offset;
+        } kcs[] = {
+            { "kcs", IA64_PDH_BMC_KCS },
+            { "kcs2", IA64_PDH_BMC_KCS2 },
+            { "kcs3", IA64_PDH_BMC_KCS3 },
+        };
+
+        QEMU_BUILD_BUG_ON(ARRAY_SIZE(kcs) != ARRAY_SIZE(s->kcs));
+        s->kcs[i] = longspeak_pdh_bmc_port(s, TYPE_IPMI_KCS_MM, kcs[i].name,
+                                           kcs[i].offset, errp);
+        if (s->kcs[i] == NULL) {
+            return;
+        }
     }
 
     s->rtc = qdev_new(TYPE_LONGSPEAK_RTC);

@@ -506,7 +506,22 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_RTC                  0x8000U   /* the PDH clock */
 #define IA64_PDH_RTC_REGS             0x0014U
 #define IA64_PDH_RTC_RAM              256U
-#define IA64_PDH_BMC_KCS              0x0ca2U   /* data, then status */
+/*
+ * The firmware's KCS1 (the SPMI one), KCS2 (the one the vendor DSDT gives the
+ * OS as IPI0001) and KCS3: data, then status.  It counts BT and the three as
+ * its BMC ports 1 to 4 (FFF446A0).
+ */
+#define IA64_PDH_BMC_KCS              0x0ca2U
+#define IA64_PDH_BMC_KCS2             0x0000U
+#define IA64_PDH_BMC_KCS3             0x0062U
+/*
+ * Get Device ID of the rx2600's BMC: firmware 1.53, IPMI 1.0 (rx2600 capture
+ * 2026-10-03, BMC-1), the version BCD with the major digit in bits 3:0 (IPMI
+ * v2.0 table 20-2).
+ */
+#define IA64_PDH_BMC_FW_MAJOR         0x01U
+#define IA64_PDH_BMC_FW_MINOR         0x53U
+#define IA64_PDH_BMC_IPMI_VERSION     0x01U
 /* The board id the firmware picks its DIMM slot table with (FFF62880). */
 #define IA64_PDH_BMC_PRODUCT_ID       257U
 #define IA64_PDH_BMC_PRODUCT_ID_OFFSET 115U  /* in the FRU product area */

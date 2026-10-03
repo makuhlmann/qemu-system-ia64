@@ -1611,6 +1611,7 @@ static void test_pdh_unimp_logged_once(void)
 #define IPMI_NETFN_APP_LUN0     0x18U
 #define IPMI_NETFN_STORAGE_LUN0 0x28U
 #define IPMI_NETFN_HP_TOKEN_LUN0 0xc8U
+#define IPMI_CMD_GET_DEVICE_ID  0x01U
 #define IPMI_CMD_SELF_TEST      0x04U
 #define IPMI_CMD_GET_FRU_AREA_INFO 0x10U
 #define IPMI_CMD_READ_FRU_DATA     0x11U
@@ -2089,6 +2090,45 @@ static void test_pdh_bmc(void)
     g_assert_cmphex(rsp[6], ==, IA64_PDH_BMC_BT_BUFFER);
     g_assert_cmphex(rsp[8], ==, IA64_PDH_BMC_BT_RETRIES);
 
+    qtest_quit(qts);
+}
+
+/*
+ * The firmware tries the BMC on all four ports (BT, KCS1 to KCS3) and takes
+ * any one that does not answer as a failed BMC port; each reports the
+ * rx2600's BMC identity.
+ */
+static void test_pdh_bmc_ports(void)
+{
+    static const uint64_t kcs[] = {
+        IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS,
+        IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS2,
+        IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS3,
+    };
+    const uint64_t bt = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_BT;
+    const uint8_t get_id[] = { IPMI_NETFN_APP_LUN0, IPMI_CMD_GET_DEVICE_ID };
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t rsp[64];
+    unsigned i;
+
+    for (i = 0; i < G_N_ELEMENTS(kcs); i++) {
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs[i], get_id,
+                                         G_N_ELEMENTS(get_id),
+                                         rsp, sizeof(rsp)), ==, 3 + 11);
+        g_assert_cmphex(rsp[0], ==, IPMI_NETFN_APP_LUN0 | 0x04);
+        g_assert_cmphex(rsp[1], ==, IPMI_CMD_GET_DEVICE_ID);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        g_assert_cmphex(rsp[5], ==, IA64_PDH_BMC_FW_MAJOR);
+        g_assert_cmphex(rsp[6], ==, IA64_PDH_BMC_FW_MINOR);
+        g_assert_cmphex(rsp[7], ==, IA64_PDH_BMC_IPMI_VERSION);
+    }
+    g_assert_cmpuint(bmc_bt_command(qts, bt, IPMI_NETFN_APP_LUN0,
+                                    IPMI_CMD_GET_DEVICE_ID, 0x79, NULL, 0,
+                                    rsp, sizeof(rsp)), ==, 4 + 11);
+    g_assert_cmphex(rsp[3], ==, 0x00);
+    g_assert_cmphex(rsp[6], ==, IA64_PDH_BMC_FW_MAJOR);
+    g_assert_cmphex(rsp[7], ==, IA64_PDH_BMC_FW_MINOR);
+    g_assert_cmphex(rsp[8], ==, IA64_PDH_BMC_IPMI_VERSION);
     qtest_quit(qts);
 }
 
@@ -9648,6 +9688,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pdh/unimp-logged-once",
                    test_pdh_unimp_logged_once);
     qtest_add_func("/ia64-vpc/pdh/bmc", test_pdh_bmc);
+    qtest_add_func("/ia64-vpc/pdh/bmc-ports", test_pdh_bmc_ports);
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens", test_pdh_bmc_tokens);
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens-persist",
                    test_pdh_bmc_tokens_persist);
