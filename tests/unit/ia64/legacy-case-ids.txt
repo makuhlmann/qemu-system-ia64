@@ -1694,3 +1694,6 @@ pmu_user_monitor_follows_sum_rum
 pmu_ism_counts_ia32_code_only
 pmu_merced_retired_counts_on_pmc4_only
 pmu_overflow_freezes_and_pends_pmv
+pal_version_madison
+pal_brand_info_madison_unimplemented
+pal_prefetch_vis_madison

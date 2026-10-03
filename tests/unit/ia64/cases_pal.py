@@ -708,6 +708,27 @@ test_pal_brand_info_merced_unimplemented = require_registers(
      "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="merced")
 
+# The rx2600's Madison PAL (capture 2026-10-03, CPU-4): minimum 5.00 and
+# current PAL_A 5.37, PAL_B 5.65, vendor 0xFF; no PAL_BRAND_INFO; and
+# PAL_PREFETCH_VISIBILITY answers that remote processors need no call.
+test_pal_version_madison = require_registers("pal_version_madison",
+    pal_call_program(PAL_VERSION),
+    {"ip": 0x30, "r28": PAL_VERSION, "r8": 0,
+     "r9": 0x00000500ff000500, "r10": 0x00000537ff000565, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_brand_info_madison_unimplemented = require_registers(
+    "pal_brand_info_madison_unimplemented",
+    pal_stacked_call_program(PAL_BRAND_INFO, [0, 0x4000, 0]),
+    {"ip": 0x80, "r28": PAL_BRAND_INFO,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_prefetch_vis_madison = require_registers("pal_prefetch_vis_madison",
+    pal_call_program(PAL_PREFETCH_VIS),
+    {"ip": 0x30, "r28": PAL_PREFETCH_VIS, "r8": 1, "r9": 0, "r10": 0,
+     "r11": 0}, entry=0x10, cpu="madison")
+
 # logical_to_physical is already montecito-only; confirm merced too is
 # NOT_IMPLEMENTED (mirrors pal_logical_to_physical_madison_unimplemented).
 test_pal_logical_to_physical_merced_unimplemented = require_registers(
@@ -2088,6 +2109,9 @@ CASE_NAMES = (
     'pal_prefetch_vis_merced_trans_type_reserved',
     'pal_cache_shared_info_merced_unimplemented',
     'pal_brand_info_merced_unimplemented',
+    'pal_version_madison',
+    'pal_brand_info_madison_unimplemented',
+    'pal_prefetch_vis_madison',
     'pal_logical_to_physical_merced_unimplemented',
     'pal_freq_ratios_reserved_arg',
     'pal_halt_info',

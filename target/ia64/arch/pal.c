@@ -118,6 +118,8 @@ static uint64_t pal_stacked_arg(CPUIA64State *env, uint32_t arg)
  */
 #define PAL_IMPL_PROC_RESPONSE_TIMEOUT 0x213
 #define PAL_STATUS_NEXT_HIGHER     1
+/* PAL_PREFETCH_VISIBILITY: done; not necessary on remote processors. */
+#define PAL_STATUS_NOT_NECESSARY   1
 
 static void pal_get_version(CPUIA64State *env)
 {
@@ -126,17 +128,23 @@ static void pal_get_version(CPUIA64State *env)
     if (pal_reserved_args_are_zero(env)) {
         /*
          * SDM Vol. 2 figure 11-37: PAL_B_version{15:0}, PAL_vendor{31:24},
-         * PAL_A_version{47:32}.  Both the minimum and the current version
-         * report the same firmware; this model has only one.
+         * PAL_A_version{47:32}; the minimum version comes first, then the
+         * current one.
          */
+        uint64_t current = ((uint64_t)pal->pal_a_model << 40) |
+                           ((uint64_t)pal->pal_a_revision << 32) |
+                           ((uint64_t)pal->pal_vendor << 24) |
+                           ((uint64_t)pal->pal_b_model << 8) |
+                           (uint64_t)pal->pal_b_revision;
+        uint64_t minimum = ((uint64_t)pal->pal_min_a_model << 40) |
+                           ((uint64_t)pal->pal_min_a_revision << 32) |
+                           ((uint64_t)pal->pal_min_b_model << 8) |
+                           (uint64_t)pal->pal_min_b_revision;
+
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->gr[IA64_PAL_GR_RESULT1] =
-            ((uint64_t)pal->pal_a_model << 40) |
-            ((uint64_t)pal->pal_a_revision << 32) |
-            ((uint64_t)pal->pal_vendor << 24) |
-            ((uint64_t)pal->pal_b_model << 8) |
-            (uint64_t)pal->pal_b_revision;
-        env->gr[IA64_PAL_GR_RESULT2] = env->gr[IA64_PAL_GR_RESULT1];
+        env->gr[IA64_PAL_GR_RESULT1] = minimum != 0 ?
+            minimum | ((uint64_t)pal->pal_vendor << 24) : current;
+        env->gr[IA64_PAL_GR_RESULT2] = current;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
@@ -335,7 +343,9 @@ static void pal_prefetch_vis(CPUIA64State *env)
 
     if (trans_type <= max_trans_type && env->gr[IA64_PAL_GR_ARG2] == 0 &&
         env->gr[IA64_PAL_GR_ARG3] == 0) {
-        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
+        env->gr[IA64_PAL_GR_STATUS] =
+            ia64_env_cpu_class(env)->pal->prefetch_vis_not_needed ?
+            PAL_STATUS_NOT_NECESSARY : PAL_STATUS_SUCCESS;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
     }
@@ -581,17 +591,14 @@ static void pal_copy_pal(CPUIA64State *env)
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
+/* Only Montecito's PAL has the procedure (IA64PalProfile.has_brand_info). */
 static void pal_brand_info(CPUIA64State *env, uintptr_t ra)
 {
-    static const char montecito_brand[] =
+    static const char brand[] =
         "QEMU Montecito-compatible IA-64 CPU 1.60GHz 24MB";
-    static const char madison_brand[] =
-        "QEMU Madison-compatible IA-64 CPU";
-    bool montecito = ia64_env_cpu_class(env)->is_montecito;
     uint64_t request = pal_stacked_arg(env, 0);
     uint64_t address = pal_stacked_arg(env, 1);
     uint64_t reserved = pal_stacked_arg(env, 2);
-    const char *brand = montecito ? montecito_brand : madison_brand;
     size_t length;
     size_t i;
 
@@ -618,20 +625,16 @@ static void pal_brand_info(CPUIA64State *env, uintptr_t ra)
         env->gr[IA64_PAL_GR_RESULT1] = length;
         break;
     case 16:
-        env->gr[IA64_PAL_GR_STATUS] = montecito ? PAL_STATUS_SUCCESS :
-                     PAL_STATUS_NO_INFORMATION;
-        env->gr[IA64_PAL_GR_RESULT1] = montecito ? IA64_MONTECITO_FREQUENCY : 0;
+        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
+        env->gr[IA64_PAL_GR_RESULT1] = IA64_MONTECITO_FREQUENCY;
         break;
     case 17:
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->gr[IA64_PAL_GR_RESULT1] =
-            montecito ? IA64_MONTECITO_PACKAGE_CACHE_SIZE : 3 * MiB;
+        env->gr[IA64_PAL_GR_RESULT1] = IA64_MONTECITO_PACKAGE_CACHE_SIZE;
         break;
     case 18:
-        env->gr[IA64_PAL_GR_STATUS] = montecito ? PAL_STATUS_SUCCESS :
-                     PAL_STATUS_NO_INFORMATION;
-        env->gr[IA64_PAL_GR_RESULT1] =
-            montecito ? IA64_MONTECITO_BUS_FREQUENCY : 0;
+        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
+        env->gr[IA64_PAL_GR_RESULT1] = IA64_MONTECITO_BUS_FREQUENCY;
         break;
     default:
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
@@ -1940,7 +1943,7 @@ uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra)
         pal_copy_pal(env);
         break;
     case PAL_BRAND_INFO:
-        if (!pal_post_merced_available(env)) {
+        if (!ia64_env_cpu_class(env)->pal->has_brand_info) {
             pal_return_not_implemented(env);
         } else {
             pal_brand_info(env, ra);

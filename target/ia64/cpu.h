@@ -1948,6 +1948,19 @@ typedef struct IA64PalProfile {
     uint8_t pal_b_model, pal_b_revision;
     uint8_t pal_vendor;
     uint8_t pal_a_model, pal_a_revision;
+    /*
+     * The minimum version PAL_VERSION reports first; all zero means the
+     * current one.
+     */
+    uint8_t pal_min_b_model, pal_min_b_revision;
+    uint8_t pal_min_a_model, pal_min_a_revision;
+    /* PAL_BRAND_INFO exists, which it does from Montecito on. */
+    bool has_brand_info;
+    /*
+     * PAL_PREFETCH_VISIBILITY answers 1, "not necessary on remote
+     * processors", instead of 0.
+     */
+    bool prefetch_vis_not_needed;
 
     /*
      * PAL_MEM_ATTRIB: bit n set for each implemented memory-attribute

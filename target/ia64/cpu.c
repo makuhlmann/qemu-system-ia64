@@ -1168,9 +1168,18 @@ static const IA64PalProfile ia64_pal_profile_madison = {
     .bus_ratio_num = 1,   .bus_ratio_den = 1,     /* 200 MHz */
     .itc_ratio_num = 16,  .itc_ratio_den = 2,     /* ITC at the core clock */
     .has_post_merced_pal = true,
-    .pal_vendor = 1,
-    .pal_a_model = 2, .pal_a_revision = 0x23,
-    .pal_b_model = 2, .pal_b_revision = 0x23,
+    /*
+     * The rx2600's Madison (capture 2026-10-03, CPU-4): vendor 0xFF, PAL_A
+     * 5.37 and PAL_B 5.65, as in the FIT, and a minimum of 5.00 for both.
+     * Its PAL has no PAL_BRAND_INFO, and PAL_PREFETCH_VISIBILITY answers that
+     * remote processors need no call.
+     */
+    .pal_vendor = 0xff,
+    .pal_a_model = 5, .pal_a_revision = 0x37,
+    .pal_b_model = 5, .pal_b_revision = 0x65,
+    .pal_min_a_model = 5, .pal_min_a_revision = 0x00,
+    .pal_min_b_model = 5, .pal_min_b_revision = 0x00,
+    .prefetch_vis_not_needed = true,
     .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 4,
@@ -1221,6 +1230,7 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     .pal_vendor = 1,
     .pal_a_model = 2, .pal_a_revision = 0x23,
     .pal_b_model = 2, .pal_b_revision = 0x23,
+    .has_brand_info = true,
     .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 5,
