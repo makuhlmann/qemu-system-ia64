@@ -1174,9 +1174,6 @@ static int nv_execute_command(NV15State *s, uint32_t chid, uint32_t subc,
                 word0 = (word0 & 0xFFFC7FFF) | (ch->gdi_operation << 15);
                 word1 = (word1 & 0xFFFFFFFC) | ch->gdi_mono_fmt;
                 nv_ramin_write32(s, ch->schs[subc].object, word0);
-            } else if (cls8 == 0x62) {
-                nv_ramin_write32(s, ch->schs[subc].object + 0x8,
-                    (ch->s2d_img_src >> 4) | (ch->s2d_img_dst >> 4 << 16));
             } else if (cls8 == 0x64) {
                 nv_ramin_write32(s, ch->schs[subc].object + 0x8,
                                  ch->iifc_palette >> 4);
@@ -1324,6 +1321,21 @@ static int nv_execute_command(NV15State *s, uint32_t chid, uint32_t subc,
                 break;
             case 0x62:
                 nv2d_execute_surf2d(s, ch, method, param);
+                /*
+                 * NV4+ PGRAPH stores a DMA object that a method binds in the
+                 * graph object's options in RAMIN, and each bind loads them
+                 * again (envytools, PGRAPH, "Graph object options").
+                 */
+                if (method == 0x061 || method == 0x062) {
+                    uint32_t addr = ch->schs[subc].object + 0x8;
+                    uint32_t srcdst = nv_ramin_read32(s, addr);
+                    if (method == 0x061) {
+                        srcdst = (srcdst & 0xFFFF0000) | (param >> 4);
+                    } else {
+                        srcdst = (srcdst & 0x0000FFFF) | (param >> 4 << 16);
+                    }
+                    nv_ramin_write32(s, addr, srcdst);
+                }
                 break;
             case 0x64:
                 nv2d_execute_iifc(s, ch, method, param);

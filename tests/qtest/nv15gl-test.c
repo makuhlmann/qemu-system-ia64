@@ -565,6 +565,58 @@ static void nv15_fifo_dma_channel_switch(void)
     qtest_quit(qts);
 }
 
+/*
+ * A surface object gets its DMA objects on one subchannel and is then bound
+ * on another, as the Windows IA-64 NV4 display driver does (subchannels 1
+ * and 7).  The bind loads the DMA objects again from the object's options
+ * in RAMIN.  If those still read 0, RAMIN 0 acts as a page-table DMA object
+ * with empty entries, and every pixel goes to VRAM page 0.
+ */
+#define NV15_RAMIN_DMA2     0x2800U
+#define NV15_H_DMA2         0xbeef0007U
+
+static void nv15_surf2d_rebind_keeps_dma(void)
+{
+    QTestState *qts = nv15_start();
+    const uint32_t color = 0xff336699U;
+    const uint32_t dst_ofs = 0x00020000U;
+    const uint32_t pitch = 0x0400U;
+
+    nv_engine_reset_ramht(qts);
+    nv_make_gr_object(qts, NV15_RAMIN_SURF, NV_CLASS_SURF2D);
+    nv_make_dma_object(qts, NV15_RAMIN_DMA);
+    nv_make_dma_object(qts, NV15_RAMIN_DMA2);
+    nv_make_gr_object(qts, NV15_RAMIN_RECT, NV_CLASS_RECT);
+    nv_ramht_insert(qts, NV15_H_SURF, 0, NV_ENGINE_GRAPH, NV15_RAMIN_SURF);
+    nv_ramht_insert(qts, NV15_H_DMA,  0, NV_ENGINE_GRAPH, NV15_RAMIN_DMA);
+    nv_ramht_insert(qts, NV15_H_DMA2, 0, NV_ENGINE_GRAPH, NV15_RAMIN_DMA2);
+    nv_ramht_insert(qts, NV15_H_RECT, 0, NV_ENGINE_GRAPH, NV15_RAMIN_RECT);
+
+    nv_method(qts, 0, 1, 0x000, NV15_H_SURF);
+    nv_method(qts, 0, 1, 0x061, NV15_H_DMA2);           /* SetContextDmaSrc */
+    nv_method(qts, 0, 1, 0x062, NV15_H_DMA);            /* SetContextDmaDst */
+    g_assert_cmphex(nv_ramin_r(qts, NV15_RAMIN_SURF + 0x8), ==,
+                    (NV15_RAMIN_DMA >> 4 << 16) | (NV15_RAMIN_DMA2 >> 4));
+
+    nv_method(qts, 0, 7, 0x000, NV15_H_SURF);
+    nv_method(qts, 0, 7, 0x0c0, 0x0a);                  /* A8R8G8B8         */
+    nv_method(qts, 0, 7, 0x0c1, (pitch << 16) | pitch);
+    nv_method(qts, 0, 7, 0x0c3, dst_ofs);
+
+    nv_method(qts, 0, 2, 0x000, NV15_H_RECT);
+    nv_method(qts, 0, 2, 0x0bf, 3);
+    nv_method(qts, 0, 2, 0x0c1, color);
+    nv_method(qts, 0, 2, 0x100, 0);
+    nv_method(qts, 0, 2, 0x101, (1U << 16) | 2);
+
+    g_assert_cmphex(qtest_readl(qts, IA64_NV15_FB_BASE + dst_ofs), ==, color);
+    g_assert_cmphex(qtest_readl(qts, IA64_NV15_FB_BASE + dst_ofs + 4), ==,
+                    color);
+    g_assert_cmphex(qtest_readl(qts, IA64_NV15_FB_BASE), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, IA64_NV15_FB_BASE + 4), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -582,6 +634,8 @@ int main(int argc, char **argv)
                        nv15_iifc_data_without_alloc);
         qtest_add_func("/nv15gl/fifo-dma-channel-switch",
                        nv15_fifo_dma_channel_switch);
+        qtest_add_func("/nv15gl/surf2d-rebind-keeps-dma",
+                       nv15_surf2d_rebind_keeps_dma);
     }
 
     return g_test_run();
