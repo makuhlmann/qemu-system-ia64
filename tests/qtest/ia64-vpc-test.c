@@ -1706,14 +1706,26 @@ static unsigned bcd(uint8_t v)
  * or POST 0x82 "PCI clock DLL error"), the rope width its board table
  * expects (0x610 bit 8 single, clear on the AGP rope 4, or POST 0x7D "I/O
  * rope width does not match expected value") and a rope request
- * queue depth of at least two in the mio (FED0_1400 + 8 per rope).
+ * queue depth of at least two in FED0_1400, which it writes itself.
  */
 static void test_lba_rope_window(void)
 {
     const uint64_t rope = 0xfed20000;
     QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
 
-    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x1400) >> 48, >=, 2);
+    /*
+     * The IOC queue register holds what SAL_B writes (FFEC80C6), and its bit
+     * 10 clears itself (FFEC6620 waits for it).
+     */
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x1400, 0x0008ffff05434a03ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x1400) >> 48, ==, 8);
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x1400, 0x0008ffff05434e03ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x1400), ==,
+                    0x0008ffff05434a03ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x1410), ==, 0x73f);
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x8620, 0xc000000700000159ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x8620), ==,
+                    0xc000000700000159ULL);
 
     /* The window answers only once ROPE_CONFIG_BASE enables it. */
     qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, rope);

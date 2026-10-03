@@ -120,12 +120,33 @@
 #define IA64_SBA_ROPES                 16
 
 /*
- * One register per rope in function 1, not in the ERS: the firmware reads the
- * rope's request queue depth from bits 55:48 (FFECA050 reads FED0_1400 + 8 per
- * rope) and asserts "queueDepth >= MERCURY_ROPE_REQ_DEPTH_MIN" below two.
+ * Registers outside the ERS that SAL_B programs and reads back, kept as
+ * storage.  The rx2600 reads what the firmware wrote (rx2600 capture
+ * 2026-10-03, MIO-4, MIO-7 to MIO-9): FED0_1400 as written at FFEC80C6 with
+ * bit 23 added at FFECB656, the request queue depth in bits 55:48 that
+ * FFECA050 reads back and that has to be two or more
+ * ("queueDepth >= MERCURY_ROPE_REQ_DEPTH_MIN"); the memory controls at 8600
+ * and 8700 (G10); the error enables at 9500 and 9508.
  */
-#define IA64_SBA_ROPE_QUEUE_FIRST      UINT64_C(0x1400)
-#define IA64_SBA_ROPE_QUEUE_DEPTH      16
+static const hwaddr ia64_sba_stored_regs[] = {
+    0x0400, 0x0408, 0x0418,
+    0x1400, 0x1408, 0x1410, 0x1418,
+    0x8600, 0x8608, 0x8610, 0x8620, 0x8700, 0x8708, 0x8710, 0x8720,
+    0x9420, 0x9500, 0x9508,
+};
+#define IA64_SBA_STORED_REGS           ARRAY_SIZE(ia64_sba_stored_regs)
+/*
+ * FFEC6620 sets bit 10 of FED0_1400 and waits for it to clear again; the
+ * rx2600 reads it clear.
+ */
+#define IA64_SBA_IOC_QUEUE_OFFSET      UINT64_C(0x1400)
+#define IA64_SBA_IOC_QUEUE_GO          (UINT64_C(1) << 10)
+/*
+ * FFEAD180 changes only bits 47:32 of FED0_1410, and the rx2600 reads 0x73F
+ * below them: the value the part powers up with.
+ */
+#define IA64_SBA_IOC_1410_OFFSET       UINT64_C(0x1410)
+#define IA64_SBA_IOC_1410_POWER_ON     UINT64_C(0x073f)
 
 /*
  * ROPE_CONFIG (mio ERS register 23): which ropes run double- or quad-wide.
@@ -377,6 +398,22 @@ static bool ia64_sba_range_reg(hwaddr addr, unsigned int size, unsigned int *n)
     return true;
 }
 
+static bool ia64_sba_stored_reg(hwaddr addr, unsigned int size, unsigned int *n)
+{
+    unsigned int i;
+
+    if (size != 8) {
+        return false;
+    }
+    for (i = 0; i < IA64_SBA_STORED_REGS; i++) {
+        if (ia64_sba_stored_regs[i] == addr) {
+            *n = i;
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool ia64_sba_lba_port(hwaddr addr, unsigned int size, unsigned int *n)
 {
     if (size != 8 || addr < IA64_SBA_LBA_PORT_FIRST ||
@@ -429,10 +466,8 @@ static MemTxResult ia64_sba_csr_read(void *opaque, hwaddr addr, uint64_t *data,
         } else if (size == 8 && addr == IA64_SBA_ROPE_WIDTH_OFFSET) {
             *data = s->rope_width;
             ok = true;
-        } else if (size == 8 && !(addr & 7) &&
-                   addr >= IA64_SBA_ROPE_QUEUE_FIRST &&
-                   addr < IA64_SBA_ROPE_QUEUE_FIRST + 8 * IA64_SBA_ROPES) {
-            *data = (uint64_t)IA64_SBA_ROPE_QUEUE_DEPTH << 48;
+        } else if (ia64_sba_stored_reg(addr, size, &reg_index)) {
+            *data = s->stored[reg_index];
             ok = true;
         }
     }
@@ -511,6 +546,18 @@ static MemTxResult ia64_sba_csr_write(void *opaque, hwaddr addr, uint64_t value,
     if (!handled && size == 8 && addr == IA64_SBA_ROPE_WIDTH_OFFSET) {
         s->rope_width = value;
         handled = true;
+    }
+
+    if (!handled) {
+        unsigned int reg_index;
+
+        if (ia64_sba_stored_reg(addr, size, &reg_index)) {
+            if (addr == IA64_SBA_IOC_QUEUE_OFFSET) {
+                value &= ~IA64_SBA_IOC_QUEUE_GO;
+            }
+            s->stored[reg_index] = value;
+            handled = true;
+        }
     }
 
     if (!handled && size == 8 && addr == IA64_SBA_ERROR_CONTROL_OFFSET) {
@@ -626,15 +673,22 @@ static void ia64_sba_realize(PCIDevice *dev, Error **errp)
 {
     IA64SBAState *s = IA64_SBA(dev);
     uint8_t *c = dev->config;
+    unsigned int i;
 
     /* Chipset host-bridge identity; the IOC "function 1" id 0x122A/HP. */
     pci_config_set_prog_interface(c, 0);
 
+    QEMU_BUILD_BUG_ON(IA64_SBA_STORED_REGS != ARRAY_SIZE(s->stored));
     qemu_rec_mutex_init(&s->iommu_lock);
     ia64_sba_frontend_reset(s);
     s->unimp_read = bitmap_new(IA64_SBA_CSR_SIZE);
     s->unimp_write = bitmap_new(IA64_SBA_CSR_SIZE);
     s->rope_width = IA64_SBA_ROPE_WIDTH_POWER_ON;
+    for (i = 0; i < IA64_SBA_STORED_REGS; i++) {
+        if (ia64_sba_stored_regs[i] == IA64_SBA_IOC_1410_OFFSET) {
+            s->stored[i] = IA64_SBA_IOC_1410_POWER_ON;
+        }
+    }
 
     /* IOC CSR block, exposed to the CPU at the fixed chipset base. */
     memory_region_init_io(&s->csr, OBJECT(s), &ia64_sba_csr_ops, s,
@@ -690,7 +744,7 @@ static int ia64_sba_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ia64_sba = {
     .name = "ia64-sba-ioc",
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 3,
     .post_load = ia64_sba_post_load,
     .fields = (const VMStateField[]) {
@@ -706,6 +760,7 @@ static const VMStateDescription vmstate_ia64_sba = {
         VMSTATE_UINT64_ARRAY(range, IA64SBAState, IA64_SBA_RANGE_REGS),
         VMSTATE_UINT64(error_control, IA64SBAState),
         VMSTATE_UINT64(rope_width, IA64SBAState),
+        VMSTATE_UINT64_ARRAY_V(stored, IA64SBAState, IA64_SBA_STORED_REGS, 4),
         VMSTATE_END_OF_LIST()
     },
 };
