@@ -1163,6 +1163,17 @@ static const TCGCPUOps ia64_tcg_ops = {
     { .num_entries = 128, .num_ways = 128, .num_sets = 1, \
       .reduced_by_trs = true, .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK }
 
+/*
+ * A PAL_HALT_INFO power state: typical power in mW, entry and exit latency
+ * in cycles.  The model's placeholder states are 1 W and 1 cycle.
+ */
+#define IA64_PAL_POWER_STATE(coherent, mw, entry, exit) \
+    (IA64_PAL_HALT_IMPLEMENTED | ((coherent) ? IA64_PAL_HALT_COHERENT : 0) | \
+     ((uint64_t)(mw) << 32) | ((uint64_t)(entry) << 16) | (exit))
+#define IA64_PAL_HALT_INFO_PLACEHOLDER \
+    { IA64_PAL_POWER_STATE(true, 1000, 1, 1), \
+      IA64_PAL_POWER_STATE(false, 1000, 1, 1) }
+
 /* PAL_REGISTER_INFO request 2: DCR, ITM, IVA, PTA and the interruption CRs. */
 #define IA64_PAL_CR_IMPLEMENTED_LOW 0x0000000003fb0107ULL
 
@@ -1255,6 +1266,14 @@ static const IA64PalProfile ia64_pal_profile_madison = {
     .perf_pmc_mask = 0xffff,
     .perf_retired_mask = 0xf0,
     .cr_implemented_low = 0x0000000003fb0307ULL,
+    /*
+     * PAL_HALT_INFO of the rx2600 (capture 2026-10-03, CPU-19): states 0
+     * (PAL_HALT_LIGHT) and 2, both coherent at 35 W; no state 1.
+     */
+    .halt_info = {
+        [0] = IA64_PAL_POWER_STATE(true, 35000, 9000, 8700),
+        [2] = IA64_PAL_POWER_STATE(true, 35000, 14000, 8700),
+    },
 };
 
 static const IA64PalProfile ia64_pal_profile_montecito = {
@@ -1308,6 +1327,7 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     .perf_pmc_mask = 0x3fff,
     .perf_retired_mask = 0xf0,
     .cr_implemented_low = IA64_PAL_CR_IMPLEMENTED_LOW,
+    .halt_info = IA64_PAL_HALT_INFO_PLACEHOLDER,
 };
 
 /*
@@ -1414,6 +1434,7 @@ static const IA64PalProfile ia64_pal_profile_merced = {
     .perf_pmc_mask = 0x3fff,
     .perf_retired_mask = 0x10,
     .cr_implemented_low = IA64_PAL_CR_IMPLEMENTED_LOW,
+    .halt_info = IA64_PAL_HALT_INFO_PLACEHOLDER,
 };
 
 static const Property ia64_cpu_properties[] = {

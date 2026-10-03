@@ -82,9 +82,6 @@
 #define PAL_PERF_PMD_MASK          0x3ffffULL
 
 #define PAL_CACHE_FLUSH_OPERATION_MASK 0x3ULL
-#define PAL_HALT_STATE_COUNT       8
-#define PAL_HALT_STATE_IMPLEMENTED (1ULL << 60)
-#define PAL_HALT_STATE_COHERENT    (1ULL << 61)
 #define PAL_HALT_IO_TYPE_NONE      0
 #define PAL_HALT_IO_TYPE_LOAD      1
 #define PAL_HALT_IO_TYPE_STORE     2
@@ -306,11 +303,14 @@ static bool pal_halt_io_transaction(uint64_t io_detail_ptr,
 static bool pal_halt(CPUIA64State *env)
 {
     CPUState *cs = env_cpu(env);
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
     uint64_t halt_state = env->gr[IA64_PAL_GR_ARG1];
     uint64_t io_detail_ptr = env->gr[IA64_PAL_GR_ARG2];
     uint64_t load_return = 0;
 
-    if (halt_state != 1 || env->gr[IA64_PAL_GR_ARG3] != 0 ||
+    if (halt_state < 1 || halt_state >= IA64_PAL_HALT_STATES ||
+        !(pal->halt_info[halt_state] & IA64_PAL_HALT_IMPLEMENTED) ||
+        env->gr[IA64_PAL_GR_ARG3] != 0 ||
         !pal_halt_io_transaction(io_detail_ptr, &load_return)) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
@@ -760,7 +760,7 @@ static void pal_halt_info(CPUIA64State *env, uintptr_t ra)
     uint64_t power_buffer = pal_stacked_arg(env, 0);
     uint64_t reserved1 = pal_stacked_arg(env, 1);
     uint64_t reserved2 = pal_stacked_arg(env, 2);
-    uint64_t power_states[PAL_HALT_STATE_COUNT] = { 0 };
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
     int i;
 
     if ((power_buffer & 7) != 0 || reserved1 != 0 || reserved2 != 0) {
@@ -771,13 +771,8 @@ static void pal_halt_info(CPUIA64State *env, uintptr_t ra)
         return;
     }
 
-    power_states[0] = PAL_HALT_STATE_IMPLEMENTED | PAL_HALT_STATE_COHERENT |
-                      (1000ULL << 32) | (1ULL << 16) | 1ULL;
-    power_states[1] = PAL_HALT_STATE_IMPLEMENTED |
-                      (1000ULL << 32) | (1ULL << 16) | 1ULL;
-
-    for (i = 0; i < PAL_HALT_STATE_COUNT; i++) {
-        ia64_exec_store_data(env, power_buffer + i * 8, power_states[i],
+    for (i = 0; i < IA64_PAL_HALT_STATES; i++) {
+        ia64_exec_store_data(env, power_buffer + i * 8, pal->halt_info[i],
                              8, false, ra);
     }
 

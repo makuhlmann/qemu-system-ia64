@@ -233,8 +233,8 @@ test_pal_halt_light_stops_at_pal_continuation = require_registers(
         "r31": 0,
     }, entry=0x10)
 
-test_pal_halt_wakes_on_due_itm = require_registers(
-    "pal_halt_wakes_on_due_itm", [
+def _pal_halt_wakes_on_due_itm_program(state):
+    return [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(),
          nop_i()),
         (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
@@ -255,7 +255,7 @@ test_pal_halt_wakes_on_due_itm = require_registers(
         (0x90, 0x10, nop_m(), nop_i(),
          br_cond(0x90, 0x40, qp=7)),
         (0xa0, *movl_mlx(28, PAL_HALT)),
-        (0xb0, 0x00, nop_m(), addl(29, 1, 0), addl(30, 0, 0)),
+        (0xb0, 0x00, nop_m(), addl(29, state, 0), addl(30, 0, 0)),
         (0xc0, *movl_mlx(19, (1 << 13) | (1 << 14))),
         (0xd0, 0x10, mov_gr_psr_full(19), addl(31, 0, 0),
          br_call(0, 0xd0, PAL_PROC_ENTRY)),
@@ -269,13 +269,29 @@ test_pal_halt_wakes_on_due_itm = require_registers(
          br_cond(0x3000, 0x3010)),
         (0x3010, 0x10, nop_m(), nop_i(),
          br_cond(0x3010, 0x3010)),
-    ], {
+    ]
+
+
+test_pal_halt_wakes_on_due_itm = require_registers(
+    "pal_halt_wakes_on_due_itm", _pal_halt_wakes_on_due_itm_program(1), {
         "ip": 0x3010,
         "exception": IA64_EXCP_NONE,
         "r8": 0,
         "r9": 0,
         "r31": 0x5a,
     }, entry=0x10)
+
+# The rx2600's Madison has power state 2 and no state 1 (capture
+# 2026-10-03, CPU-19).
+test_pal_halt_state2_wakes_on_due_itm_madison = require_registers(
+    "pal_halt_state2_wakes_on_due_itm_madison",
+    _pal_halt_wakes_on_due_itm_program(2), {
+        "ip": 0x3010,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r9": 0,
+        "r31": 0x5a,
+    }, entry=0x10, cpu="madison")
 
 # PAL_HALT and PAL_HALT_LIGHT read the virtual clock.  Under -icount that is
 # only allowed in the last instruction of a TB, and the break bundle of the
@@ -1975,6 +1991,33 @@ test_pal_halt_info = require_registers("pal_halt_info", [
     "r20": PAL_HALT_LIGHT_INFO, "r21": PAL_HALT_STATE1_INFO, "r22": 0},
     entry=0x10)
 
+# The rx2600's power states (capture 2026-10-03, CPU-19): 0 and 2, coherent,
+# 35 W, entry 9000 and 14000 cycles, exit 8700; state 1 is not implemented.
+test_pal_halt_info_madison = require_registers("pal_halt_info_madison", [
+    (0x10, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
+    (0x20, *movl_mlx(28, PAL_HALT_INFO)),
+    (0x30, *movl_mlx(32, PAL_HALT_INFO)),
+    (0x40, *movl_mlx(33, PAL_HALT_INFO_BUFFER)),
+    (0x50, *movl_mlx(34, 0)),
+    (0x60, *movl_mlx(35, 0)),
+    (0x70, 0x10, nop_m(), nop_i(), br_call(0, 0x70, PAL_PROC_ENTRY)),
+    (0x80, *movl_mlx(2, PAL_HALT_INFO_BUFFER)),
+    (0x90, 0x00, ld8(20, 2), adds(2, 8, 2), nop_i()),
+    (0xa0, 0x00, ld8(21, 2), adds(2, 8, 2), nop_i()),
+    (0xb0, 0x00, ld8(22, 2), nop_i(), nop_i()),
+    (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+    (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+    (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+], {"ip": 0xc0, "r8": 0, "r9": 0, "r10": 0, "r11": 0,
+    "r20": 0x300088b8232821fc, "r21": 0, "r22": 0x300088b836b021fc},
+    entry=0x10, cpu="madison")
+
+test_pal_halt_state1_invalid_madison = require_registers(
+    "pal_halt_state1_invalid_madison",
+    pal_call_program(PAL_HALT, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0,
+     "r11": 0}, entry=0x10, cpu="madison")
+
 test_pal_halt_invalid_state = require_registers("pal_halt_invalid_state",
     pal_call_program(PAL_HALT, [(29, 0), (30, 0), (31, 0)]),
     {"ip": 0x60, "r28": PAL_HALT,
@@ -2289,6 +2332,9 @@ CASE_NAMES = (
     'pal_halt_light_wakes_on_due_itm',
     'pal_halt_reserved_arg',
     'pal_halt_wakes_on_due_itm',
+    'pal_halt_state2_wakes_on_due_itm_madison',
+    'pal_halt_info_madison',
+    'pal_halt_state1_invalid_madison',
     'pal_halt_wakes_on_due_itm_icount',
     'pal_logical_to_physical_current',
     'pal_logical_to_physical_multicore_thread',

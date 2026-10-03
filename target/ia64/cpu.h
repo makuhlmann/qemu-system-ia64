@@ -1911,6 +1911,11 @@ typedef struct IA64PalCacheLevel {
     uint32_t protection[2];
 } IA64PalCacheLevel;
 
+/* PAL_HALT_INFO power states (SDM Vol. 2 PAL_HALT_INFO). */
+#define IA64_PAL_HALT_STATES      8
+#define IA64_PAL_HALT_IMPLEMENTED (1ULL << 60)
+#define IA64_PAL_HALT_COHERENT    (1ULL << 61)
+
 #define IA64_PAL_CACHE_LEVELS 3
 #define IA64_PAL_CACHE_TYPES  2   /* index 0 = instruction, 1 = data/unified */
 
@@ -2007,6 +2012,11 @@ typedef struct IA64PalProfile {
     uint64_t perf_retired_mask;
     /* PAL_REGISTER_INFO request 2, CR0-63. */
     uint64_t cr_implemented_low;
+    /*
+     * PAL_HALT_INFO pal_power_mgmt_info per state; PAL_HALT enters a state
+     * from 1 up that is implemented here.
+     */
+    uint64_t halt_info[IA64_PAL_HALT_STATES];
 } IA64PalProfile;
 
 /*
