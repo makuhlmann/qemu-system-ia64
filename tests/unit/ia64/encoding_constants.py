@@ -251,6 +251,7 @@ PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_16_3 = (16 << 32) | 3
 PAL_RATIO_2_1 = (2 << 32) | 1
 PAL_RATIO_16_2 = (16 << 32) | 2
+PAL_RATIO_13_2 = (13 << 32) | 2
 PAL_RATIO_1_1 = (1 << 32) | 1
 PAL_RATIO_12_2 = (12 << 32) | 2
 # WB(0), UC(4), UCE(5) and WC(6) are all implemented by both supported
@@ -573,6 +574,7 @@ __all__ = (
     'PAL_RATIO_16_1',
     'PAL_RATIO_16_3',
     'PAL_RATIO_16_2',
+    'PAL_RATIO_13_2',
     'PAL_RATIO_1_1',
     'PAL_RATIO_12_2',
     'PAL_RATIO_2_1',

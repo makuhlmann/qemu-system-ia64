@@ -48,8 +48,8 @@ extern char __fw_ivt[];
 
 /*
  * ITC rate, set at boot from PAL_FREQ_RATIOS: the ITC counts processor
- * clocks (800 MHz on Merced, 1.6 GHz on the Itanium 2 models).  20 (200 MHz)
- * only until fw_init_itc_rate() has run.
+ * clocks (800 MHz on Merced, 1.3 GHz on Madison, 1.6 GHz on Montecito).  20
+ * (200 MHz) only until fw_init_itc_rate() has run.
  */
 extern UINT64 fw_itc_ticks_per_100ns;
 #define FW_ITC_TICKS_PER_100NS fw_itc_ticks_per_100ns

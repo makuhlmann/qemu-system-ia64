@@ -102,7 +102,7 @@ from .encoding import (
     PAL_RATIO_16_1,
     PAL_RATIO_16_3,
     PAL_RATIO_2_1,
-    PAL_RATIO_16_2,
+    PAL_RATIO_13_2,
     PAL_RATIO_1_1,
     PAL_RATIO_12_2,
     PAL_REGISTER_INFO,
@@ -506,12 +506,12 @@ test_pal_freq_ratios = require_registers("pal_freq_ratios",
     "r11": PAL_RATIO_16_1}, entry=0x10)
 
 # The zx1 Itanium 2: a 200 MHz input clock, which is the bus clock, and the
-# core and the ITC at 16/2 of it (251110-003 6.10, 250945-005 Table 2-25).
+# core and the ITC at 13/2 of it, as on the rx2600 (capture 2026-10-03).
 test_pal_freq_ratios_madison = require_registers(
     "pal_freq_ratios_madison", pal_call_program(PAL_FREQ_RATIOS),
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
-     "r9": PAL_RATIO_16_2, "r10": PAL_RATIO_1_1,
-     "r11": PAL_RATIO_16_2}, entry=0x10, cpu="madison")
+     "r9": PAL_RATIO_13_2, "r10": PAL_RATIO_1_1,
+     "r11": PAL_RATIO_13_2}, entry=0x10, cpu="madison")
 
 test_pal_freq_base_madison = require_registers(
     "pal_freq_base_madison", pal_call_program(PAL_FREQ_BASE),

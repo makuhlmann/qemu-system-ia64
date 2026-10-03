@@ -1157,16 +1157,17 @@ static const TCGCPUOps ia64_tcg_ops = {
 static const IA64PalProfile ia64_pal_profile_madison = {
     /*
      * The input clock is the 200 MHz system bus clock (251110-003 6.10), and
-     * the core runs at 16/2 of it, the bus-to-core setting 2/16 of 250945-005
-     * Table 2-25; PAL_FREQ_RATIOS relates every rate to the input clock.
+     * the core runs at 13/2 of it, the rx2600's 1.3 GHz part (capture
+     * 2026-10-03, CPU-6: PAL_FREQ_RATIOS 13/2, 1/1, 13/2; the 3 MB L3 below
+     * is that part's); PAL_FREQ_RATIOS relates every rate to the input clock.
      */
     .freq_base_hz = 200000000ULL,
     .io_block_pa = IA64_PAL_IO_BLOCK_ITANIUM2,
     /* Set 16 exists and holds no feature this model implements. */
     .impl_feature_sets = 1U << 0,
-    .proc_ratio_num = 16, .proc_ratio_den = 2,   /* 1.6 GHz */
+    .proc_ratio_num = 13, .proc_ratio_den = 2,   /* 1.3 GHz */
     .bus_ratio_num = 1,   .bus_ratio_den = 1,     /* 200 MHz */
-    .itc_ratio_num = 16,  .itc_ratio_den = 2,     /* ITC at the core clock */
+    .itc_ratio_num = 13,  .itc_ratio_den = 2,     /* ITC at the core clock */
     .has_post_merced_pal = true,
     /*
      * The rx2600's Madison (capture 2026-10-03, CPU-4): vendor 0xFF, PAL_A
