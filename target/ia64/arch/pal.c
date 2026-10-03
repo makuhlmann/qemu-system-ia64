@@ -196,7 +196,7 @@ static void pal_vm_summary(CPUIA64State *env)
                      ((uint64_t)env->impl_pa_bits << 1) |
                      ((uint64_t)env->impl_key_bits << 8) |
                      (((uint64_t)IA64_PKR_COUNT - 1ULL) << 16) |
-                     (8ULL << 24) |
+                     ((uint64_t)pal->hash_tag_id << 24) |
                      ((dtr_count - 1ULL) << 32) |
                      ((itr_count - 1ULL) << 40) |
                      ((uint64_t)pal->unique_tcs << 48) |
@@ -1444,8 +1444,18 @@ static uint64_t pal_page_shift(uint64_t page_size)
     return shift;
 }
 
+/* TR_valid bits (SDM Vol. 2 PAL_VM_TR_READ) and the PTE fields they cover. */
+#define PAL_TR_VALID_AV     (1ULL << 0)
+#define PAL_TR_VALID_PV     (1ULL << 1)
+#define PAL_TR_VALID_DV     (1ULL << 2)
+#define PAL_TR_VALID_MV     (1ULL << 3)
+#define PAL_TR_PTE_PL_MASK  (3ULL << 7)
+#define PAL_TR_PTE_AR_MASK  (7ULL << 9)
+#define PAL_TR_RR_PS_MASK   (0x3fULL << IA64_ITIR_PS_SHIFT)
+
 static void pal_vm_tr_read(CPUIA64State *env, uintptr_t ra)
 {
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
     uint64_t reg_num = pal_stacked_arg(env, 0);
     uint64_t tr_type = pal_stacked_arg(env, 1);
     uint64_t tr_buffer = pal_stacked_arg(env, 2);
@@ -1484,6 +1494,22 @@ static void pal_vm_tr_read(CPUIA64State *env, uintptr_t ra)
         rr = ((uint64_t)entry->rid << IA64_RR_RID_SHIFT) |
              (ps_shift << IA64_ITIR_PS_SHIFT);
         tr_valid = 0xf;
+    }
+    if (pal->tr_read_fixed_valid) {
+        tr_valid = pal->tr_read_valid[tr_type];
+        if (!(tr_valid & PAL_TR_VALID_AV)) {
+            pte &= ~PAL_TR_PTE_AR_MASK;
+        }
+        if (!(tr_valid & PAL_TR_VALID_PV)) {
+            pte &= ~PAL_TR_PTE_PL_MASK;
+        }
+        if (!(tr_valid & PAL_TR_VALID_DV)) {
+            pte &= ~IA64_PTE_DIRTY;
+        }
+        if (!(tr_valid & PAL_TR_VALID_MV)) {
+            pte &= ~IA64_PTE_MA_MASK;
+        }
+        rr &= ~PAL_TR_RR_PS_MASK;
     }
 
     ia64_exec_store_data(env, tr_buffer, pte, 8, false, ra);

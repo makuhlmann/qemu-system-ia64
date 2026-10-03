@@ -932,6 +932,84 @@ test_pal_vm_tr_read_misaligned_buffer = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+# The madison PAL_VM_SUMMARY, PAL_VM_INFO and PAL_VM_TR_READ answers are the
+# rx2600's (capture 2026-10-03, CPU-7, CPU-8 and CPU-24).
+test_pal_vm_summary_madison = require_registers(
+    "pal_vm_summary_madison", pal_call_program(PAL_VM_SUMMARY),
+    {"ip": 0x30, "r8": 0, "r9": 0x02043f3f020f1865, "r10": 0x183c,
+     "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_vm_info_madison_l0_instruction = require_registers(
+    "pal_vm_info_madison_l0_instruction",
+    pal_call_program(PAL_VM_INFO, [(29, 0), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x202001, "r10": 0x155557000, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_vm_info_madison_l0_data = require_registers(
+    "pal_vm_info_madison_l0_data",
+    pal_call_program(PAL_VM_INFO, [(29, 0), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x202001, "r10": 0x155557000, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_vm_info_madison_l1_instruction = require_registers(
+    "pal_vm_info_madison_l1_instruction",
+    pal_call_program(PAL_VM_INFO, [(29, 1), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x400808001, "r10": 0x155557000, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_vm_info_madison_l1_data = require_registers(
+    "pal_vm_info_madison_l1_data",
+    pal_call_program(PAL_VM_INFO, [(29, 1), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x400808001, "r10": 0x155557000, "r11": 0},
+    entry=0x10, cpu="madison")
+
+
+def _pal_vm_tr_read_program(tr_type, insert):
+    return [
+        (0x10, *movl_mlx(18, PAL_TR_TEST_PTE)),
+        (0x20, 0x00, nop_m(), addl(19, PAL_TR_TEST_IFA & ~0xfff, 0),
+         nop_i()),
+        (0x30, 0x00, nop_m(), addl(7, PAL_TR_TEST_ITIR, 0), addl(5, 5, 0)),
+        (0x40, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x60, 0x00, insert(5, 18), nop_i(), nop_i()),
+        (0x70, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
+        (0x80, *movl_mlx(28, PAL_VM_TR_READ)),
+        (0x90, *movl_mlx(32, PAL_VM_TR_READ)),
+        (0xa0, 0x00, nop_m(), addl(33, 5, 0), addl(34, tr_type, 0)),
+        (0xb0, 0x00, nop_m(), addl(35, 0x2000, 0), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_call(0, 0xc0, PAL_PROC_ENTRY)),
+        (0xd0, 0x00, nop_m(), addl(2, 0x2000, 0), nop_i()),
+        (0xe0, 0x00, ld8(20, 2), adds(2, 8, 2), nop_i()),
+        (0xf0, 0x00, ld8(21, 2), adds(2, 8, 2), nop_i()),
+        (0x100, 0x00, ld8(22, 2), adds(2, 8, 2), nop_i()),
+        (0x110, 0x00, ld8(23, 2), nop_i(), nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ]
+
+
+# An ITR reads back with no field valid and ar, pl, d and ma as 0; a DTR with
+# pl, d and ma valid and ar as 0.  Neither RR word holds the page size.
+test_pal_vm_tr_read_madison_itr = require_registers(
+    "pal_vm_tr_read_madison_itr", _pal_vm_tr_read_program(0, itr_i),
+    {"ip": 0x120, "r8": 0, "r9": 0, "r10": 0, "r11": 0,
+     "r20": PAL_TR_TEST_PTE & ~0xfdc, "r21": PAL_TR_TEST_ITIR,
+     "r22": PAL_TR_TEST_IFA, "r23": 0}, entry=0x10, cpu="madison")
+
+test_pal_vm_tr_read_madison_dtr = require_registers(
+    "pal_vm_tr_read_madison_dtr", _pal_vm_tr_read_program(1, itr_d),
+    {"ip": 0x120, "r8": 0, "r9": 0xe, "r10": 0, "r11": 0,
+     "r20": PAL_TR_TEST_PTE & ~0xe00, "r21": PAL_TR_TEST_ITIR,
+     "r22": PAL_TR_TEST_IFA, "r23": 0}, entry=0x10, cpu="madison")
+
+test_pal_vm_tr_read_madison_empty = require_registers(
+    "pal_vm_tr_read_madison_empty",
+    pal_stacked_call_program(PAL_VM_TR_READ, [4, 1, 0x2000]),
+    {"ip": 0x80, "r8": 0, "r9": 0xe, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
 test_pal_proc_entry_virtual_itr = require_registers(
     "pal_proc_entry_virtual_itr", [
         (0x10, *movl_mlx(18, PAL_VIRTUAL_CODE_PTE)),
@@ -2141,6 +2219,14 @@ CASE_NAMES = (
     'pal_freq_ratios_merced',
     'pal_freq_base_merced',
     'pal_vm_summary_merced',
+    'pal_vm_summary_madison',
+    'pal_vm_info_madison_l0_instruction',
+    'pal_vm_info_madison_l0_data',
+    'pal_vm_info_madison_l1_instruction',
+    'pal_vm_info_madison_l1_data',
+    'pal_vm_tr_read_madison_itr',
+    'pal_vm_tr_read_madison_dtr',
+    'pal_vm_tr_read_madison_empty',
     'pal_cache_info_merced_l0_i',
     'pal_cache_info_merced_l0_d',
     'pal_cache_info_merced_l1_unified',

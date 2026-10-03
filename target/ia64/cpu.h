@@ -1988,6 +1988,15 @@ typedef struct IA64PalProfile {
     IA64PalTcLevel tc[IA64_PAL_CACHE_LEVELS][IA64_PAL_CACHE_TYPES];
     uint8_t tc_levels;
     uint8_t unique_tcs;
+    /* PAL_VM_SUMMARY hash_tag_id: the thash/ttag algorithm. */
+    uint8_t hash_tag_id;
+    /*
+     * PAL_VM_TR_READ reports the fixed TR_valid tr_read_valid[tr_type] for
+     * every TR, returns 0 in the PTE fields it marks invalid and no page
+     * size in the RR word.  Otherwise every field of an inserted TR is valid.
+     */
+    bool tr_read_fixed_valid;
+    uint8_t tr_read_valid[2];
 
     /* PAL_PERF_MON_INFO: PAL_WIDTH and the low word of PAL_RETIRED_MASK. */
     uint8_t perf_counter_width;

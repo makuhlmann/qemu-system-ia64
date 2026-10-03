@@ -1145,7 +1145,9 @@ static const TCGCPUOps ia64_tcg_ops = {
  * a 32-entry fully associative L1 ITLB and L1 DTLB that "directly support
  * only a 4KB-page size", over a 128-entry fully associative L2 ITLB and
  * L2 DTLB, each of which may hold up to 64 translation registers and holds
- * every architected page size.  Four unique TCs across two levels.
+ * every architected page size.  Four unique TCs across two levels.  The
+ * rx2600's Madison PAL reports every page size for the L1 TCs and no
+ * preferred-page-size optimization (the IA64_PAL_TC_MADISON pair).
  */
 #define IA64_PAL_TC_ITANIUM2_L1 \
     { .num_entries = 32, .num_ways = 32, .num_sets = 1, \
@@ -1154,6 +1156,12 @@ static const TCGCPUOps ia64_tcg_ops = {
     { .num_entries = 128, .num_ways = 128, .num_sets = 1, \
       .preferred_page_size_optimized = true, .reduced_by_trs = true, \
       .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK }
+#define IA64_PAL_TC_MADISON_L1 \
+    { .num_entries = 32, .num_ways = 32, .num_sets = 1, \
+      .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK }
+#define IA64_PAL_TC_MADISON_L2 \
+    { .num_entries = 128, .num_ways = 128, .num_sets = 1, \
+      .reduced_by_trs = true, .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK }
 
 static const IA64PalProfile ia64_pal_profile_madison = {
     /*
@@ -1219,12 +1227,22 @@ static const IA64PalProfile ia64_pal_profile_madison = {
                     .protection = { 0x0c500080, 0x4c7c5220 } },
         },
     },
+    /*
+     * PAL_VM_SUMMARY, PAL_VM_INFO and PAL_VM_TR_READ of the rx2600 (capture
+     * 2026-10-03, CPU-7, CPU-8 and CPU-24): hash_tag_id 2; the L1 TCs
+     * report every page size and the L2 TCs no preferred-page-size
+     * optimization; TR reads mark no ITR field and the DTR access rights
+     * not valid.
+     */
     .tc_levels = 2,
     .unique_tcs = 4,
     .tc = {
-        [0] = { IA64_PAL_TC_ITANIUM2_L1, IA64_PAL_TC_ITANIUM2_L1 },
-        [1] = { IA64_PAL_TC_ITANIUM2_L2, IA64_PAL_TC_ITANIUM2_L2 },
+        [0] = { IA64_PAL_TC_MADISON_L1, IA64_PAL_TC_MADISON_L1 },
+        [1] = { IA64_PAL_TC_MADISON_L2, IA64_PAL_TC_MADISON_L2 },
     },
+    .hash_tag_id = 2,
+    .tr_read_fixed_valid = true,
+    .tr_read_valid = { 0x0, 0xe },
     /* 251110-003 Table 10-28 */
     .perf_counter_width = 48,
     .perf_retired_mask = 0xf0,
@@ -1276,6 +1294,7 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
         [0] = { IA64_PAL_TC_ITANIUM2_L1, IA64_PAL_TC_ITANIUM2_L1 },
         [1] = { IA64_PAL_TC_ITANIUM2_L2, IA64_PAL_TC_ITANIUM2_L2 },
     },
+    .hash_tag_id = 8,
     .perf_counter_width = 48,
     .perf_retired_mask = 0xf0,
 };
@@ -1378,6 +1397,7 @@ static const IA64PalProfile ia64_pal_profile_merced = {
                     .page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK },
         },
     },
+    .hash_tag_id = 8,
     /* 245320-003 Table 6-24 */
     .perf_counter_width = 32,
     .perf_retired_mask = 0x10,
