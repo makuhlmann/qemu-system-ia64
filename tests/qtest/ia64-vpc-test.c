@@ -6945,6 +6945,54 @@ static void test_iosapic_ioa_software_interrupt(void)
     qtest_quit(qts);
 }
 
+static void wait_sapic_irr(QTestState *qts, uint8_t vector)
+{
+    gint64 deadline = g_get_monotonic_time() + 15 * G_USEC_PER_SEC;
+
+    while (!(cpu_sapic_irr_word(qts, vector / 64) &
+             (1ULL << (vector % 64)))) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+}
+
+/*
+ * The PDH UARTs and the SCI are inputs 7, 8 and 9 of rope 1's I/O SAPIC:
+ * GSI 34 to 36 under its base of 27, as the rx2600's SPCR, HCDP and FADT
+ * name them.
+ */
+static void test_iosapic_rope1_pdh_inputs(void)
+{
+    const uint64_t rope = 0xfed20000;
+    const uint64_t window = rope + 0x2000 + 0x800;
+    const uint64_t evt = IA64_PDH_ACPI_PM_BASE + IA64_PDH_ACPI_PM1_EVT;
+    const uint8_t vector[] = { 0x62, 0x63, 0x64 };
+    /* Not stopped: a stopped VM runs no virtual-clock timers. */
+    QTestState *qts = qtest_init("-machine zx1 -m 256M");
+    unsigned int i;
+
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, rope | 1);
+    for (i = 0; i < 3; i++) {
+        qtest_writel(qts, window + IA64_IOSAPIC_IOREGSEL,
+                     IA64_IOSAPIC_RTE_BASE + (7 + i) * 2);
+        qtest_writel(qts, window + IA64_IOSAPIC_IOWIN,
+                     vector[i] | (i == 2 ? IA64_IOSAPIC_RTE_LEVEL : 0));
+    }
+    /* With the transmitter empty, enabling its interrupt raises the line. */
+    for (i = 0; i < IA64_PDH_UARTS; i++) {
+        qtest_writeb(qts, IA64_PDH_UART_BASE + i * IA64_PDH_UART_STRIDE + 1,
+                     0x02);
+        wait_sapic_irr(qts, vector[i]);
+    }
+    /* The 32-bit PM timer's top bit sets TMR_STS, which TMR_EN routes. */
+    qtest_writew(qts, evt, 0xffff);
+    qtest_writew(qts, evt + IA64_ACPI_PM1_EVT_EN_OFFSET,
+                 IA64_ACPI_PM1_EVT_TMR_EN);
+    qtest_clock_step(qts, 601 * 1000LL * 1000 * 1000);
+    wait_sapic_irr(qts, vector[2]);
+    qtest_quit(qts);
+}
+
 static void test_iosapic_lowest_priority(void)
 {
     const unsigned pin = 22;
@@ -9507,6 +9555,8 @@ int main(int argc, char **argv)
                    test_iosapic_pid_register_face);
     qtest_add_func("/ia64-vpc/iosapic/ioa-register-face",
                    test_iosapic_ioa_register_face);
+    qtest_add_func("/ia64-vpc/iosapic/rope1-pdh-inputs",
+                   test_iosapic_rope1_pdh_inputs);
     qtest_add_func("/ia64-vpc/iosapic/ioa-software-interrupt",
                    test_iosapic_ioa_software_interrupt);
     qtest_add_func("/ia64-vpc/iosapic/edge-rte-write-not-a-request",

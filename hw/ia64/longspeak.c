@@ -39,6 +39,13 @@
  * FED2_8000 (rx2600 capture of 2026-10-03, SCRAM LBA records).
  */
 #define LONGSPEAK_AGP_ROPE          4
+/*
+ * Rope 1's I/O SAPIC takes the PDH UART0 and UART1 on inputs 7 and 8 and the
+ * SCI on input 9: GSI 34 to 36 under its base of 27 (the rx2600's SPCR,
+ * HCDP, FADT and SCRAM serial records).
+ */
+#define LONGSPEAK_UART_PIN          7
+#define LONGSPEAK_SCI_PIN           9
 
 /*
  * The I/O backplane's PCI and PCI-X ropes, empty here.  SAL_B's table for a
@@ -227,6 +234,11 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
                       &IA64_LBA(s->rope1_lba_dev)->csr);
     ia64_sba_add_rope(IA64_SBA(s->sba_dev), LONGSPEAK_AGP_ROPE,
                       &IA64_LBA(s->lba_dev)->csr);
+    for (r = 0; r < IA64_PDH_UARTS; r++) {
+        sysbus_connect_irq(SYS_BUS_DEVICE(LONGSPEAK_PDH(pdh)->uart[r]), 0,
+                           ia64_lba_iosapic_input(IA64_LBA(s->rope1_lba_dev),
+                                                  LONGSPEAK_UART_PIN + r));
+    }
     for (r = 0; r < ARRAY_SIZE(longspeak_backplane_ropes); r++) {
         DeviceState *ioa =
             longspeak_rope_ioa(longspeak_backplane_ropes[r].straps, errp);
@@ -328,6 +340,9 @@ static void longspeak_wire_intx(IA64VpcMachineState *s, DeviceState *pci_host,
                                     qdev_get_gpio_in(org, 1)));
         }
     }
+    /* The SCI also keeps the platform IOSAPIC line our own FADT names. */
+    s->acpi_sci_irq = longspeak_split_irq(s->acpi_sci_irq,
+        ia64_lba_iosapic_input(IA64_LBA(s->rope1_lba_dev), LONGSPEAK_SCI_PIN));
 }
 
 /*

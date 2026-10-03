@@ -516,8 +516,8 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
 
     /*
      * The UARTs and the BT overlay the log-only background, so an undecoded
-     * offset is still reported.  Their interrupt wiring is unknown; the
-     * firmware polls both.
+     * offset is still reported.  The board wires the UARTs' interrupts to
+     * rope 1's ioa (longspeak.c).
      */
     for (i = 0; i < IA64_PDH_UARTS; i++) {
         LongspeakPDHBlock *b = &s->block[LONGSPEAK_PDH_UART_BLOCK];
