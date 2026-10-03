@@ -1268,10 +1268,18 @@ static void test_sba_mio_registers(void)
     QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
     unsigned int i;
 
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x000), ==,
+                    IA64_SBA_FUNC0_ID);
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x008), ==,
                     IA64_SBA_IOC_FCLASS);
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x100), ==,
                     IA64_SBA_MODULE_INFO);
+    /* The memory controller's id, as the firmware reads it: bits 31:16. */
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x8000) >> 16, ==,
+                    0x122b);
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x8000, 0);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x8000), ==,
+                    IA64_SBA_MC_FUNC_ID);
     qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x100, 0);
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x100), ==,
                     IA64_SBA_MODULE_INFO);
@@ -1384,6 +1392,11 @@ static void test_pdh_longspeak_map(void)
     /* No mx2 modules. */
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_DILLON_BASE +
                                 IA64_PDH_DILLON_MODULE_LAYOUT), ==, 0);
+    /* The rx2600's Meson and Dillon revisions, read 16 bits wide. */
+    g_assert_cmphex(qtest_readw(qts, IA64_PDH_PRESENCE_BASE +
+                                IA64_PDH_MESON_REV), ==, 7);
+    g_assert_cmphex(qtest_readw(qts, IA64_PDH_DILLON_BASE +
+                                IA64_PDH_DILLON_REV), ==, 2);
 
     /* Id 1 claims the free semaphore; id 0 and id 1 then see it held by 1. */
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_SEMAPHORE_ADDR(1)), ==, 0);

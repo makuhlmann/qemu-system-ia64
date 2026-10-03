@@ -343,6 +343,15 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 /* Module Info (mio ERS register 3): module 0x000a, functions 0, 1, 8, 9, 10. */
 #define IA64_SBA_MODULE_INFO          IA64_U64(0x000000000703000a)
 /*
+ * FUNC_ID of function 0, the "Root Bridge" 1229, and of function 8, the
+ * memory controller 122B.  The vendor shell's "info chiprev" takes the device
+ * from bits 31:16 (FFEEA8C0 reads FED0_8000) and the revision as the largest
+ * FCLASS low byte of functions 0, 1, 8, 9 and 10 (FFEEA810).  rx2600 capture
+ * 2026-10-03, MIO-1; function 8's vendor half is HP's, as in the others.
+ */
+#define IA64_SBA_FUNC0_ID             IA64_U64(0x000000001229103c)
+#define IA64_SBA_MC_FUNC_ID           IA64_U64(0x00000000122b103c)
+/*
  * The zx1 SBA "safe IOVA space": the 1 GiB window at 1 GiB the IOC advertises
  * through IBASE/IMASK and that the OS's sba_iommu allocates IOVAs from.  The
  * mio maps no memory there (mio ERS 2.1, "The I/O Virtual Region").
@@ -543,6 +552,16 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 /* Offsets in the presence block and in the Dillon register block. */
 #define IA64_PDH_PRESENCE             0x0000U   /* bits 3:0, active low */
 #define IA64_PDH_POST                 0x0018U
+/*
+ * The revisions of the board's two PDH parts, as "info chiprev" prints them
+ * ("Other Bridge"): the Meson in the presence block reads 7 and the Dillon
+ * reads 2, both with 16-bit loads (FFF449C0, FFF44940).  rx2600 capture
+ * 2026-10-03, PDH-2 and PDH-5.
+ */
+#define IA64_PDH_MESON_REV            0x0020U
+#define IA64_PDH_MESON_REV_VALUE      7U
+#define IA64_PDH_DILLON_REV           0x2070U
+#define IA64_PDH_DILLON_REV_VALUE     2U
 #define IA64_PDH_DILLON_SCRATCH0      0x0020U   /* bits 7:6: boot mode */
 #define IA64_PDH_DILLON_REGS          19U       /* 8-byte, 0x00-0x90 */
 #define IA64_PDH_DILLON_STATUS        0x0028U   /* + 8 * processor index */

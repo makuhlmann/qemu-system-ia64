@@ -24,6 +24,7 @@
  *   FF5B_8000  the clock, a DS1501/1511-class part.
  *   FF5C_0000  processor presence, bits 3:0 active low (SAL_A FFFE0E60).
  *   FF5C_0018  POST byte (SAL_A writes (id << 4) | step).
+ *   FF5C_0020  the Meson's revision; FF5F_2070 holds the Dillon's.
  *   FF5E_0000  two 16550 UARTs, FF5E_0000 and FF5E_2000 (EFI PDHUART,
  *              PNP0501 in the firmware's device table at FFF8E918).  They
  *              take the second and third -serial chardev.
@@ -192,10 +193,20 @@ static bool longspeak_pdh_do_read(LongspeakPDHBlock *b, hwaddr addr,
             *data = s->post;
             return true;
         }
+        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_MESON_REV)) {
+            *data = longspeak_pdh_reg_read(IA64_PDH_MESON_REV_VALUE, addr,
+                                           size, IA64_PDH_MESON_REV);
+            return true;
+        }
         return false;
     case LONGSPEAK_PDH_DILLON_BLOCK:
         if (longspeak_pdh_file_index(addr, size, &id)) {
             *data = longspeak_pdh_reg_read(s->reg[id], addr, size, id * 8);
+            return true;
+        }
+        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_REV)) {
+            *data = longspeak_pdh_reg_read(IA64_PDH_DILLON_REV_VALUE, addr,
+                                           size, IA64_PDH_DILLON_REV);
             return true;
         }
         if (longspeak_pdh_semaphore_slot(addr, size, &id)) {

@@ -78,7 +78,9 @@
  * put the rope guests, so a range register that reads zero sends it to address
  * zero for every host bridge.
  */
+#define IA64_SBA_FUNC0_ID_OFFSET       UINT64_C(0x0000)
 #define IA64_SBA_FUNC0_FCLASS_OFFSET   UINT64_C(0x0008)
+#define IA64_SBA_MC_FUNC_ID_OFFSET     UINT64_C(0x8000)
 #define IA64_SBA_MODULE_INFO_OFFSET    UINT64_C(0x0100)
 /*
  * The IOC has an error log of its own and clears it the way a rope port does:
@@ -274,12 +276,17 @@ static bool ia64_sba_is_iommu_addr(hwaddr addr)
  * The IOC identity registers Linux sba_iommu reads to name the IOC and take its
  * revision (FCLASS & 0xff).  Serving these lets func_id == ZX1_IOC_ID match, so
  * the driver runs the zx1-specific ioc_zx1_init() path rather than reporting an
- * "Unknown 0.0" IOC.  Only these two offsets in the function block are modeled;
- * every other MIO CSR still reads zero.
+ * "Unknown 0.0" IOC.
  */
 static bool ia64_sba_identity_reg(hwaddr base, uint64_t *reg)
 {
     switch (base) {
+    case IA64_SBA_FUNC0_ID_OFFSET:
+        *reg = IA64_SBA_FUNC0_ID;
+        return true;
+    case IA64_SBA_MC_FUNC_ID_OFFSET:
+        *reg = IA64_SBA_MC_FUNC_ID;
+        return true;
     case IA64_SBA_IOC_FUNC_ID_OFFSET:
         *reg = IA64_SBA_IOC_FUNC_ID;
         return true;
