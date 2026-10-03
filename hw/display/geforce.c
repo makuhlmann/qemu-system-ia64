@@ -395,7 +395,12 @@ void nv_dma_copy(NV15State *s, uint32_t dst_obj, uint32_t dst_addr,
 static uint32_t nv_ramfc_address(NV15State *s, uint32_t chid, uint32_t offset)
 {
     uint32_t ramfc = (s->fifo_ramfc & 0xFFF) << 8;
-    uint32_t ramfc_ch_size = 0x40; /* NV15 (0x20 <= card < 0x40) */
+    /*
+     * NV10-family RAMFC: 0x20 bytes per channel.  The 0x40-byte form
+     * (RAMFC bit 16) starts with NV17: Linux nvkm/engine/fifo/nv10.c and
+     * nv17.c; Bochs geforce.cc ramfc_address() (card_type < 0x20).
+     */
+    uint32_t ramfc_ch_size = 0x20;
     return ramfc + chid * ramfc_ch_size + offset;
 }
 
@@ -1429,17 +1434,23 @@ static void nv_fifo_process_chid(NV15State *s, uint32_t chid)
         nv_ramfc_write32(s, oldchid, 0x0, s->fifo_cache1_dma_put);
         nv_ramfc_write32(s, oldchid, 0x4, s->fifo_cache1_dma_get);
         nv_ramfc_write32(s, oldchid, 0x8, s->fifo_cache1_ref_cnt);
-        nv_ramfc_write32(s, oldchid, 0xC, s->fifo_cache1_dma_instance);
-        nv_ramfc_write32(s, oldchid, 0x2C, s->fifo_cache1_semaphore);
+        /* The high half of +0x0C is DMA_DCOUNT, which is not modelled. */
+        nv_ramfc_write32(s, oldchid, 0xC,
+                         s->fifo_cache1_dma_instance & 0xFFFF);
         s->fifo_cache1_dma_put = nv_ramfc_read32(s, chid, 0x0);
         s->fifo_cache1_dma_get = nv_ramfc_read32(s, chid, 0x4);
         s->fifo_cache1_ref_cnt = nv_ramfc_read32(s, chid, 0x8);
-        s->fifo_cache1_dma_instance = nv_ramfc_read32(s, chid, 0xC);
-        s->fifo_cache1_semaphore = nv_ramfc_read32(s, chid, 0x2C);
+        s->fifo_cache1_dma_instance = nv_ramfc_read32(s, chid, 0xC) & 0xFFFF;
         s->fifo_cache1_push1 = (s->fifo_cache1_push1 & ~0x1F) | chid;
     }
     s->fifo_cache1_dma_push |= 0x100;
     if (s->fifo_cache1_dma_instance == 0) {
+        /* Once: the puller retries on every DMA_PUT write. */
+        if (!s->fifo_dma_instance0_logged) {
+            s->fifo_dma_instance0_logged = true;
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "nv15: fifo channel %u has DMA instance 0\n", chid);
+        }
         return;
     }
     gf_channel *ch = &s->chs[chid];
@@ -2119,6 +2130,7 @@ static void nv_init_state(NV15State *s)
     s->fifo_wait_notify = false;
     s->fifo_wait_flip = false;
     s->fifo_wait_acquire = false;
+    s->fifo_dma_instance0_logged = false;
     s->fifo_intr = 0;
     s->fifo_intr_en = 0;
     s->fifo_ramht = 0;
