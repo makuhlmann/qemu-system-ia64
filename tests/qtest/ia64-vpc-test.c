@@ -1187,6 +1187,35 @@ static void test_lba_agp_capability(void)
     /* LMMIO_BASE (0x200) reset 0x80000000; SLAVE_CONTROL (0x278) reset 0x6. */
     g_assert_cmphex(qtest_readl(qts, lba + 0x200), ==, 0x80000000u);
     g_assert_cmphex(qtest_readl(qts, lba + 0x278), ==, 0x6);
+    /* SAL_B's bit 31 stays, as on the rx2600: 0x80002006. */
+    qtest_writel(qts, lba + 0x278, 0x80002006u);
+    g_assert_cmphex(qtest_readl(qts, lba + 0x278), ==, 0x80002006u);
+    /*
+     * The PCI face (ERS 8.2, 8.3, 10.2, 10.3): four command bits, the line
+     * size and latency timer, the arbiter mode and its latency timer, all
+     * from 0; the rx2600's rope 0 reads 0x0146, 0x20, 0x80, 0x20000, 0x40.
+     */
+    g_assert_cmphex(qtest_readw(qts, lba + PCI_COMMAND), ==, 0);
+    qtest_writew(qts, lba + PCI_COMMAND, 0xffff);
+    g_assert_cmphex(qtest_readw(qts, lba + PCI_COMMAND), ==, 0x0146);
+    g_assert_cmphex(qtest_readw(qts, lba + PCI_STATUS), ==,
+                    IA64_LBA_PCI_STATUS_RESET);
+    qtest_writeb(qts, lba + PCI_CACHE_LINE_SIZE, 0x20);
+    qtest_writeb(qts, lba + PCI_LATENCY_TIMER, 0x80);
+    g_assert_cmphex(qtest_readq(qts, lba + 0x08), ==,
+                    0x0000802000000000ULL | IA64_LBA_REVISION |
+                    (IA64_LBA_CLASS_CODE << 8));
+    /* SAL_B writes both registers whole (FFEB2596); neither takes the other. */
+    qtest_writeq(qts, lba + 0x08, 0x0000402006000032ULL);
+    g_assert_cmphex(qtest_readw(qts, lba + PCI_COMMAND), ==, 0x0146);
+    qtest_writeq(qts, lba + 0x00, 0x0000014600000000ULL);
+    g_assert_cmphex(qtest_readb(qts, lba + PCI_LATENCY_TIMER), ==, 0x40);
+    g_assert_cmphex(qtest_readq(qts, lba + 0x90), ==, 0);
+    g_assert_cmphex(qtest_readq(qts, lba + 0x98), ==, 0);
+    qtest_writeq(qts, lba + 0x90, UINT64_MAX);
+    qtest_writeq(qts, lba + 0x98, UINT64_MAX);
+    g_assert_cmphex(qtest_readq(qts, lba + 0x90), ==, 0x00ff0000);
+    g_assert_cmphex(qtest_readq(qts, lba + 0x98), ==, 0xff);
     /* BUS_MODE (0x620): AGP bit set. */
     g_assert_cmphex(qtest_readl(qts, lba + 0x620) & 1u, ==, 1u);
     /* CONFIG_ADDRESS (0x40) is a writable selector, masked to 0x00fffffc. */

@@ -42,6 +42,10 @@ struct IA64LBAState {
     uint32_t bus_number;           /* BUS_NUMBER (0x58) secondary|subordinate */
     uint32_t agp_command;          /* AGP_COMMAND (0x68) */
     uint32_t arbitration_mask;     /* ARBITRATION_MASK (0x80) */
+    uint64_t pci_command;          /* FUNCTION_ID bits 47:32 */
+    uint64_t line_latency;         /* FUNCTION_CLASS bits 47:32 */
+    uint32_t arbitration_mode;     /* ARBITRATION_MODE (0x90) */
+    uint32_t mt_latency;           /* MULTI-TRANSACTION LATENCY TIMER (0x98) */
     uint32_t status_control;       /* STATUS_CONTROL / SIC (0x108) */
     uint64_t lmmio_base, lmmio_mask;    /* LMMIO decode  (0x200/0x208) */
     uint64_t gmmio_base, gmmio_mask;    /* GMMIO decode  (0x210/0x218) */

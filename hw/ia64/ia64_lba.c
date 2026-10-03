@@ -65,6 +65,8 @@
 #define LBA_AGP_CAPABILITY       0x060
 #define LBA_AGP_COMMAND          0x068
 #define LBA_ARBITRATION_MASK     0x080
+#define LBA_ARBITRATION_MODE     0x090
+#define LBA_MT_LATENCY           0x098
 #define LBA_STATUS_CONTROL       0x108
 #define LBA_LMMIO_BASE           0x200
 #define LBA_LMMIO_MASK           0x208
@@ -149,8 +151,22 @@
 #define LBA_MSI_BASE_WRITE       UINT64_C(0x00000fffffff0001)
 #define LBA_MSI_MASK_RESET       UINT64_C(0x00000ffffff00000)
 #define LBA_MSI_MASK_WRITE       UINT64_C(0x00000fffffff0000)
+/*
+ * Bits 31:19 have no reset value in ERS 9.13; SAL_B sets bit 31 on a PCI
+ * rope (FFEB8276) and the rx2600 reads it back (capture 2026-10-03, IOA-3).
+ */
 #define LBA_SLAVE_CONTROL_RESET  UINT64_C(0x00000006)
-#define LBA_SLAVE_CONTROL_WRITE  UINT64_C(0x0006200f)
+#define LBA_SLAVE_CONTROL_WRITE  UINT64_C(0x8006200f)
+/*
+ * ERS 8.2 and 8.3: of the PCI command only Memory Space, Bus Master, Parity
+ * Error Response and SERR# Enable exist (the rx2600 reads 0x0146), and the
+ * line size and latency timer are plain storage; all reset to 0.
+ */
+#define LBA_FUNCTION_ID_WRITE    UINT64_C(0x0000014600000000)
+#define LBA_FUNCTION_CLASS_WRITE UINT64_C(0x0000ffff00000000)
+/* ERS 10.2 and 10.3: the arbiter's mode bits and its latency timer. */
+#define LBA_ARBITRATION_MODE_WRITE UINT32_C(0x00ff0000)
+#define LBA_MT_LATENCY_WRITE     UINT32_C(0x000000ff)
 #define LBA_BUS_MODE_AGP         UINT64_C(0x00000001)
 #define LBA_BUS_MODE_SIX_MASTERS (UINT64_C(1) << 3)
 #define LBA_BUS_MODE_ROPE_2X_L   (UINT64_C(1) << 5)
@@ -190,13 +206,15 @@ static uint64_t ia64_lba_reg(IA64LBAState *s, uint64_t base, bool *modelled)
     *modelled = true;
     switch (base) {
     case LBA_FUNCTION_ID:
-        /* vendor | device | command(0) | status(CAP_LIST set). */
+        /* vendor | device | command | status(CAP_LIST set). */
         return IA64_LBA_VENDOR_ID |
                (IA64_LBA_DEVICE_ID << 16) |
+               s->pci_command |
                (IA64_LBA_PCI_STATUS_RESET << 48);
     case LBA_FUNCTION_CLASS:
         /* revision (byte 0x08) | class code (bytes 0x09-0x0b): host bridge. */
-        return IA64_LBA_REVISION | (IA64_LBA_CLASS_CODE << 8);
+        return IA64_LBA_REVISION | (IA64_LBA_CLASS_CODE << 8) |
+               s->line_latency;
     case LBA_CAP_POINTER:
         /* The capabilities pointer lands in byte 0x34. */
         return (uint64_t)((s->straps & LBA_BUS_MODE_AGP) ?
@@ -212,6 +230,10 @@ static uint64_t ia64_lba_reg(IA64LBAState *s, uint64_t base, bool *modelled)
         return s->agp_command;
     case LBA_ARBITRATION_MASK:
         return s->arbitration_mask;
+    case LBA_ARBITRATION_MODE:
+        return s->arbitration_mode;
+    case LBA_MT_LATENCY:
+        return s->mt_latency;
     case LBA_STATUS_CONTROL:
         /*
          * SIC latch.  RC (bit 32) "returns 1 while the PCI bus is held in
@@ -370,6 +392,23 @@ static MemTxResult ia64_lba_write(void *opaque, hwaddr addr, uint64_t value,
     data = (value << (lane * 8)) & mask;
 
     switch (base) {
+    case LBA_FUNCTION_ID:
+        ia64_lba_latch(&s->pci_command, LBA_FUNCTION_ID_WRITE, mask, data);
+        break;
+    case LBA_FUNCTION_CLASS:
+        ia64_lba_latch(&s->line_latency, LBA_FUNCTION_CLASS_WRITE, mask,
+                       data);
+        break;
+    case LBA_ARBITRATION_MODE:
+        latch = s->arbitration_mode;
+        ia64_lba_latch(&latch, LBA_ARBITRATION_MODE_WRITE, mask, data);
+        s->arbitration_mode = (uint32_t)latch;
+        break;
+    case LBA_MT_LATENCY:
+        latch = s->mt_latency;
+        ia64_lba_latch(&latch, LBA_MT_LATENCY_WRITE, mask, data);
+        s->mt_latency = (uint32_t)latch;
+        break;
     case LBA_BUS_NUMBER:
         latch = s->bus_number;
         ia64_lba_latch(&latch, LBA_BUS_NUMBER_WRITE, mask, data);
@@ -575,6 +614,10 @@ static void ia64_lba_reset(DeviceState *dev)
     s->config_address = 0;
     s->agp_command = 0;
     s->arbitration_mask = LBA_ARBITRATION_RESET;
+    s->pci_command = 0;
+    s->line_latency = 0;
+    s->arbitration_mode = 0;
+    s->mt_latency = 0;
     s->status_control = 0;
     s->lmmio_base = LBA_LMMIO_BASE_RESET;
     s->lmmio_mask = LBA_LMMIO_MASK_RESET;
@@ -605,7 +648,7 @@ static void ia64_lba_reset(DeviceState *dev)
 
 static const VMStateDescription vmstate_ia64_lba = {
     .name = "ia64-zx1-lba",
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 4,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(bus_number, IA64LBAState),
@@ -637,6 +680,10 @@ static const VMStateDescription vmstate_ia64_lba = {
         VMSTATE_UINT64(inbound_err_attr, IA64LBAState),
         VMSTATE_UINT64(completion_msg, IA64LBAState),
         VMSTATE_UINT64(outbound_err_addr, IA64LBAState),
+        VMSTATE_UINT64_V(pci_command, IA64LBAState, 5),
+        VMSTATE_UINT64_V(line_latency, IA64LBAState, 5),
+        VMSTATE_UINT32_V(arbitration_mode, IA64LBAState, 5),
+        VMSTATE_UINT32_V(mt_latency, IA64LBAState, 5),
         VMSTATE_END_OF_LIST()
     },
 };
