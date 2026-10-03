@@ -21,8 +21,9 @@
  * WGMMIO/ELMMIO window decoders 0x200-0x258, SLAVE_CONTROL 0x278, MSI 0x280/
  * 0x288, BUS_MODE 0x620) with their real reset values and writable masks.
  *
- * Register values and masks mirror upstream hw/pci-host/hp-zx1-ioa-regs.c in AGP
- * mode.  Deliberate simplifications for this machine: the LMMIO/GMMIO/MSI
+ * Register values and masks mirror upstream hw/pci-host/hp-zx1-ioa-regs.c; the
+ * "straps" property says whether the ioa sits on an AGP or a PCI rope, as the
+ * board ties its power-up pins (ERS 3.2.1).  Deliberate simplifications for this machine: the LMMIO/GMMIO/MSI
  * decoders are modelled for driver-visible fidelity but do not themselves route
  * decode -- this machine decodes through the shared PCI window and the ACPI
  * _CRS, and DMA/GART is the SBA's IOPDIR (hp-agp's "shared" path).  The block
@@ -54,6 +55,8 @@
 #define LBA_FUNCTION_ID          0x000
 #define LBA_FUNCTION_CLASS       0x008
 #define LBA_CAP_POINTER          0x030
+/* ERS 8.4: the pointer names the AGP capability in AGP mode, else PCI-X's. */
+#define LBA_CAP_POINTER_PCIX     0x0a0
 #define LBA_CONFIG_ADDRESS       0x040
 #define LBA_CONFIG_DATA          0x048
 #define LBA_BUS_NUMBER           0x058
@@ -150,7 +153,17 @@
 #define LBA_SLAVE_CONTROL_WRITE  UINT64_C(0x0006200f)
 #define LBA_BUS_MODE_AGP         UINT64_C(0x00000001)
 #define LBA_BUS_MODE_SIX_MASTERS (UINT64_C(1) << 3)
-#define LBA_BUS_MODE_SAFE_WRITE  UINT64_C(0x00010100)
+#define LBA_BUS_MODE_ROPE_2X_L   (UINT64_C(1) << 5)
+/* drv_m66en, master_32bit (ERS 3.2.2) and bit 16, which POST sets. */
+#define LBA_BUS_MODE_WRITE       UINT64_C(0x00018100)
+/*
+ * ERS 8.7: the PCI-X capability, with the command bits 22:16 writable and
+ * the three split-completion status bits write-1-to-clear.
+ */
+#define LBA_PCIX_CAP_RESET       UINT64_C(0x0013ff0000000007)
+#define LBA_PCIX_CAP_WRITE       UINT64_C(0x00000000007f0000)
+#define LBA_PCIX_CAP_W1C         ((UINT64_C(1) << 61) | (UINT64_C(1) << 51) | \
+                                  (UINT64_C(1) << 50))
 
 static uint64_t ia64_lba_size_mask(unsigned int size)
 {
@@ -185,8 +198,9 @@ static uint64_t ia64_lba_reg(IA64LBAState *s, uint64_t base, bool *modelled)
         /* revision (byte 0x08) | class code (bytes 0x09-0x0b): host bridge. */
         return IA64_LBA_REVISION | (IA64_LBA_CLASS_CODE << 8);
     case LBA_CAP_POINTER:
-        /* capabilities pointer lands in byte 0x34 -> the AGP capability. */
-        return IA64_LBA_AGP_CAP_OFFSET << 32;
+        /* The capabilities pointer lands in byte 0x34. */
+        return (uint64_t)((s->straps & LBA_BUS_MODE_AGP) ?
+                          IA64_LBA_AGP_CAP_OFFSET : LBA_CAP_POINTER_PCIX) << 32;
     case LBA_CONFIG_ADDRESS:
         return s->config_address;
     case LBA_BUS_NUMBER:
@@ -218,7 +232,9 @@ static uint64_t ia64_lba_reg(IA64LBAState *s, uint64_t base, bool *modelled)
     case LBA_SLAVE_CONTROL: return s->slave_control;
     case LBA_MSI_BASE:     return s->msi_base;
     case LBA_MSI_MASK:     return s->msi_mask;
-    case LBA_ROPE_CONFIG:  return s->rope_config | LBA_ROPE_SINGLE_WIDE;
+    case LBA_ROPE_CONFIG:
+        return s->rope_config |
+               ((s->straps & LBA_BUS_MODE_ROPE_2X_L) ? LBA_ROPE_SINGLE_WIDE : 0);
     case LBA_CLOCK_STATUS: return LBA_CLOCK_DLL_LOCKED;
     case LBA_BUS_MODE:     return s->bus_mode;
     case LBA_ERROR_CONFIG: return s->error_config;
@@ -443,13 +459,14 @@ static MemTxResult ia64_lba_write(void *opaque, hwaddr addr, uint64_t value,
         ia64_lba_latch(&s->rope_config, ~LBA_ROPE_SINGLE_WIDE, mask, data);
         break;
     case LBA_BUS_MODE:
-        ia64_lba_latch(&s->bus_mode, LBA_BUS_MODE_SAFE_WRITE, mask, data);
+        ia64_lba_latch(&s->bus_mode, LBA_BUS_MODE_WRITE, mask, data);
         break;
     case LBA_ERROR_CONFIG:
         ia64_lba_latch(&s->error_config, UINT64_MAX, mask, data);
         break;
     case LBA_PCIX_CAP:
-        ia64_lba_latch(&s->pcix_cap, UINT64_MAX, mask, data);
+        s->pcix_cap &= ~(data & LBA_PCIX_CAP_W1C);
+        ia64_lba_latch(&s->pcix_cap, LBA_PCIX_CAP_WRITE, mask, data);
         break;
     case LBA_ROPE_ERROR:
         ia64_lba_latch(&s->rope_error, UINT64_MAX, mask, data);
@@ -521,6 +538,7 @@ static void ia64_lba_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(&s->csr, 0, &s->regs);
 
     s->iosapic = qdev_new(TYPE_IA64_IOSAPIC);
+    object_property_add_child(OBJECT(s), "iosapic", OBJECT(s->iosapic));
     qdev_prop_set_uint32(s->iosapic, "num-pins", LBA_IOSAPIC_PINS);
     qdev_prop_set_uint32(s->iosapic, "version", LBA_IOSAPIC_VERSION);
     qdev_prop_set_uint8(s->iosapic, "face", IA64_IOSAPIC_FACE_IOA);
@@ -571,11 +589,11 @@ static void ia64_lba_reset(DeviceState *dev)
     s->msi_base = LBA_MSI_BASE_RESET;
     s->msi_mask = LBA_MSI_MASK_RESET;
     s->slave_control = LBA_SLAVE_CONTROL_RESET;
-    s->bus_mode = LBA_BUS_MODE_AGP;
+    s->bus_mode = s->straps;
     s->rope_config = 0;
     s->error_config = 0;
     s->error_control = 0;
-    s->pcix_cap = 0;
+    s->pcix_cap = LBA_PCIX_CAP_RESET;
     s->rope_error = 0;
     s->error_status = 0;
     s->error_master_id = 0;
@@ -633,6 +651,7 @@ static void ia64_lba_unrealize(DeviceState *dev)
 
 static const Property ia64_lba_properties[] = {
     DEFINE_PROP_UINT64("csr-base", IA64LBAState, csr_base, IA64_LBA_CSR_BASE),
+    DEFINE_PROP_UINT32("straps", IA64LBAState, straps, IA64_LBA_STRAPS_AGP),
 };
 
 static void ia64_lba_class_init(ObjectClass *klass, const void *data)

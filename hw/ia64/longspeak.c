@@ -34,6 +34,38 @@
 #define LONGSPEAK_SCSI_SLOT         1
 /* How many of the ioa I/O SAPIC's pins the board wires. */
 #define LONGSPEAK_INTX_PINS         6
+/*
+ * The rx2600's AGP ioa is on rope 4, double-wide with rope 5, at
+ * FED2_8000 (rx2600 capture of 2026-10-03, SCRAM LBA records).
+ */
+#define LONGSPEAK_AGP_ROPE          4
+
+/*
+ * The I/O backplane's PCI and PCI-X ropes, empty here.  SAL_B's table for a
+ * board with the backplane names them (FFEAB2F0, longspeak_bmc.c), and each
+ * has an ioa on the rx2600.
+ */
+static const struct {
+    unsigned int rope;
+    uint32_t straps;
+} longspeak_backplane_ropes[] = {
+    { 2, IA64_LBA_STRAPS_PCI33 },
+    { 3, IA64_LBA_STRAPS_PCIX },
+    { 6, IA64_LBA_STRAPS_PCI33 },
+};
+
+/* An ioa that answers only in the rope guest window the mio opens. */
+static DeviceState *longspeak_rope_ioa(uint32_t straps, Error **errp)
+{
+    DeviceState *ioa = qdev_new(TYPE_IA64_LBA);
+
+    object_property_set_uint(OBJECT(ioa), "csr-base", 0, &error_abort);
+    qdev_prop_set_uint32(ioa, "straps", straps);
+    if (!qdev_realize_and_unref(ioa, NULL, errp)) {
+        return NULL;
+    }
+    return ioa;
+}
 
 /*
  * The board's INTx wiring, as the vendor firmware's own SCRAM interrupt
@@ -106,6 +138,7 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
 {
     DeviceState *pdh;
     SysBusDevice *pdh_sbd;
+    unsigned int r;
     int i;
 
     /*
@@ -162,6 +195,7 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     s->lba_dev = qdev_new(TYPE_IA64_LBA);
     object_property_set_uint(OBJECT(s->lba_dev), "csr-base",
                              IA64_LBA_CSR_BASE, &error_abort);
+    qdev_prop_set_uint32(s->lba_dev, "straps", IA64_LBA_STRAPS_AGP);
     if (!qdev_realize_and_unref(s->lba_dev, NULL, errp)) {
         return false;
     }
@@ -173,15 +207,37 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
      * firmware never opens -- and the AGP bridge above keeps the fixed base
      * ACPI publishes for it.
      */
-    s->rope0_lba_dev = qdev_new(TYPE_IA64_LBA);
-    object_property_set_uint(OBJECT(s->rope0_lba_dev), "csr-base", 0,
-                             &error_abort);
-    if (!qdev_realize_and_unref(s->rope0_lba_dev, NULL, errp)) {
+    s->rope0_lba_dev = longspeak_rope_ioa(IA64_LBA_STRAPS_PCI33, errp);
+    if (s->rope0_lba_dev == NULL) {
+        return false;
+    }
+    /*
+     * Rope 1's ioa: the rx2600's carries the SCSI and the gigabit LAN, and its
+     * I/O SAPIC takes the PDH UARTs and the SCI on inputs 7 to 9 (the vendor
+     * SPCR, HCDP and FADT name GSI 34 to 36, base 27).  Its bus stays empty
+     * here, so a configuration cycle on it finds nothing, as on an empty rope.
+     */
+    s->rope1_lba_dev = longspeak_rope_ioa(IA64_LBA_STRAPS_PCI66, errp);
+    if (s->rope1_lba_dev == NULL) {
         return false;
     }
     ia64_sba_add_rope(IA64_SBA(s->sba_dev), 0,
                       &IA64_LBA(s->rope0_lba_dev)->csr);
-    ia64_sba_add_rope(IA64_SBA(s->sba_dev), 1, &IA64_LBA(s->lba_dev)->csr);
+    ia64_sba_add_rope(IA64_SBA(s->sba_dev), 1,
+                      &IA64_LBA(s->rope1_lba_dev)->csr);
+    ia64_sba_add_rope(IA64_SBA(s->sba_dev), LONGSPEAK_AGP_ROPE,
+                      &IA64_LBA(s->lba_dev)->csr);
+    for (r = 0; r < ARRAY_SIZE(longspeak_backplane_ropes); r++) {
+        DeviceState *ioa =
+            longspeak_rope_ioa(longspeak_backplane_ropes[r].straps, errp);
+
+        if (ioa == NULL) {
+            return false;
+        }
+        ia64_sba_add_rope(IA64_SBA(s->sba_dev),
+                          longspeak_backplane_ropes[r].rope,
+                          &IA64_LBA(ioa)->csr);
+    }
     ia64_sba_set_window_notify(IA64_SBA(s->sba_dev),
                                longspeak_lmmio_window_moved, s);
     /*
@@ -228,38 +284,48 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     return true;
 }
 
+/* One interrupt line that reaches two controllers. */
+static qemu_irq longspeak_split_irq(qemu_irq a, qemu_irq b)
+{
+    DeviceState *split = qdev_new(TYPE_SPLIT_IRQ);
+
+    object_property_set_int(OBJECT(split), "num-lines", 2, &error_abort);
+    qdev_realize_and_unref(split, NULL, &error_abort);
+    qdev_connect_gpio_out(split, 0, a);
+    qdev_connect_gpio_out(split, 1, b);
+    return qdev_get_gpio_in(split, 0);
+}
+
 /*
- * Both roots wire-OR into one block of interrupt lines, and each line reaches
- * two controllers: the rope 0 ioa's own I/O SAPIC, which is the one the vendor
- * firmware finds and publishes (ERS sec 11.2), and the platform IOSAPIC our
- * own firmware publishes.  A line an OS has not programmed stays masked, so
- * only the controller its firmware described ever delivers.
+ * Each root's lines reach two controllers: the I/O SAPIC of the root's own
+ * ioa, which the vendor firmware finds and publishes (ERS sec 11.2), and the
+ * platform IOSAPIC our own firmware publishes, where both roots wire-OR into
+ * one block of lines.  A line an OS has not programmed stays masked, so only
+ * the controller its firmware described ever delivers.
  */
 static void longspeak_wire_intx(IA64VpcMachineState *s, DeviceState *pci_host,
                                 DeviceState *iosapic)
 {
     IA64LBAState *rope0 = IA64_LBA(s->rope0_lba_dev);
+    IA64LBAState *agp = IA64_LBA(s->lba_dev);
     unsigned int i;
 
     for (i = 0; i < LONGSPEAK_INTX_PINS; i++) {
         DeviceState *org = qdev_new(TYPE_OR_IRQ);
-        DeviceState *split = qdev_new(TYPE_SPLIT_IRQ);
-
-        object_property_set_int(OBJECT(split), "num-lines", 2, &error_abort);
-        qdev_realize_and_unref(split, NULL, &error_abort);
-        qdev_connect_gpio_out(split, 0, ia64_lba_iosapic_input(rope0, i));
-        qdev_connect_gpio_out(split, 1,
-                              qdev_get_gpio_in(iosapic,
-                                               IA64_PCI_INTX_GSI_BASE + i));
 
         object_property_set_int(OBJECT(org), "num-lines", 2, &error_abort);
         qdev_realize_and_unref(org, NULL, &error_abort);
-        qdev_connect_gpio_out(org, 0, qdev_get_gpio_in(split, 0));
-        qdev_connect_gpio_out(pci_host, i, qdev_get_gpio_in(org, 0));
+        qdev_connect_gpio_out(org, 0,
+                              qdev_get_gpio_in(iosapic,
+                                               IA64_PCI_INTX_GSI_BASE + i));
+        qdev_connect_gpio_out(pci_host, i,
+            longspeak_split_irq(ia64_lba_iosapic_input(rope0, i),
+                                qdev_get_gpio_in(org, 0)));
         /* The second root swizzles into the first four lines only. */
         if (i < IA64_PCI_INTX_LINES) {
             qdev_connect_gpio_out(s->mercury_host, i,
-                                  qdev_get_gpio_in(org, 1));
+                longspeak_split_irq(ia64_lba_iosapic_input(agp, i),
+                                    qdev_get_gpio_in(org, 1)));
         }
     }
 }

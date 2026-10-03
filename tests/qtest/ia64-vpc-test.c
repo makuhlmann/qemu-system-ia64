@@ -1685,8 +1685,9 @@ static unsigned bcd(uint8_t v)
  * What the vendor firmware needs of a rope guest before it will configure the
  * I/O host bridge below it: its identity in the rope configuration window
  * where ROPE_CONFIG_BASE puts it, the I/O bus clock's DLL locked (0x618 bit 3,
- * or POST 0x82 "PCI clock DLL error"), a single-wide rope (0x610 bit 8, or
- * POST 0x7D "I/O rope width does not match expected value") and a rope request
+ * or POST 0x82 "PCI clock DLL error"), the rope width its board table
+ * expects (0x610 bit 8 single, clear on the AGP rope 4, or POST 0x7D "I/O
+ * rope width does not match expected value") and a rope request
  * queue depth of at least two in the mio (FED0_1400 + 8 per rope).
  */
 static void test_lba_rope_window(void)
@@ -1705,13 +1706,37 @@ static void test_lba_rope_window(void)
 
     g_assert_cmphex(qtest_readq(qts, rope + 0x618) & 0x8, ==, 0x8);
     g_assert_cmphex(qtest_readq(qts, rope + 0x610) & 0x100, ==, 0x100);
-    /* The same block answers at the base our own firmware publishes. */
-    g_assert_cmphex(qtest_readw(qts, IA64_LBA_CSR_BASE), ==,
-                    IA64_LBA_VENDOR_ID);
 
-    /* Rope 1 carries the AGP bridge, so both roots have an ioa. */
+    /*
+     * Ropes 0 and 1 are PCI ropes, rope 4 the AGP one, double-wide, as on the
+     * rx2600: BUS_MODE's straps, the capability pointer (ERS 8.4) and the
+     * rope width follow, and the PCI-X capability resets as ERS 8.7 gives it.
+     */
+    g_assert_cmphex(qtest_readq(qts, rope + 0x620) & 0xffff, ==, 0x0460);
+    g_assert_cmphex(qtest_readb(qts, rope + 0x34), ==, 0xa0);
+    g_assert_cmphex(qtest_readq(qts, rope + 0xa0), ==, 0x0013ff0000000007ULL);
+    qtest_writeq(qts, rope + 0xa0, UINT64_MAX);
+    g_assert_cmphex(qtest_readq(qts, rope + 0xa0), ==, 0x0013ff00007f0007ULL);
     g_assert_cmphex(qtest_readw(qts, rope + 0x2000), ==, IA64_LBA_VENDOR_ID);
     g_assert_cmphex(qtest_readw(qts, rope + 0x2002), ==, IA64_LBA_DEVICE_ID);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x2620) & 0xffff, ==, 0x04e0);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x4620) & 0xffff, ==, 0x0460);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x6620) & 0xffff, ==, 0x7ce0);
+    g_assert_cmphex(qtest_readq(qts, rope + 0xc620) & 0xffff, ==, 0x0460);
+    g_assert_cmphex(qtest_readw(qts, rope + 0xa000), !=, IA64_LBA_VENDOR_ID);
+    g_assert_cmphex(qtest_readw(qts, rope + 0xe000), !=, IA64_LBA_VENDOR_ID);
+    g_assert_cmphex(qtest_readw(qts, rope + 0x8000), ==, IA64_LBA_VENDOR_ID);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x8620) & 0xffff, ==, 0x0081);
+    g_assert_cmphex(qtest_readb(qts, rope + 0x8034), ==, 0x60);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x8610) & 0x100, ==, 0);
+    /* The AGP block also answers at the base our own firmware publishes. */
+    g_assert_cmphex(qtest_readw(qts, IA64_LBA_CSR_BASE), ==,
+                    IA64_LBA_VENDOR_ID);
+    g_assert_cmphex(qtest_readb(qts, IA64_LBA_CSR_BASE + 0x34), ==, 0x60);
+    /* ROPE_CONFIG (mio ERS register 23) powers up with bits 7:0 set. */
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x1040), ==, 0xff);
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x1040, 0x400);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x1040), ==, 0x400);
 
     /*
      * Every ioa carries an I/O SAPIC (zx1 ioa ERS sec 11.2): select at 0x800,
@@ -1725,15 +1750,22 @@ static void test_lba_rope_window(void)
     g_assert_cmphex(qtest_readl(qts, rope + 0x810), ==, 0x00010000);
     qtest_writel(qts, rope + 0x2000 + 0x800, 0x01);
     g_assert_cmphex(qtest_readl(qts, rope + 0x2000 + 0x810), ==, 0x000a0020);
+    qtest_writel(qts, rope + 0x8000 + 0x800, 0x01);
+    g_assert_cmphex(qtest_readl(qts, rope + 0x8000 + 0x810), ==, 0x000a0020);
 
     /*
      * Rope 0's block does configuration cycles on the primary root bus: the
-     * SBA answers at 00:1f.0 there, the AGP bridge's block does not see it.
+     * SBA answers at 00:1f.0 there.  Rope 1's bus is empty, and rope 4's
+     * block reaches the graphics adapter at device 0 of the Mercury bus.
      */
     qtest_writel(qts, rope + 0x40, 0x80000000 | (31 << 11));
     g_assert_cmphex(qtest_readw(qts, rope + 0x48), ==, IA64_LBA_VENDOR_ID);
     qtest_writel(qts, rope + 0x2000 + 0x40, 0x80000000 | (31 << 11));
     g_assert_cmphex(qtest_readw(qts, rope + 0x2000 + 0x48), ==, 0xffff);
+    qtest_writel(qts, rope + 0x2000 + 0x40, 0x80000000);
+    g_assert_cmphex(qtest_readw(qts, rope + 0x2000 + 0x48), ==, 0xffff);
+    qtest_writel(qts, rope + 0x8000 + 0x40, 0x80000000);
+    g_assert_cmphex(qtest_readw(qts, rope + 0x8000 + 0x48), !=, 0xffff);
 
     /* Clearing the enable takes the window away again. */
     qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, 0);
@@ -1746,6 +1778,34 @@ static void test_lba_rope_window(void)
  * table from the product id in the board's own FRU and then reads a JEDEC SPD
  * from the device of each slot.
  */
+/*
+ * FRU device 5 answers and device 6 does not: SAL_B then takes the table of
+ * the board with the I/O backplane, the rx2600's ropes 0 to 4 and 6.
+ */
+static void test_pdh_io_backplane_fru(void)
+{
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    uint8_t read[] = { IPMI_NETFN_STORAGE_LUN0, IPMI_CMD_READ_FRU_DATA,
+                       0x05, 0x00, 0x00, 8 };
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t rsp[32];
+    uint8_t sum = 0;
+    unsigned int i;
+
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, sizeof(read),
+                                     rsp, sizeof(rsp)), ==, 4 + 8);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    g_assert_cmphex(rsp[4], ==, 0x01);
+    for (i = 0; i < 8; i++) {
+        sum += rsp[4 + i];
+    }
+    g_assert_cmphex(sum, ==, 0);
+    read[2] = 0x06;
+    bmc_kcs_command(qts, kcs, read, sizeof(read), rsp, sizeof(rsp));
+    g_assert_cmphex(rsp[2], !=, 0x00);
+    qtest_quit(qts);
+}
+
 static void test_pdh_dimm_spd(void)
 {
     const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
@@ -9376,6 +9436,8 @@ int main(int argc, char **argv)
                    test_pdh_bmc_tokens_persist);
     qtest_add_func("/ia64-vpc/pdh/clock", test_pdh_clock);
     qtest_add_func("/ia64-vpc/pdh/dimm-spd", test_pdh_dimm_spd);
+    qtest_add_func("/ia64-vpc/pdh/io-backplane-fru",
+                   test_pdh_io_backplane_fru);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",
                    test_mercury_config_dispatch);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);

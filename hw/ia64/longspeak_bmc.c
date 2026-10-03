@@ -98,6 +98,18 @@ DECLARE_CLASS_CHECKERS(LongspeakBmcClass, LONGSPEAK_BMC, TYPE_LONGSPEAK_BMC)
 
 #define LONGSPEAK_BMC_SPD_SIZE      256
 
+/*
+ * FRU device 5.  SAL_B reads its first byte and takes the board with the
+ * I/O backplane when the BMC answers: ropes 0 to 4 (4 double-wide) and 6, the
+ * rx2600's; without it, the core I/O ropes 0 and 1 alone (FFEAB2F0, tables
+ * from FFF7_F160).  An answer from device 6 would add rope 7, which the
+ * rx2600 does not have.  The device's contents are not captured, so it is an
+ * empty FRU: the common header alone, version 1, no areas (IPMI FRU 1.0
+ * sec 8).
+ */
+#define LONGSPEAK_BMC_FRU_IO        0x05
+#define LONGSPEAK_BMC_FRU_IO_SIZE   8
+
 /* The DIMM slots 0A, 0B, 1A ... 5B and the FRU device of each (FFF96CD8). */
 static const uint8_t longspeak_bmc_dimm_dev[] = {
     0x80, 0x81, 0x88, 0x89, 0x82, 0x83, 0x8a, 0x8b, 0x84, 0x85, 0x8c, 0x8d
@@ -569,6 +581,15 @@ static bool longspeak_bmc_fru(uint8_t *cmd, unsigned int cmd_len,
         longspeak_bmc_board_fru(image);
         return longspeak_bmc_fru_image(cmd, cmd_len, rsp, image,
                                        LONGSPEAK_BMC_FRU0_SIZE);
+    }
+
+    if (cmd[2] == LONGSPEAK_BMC_FRU_IO) {
+        static const uint8_t header[LONGSPEAK_BMC_FRU_IO_SIZE] = {
+            0x01, 0, 0, 0, 0, 0, 0, 0xff
+        };
+
+        return longspeak_bmc_fru_image(cmd, cmd_len, rsp, header,
+                                       LONGSPEAK_BMC_FRU_IO_SIZE);
     }
 
     if (cmd[2] >= LONGSPEAK_BMC_FRU_FIRST &&
