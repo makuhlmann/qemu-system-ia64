@@ -1998,9 +1998,15 @@ typedef struct IA64PalProfile {
     bool tr_read_fixed_valid;
     uint8_t tr_read_valid[2];
 
-    /* PAL_PERF_MON_INFO: PAL_WIDTH and the low word of PAL_RETIRED_MASK. */
+    /*
+     * PAL_PERF_MON_INFO: PAL_WIDTH, the low words of PAL_PMC_MASK and
+     * PAL_RETIRED_MASK.
+     */
     uint8_t perf_counter_width;
+    uint64_t perf_pmc_mask;
     uint64_t perf_retired_mask;
+    /* PAL_REGISTER_INFO request 2, CR0-63. */
+    uint64_t cr_implemented_low;
 } IA64PalProfile;
 
 /*

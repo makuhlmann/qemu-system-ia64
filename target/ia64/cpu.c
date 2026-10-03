@@ -1163,6 +1163,9 @@ static const TCGCPUOps ia64_tcg_ops = {
     { .num_entries = 128, .num_ways = 128, .num_sets = 1, \
       .reduced_by_trs = true, .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK }
 
+/* PAL_REGISTER_INFO request 2: DCR, ITM, IVA, PTA and the interruption CRs. */
+#define IA64_PAL_CR_IMPLEMENTED_LOW 0x0000000003fb0107ULL
+
 static const IA64PalProfile ia64_pal_profile_madison = {
     /*
      * The input clock is the 200 MHz system bus clock (251110-003 6.10), and
@@ -1243,9 +1246,15 @@ static const IA64PalProfile ia64_pal_profile_madison = {
     .hash_tag_id = 2,
     .tr_read_fixed_valid = true,
     .tr_read_valid = { 0x0, 0xe },
-    /* 251110-003 Table 10-28 */
-    .perf_counter_width = 48,
+    /*
+     * PAL_PERF_MON_INFO and PAL_REGISTER_INFO of the rx2600 (capture
+     * 2026-10-03, CPU-12 and CPU-14): 47-bit counters (251110-003 Table
+     * 10-7) and PMC0-15; CR9 is implemented.
+     */
+    .perf_counter_width = 47,
+    .perf_pmc_mask = 0xffff,
     .perf_retired_mask = 0xf0,
+    .cr_implemented_low = 0x0000000003fb0307ULL,
 };
 
 static const IA64PalProfile ia64_pal_profile_montecito = {
@@ -1296,7 +1305,9 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     },
     .hash_tag_id = 8,
     .perf_counter_width = 48,
+    .perf_pmc_mask = 0x3fff,
     .perf_retired_mask = 0xf0,
+    .cr_implemented_low = IA64_PAL_CR_IMPLEMENTED_LOW,
 };
 
 /*
@@ -1400,7 +1411,9 @@ static const IA64PalProfile ia64_pal_profile_merced = {
     .hash_tag_id = 8,
     /* 245320-003 Table 6-24 */
     .perf_counter_width = 32,
+    .perf_pmc_mask = 0x3fff,
     .perf_retired_mask = 0x10,
+    .cr_implemented_low = IA64_PAL_CR_IMPLEMENTED_LOW,
 };
 
 static const Property ia64_cpu_properties[] = {

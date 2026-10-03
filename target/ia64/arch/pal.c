@@ -79,7 +79,6 @@
 #define PAL_PERF_MON_INFO_VALUE \
     (((uint64_t)IA64_PMU_EVENT_INST_RETIRED << 24) | \
      ((uint64_t)IA64_PMU_EVENT_CPU_CYCLES << 16) | 4)
-#define PAL_PERF_PMC_MASK          0x3fffULL
 #define PAL_PERF_PMD_MASK          0x3ffffULL
 
 #define PAL_CACHE_FLUSH_OPERATION_MASK 0x3ULL
@@ -1612,17 +1611,20 @@ static void pal_set_features(CPUIA64State *env)
  * control registers, and those whose read has a side effect.  Reading an
  * unimplemented register faults, so requests 1 and 3 set its bit too: the
  * HP zx1 SAL's INIT handler (FFE8B3C0) reads every control register whose
- * request-3 bit is clear, and would fault on cr3 with PSR.ic = 0.  IVR
- * (cr65) acknowledges the interrupt it returns.
+ * request-3 bit is clear, and would fault on cr3 with PSR.ic = 0.  The
+ * ignored ARs 48-63 and 112-127 read as 0 without a fault (SDM Vol. 1
+ * Table 3-3), and the rx2600 leaves their request-1 bits clear (capture
+ * 2026-10-03, CPU-12).  IVR (cr65) acknowledges the interrupt it returns.
  */
 #define PAL_AR_IMPLEMENTED_LOW          0x000011117f2f00ffULL
 #define PAL_AR_IMPLEMENTED_HIGH         0x7ULL
-#define PAL_CR_IMPLEMENTED_LOW          0x0000000003fb0107ULL
+#define PAL_AR_IGNORED                  0xffff000000000000ULL
 #define PAL_CR_IMPLEMENTED_HIGH         0x307ffULL
 #define PAL_CR_READ_SIDE_EFFECT_HIGH    0x2ULL
 
 static void pal_register_info(CPUIA64State *env)
 {
+    uint64_t cr_low = ia64_env_cpu_class(env)->pal->cr_implemented_low;
     uint64_t info_type = env->gr[IA64_PAL_GR_ARG1];
 
     if (env->gr[IA64_PAL_GR_ARG2] != 0 ||
@@ -1641,15 +1643,17 @@ static void pal_register_info(CPUIA64State *env)
         env->gr[IA64_PAL_GR_RESULT2] = PAL_AR_IMPLEMENTED_HIGH;
         break;
     case 1:
-        env->gr[IA64_PAL_GR_RESULT1] = ~PAL_AR_IMPLEMENTED_LOW;
-        env->gr[IA64_PAL_GR_RESULT2] = ~PAL_AR_IMPLEMENTED_HIGH;
+        env->gr[IA64_PAL_GR_RESULT1] =
+            ~PAL_AR_IMPLEMENTED_LOW & ~PAL_AR_IGNORED;
+        env->gr[IA64_PAL_GR_RESULT2] =
+            ~PAL_AR_IMPLEMENTED_HIGH & ~PAL_AR_IGNORED;
         break;
     case 2:
-        env->gr[IA64_PAL_GR_RESULT1] = PAL_CR_IMPLEMENTED_LOW;
+        env->gr[IA64_PAL_GR_RESULT1] = cr_low;
         env->gr[IA64_PAL_GR_RESULT2] = PAL_CR_IMPLEMENTED_HIGH;
         break;
     case 3:
-        env->gr[IA64_PAL_GR_RESULT1] = ~PAL_CR_IMPLEMENTED_LOW;
+        env->gr[IA64_PAL_GR_RESULT1] = ~cr_low;
         env->gr[IA64_PAL_GR_RESULT2] = ~PAL_CR_IMPLEMENTED_HIGH |
                                        PAL_CR_READ_SIDE_EFFECT_HIGH;
         break;
@@ -1684,7 +1688,7 @@ static void pal_perf_mon_info(CPUIA64State *env, uintptr_t ra)
      * cycles and 0x08 for retired instructions (245320-003 Table 6-24,
      * 251110-003 Table 10-28).
      */
-    ia64_exec_store_data(env, pm_buffer, PAL_PERF_PMC_MASK, 8, false, ra);
+    ia64_exec_store_data(env, pm_buffer, pal->perf_pmc_mask, 8, false, ra);
     ia64_exec_store_data(env, pm_buffer + 0x20, PAL_PERF_PMD_MASK,
                          8, false, ra);
     ia64_exec_store_data(env, pm_buffer + 0x40, IA64_PMU_CYCLE_COUNTERS,

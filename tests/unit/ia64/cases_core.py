@@ -1692,6 +1692,19 @@ test_psad1_decode = require_registers("psad1_decode", [
     "exception": IA64_EXCP_NONE,
 }, entry=0x10)
 
+# ARs 48-63 and 112-127 are ignored (SDM Vol. 1 Table 3-3): writes are
+# dropped and reads return 0 without a fault, as PAL_REGISTER_INFO request 1
+# reports.
+test_ignored_ars_read_zero = require_registers("ignored_ars_read_zero", [
+    (0x10, 0x00, nop_m(), addl(9, 0x1234, 0), nop_i()),
+    (0x20, 0x00, mov_m_gr_ar(9, 48), nop_i(), nop_i()),
+    (0x30, 0x00, mov_m_ar_gr(10, 48), nop_i(), nop_i()),
+    (0x40, 0x00, mov_m_gr_ar(9, 127), nop_i(), nop_i()),
+    (0x50, 0x00, mov_m_ar_gr(11, 127), nop_i(), nop_i()),
+    (0x60, 0x10, nop_m(), nop_i(), br_cond(0x60, 0x60)),
+], {"ip": 0x60, "exception": IA64_EXCP_NONE, "r9": 0x1234, "r10": 0,
+    "r11": 0}, entry=0x10)
+
 test_fc_i_sync_i_decode = require_registers("fc_i_sync_i_decode", [
     (0x10, *movl_mlx(30, 0x200)),
     (0x20, 0x10, fc_i(30), adds(30, 32, 30),
@@ -3872,6 +3885,7 @@ CASE_NAMES = (
     'epc_b_ignored_fields_decode',
     'extr_signed_truncates_overlong_field',
     'extr_u_ignored_bit36_decode',
+    'ignored_ars_read_zero',
     'fc_i_sync_i_decode',
     'fwb_decode',
     'hint_i_decode',

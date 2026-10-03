@@ -1373,13 +1373,15 @@ test_pal_register_info_application_implemented = require_registers(
 
 # Requests 1 and 3 mark every unimplemented register: reading one faults,
 # and the HP zx1 SAL's INIT handler reads every control register whose
-# request-3 bit is clear.
+# request-3 bit is clear.  The ignored ARs 48-63 and 112-127 read as 0
+# without a fault.
 test_pal_register_info_application_side_effects = require_registers(
     "pal_register_info_application_side_effects",
     pal_call_program(PAL_REGISTER_INFO, [(29, 1), (30, 0), (31, 0)]),
     {"ip": 0x60, "r28": PAL_REGISTER_INFO, "r8": 0,
-     "r9": ~PAL_AR_IMPLEMENTED_LOW & UINT64_MAX,
-     "r10": ~PAL_AR_IMPLEMENTED_HIGH & UINT64_MAX, "r11": 0}, entry=0x10)
+     "r9": ~PAL_AR_IMPLEMENTED_LOW & 0x0000ffffffffffff,
+     "r10": ~PAL_AR_IMPLEMENTED_HIGH & 0x0000ffffffffffff, "r11": 0},
+    entry=0x10)
 
 test_pal_register_info_control_implemented = require_registers(
     "pal_register_info_control_implemented",
@@ -1397,6 +1399,28 @@ test_pal_register_info_control_side_effects = require_registers(
             PAL_CR_READ_SIDE_EFFECT_HIGH, "r11": 0},
     entry=0x10)
 
+# The rx2600's answers to the four requests (capture 2026-10-03, CPU-12).
+def _pal_register_info_madison(name, request, low, high):
+    return require_registers(
+        name,
+        pal_call_program(PAL_REGISTER_INFO, [(29, request), (30, 0), (31, 0)]),
+        {"ip": 0x60, "r8": 0, "r9": low, "r10": high, "r11": 0},
+        entry=0x10, cpu="madison")
+
+
+test_pal_register_info_madison_ar_implemented = _pal_register_info_madison(
+    "pal_register_info_madison_ar_implemented", 0,
+    0x000011117f2f00ff, 0x7)
+test_pal_register_info_madison_ar_side_effects = _pal_register_info_madison(
+    "pal_register_info_madison_ar_side_effects", 1,
+    0x0000eeee80d0ff00, 0x0000fffffffffff8)
+test_pal_register_info_madison_cr_implemented = _pal_register_info_madison(
+    "pal_register_info_madison_cr_implemented", 2,
+    0x0000000003fb0307, 0x307ff)
+test_pal_register_info_madison_cr_side_effects = _pal_register_info_madison(
+    "pal_register_info_madison_cr_side_effects", 3,
+    0xfffffffffc04fcf8, 0xfffffffffffcf802)
+
 test_pal_register_info_invalid_request = require_registers(
     "pal_register_info_invalid_request",
     pal_call_program(PAL_REGISTER_INFO, [(29, 4), (30, 0), (31, 0)]),
@@ -1411,7 +1435,8 @@ test_pal_register_info_reserved_arg = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
-def _pal_perf_mon_info_case(name, info, retired_mask, cpu=None):
+def _pal_perf_mon_info_case(name, info, retired_mask, cpu=None,
+                            pmc_mask=0x3fff):
     return require_registers(name, [
         (0x10, *movl_mlx(29, PAL_PERF_BUFFER)),
         (0x20, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
@@ -1429,7 +1454,7 @@ def _pal_perf_mon_info_case(name, info, retired_mask, cpu=None):
         (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
     ], {"ip": 0xc0, "r28": PAL_PERF_MON_INFO, "r8": 0,
         "r9": info, "r10": 0, "r11": 0,
-        "r20": 0x3fff, "r21": 0, "r22": 0x3ffff, "r23": 0,
+        "r20": pmc_mask, "r21": 0, "r22": 0x3ffff, "r23": 0,
         "r24": 0xf0, "r25": retired_mask},
         entry=0x10, cpu=cpu)
 
@@ -1439,6 +1464,11 @@ test_pal_perf_mon_info = _pal_perf_mon_info_case(
 # 245320-003 Table 6-24: 32-bit counters; only PMD4 counts retired instructions.
 test_pal_perf_mon_info_merced = _pal_perf_mon_info_case(
     "pal_perf_mon_info_merced", 0x08122004, 0x10, cpu="merced")
+
+# The rx2600: 47-bit counters and PMC0-15 (capture 2026-10-03, CPU-14).
+test_pal_perf_mon_info_madison = _pal_perf_mon_info_case(
+    "pal_perf_mon_info_madison", 0x08122f04, 0xf0, cpu="madison",
+    pmc_mask=0xffff)
 
 test_pal_perf_mon_info_bad_buffer = require_registers(
     "pal_perf_mon_info_bad_buffer",
@@ -2288,6 +2318,11 @@ CASE_NAMES = (
     'pal_mem_attrib_reserved_arg',
     'pal_mem_for_test',
     'pal_perf_mon_info',
+    'pal_perf_mon_info_madison',
+    'pal_register_info_madison_ar_implemented',
+    'pal_register_info_madison_ar_side_effects',
+    'pal_register_info_madison_cr_implemented',
+    'pal_register_info_madison_cr_side_effects',
     'pal_perf_mon_info_merced',
     'pal_perf_mon_info_bad_buffer',
     'pal_perf_mon_info_reserved_arg',
