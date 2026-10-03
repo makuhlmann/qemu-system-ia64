@@ -460,6 +460,10 @@ void cpu_x86_cpuid(CPUX86State *xenv, uint32_t index, uint32_t count,
                    uint32_t *edx)
 {
     *eax = *ebx = *ecx = *edx = 0;
+    if (index > xenv->cpuid_level &&
+        ia64_env_cpu_class((CPUIA64State *)xenv)->ia32_cpuid_high_leaf_repeats) {
+        index = xenv->cpuid_level;
+    }
     switch (index) {
     case 0:
         *eax = xenv->cpuid_level;

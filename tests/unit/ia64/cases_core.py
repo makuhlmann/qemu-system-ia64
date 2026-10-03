@@ -2510,12 +2510,40 @@ test_ia32_cpuid_leaf2_reports_madison_cache_descriptors = require_registers(
         ia32_bundle(0x110, bytes.fromhex("0f b8 00 02")),
         (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
     ], {
+        # The rx2600's Madison, under Linux and Windows (capture 2026-10-03).
         "ip": 0x200,
-        "r8": 0x7e776701,
-        "r9": 0,
-        "r10": 0xffffffff80000000,
-        "r11": 0x8d,
+        "r8": 0x77aca801,
+        "r9": 0xa4a0,
+        "r10": 0x008d7e67,
+        "r11": 0,
         "r14": 2,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+# Above the highest leaf, Madison's engine repeats leaf 2 (rx2600 capture
+# 2026-10-03: leaf 80000000h); Merced, with no hardware value, keeps zeros.
+test_ia32_cpuid_high_leaf_repeats_leaf2_on_madison = require_registers(
+    "ia32_cpuid_high_leaf_repeats_leaf2_on_madison", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(8, 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x30, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "66 b8 03 00 00 00 "  # mov eax,3
+            "0f a2 "              # cpuid
+            "66 89 c6")),         # mov esi,eax
+        ia32_bundle(0x110, bytes.fromhex(
+            "66 b8 00 00 00 80 "  # mov eax,80000000h
+            "0f a2 "              # cpuid
+            "0f b8 00 02")),      # jmpe 0x200
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+    ], {
+        "ip": 0x200,
+        "r8": 0x77aca801,
+        "r9": 0xa4a0,
+        "r10": 0x008d7e67,
+        "r11": 0,
+        "r14": 0x77aca801,
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
@@ -2557,9 +2585,9 @@ test_ia32_cpuid_leaf1_reports_madison_feature_word = require_registers(
         (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
     ], {
         "ip": 0x200,
-        "r8": 0x673,
+        "r8": 0x00100f15,
         "r9": 0,
-        "r10": 0x4383fbbf,
+        "r10": 0x4383fbff,
         "r11": 0,
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
@@ -3766,6 +3794,7 @@ CASE_NAMES = (
     'ia32_indirect_jump_reaches_target',
     'ia32_cpuid_leaf1_reports_madison_feature_word',
     'ia32_cpuid_leaf2_reports_madison_cache_descriptors',
+    'ia32_cpuid_high_leaf_repeats_leaf2_on_madison',
     'ia32_cpuid_leaf2_reports_merced_cache_descriptors',
     'ia32_fldenv_restores_x87_environment',
     'ia32_fnstenv_saves_x87_environment_and_masks_exceptions',

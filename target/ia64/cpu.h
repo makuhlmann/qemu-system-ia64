@@ -2019,12 +2019,17 @@ struct IA64CPUClass {
     /*
      * IA-32 CPUID(1) EAX reported by the hardware IA-32 engine.  x86
      * family 7 is the assignment for the original Itanium's engine (Intel
-     * AP-485 processor-identification tables); the Itanium 2 generation
-     * reports a P6-class identity instead.
+     * AP-485 processor-identification tables); Madison's reads 0x00100F15.
      */
     uint32_t ia32_cpuid_version;
     /* IA-32 CPUID(2) cache and TLB descriptors: EAX, EBX, ECX, EDX. */
     uint32_t ia32_cpuid_leaf2[4];
+    /*
+     * The engine reports PAE in CPUID(1) EDX, and a leaf above the highest
+     * one returns that leaf's data, as the IA-32 SDM describes for CPUID.
+     */
+    bool ia32_cpuid_pae;
+    bool ia32_cpuid_high_leaf_repeats;
     /*
      * Translation-register file sizes.  These are asymmetric on the original
      * Itanium (8 ITR / 48 DTR, 248701-002 §2.5.6); Madison/Montecito use 64 of

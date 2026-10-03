@@ -1367,11 +1367,12 @@ static const Property ia64_cpu_properties[] = {
 };
 
 /*
- * Madison's IA-32 cache descriptors.  The L3 descriptor reports 3 MB even on
- * larger-cache parts, matching hardware erratum 6.  EDX is architecturally
- * reserved for this implementation.
+ * The IA-32 engine of the rx2600's Madison (1.3 GHz, 3 MB, B1), under Linux
+ * and Windows alike (rx2600 capture 2026-10-03, CPU-3): CPUID(1) EAX
+ * 0x00100F15 with PAE in the feature word, and these leaf-2 descriptors.
  */
-#define IA64_MADISON_IA32_CPUID_LEAF2 { 0x7e776701, 0x0000008d, 0, 0x80000000 }
+#define IA64_MADISON_IA32_CPUID_VERSION 0x00100f15
+#define IA64_MADISON_IA32_CPUID_LEAF2 { 0x77aca801, 0, 0x0000a4a0, 0x008d7e67 }
 
 static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
 {
@@ -1402,10 +1403,12 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
      */
     icc->cpuid_version = 0x000000001f010504ULL;
     icc->cpuid_features = IA64_CPUID4_LB;
-    icc->ia32_cpuid_version = 0x00000673;
+    icc->ia32_cpuid_version = IA64_MADISON_IA32_CPUID_VERSION;
     memcpy(icc->ia32_cpuid_leaf2,
            (const uint32_t[4])IA64_MADISON_IA32_CPUID_LEAF2,
            sizeof(icc->ia32_cpuid_leaf2));
+    icc->ia32_cpuid_pae = true;
+    icc->ia32_cpuid_high_leaf_repeats = true;
     icc->itr_count = 64;
     icc->dtr_count = 64;
     icc->insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK;
@@ -1428,6 +1431,8 @@ typedef struct IA64CPUModelDef {
     uint64_t cpuid_features;
     uint32_t ia32_cpuid_version;
     uint32_t ia32_cpuid_leaf2[4];
+    bool ia32_cpuid_pae;
+    bool ia32_cpuid_high_leaf_repeats;
     uint8_t itr_count;
     uint8_t dtr_count;
     uint64_t insertable_page_mask;
@@ -1457,6 +1462,8 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->ia32_cpuid_version = model->ia32_cpuid_version;
     memcpy(icc->ia32_cpuid_leaf2, model->ia32_cpuid_leaf2,
            sizeof(icc->ia32_cpuid_leaf2));
+    icc->ia32_cpuid_pae = model->ia32_cpuid_pae;
+    icc->ia32_cpuid_high_leaf_repeats = model->ia32_cpuid_high_leaf_repeats;
     icc->itr_count = model->itr_count;
     icc->dtr_count = model->dtr_count;
     icc->insertable_page_mask = model->insertable_page_mask;
@@ -1574,9 +1581,10 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
      * own ld.s deferral is DCR-gated -- the behaviour of an sd=0 processor.
      */
     .cpuid_features = IA64_CPUID4_LB,
-    /* P6-class IA-32 engine identity: family 6, model 7, stepping 3. */
-    .ia32_cpuid_version = 0x00000673,
+    .ia32_cpuid_version = IA64_MADISON_IA32_CPUID_VERSION,
     .ia32_cpuid_leaf2 = IA64_MADISON_IA32_CPUID_LEAF2,
+    .ia32_cpuid_pae = true,
+    .ia32_cpuid_high_leaf_repeats = true,
     .itr_count = 64,
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
