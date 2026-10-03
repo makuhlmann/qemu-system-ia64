@@ -103,6 +103,10 @@ struct IA64VpcMachineClass {
     bool acpi_pm_tmr_ext;
     /* The PM1_EN bits the board implements; 0 keeps all 16. */
     uint16_t acpi_pm1_en_mask;
+    /* The board LAN's subsystem ids (vendor 0: the chip's own) and ROM. */
+    uint16_t nic_subsystem_vendor_id;
+    uint16_t nic_subsystem_id;
+    const char *nic_romfile;
     /*
      * The SLP_TYP value this board's firmware puts in _S5, where that is
      * not the architected 0 the ACPI core always takes.  It goes in the

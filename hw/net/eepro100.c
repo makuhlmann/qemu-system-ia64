@@ -142,6 +142,9 @@ typedef struct {
     bool has_priority_queues;
     bool has_static_resume;
     bool power_management;
+    /* Max_Lat and PMC where a part differs from the manual (0: 18h, 7E21h). */
+    uint8_t max_lat;
+    uint16_t pmc;
 } E100PCIDeviceInfo;
 
 /* Offsets to the various registers.
@@ -548,6 +551,88 @@ static void eepro100_fcp_interrupt(EEPRO100State * s)
 }
 #endif
 
+static bool e100_has_pm_data(EEPRO100State *s)
+{
+    switch (s->device) {
+    case i82557A:
+    case i82557B:
+    case i82557C:
+    case i82558A:
+    case i82558B:
+        return false;
+    default:
+        return true;
+    }
+}
+
+/*
+ * The Data register and Data Scale follow Data Select (manual Table 6, the
+ * 82559's values).  Of the 82550 only select 0 is known: 0.75 W in D0
+ * (rx2600 capture 2026-10-03, DEV-1).
+ */
+static void e100_pm_update_data(EEPRO100State *s)
+{
+    static const uint8_t i82559_data[9] = { 58, 40, 40, 40, 58, 40, 40, 40, 0 };
+    uint8_t *pm = s->dev.config + s->dev.pm_cap;
+    uint16_t ctrl = pci_get_word(pm + PCI_PM_CTRL);
+    unsigned int sel = (ctrl & PCI_PM_CTRL_DATA_SEL_MASK) >> 9;
+    uint8_t data = 0, scale = 0;
+
+    switch (s->device) {
+    case i82550:
+        if (sel == 0) {
+            data = 0x4b;
+            scale = 2;
+        }
+        break;
+    case i82559A:
+    case i82559B:
+    case i82559C:
+    case i82559ER:
+        if (sel < ARRAY_SIZE(i82559_data)) {
+            data = i82559_data[sel];
+            scale = 2;
+        }
+        break;
+    default:
+        break;
+    }
+    ctrl = (ctrl & ~PCI_PM_CTRL_DATA_SCALE_MASK) | (scale << 13);
+    pci_set_word(pm + PCI_PM_CTRL, ctrl);
+    pm[PCI_PM_DATA_REGISTER] = data;
+}
+
+static void e100_write_config(PCIDevice *pci_dev, uint32_t addr, uint32_t val,
+                              int len)
+{
+    EEPRO100State *s = DO_UPCAST(EEPRO100State, dev, pci_dev);
+    uint8_t cls;
+
+    pci_default_write_config(pci_dev, addr, val, len);
+
+    /* Only 8 and 16 dwords stick (manual 4.1.7). */
+    cls = pci_dev->config[PCI_CACHE_LINE_SIZE];
+    if (range_covers_byte(addr, len, PCI_CACHE_LINE_SIZE) &&
+        cls != 8 && cls != 16) {
+        pci_dev->config[PCI_CACHE_LINE_SIZE] = 0;
+    }
+    if ((pci_dev->cap_present & QEMU_PCI_CAP_PM) &&
+        ranges_overlap(addr, len, pci_dev->pm_cap + PCI_PM_CTRL, 2)) {
+        e100_pm_update_data(s);
+    }
+}
+
+/* PCI RST# also returns Data Select and the latency timer. */
+static void e100_pci_config_reset(EEPRO100State *s)
+{
+    pci_set_byte(s->dev.config + PCI_LATENCY_TIMER, 0x20);
+    if (s->dev.cap_present & QEMU_PCI_CAP_PM) {
+        pci_word_test_and_clear_mask(s->dev.config + s->dev.pm_cap +
+                                     PCI_PM_CTRL, PCI_PM_CTRL_DATA_SEL_MASK);
+        e100_pm_update_data(s);
+    }
+}
+
 static void e100_pci_reset(EEPRO100State *s, Error **errp)
 {
     E100PCIDeviceInfo *info = eepro100_get_class(s);
@@ -561,6 +646,12 @@ static void e100_pci_reset(EEPRO100State *s, Error **errp)
                                         PCI_STATUS_FAST_BACK);
     /* PCI Latency Timer */
     pci_set_byte(pci_conf + PCI_LATENCY_TIMER, 0x20);   /* latency timer = 32 clocks */
+    /* Set by the bus arbiter (manual 4.1.8). */
+    pci_set_byte(s->dev.wmask + PCI_LATENCY_TIMER, 0xff);
+    /* The 82557 has no MWI and reads 0 (manual 4.1.7). */
+    if (device == i82557A || device == i82557B || device == i82557C) {
+        pci_set_byte(s->dev.wmask + PCI_CACHE_LINE_SIZE, 0);
+    }
     /* Capability Pointer is set by PCI framework. */
     /* Interrupt Line */
     /* Interrupt Pin */
@@ -568,7 +659,10 @@ static void e100_pci_reset(EEPRO100State *s, Error **errp)
     /* Minimum Grant */
     pci_set_byte(pci_conf + PCI_MIN_GNT, 0x08);
     /* Maximum Latency */
-    pci_set_byte(pci_conf + PCI_MAX_LAT, 0x18);
+    pci_set_byte(pci_conf + PCI_MAX_LAT, info->max_lat ? info->max_lat : 0x18);
+    /* Nothing but the PM registers lives past the header (manual Figure 3). */
+    memset(s->dev.wmask + PCI_CONFIG_HEADER_SIZE, 0,
+           PCI_CONFIG_SPACE_SIZE - PCI_CONFIG_HEADER_SIZE);
 
     s->has_extended_tcb_support = info->has_extended_tcb_support;
 
@@ -607,13 +701,15 @@ static void e100_pci_reset(EEPRO100State *s, Error **errp)
             return;
         }
 
-        pci_set_word(pci_conf + cfg_offset + PCI_PM_PMC, 0x7e21);
-#if 0 /* TODO: replace dummy code for power management emulation. */
-        /* TODO: Power Management Control / Status. */
-        pci_set_word(pci_conf + cfg_offset + PCI_PM_CTRL, 0x0000);
-        /* TODO: Ethernet Power Consumption Registers (i82559 and later). */
-        pci_set_byte(pci_conf + cfg_offset + PCI_PM_PPB_EXTENSIONS, 0x0000);
-#endif
+        pci_set_word(pci_conf + cfg_offset + PCI_PM_PMC,
+                     info->pmc ? info->pmc : 0x7e21);
+        /* PMCSR (manual Table 5); Data Select from the 82559 on. */
+        pci_set_word(s->dev.wmask + cfg_offset + PCI_PM_CTRL,
+                     PCI_PM_CTRL_STATE_MASK | PCI_PM_CTRL_PME_ENABLE |
+                     (e100_has_pm_data(s) ? PCI_PM_CTRL_DATA_SEL_MASK : 0));
+        pci_set_word(s->dev.w1cmask + cfg_offset + PCI_PM_CTRL,
+                     PCI_PM_CTRL_PME_STATUS);
+        e100_pm_update_data(s);
     }
 
 #if EEPROM_SIZE > 0
@@ -704,6 +800,12 @@ static void nic_reset(void *opaque)
     memset(&s->mult[0], 0, sizeof(s->mult));
     nic_selective_reset(s);
     s->cu_base = 0;
+}
+
+static void nic_system_reset(void *opaque)
+{
+    e100_pci_config_reset(opaque);
+    nic_reset(opaque);
 }
 
 #if defined(DEBUG_EEPRO100)
@@ -2586,7 +2688,7 @@ static void pci_nic_uninit(PCIDevice *pci_dev)
 {
     EEPRO100State *s = DO_UPCAST(EEPRO100State, dev, pci_dev);
 
-    qemu_unregister_reset(nic_reset, s);
+    qemu_unregister_reset(nic_system_reset, s);
     disable_interrupt(s);
     vmstate_unregister(VMSTATE_IF(&pci_dev->qdev), s->vmstate, s);
     g_free(s->vmstate);
@@ -2673,7 +2775,7 @@ static void e100_nic_realize(PCIDevice *pci_dev, Error **errp)
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
     TRACE(OTHER, logout("%s\n", qemu_get_queue(s->nic)->info_str));
 
-    qemu_register_reset(nic_reset, s);
+    qemu_register_reset(nic_system_reset, s);
 
     s->vmstate = g_memdup(&vmstate_eepro100, sizeof(vmstate_eepro100));
     s->vmstate->name = qemu_get_queue(s->nic)->model;
@@ -2734,6 +2836,12 @@ static E100PCIDeviceInfo e100_devices[] = {
         .has_priority_queues = true,
         .has_static_resume = true,
         .power_management = true,
+        /*
+         * The rx2600's 82550: PCI PM 1.1, PME# from D3cold on auxiliary
+         * power (rx2600 capture 2026-10-03, DEV-1).
+         */
+        .max_lat = 0x38,
+        .pmc = 0xfe22,
     },{
         .name = "i82551",
         .desc = "Intel i82551 Ethernet",
@@ -2933,6 +3041,7 @@ static void eepro100_class_init(ObjectClass *klass, const void *data)
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     k->romfile = "pxe-eepro100.rom";
     k->realize = e100_nic_realize;
+    k->config_write = e100_write_config;
     k->exit = pci_nic_uninit;
     k->device_id = info->device_id;
     k->revision = info->revision;

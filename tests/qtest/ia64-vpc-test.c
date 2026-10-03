@@ -2792,6 +2792,79 @@ static void test_eepro100_eeprom_map(void)
     qtest_quit(qts);
 }
 
+/*
+ * The zx1 board LAN reads as the rx2600's 82550 (capture 2026-10-03, DEV-1),
+ * with the manual's cache line, latency and PMCSR rules; the 460gx 82559
+ * keeps Intel's identity and reports the manual's power figures.
+ */
+static void test_eepro100_board_identity(void)
+{
+    const uint8_t zx1_slot = 6;
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t pm;
+
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0, PCI_VENDOR_ID), ==,
+                    0x12298086);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0,
+                                   PCI_SUBSYSTEM_VENDOR_ID), ==, 0x1274103c);
+    ia64_cfg_writel(qts, 0, zx1_slot, 0, PCI_ROM_ADDRESS, UINT32_MAX);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0, PCI_ROM_ADDRESS), ==,
+                    0);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0, zx1_slot, 0, PCI_MIN_GNT), ==,
+                    0x3808);
+
+    /* The HP POST writes 20h (a 128-byte line), which does not stick. */
+    ia64_cfg_writeb(qts, 0, zx1_slot, 0, PCI_CACHE_LINE_SIZE, 0x20);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, zx1_slot, 0, PCI_CACHE_LINE_SIZE),
+                    ==, 0);
+    ia64_cfg_writeb(qts, 0, zx1_slot, 0, PCI_CACHE_LINE_SIZE, 0x10);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, zx1_slot, 0, PCI_CACHE_LINE_SIZE),
+                    ==, 0x10);
+    ia64_cfg_writeb(qts, 0, zx1_slot, 0, PCI_LATENCY_TIMER, 0x80);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, zx1_slot, 0, PCI_LATENCY_TIMER),
+                    ==, 0x80);
+
+    pm = ia64_cfg_readb(qts, 0, zx1_slot, 0, PCI_CAPABILITY_LIST);
+    g_assert_cmphex(pm, ==, 0xdc);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0, pm), ==, 0xfe220001);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL), ==,
+                    0x4b004000);
+    /* Only select 0 was captured; the others report nothing. */
+    ia64_cfg_writew(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL, 1 << 9);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL), ==,
+                    0x00000200);
+    ia64_cfg_writew(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL, 3);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL), ==,
+                    0x4003);
+    ia64_cfg_writew(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL, 0);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL), ==,
+                    0x4000);
+
+    /* Past the header, only the PM registers exist. */
+    ia64_cfg_writel(qts, 0, zx1_slot, 0, 0x40, UINT32_MAX);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0, 0x40), ==, 0);
+
+    /* A system reset returns Data Select and the latency timer. */
+    ia64_cfg_writew(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL, 1 << 9);
+    qtest_qmp_assert_success(qts, "{ 'execute': 'system_reset' }");
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL), ==,
+                    0x4b004000);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, zx1_slot, 0, PCI_LATENCY_TIMER),
+                    ==, 0x20);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_E1000_SLOT, 0,
+                                   PCI_SUBSYSTEM_VENDOR_ID), ==, 0x00408086);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, IA64_E1000_SLOT, 0, PCI_MAX_LAT),
+                    ==, 0x18);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_E1000_SLOT, 0, 0xdc), ==,
+                    0x7e210001);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_E1000_SLOT, 0, 0xe0), ==,
+                    0x3a004000);
+    qtest_quit(qts);
+}
+
 static void test_eepro100_csr_windows(void)
 {
     const uint64_t cfg = IA64_PCI_CONFIG_BASE +
@@ -9629,6 +9702,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
     qtest_add_func("/ia64-vpc/eepro100/csr-windows",
                    test_eepro100_csr_windows);
+    qtest_add_func("/ia64-vpc/eepro100/board-identity",
+                   test_eepro100_board_identity);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
                    test_eepro100_eeprom_map);
     qtest_add_func("/ia64-vpc/pci/460gx-no-chipset-bus",

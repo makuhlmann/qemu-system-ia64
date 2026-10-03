@@ -431,6 +431,14 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
 #ifdef CONFIG_IA64_VPC_NETWORK
     /* "The LAN controller is an Intel 82550 chip" (O&M Guide App. B). */
     mc->default_nic = "i82550";
+    /*
+     * The rx2600 board LAN reads subsystem 103C:1274 and has no expansion
+     * ROM; that EEPROM bit is clear (manual 4.1.13; rx2600 capture
+     * 2026-10-03, DEV-1).
+     */
+    imc->nic_subsystem_vendor_id = 0x103c;
+    imc->nic_subsystem_id = 0x1274;
+    imc->nic_romfile = "";
 #endif
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("madison");
     /*

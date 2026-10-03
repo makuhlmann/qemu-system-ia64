@@ -3262,11 +3262,36 @@ static void ia64_vpc_record_nic(IA64VpcMachineState *s, PCIBus *bus,
     s->nic_count++;
 }
 
+/* pci_init_nic_in_slot(), with the board's identity for its LAN. */
+static void ia64_vpc_init_board_nic(IA64VpcMachineState *s, PCIBus *bus,
+                                    unsigned int slot)
+{
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
+    MachineClass *mc = MACHINE_GET_CLASS(s);
+    NICInfo *nd = qemu_find_nic_info(mc->default_nic, true, NULL);
+    PCIDevice *pci_dev;
+
+    if (!nd) {
+        return;
+    }
+    pci_dev = pci_new(PCI_DEVFN(slot, 0), mc->default_nic);
+    qdev_set_nic_properties(DEVICE(pci_dev), nd);
+    if (imc->nic_subsystem_vendor_id) {
+        qdev_prop_set_uint16(DEVICE(pci_dev), "x-pci-subsystem-vendor-id",
+                             imc->nic_subsystem_vendor_id);
+        qdev_prop_set_uint16(DEVICE(pci_dev), "x-pci-subsystem-id",
+                             imc->nic_subsystem_id);
+    }
+    if (imc->nic_romfile) {
+        qdev_prop_set_string(DEVICE(pci_dev), "romfile", imc->nic_romfile);
+    }
+    pci_realize_and_unref(pci_dev, bus, &error_fatal);
+}
+
 static void ia64_vpc_init_network(IA64VpcMachineState *s, PCIBus *pci_bus)
 {
     MachineState *machine = MACHINE(s);
     MachineClass *mc = MACHINE_GET_CLASS(machine);
-    g_autofree char *slot_arg = NULL;
     unsigned int first_slot;
     unsigned int slot;
 
@@ -3281,8 +3306,7 @@ static void ia64_vpc_init_network(IA64VpcMachineState *s, PCIBus *pci_bus)
         ia64_vpc_seat(s, IA64_VPC_SEAT_NIC, &bus, &devfn);
         first_slot = PCI_SLOT(devfn);
     }
-    slot_arg = g_strdup_printf("%u", first_slot);
-    pci_init_nic_in_slot(pci_bus, mc->default_nic, NULL, slot_arg);
+    ia64_vpc_init_board_nic(s, pci_bus, first_slot);
     pci_init_nic_devices(pci_bus, mc->default_nic);
 
     for (slot = first_slot; slot < PCI_SLOT_MAX; slot++) {
