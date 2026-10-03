@@ -772,6 +772,33 @@ static void test_acpi_pm_mmio(void)
 }
 
 /*
+ * The rx2600's PM timer counts 32 bits, so TMR_STS waits for bit 31, about
+ * 600 s; the PM1_EN bits it lacks read back 0 (rx2600 capture 2026-10-03).
+ */
+static void test_acpi_pm_timer_ext(void)
+{
+    const uint64_t evt = IA64_PDH_ACPI_PM_BASE + IA64_PDH_ACPI_PM1_EVT;
+    const uint64_t tmr = IA64_PDH_ACPI_PM_BASE + IA64_PDH_ACPI_PM_TMR;
+    QTestState *qts = ia64_vpc_start_zx1(NULL);
+
+    g_assert_cmphex(qtest_readw(qts, evt) & 1, ==, 0);
+    qtest_writew(qts, evt + IA64_ACPI_PM1_EVT_EN_OFFSET, 0xffff);
+    g_assert_cmphex(qtest_readw(qts, evt + IA64_ACPI_PM1_EVT_EN_OFFSET), ==,
+                    0x0721);
+    qtest_writew(qts, evt + IA64_ACPI_PM1_EVT_EN_OFFSET, 0);
+
+    /* Five seconds are 17.9 million ticks, past a 24-bit counter. */
+    qtest_clock_step(qts, 5 * 1000LL * 1000 * 1000);
+    g_assert_cmphex(qtest_readl(qts, tmr), >, 0x00ffffff);
+    g_assert_cmphex(qtest_readw(qts, evt) & 1, ==, 0);
+
+    qtest_clock_step(qts, 600 * 1000LL * 1000 * 1000);
+    g_assert_cmphex(qtest_readl(qts, tmr), >=, 0x80000000);
+    g_assert_cmphex(qtest_readw(qts, evt) & 1, ==, 1);
+    qtest_quit(qts);
+}
+
+/*
  * The firmware defaults record the machine seeds into the NVRAM store from
  * its options (console policy, IDE DMA, boot timeout, memory-map quirks);
  * read back from the flash's NVRAM sector.
@@ -9320,6 +9347,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/acpi-reset-register",
                    test_acpi_reset_register);
     qtest_add_func("/ia64-vpc/acpi-pm-mmio", test_acpi_pm_mmio);
+    qtest_add_func("/ia64-vpc/acpi-pm-timer-ext", test_acpi_pm_timer_ext);
     qtest_add_func("/ia64-vpc/vga/int10-rom", test_int10_rom);
     qtest_add_func("/ia64-vpc/vga/int10-rom-gl", test_int10_rom_gl);
     qtest_add_func("/ia64-vpc/vga/int10-vbe", test_int10_vbe);

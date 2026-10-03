@@ -2141,6 +2141,11 @@ static void ia64_vpc_init_acpi_pm(IA64VpcMachineState *s,
                       IA64_VPC_MACHINE_GET_CLASS(s)->acpi_s5_slp_typ, true);
     acpi_pm_tmr_init(&s->acpi_regs, ia64_vpc_acpi_update_sci,
                      &s->acpi_pm);
+    s->acpi_regs.tmr.ext = IA64_VPC_MACHINE_GET_CLASS(s)->acpi_pm_tmr_ext;
+    if (IA64_VPC_MACHINE_GET_CLASS(s)->acpi_pm1_en_mask != 0) {
+        s->acpi_regs.pm1.evt.en_mask =
+            IA64_VPC_MACHINE_GET_CLASS(s)->acpi_pm1_en_mask;
+    }
     memory_region_init_io(&s->acpi_reset, OBJECT(s),
                           &ia64_vpc_acpi_reset_ops, s,
                           "ia64-acpi-reset", 1);
@@ -3480,6 +3485,8 @@ static void ia64_vpc_reset(void *opaque)
         acpi_pm1_evt_reset(&s->acpi_regs);
         acpi_pm1_cnt_reset(&s->acpi_regs);
         acpi_pm_tmr_reset(&s->acpi_regs);
+        /* TMR_STS waits for the top bit: the rx2600 reads PM1_STS 0. */
+        acpi_pm_tmr_calc_overflow_time(&s->acpi_regs);
         acpi_gpe_reset(&s->acpi_regs);
     }
 #ifdef CONFIG_IA64_VPC_GRAPHICS

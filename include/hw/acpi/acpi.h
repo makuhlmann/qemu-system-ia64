@@ -115,6 +115,8 @@ struct ACPIPMTimer {
     QEMUTimer *timer;
     MemoryRegion io;
     int64_t overflow_time;
+    /* A 32-bit counter, as the FADT's TMR_VAL_EXT announces; else 24 bits. */
+    bool ext;
 
     acpi_update_sci_fn update_sci;
 };
@@ -123,6 +125,8 @@ struct ACPIPM1EVT {
     MemoryRegion io;
     uint16_t sts;
     uint16_t en;
+    /* The enable bits the part implements; the others read back 0. */
+    uint16_t en_mask;
     acpi_update_sci_fn update_sci;
 };
 

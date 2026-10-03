@@ -99,6 +99,10 @@ struct IA64VpcMachineClass {
     unsigned int pci0_intx_fallback;
     /* Where the board also answers the PM block in memory space, or zero. */
     uint64_t acpi_pm_mmio_base;
+    /* The PM timer counts 32 bits (TMR_VAL_EXT), not 24. */
+    bool acpi_pm_tmr_ext;
+    /* The PM1_EN bits the board implements; 0 keeps all 16. */
+    uint16_t acpi_pm1_en_mask;
     /*
      * The SLP_TYP value this board's firmware puts in _S5, where that is
      * not the architected 0 the ACPI core always takes.  It goes in the

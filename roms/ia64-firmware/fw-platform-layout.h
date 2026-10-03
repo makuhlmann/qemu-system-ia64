@@ -70,6 +70,7 @@ extern UINT64 mAcpiRegionBase;
 #define ACPI_FADT_FLAG_WBINVD        (1U << 0)
 #define ACPI_FADT_FLAG_PWR_BUTTON    (1U << 4)
 #define ACPI_FADT_FLAG_SLP_BUTTON    (1U << 5)
+#define ACPI_FADT_FLAG_TMR_VAL_EXT   (1U << 8)
 #define ACPI_FADT_FLAG_RESET_REG_SUP (1U << 10)
 #define ACPI_FADT_FLAG_SW_CPU_SLP    (1U << 13)
 #define VGA_MODE_TEXT_WIDTH  640U

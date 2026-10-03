@@ -708,7 +708,8 @@ static void efi_init_acpi_tables(void)
     mFadt.Flags = ACPI_FADT_FLAG_WBINVD |
                   ACPI_FADT_FLAG_SLP_BUTTON |
                   ACPI_FADT_FLAG_RESET_REG_SUP |
-                  ACPI_FADT_FLAG_SW_CPU_SLP;
+                  ACPI_FADT_FLAG_SW_CPU_SLP |
+                  (is_460gx ? 0U : ACPI_FADT_FLAG_TMR_VAL_EXT);
     mFadt.ResetRegister.SpaceId = ACPI_GAS_SYSTEM_IO;
     mFadt.ResetRegister.BitWidth = 8;
     mFadt.ResetRegister.BitOffset = 0;
@@ -1326,7 +1327,8 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiFadt->ResetValue != fw_acpi_reset_value() ||
         (mAcpiFadt->Flags & ACPI_FADT_FLAG_PWR_BUTTON) != 0 ||
         (mAcpiFadt->Flags & ACPI_FADT_FLAG_RESET_REG_SUP) == 0 ||
-        (mAcpiFadt->Flags & ACPI_FADT_FLAG_SW_CPU_SLP) == 0) {
+        (mAcpiFadt->Flags & ACPI_FADT_FLAG_SW_CPU_SLP) == 0 ||
+        ((mAcpiFadt->Flags & ACPI_FADT_FLAG_TMR_VAL_EXT) != 0) == is_460gx) {
         return 0;
     }
 

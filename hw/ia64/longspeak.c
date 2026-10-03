@@ -370,6 +370,14 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->pci0_intx_fallback = 0;
     imc->acpi_pm_mmio_base = IA64_PDH_ACPI_PM_BASE;
     /*
+     * The rx2600's PDH timer counts 32 bits (FF5C_1004 read 2345_4096h, 165 s
+     * after reset), as the vendor FADT's TMR_VAL_EXT announces, and its
+     * PM1_EN keeps 0721h of the FFFFh SAL_B writes at FFE78E26 (rx2600
+     * capture of 2026-10-03).
+     */
+    imc->acpi_pm_tmr_ext = true;
+    imc->acpi_pm1_en_mask = 0x0721;
+    /*
      * What rx2600/zx2000 carry: an LSI SCSI in core I/O and an ATI Rage XL
      * for video.  The Rage XL is also the adapter whose video BIOS the vendor
      * firmware runs: its x86 emulator interprets that ROM and sets a mode,
