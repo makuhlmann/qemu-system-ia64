@@ -866,8 +866,8 @@ static void serial_reset(void *opaque)
     s->msr = UART_MSR_DCD | UART_MSR_DSR | UART_MSR_CTS;
     /* Default to 9600 baud, 1 start bit, 8 data bits, 1 stop bit, no parity. */
     s->divider = 0x0C;
-    s->mcr = UART_MCR_OUT2;
-    s->scr = 0;
+    s->mcr = s->reset_mcr;
+    s->scr = s->reset_scr;
     s->tsr_retry = 0;
     s->char_transmit_time = (NANOSECONDS_PER_SECOND / 9600) * 10;
     s->poll_msl = 0;
@@ -965,6 +965,12 @@ static const Property serial_properties[] = {
     DEFINE_PROP_CHR("chardev", SerialState, chr),
     DEFINE_PROP_UINT32("baudbase", SerialState, baudbase, 115200),
     DEFINE_PROP_BOOL("wakeup", SerialState, wakeup, false),
+    /*
+     * A 16550 resets MCR to 0 and leaves the scratch register alone; the
+     * defaults keep what this model has always done.
+     */
+    DEFINE_PROP_UINT8("reset-mcr", SerialState, reset_mcr, UART_MCR_OUT2),
+    DEFINE_PROP_UINT8("reset-scr", SerialState, reset_scr, 0),
 };
 
 static void serial_class_init(ObjectClass *klass, const void *data)

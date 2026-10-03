@@ -573,7 +573,7 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_DILLON_CONTROL       0x1000U   /* bits 3:1 carry a command */
 #define IA64_PDH_DILLON_COMMAND       0x0eU     /* the command field */
 #define IA64_PDH_DILLON_RESET         0x06U     /* the one that reboots */
-#define IA64_PDH_DILLON_MODULE_LAYOUT 0x1010U   /* bit 0: mx2 modules */
+#define IA64_PDH_DILLON_MODULE_LAYOUT 0x1010U   /* reads 0xFF, SAL_A uses 0 */
 #define IA64_PDH_DILLON_SCRATCH1      0x1038U   /* written 0 and 2 */
 #define IA64_PDH_DILLON_MISC          0x31c0U   /* last of the tested file */
 /*

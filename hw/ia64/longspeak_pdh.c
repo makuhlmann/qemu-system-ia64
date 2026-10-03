@@ -31,7 +31,8 @@
  *   FF5F_0000  Dillon registers.  0x20 and 0x68 are scratch latches the
  *              processors share (0x68 bits 19:16: SAL_A's rendezvous check-in;
  *              0x20 bits 7:6: boot mode, FFFE0346); 0xB0 + 8 * id is one
- *              semaphore (below); 0x1010 bit 0 selects mx2 modules.
+ *              semaphore (below); 0x1010 reads 0xFF, and SAL_A uses 0 in
+ *              its place.
  *
  * Only these blocks decode.  An offset in a block that is not modelled reads
  * as zero, ignores writes and is reported once per offset and direction under
@@ -229,8 +230,12 @@ static bool longspeak_pdh_do_read(LongspeakPDHBlock *b, hwaddr addr,
             return true;
         }
         if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_MODULE_LAYOUT)) {
-            /* One processor module per socket, no mx2 (SAL_A forces 0). */
-            *data = 0;
+            /*
+             * The rx2600 reads 0xFF (capture 2026-10-03, PDH-5); SAL_A loads
+             * it and then takes 0, one module per socket (FFFE0E96).
+             */
+            *data = longspeak_pdh_reg_read(0xff, addr, size,
+                                           IA64_PDH_DILLON_MODULE_LAYOUT);
             return true;
         }
         return false;
@@ -543,6 +548,12 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
         qdev_prop_set_uint32(uart, "baudbase", 115200);
         qdev_prop_set_chr(uart, "chardev", serial_hd(i + 1));
         qdev_prop_set_uint8(uart, "endianness", DEVICE_LITTLE_ENDIAN);
+        /*
+         * The rx2600's UART1, which no firmware touches, reads MCR 0 and
+         * SCR 0xFF (rx2600 capture 2026-10-03, PDH-7).
+         */
+        qdev_prop_set_uint8(uart, "reset-mcr", 0);
+        qdev_prop_set_uint8(uart, "reset-scr", 0xff);
         if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(uart), errp)) {
             return;
         }

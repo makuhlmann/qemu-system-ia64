@@ -1354,7 +1354,7 @@ static void test_pdh_longspeak_map(void)
     qtest_writeq(qts, IA64_PDH_SRAM_BASE, 0x5555555555555555ULL);
     qtest_writeq(qts, IA64_PDH_SRAM_BASE + IA64_PDH_SRAM_SIZE - 8,
                  0xaaaaaaaaaaaaaaaaULL);
-    g_assert_cmphex(qtest_readb(qts, IA64_PDH_UART_BASE + 7), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_UART_BASE + 7), ==, 0xff);
     g_assert_cmphex(qtest_readq(qts, IA64_PDH_BBSRAM_BASE), ==,
                     0x4e564d2054494e49ULL);
     g_assert_cmphex(qtest_readq(qts, bb_last), ==, 0x1122334455667788ULL);
@@ -1389,9 +1389,13 @@ static void test_pdh_longspeak_map(void)
                  0x03);
     g_assert_cmphex(qtest_readl(qts, IA64_PDH_DILLON_BASE +
                                 IA64_PDH_DILLON_CHECKIN), ==, 0x00030000);
-    /* No mx2 modules. */
+    /* The rx2600 reads 0xFF here, and UART1 from reset MCR 0, SCR 0xFF. */
     g_assert_cmphex(qtest_readb(qts, IA64_PDH_DILLON_BASE +
-                                IA64_PDH_DILLON_MODULE_LAYOUT), ==, 0);
+                                IA64_PDH_DILLON_MODULE_LAYOUT), ==, 0xff);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_UART_BASE +
+                                IA64_PDH_UART_STRIDE + 4), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, IA64_PDH_UART_BASE +
+                                IA64_PDH_UART_STRIDE + 7), ==, 0xff);
     /* The rx2600's Meson and Dillon revisions, read 16 bits wide. */
     g_assert_cmphex(qtest_readw(qts, IA64_PDH_PRESENCE_BASE +
                                 IA64_PDH_MESON_REV), ==, 7);
