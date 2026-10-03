@@ -10021,13 +10021,15 @@ static UINT64 fw_pci_io_expected_bar_length(const FW_PCI_IO_DEVICE *Dev)
  */
 /*
  * Controllers a machine may leave out: IDE and AHCI (ide=, ahci=) and the
- * LSI (lsi=on).  The LSI's seat holds the QLogic ISP12160 by default.
+ * LSI (lsi=on).  The LSI's seat holds the QLogic ISP12160 by default.  zx1
+ * has no UHCI; its seat, device 3, holds the board LAN.
  */
 static BOOLEAN fw_pci_io_device_optional(const FW_PCI_IO_DEVICE *Dev)
 {
     return Dev->Protocol == &mPciIdeIoProto ||
            Dev->Protocol == &mPciAhciIoProto ||
-           Dev->Protocol == &mPciLsiIoProto;
+           Dev->Protocol == &mPciLsiIoProto ||
+           (Dev->Protocol == &mPciUhciIoProto && fw_platform_is_zx1());
 }
 
 static BOOLEAN fw_pci_io_device_present(const FW_PCI_IO_DEVICE *Dev)
@@ -10915,6 +10917,8 @@ static BOOLEAN __attribute__((noinline)) pci_io_transfer_selftest(void)
 {
     const FW_PCI_IO_DEVICE *vga = &mPciIoDevices[5];
     const FW_PCI_IO_DEVICE *uhci = &mPciIoDevices[3];
+    /* The I/O BAR checks need the UHCI, which only the i2000 has. */
+    BOOLEAN have_io = fw_pci_io_device_present(uhci);
     UINT64 vga_length = fw_pci_io_expected_bar_length(vga);
     UINT32 data[2] = { 0, 0 };
 
@@ -10989,9 +10993,10 @@ static BOOLEAN __attribute__((noinline)) pci_io_transfer_selftest(void)
                         vga->ExpectedBarIndex, 0,
                         vga->ExpectedBarIndex, 0, 1) !=
             EFI_INVALID_PARAMETER ||
-        pci_io_copy_mem(uhci->Protocol, EfiPciWidthUint32,
-                        uhci->ExpectedBarIndex, 0,
-                        uhci->ExpectedBarIndex, 0, 1) != EFI_UNSUPPORTED) {
+        (have_io &&
+         pci_io_copy_mem(uhci->Protocol, EfiPciWidthUint32,
+                         uhci->ExpectedBarIndex, 0,
+                         uhci->ExpectedBarIndex, 0, 1) != EFI_UNSUPPORTED)) {
         return 0;
     }
 
@@ -11002,6 +11007,9 @@ static BOOLEAN __attribute__((noinline)) pci_io_transfer_selftest(void)
     }
 
     /* Exercise the same exact-end and one-element-over rules for I/O BARs. */
+    if (!have_io) {
+        return 1;
+    }
     return pci_io_io_read(uhci->Protocol, EfiPciWidthUint32,
                           uhci->ExpectedBarIndex,
                           uhci->ExpectedBarLength - sizeof(data[0]),
@@ -11023,6 +11031,7 @@ static BOOLEAN __attribute__((noinline)) pci_io_poll_selftest(void)
     EFI_PCI_IO_PROTOCOL *protocol = &mPciVgaIoProto;
     EFI_PCI_IO_PROTOCOL_WIDTH width;
     UINT64 expected = pci_mmio_read(mem_address, sizeof(UINT32));
+    BOOLEAN have_io = fw_pci_io_device_present(&mPciIoDevices[3]);
     UINT64 result;
     UINT64 start;
 
@@ -11064,9 +11073,10 @@ static BOOLEAN __attribute__((noinline)) pci_io_poll_selftest(void)
         pci_io_poll_mem(protocol, EfiPciWidthUint32, 0,
                         fw_pci_io_expected_bar_length(&mPciIoDevices[5]) - 1U,
                         0, 0, 0, &result) != EFI_UNSUPPORTED ||
-        pci_io_poll_io(&mPciUhciIoProto, EfiPciWidthUint32, 4,
-                       mPciIoDevices[3].ExpectedBarLength,
-                       0, 0, 0, &result) != EFI_UNSUPPORTED) {
+        (have_io &&
+         pci_io_poll_io(&mPciUhciIoProto, EfiPciWidthUint32, 4,
+                        mPciIoDevices[3].ExpectedBarLength,
+                        0, 0, 0, &result) != EFI_UNSUPPORTED)) {
         return 0;
     }
 
@@ -11078,10 +11088,11 @@ static BOOLEAN __attribute__((noinline)) pci_io_poll_selftest(void)
         return 0;
     }
     result = ~0ULL;
-    if (pci_io_poll_io(&mPciUhciIoProto, EfiPciWidthUint32,
-                       mPciIoDevices[3].ExpectedBarIndex, 0,
-                       0, 0, 0, &result) != EFI_SUCCESS ||
-        result == ~0ULL) {
+    if (have_io &&
+        (pci_io_poll_io(&mPciUhciIoProto, EfiPciWidthUint32,
+                        mPciIoDevices[3].ExpectedBarIndex, 0,
+                        0, 0, 0, &result) != EFI_SUCCESS ||
+         result == ~0ULL)) {
         return 0;
     }
 
@@ -14635,9 +14646,9 @@ static void fw_retarget_vga_device_paths(void)
 /*
  * The USB and IDE controllers are functions 2 and 1 of the 82468GX I/O and
  * Firmware Bridge on the i2000, not discrete function-zero devices of their
- * own.  Retarget their fixed PCI-I/O table entries and device paths, which
- * the static initializers give the zx1 layout.  Same timing rule as
- * fw_retarget_vga_device_paths().
+ * own.  Retarget their fixed PCI-I/O table entries and device paths, whose
+ * static initializers find nothing on zx1 (no UHCI, and IDE only with
+ * ide=on).  Same timing rule as fw_retarget_vga_device_paths().
  */
 static void fw_retarget_south_bridge_device_paths(void)
 {

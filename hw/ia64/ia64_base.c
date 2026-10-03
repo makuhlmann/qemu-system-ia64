@@ -64,7 +64,6 @@
 #include "hw/rtc/mc146818rtc.h"
 #include "hw/intc/i8259.h"
 #include "hw/timer/i8254.h"
-#include "hw/usb/hcd-uhci.h"
 #include "hw/usb/usb.h"
 #include "hw/ia64/ia64_pci.h"
 #include "hw/ia64/ia64_iosapic.h"
@@ -3446,7 +3445,8 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
 
     /*
      * The UHCI controller is function 2 of the south bridge on 460gx, so it
-     * already exists by the time this runs; zx1 still gets a discrete one.
+     * already exists by the time this runs.  zx1 has none: the rx2600's USB
+     * is OHCI and EHCI (rx2600 capture 2026-10-03, DEV-3).
      */
     if (s->ifb != NULL) {
         s->uhci_dev = intel_82468gx_ifb_function(s->ifb,
@@ -3456,10 +3456,8 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
                        TYPE_INTEL_82468GX_IFB);
             return false;
         }
-    } else {
-        s->uhci_dev = pci_create_simple(pci_bus, -1, TYPE_PIIX3_USB_UHCI);
+        ia64_vpc_configure_uhci(s->uhci_dev);
     }
-    ia64_vpc_configure_uhci(s->uhci_dev);
 
     add_default_input = defaults_enabled() && !s->i8042_enabled;
     if (add_default_input) {

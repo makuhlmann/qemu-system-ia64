@@ -28,9 +28,13 @@
 #include "target/ia64/cpu.h"
 #include "ia64_vpc_internal.h"
 
-/* The first network adapter's slot on the single PCI0 root. */
-#define IA64_VPC_NIC_SLOT           6
-/* Longs Peak core I/O: the SCSI adapter is device 1 of the root. */
+/*
+ * The board LAN is device 3 of rope 0, where the vendor firmware's _PRT
+ * routes it; the rx2600 has USB at 1 and IDE at 2 (rx2600 capture
+ * 2026-10-03, DEV-4).
+ */
+#define IA64_VPC_NIC_SLOT           3
+/* The SCSI adapter, which the rx2600 has on rope 1, still takes device 1. */
 #define LONGSPEAK_SCSI_SLOT         1
 /* How many of the ioa I/O SAPIC's pins the board wires. */
 #define LONGSPEAK_INTX_PINS         6
@@ -84,9 +88,9 @@ static DeviceState *longspeak_rope_ioa(uint32_t straps, Error **errp)
  * with the _PRT packages in roms/ia64-firmware/dsdt-pci-root-zx1.asl.
  */
 static const IA64IntxRoute longspeak_pci0_intx[] = {
-    { LONGSPEAK_SCSI_SLOT, { 0, 1, 2, 3 } },   /* core I/O SCSI */
-    { 0x02, { 5, 5, 5, 5 } },                  /* core I/O LAN  */
-    { 0x03, { 4, 4, 4, 4 } },                  /* core I/O USB  */
+    { LONGSPEAK_SCSI_SLOT, { 0, 1, 2, 3 } },   /* rx2600: USB; here SCSI */
+    { 0x02, { 5, 5, 5, 5 } },                  /* rx2600: IDE; here OHCI */
+    { IA64_VPC_NIC_SLOT, { 4, 4, 4, 4 } },     /* LAN */
 };
 
 /*

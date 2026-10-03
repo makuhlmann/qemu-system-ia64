@@ -2799,7 +2799,7 @@ static void test_eepro100_eeprom_map(void)
  */
 static void test_eepro100_board_identity(void)
 {
-    const uint8_t zx1_slot = 6;
+    const uint8_t zx1_slot = 3;
     QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
     uint8_t pm;
 
@@ -2862,6 +2862,34 @@ static void test_eepro100_board_identity(void)
                     0x7e210001);
     g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_E1000_SLOT, 0, 0xe0), ==,
                     0x3a004000);
+    qtest_quit(qts);
+}
+
+/*
+ * zx1 bus 0 as far as the rx2600's layout goes (capture 2026-10-03, DEV-4):
+ * the LAN at device 3, where the vendor firmware's _PRT routes it, and no
+ * UHCI, which the board does not have.  SCSI and the OHCI keep 1 and 2.
+ */
+static void test_zx1_bus0_population(void)
+{
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    unsigned int slot;
+
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, 1, 0, PCI_VENDOR_ID), ==,
+                    0x00121000);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, 2, 0, PCI_VENDOR_ID), ==,
+                    0x003f106b);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, 3, 0, PCI_VENDOR_ID), ==,
+                    0x12298086);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, 3, 0, PCI_INTERRUPT_PIN), ==, 1);
+    for (slot = 0; slot < PCI_SLOT_MAX; slot++) {
+        /* A USB controller with programming interface 00h is a UHCI. */
+        if (ia64_cfg_readw(qts, 0, slot, 0, PCI_CLASS_DEVICE) ==
+            PCI_CLASS_SERIAL_USB) {
+            g_assert_cmphex(ia64_cfg_readb(qts, 0, slot, 0, PCI_CLASS_PROG),
+                            !=, 0);
+        }
+    }
     qtest_quit(qts);
 }
 
@@ -9702,6 +9730,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
     qtest_add_func("/ia64-vpc/eepro100/csr-windows",
                    test_eepro100_csr_windows);
+    qtest_add_func("/ia64-vpc/zx1/bus0-population",
+                   test_zx1_bus0_population);
     qtest_add_func("/ia64-vpc/eepro100/board-identity",
                    test_eepro100_board_identity);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",
