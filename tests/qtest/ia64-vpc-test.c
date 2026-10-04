@@ -7108,6 +7108,80 @@ static void test_zx1_empty_optical_sense(void)
 }
 
 /*
+ * The zx1 board CMD649 as the PCI-649 Product Specification (Rev. 1.2,
+ * chapter 6) and the rx2600 (capture 2026-10-04, 00:02.0) give it: subsystem
+ * 1095:0649 with its shadow at 8Ch, the power management capability at 60h,
+ * writable timing registers, and the bus master registers of Base Address #4
+ * at 70h-7Fh too.
+ */
+static void test_zx1_cmd649_registers(void)
+{
+    QTestState *qts = qtest_initf("-machine zx1 -m 256M -S");
+    const uint8_t dev = IA64_ZX1_IDE_SLOT;
+    const uint32_t bm = 0x1110;
+
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, PCI_SUBSYSTEM_VENDOR_ID),
+                    ==, 0x06491095);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x8c), ==, 0x06491095);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0, dev, 0, PCI_STATUS) & 0x0290, ==,
+                    0x0290);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, dev, 0, PCI_CAPABILITY_LIST), ==,
+                    0x60);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x60), ==, 0x06220001);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x64), ==, 0xf0006000);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0, dev, 0, PCI_MIN_GNT), ==, 0x0402);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, dev, 0, 0x4f), ==, 0x02);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x50), ==, 0x8000ec40);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x54), ==, 0x8c008000);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x58), ==, 0x00004000);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x70), ==, 0xf0000000);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x78), ==, 0xf0008000);
+
+    ia64_cfg_writeb(qts, 0, dev, 0, PCI_CACHE_LINE_SIZE, 0x20);
+    ia64_cfg_writeb(qts, 0, dev, 0, PCI_LATENCY_TIMER, 0x40);
+    ia64_cfg_writel(qts, 0, dev, 0, 0x40, 0xffffffff);
+    ia64_cfg_writel(qts, 0, dev, 0, 0x80, 0xffffffff);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0, dev, 0, PCI_CACHE_LINE_SIZE), ==,
+                    0x4000);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x40), ==, 0);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x80), ==, 0);
+
+    /* The values Linux leaves on the rx2600, each through its write mask. */
+    ia64_cfg_writel(qts, 0, dev, 0, 0x50, 0x40a9e4ff);
+    ia64_cfg_writel(qts, 0, dev, 0, 0x54, 0x4c3f403f);
+    ia64_cfg_writel(qts, 0, dev, 0, 0x58, 0x3fff003f);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x50), ==, 0x40a9e440);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x54), ==, 0x4c3f403f);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x58), ==, 0x3f00003f);
+
+    /* 2Ch-2Fh take writes only with SUBCONF bit 0; 8Ch-8Fh always. */
+    ia64_cfg_writel(qts, 0, dev, 0, PCI_SUBSYSTEM_VENDOR_ID, 0x1234103c);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, PCI_SUBSYSTEM_VENDOR_ID),
+                    ==, 0x06491095);
+    ia64_cfg_writel(qts, 0, dev, 0, 0x8c, 0x1234103c);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, PCI_SUBSYSTEM_VENDOR_ID),
+                    ==, 0x1234103c);
+    ia64_cfg_writeb(qts, 0, dev, 0, 0x4f, 0x01);
+    ia64_cfg_writel(qts, 0, dev, 0, PCI_SUBSYSTEM_VENDOR_ID, 0x06491095);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, dev, 0, 0x8c), ==, 0x06491095);
+
+    /* 70h-7Fh and Base Address #4 are one register file. */
+    ia64_cfg_writel(qts, 0, dev, 0, PCI_BASE_ADDRESS_4,
+                    bm | PCI_BASE_ADDRESS_SPACE_IO);
+    ia64_cfg_writew(qts, 0, dev, 0, PCI_COMMAND, PCI_COMMAND_IO);
+    ia64_cfg_writel(qts, 0, dev, 0, 0x74, 0x400a4003);
+    g_assert_cmphex(qtest_readl(qts, zx1_ide_port(bm + 4)), ==, 0x400a4000);
+    ia64_cfg_writeb(qts, 0, dev, 0, 0x73, 0xd1);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(bm + 3)), ==, 0xd1);
+    qtest_writeb(qts, zx1_ide_port(bm), 0x08);
+    qtest_writeb(qts, zx1_ide_port(bm + 2), 0x20);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0, dev, 0, 0x70) & 0x00ff, ==, 0x08);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0, dev, 0, 0x72), ==, 0x20);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(bm + 9)), ==, 0x80);
+    qtest_quit(qts);
+}
+
+/*
  * IDETIM bit 15, the channel's IDE Decode Enable (SSDM 12.2.10).  It resets
  * clear, and while it is clear the channel's ATA command and control blocks
  * are not decoded here at all -- the access falls through to LPC, which on
@@ -10266,6 +10340,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/ide-on-seat", test_ide_on_seat);
     qtest_add_func("/ia64-vpc/zx1/empty-optical-sense",
                    test_zx1_empty_optical_sense);
+    qtest_add_func("/ia64-vpc/zx1/cmd649-registers",
+                   test_zx1_cmd649_registers);
     qtest_add_func("/ia64-vpc/network/resources-survive-reset",
                    test_e1000_resources_survive_reset);
     qtest_add_func("/ia64-vpc/network/intx-route",
