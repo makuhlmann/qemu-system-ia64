@@ -973,6 +973,9 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.ar_rsc = 0;
     /* CFM.sof = 96 and the rest 0, BOF at GR32 (SDM Vol 2 6.12). */
     cpu->env.cfm_sof = IA64_STACKED_GR_COUNT;
+    for (int i = 0; i < IA64_RR_COUNT; i++) {
+        cpu->env.rr[i] = icc->pal->rr_reset;
+    }
     cpu->env.ar_fpsr = IA64_FPSR_DEFAULT;
     cpu->env.cr_iva = 0;
     cpu->env.instruction_group_start = true;
@@ -1295,6 +1298,11 @@ static const IA64PalProfile ia64_pal_profile_madison = {
         [0] = IA64_PAL_POWER_STATE(true, 35000, 9000, 8700),
         [2] = IA64_PAL_POWER_STATE(true, 35000, 14000, 8700),
     },
+    /*
+     * RID 0 with 4 KB pages: rr1-7 at the rx2600's EFI shell, where the
+     * vendor firmware has written only rr0 (capture 2026-10-03, CPU-25).
+     */
+    .rr_reset = 0x30,
 };
 
 static const IA64PalProfile ia64_pal_profile_montecito = {
@@ -1638,16 +1646,22 @@ static const IA64PmuLayout ia64_pmu_layout_merced = {
 static const IA64PmuLayout ia64_pmu_layout_madison = {
     /*
      * Reset values, 251110-003 §10.3.11 and PMC4.enable (§10.3.1: set at
-     * reset); the rest is undefined.
+     * reset); the rest is undefined.  PAL writes all ones to PMC8 and PMC9,
+     * which on the rx2600 read back without bits 31:30, and PMC9 without
+     * ig_ad and inv either; its PMC14 reads 0xdb6 in all four 16-bit lanes
+     * (capture 2026-10-03, CPU-26).
      */
     .pmc = {
         [0] = { .mask = 0xf1 },
         [4] = { .mask = UINT64_MAX, .reset = 1ULL << 23 },
         [5 ... 7] = { .mask = UINT64_MAX },
-        [8 ... 9] = { .mask = UINT64_MAX, .reset = UINT64_MAX },
+        [8] = { .mask = 0xffffffff3fffffffULL,
+                .reset = 0xffffffff3fffffffULL },
+        [9] = { .mask = 0xffffffff3ffffffcULL,
+                .reset = 0xffffffff3ffffffcULL },
         [10 ... 12] = { .mask = UINT64_MAX },
         [13] = { .mask = UINT64_MAX, .reset = 0x2078fefefefeULL },
-        [14] = { .mask = UINT64_MAX, .reset = 0xdb6 },
+        [14] = { .mask = UINT64_MAX, .reset = 0x0db60db60db60db6ULL },
         [15] = { .mask = UINT64_MAX, .reset = 0xfffffff0 },
     },
     .pmd = {

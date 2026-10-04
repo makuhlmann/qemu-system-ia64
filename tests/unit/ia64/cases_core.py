@@ -166,6 +166,7 @@ from .encoding import (
     mov_pmdgr_indexed,
     mov_pr_gr,
     mov_pr_rot_imm,
+    mov_rr_read,
     movl_mlx,
     mpy4,
     mpyshl4,
@@ -3623,28 +3624,63 @@ test_pmu_merced_reset_values = require_registers(
         "r31": 1 << 16,
     }, entry=0x10, cpu="merced")
 
-# 251110-003 §10.3.11 and §10.3.1 (PMC4.enable is set at reset).
+# 251110-003 §10.3.11 and §10.3.1 (PMC4.enable is set at reset), read back
+# as the rx2600 does (capture 2026-10-03, CPU-26).
 test_pmu_madison_reset_values = require_registers(
     "pmu_madison_reset_values", [
         (0x10, 0x00, adds(8, 4, 0), adds(9, 9, 0), nop_i()),
         (0x20, 0x00, adds(10, 13, 0), adds(11, 14, 0), nop_i()),
-        (0x30, 0x00, adds(12, 15, 0), nop_i(), nop_i()),
+        (0x30, 0x00, adds(12, 15, 0), adds(13, 8, 0), nop_i()),
         (0x40, 0x00, mov_pmcgr_indexed(26, 8), nop_i(), nop_i()),
         (0x50, 0x00, mov_pmcgr_indexed(27, 9), nop_i(), nop_i()),
         (0x60, 0x00, mov_pmcgr_indexed(28, 10), nop_i(), nop_i()),
         (0x70, 0x00, mov_pmcgr_indexed(29, 11), nop_i(), nop_i()),
         (0x80, 0x00, mov_pmcgr_indexed(30, 12), nop_i(), nop_i()),
         (0x90, 0x00, mov_m_cr_gr(31, 73), nop_i(), nop_i()),
-        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+        (0xa0, 0x00, mov_pmcgr_indexed(25, 13), nop_i(), nop_i()),
+        (0xb0, 0x10, nop_m(), nop_i(), br_cond(0xb0, 0xb0)),
     ], {
-        "ip": 0xa0,
+        "ip": 0xb0,
         "exception": IA64_EXCP_NONE,
+        "r25": 0xffffffff3fffffff,
         "r26": 1 << 23,
-        "r27": 0xffffffffffffffff,
+        "r27": 0xffffffff3ffffffc,
         "r28": 0x2078fefefefe,
-        "r29": 0xdb6,
+        "r29": 0x0db60db60db60db6,
         "r30": 0xfffffff0,
         "r31": 1 << 16,
+    }, entry=0x10, cpu="madison")
+
+# PMC8 and PMC9 keep no bits 31:30, and PMC9 neither ig_ad nor inv.
+test_pmu_madison_opcode_match_write_mask = require_registers(
+    "pmu_madison_opcode_match_write_mask", [
+        (0x10, 0x00, adds(8, 8, 0), adds(9, 9, 0), nop_i()),
+        (0x20, 0x00, adds(10, -1, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_grpmc_indexed(8, 10), nop_i(), nop_i()),
+        (0x40, 0x00, mov_grpmc_indexed(9, 10), nop_i(), nop_i()),
+        (0x50, 0x00, mov_pmcgr_indexed(28, 8), nop_i(), nop_i()),
+        (0x60, 0x00, mov_pmcgr_indexed(29, 9), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r28": 0xffffffff3fffffff,
+        "r29": 0xffffffff3ffffffc,
+    }, entry=0x10, cpu="madison")
+
+# The region registers PALE_RESET hands over on the rx2600: RID 0, 4 KB pages
+# (capture 2026-10-03, CPU-25).
+test_rr_madison_reset_values = require_registers(
+    "rr_madison_reset_values", [
+        (0x10, *movl_mlx(8, 0xe000000000000000)),
+        (0x20, 0x00, mov_rr_read(28, 0), nop_i(), nop_i()),
+        (0x30, 0x00, mov_rr_read(29, 8), nop_i(), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_cond(0x40, 0x40)),
+    ], {
+        "ip": 0x40,
+        "exception": IA64_EXCP_NONE,
+        "r28": 0x30,
+        "r29": 0x30,
     }, entry=0x10, cpu="madison")
 
 test_pmc_pmd_indexed_decode = require_registers("pmc_pmd_indexed_decode", [
@@ -3959,6 +3995,8 @@ CASE_NAMES = (
     'pmpy2_decode',
     'pmpyshr2_decode',
     'pmu_madison_reset_values',
+    'pmu_madison_opcode_match_write_mask',
+    'rr_madison_reset_values',
     'pmu_merced_reset_values',
     'popcnt_decode',
     'predicate_register_roundtrip',

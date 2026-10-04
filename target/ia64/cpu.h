@@ -2030,6 +2030,11 @@ typedef struct IA64PalProfile {
      * from 1 up that is implemented here.
      */
     uint64_t halt_info[IA64_PAL_HALT_STATES];
+    /*
+     * The region registers as PALE_RESET hands them over; the SDM leaves
+     * them undefined (Vol. 2 11.2.2, PALE_RESET Exit State).
+     */
+    uint64_t rr_reset;
 } IA64PalProfile;
 
 /*
