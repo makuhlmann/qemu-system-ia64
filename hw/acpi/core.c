@@ -412,6 +412,7 @@ static void acpi_pm1_evt_write_sts(ACPIREGS *ar, uint16_t val)
 
 static void acpi_pm1_evt_write_en(ACPIREGS *ar, uint16_t val)
 {
+    val &= ar->pm1.evt.en_mask;
     ar->pm1.evt.en = val;
     qemu_system_wakeup_enable(QEMU_WAKEUP_REASON_RTC,
                               val & ACPI_BITMASK_RT_CLOCK_ENABLE);
@@ -477,6 +478,7 @@ void acpi_pm1_evt_init(ACPIREGS *ar, acpi_update_sci_fn update_sci,
                        MemoryRegion *parent)
 {
     ar->pm1.evt.update_sci = update_sci;
+    ar->pm1.evt.en_mask = 0xffff;
     memory_region_init_io(&ar->pm1.evt.io, memory_region_owner(parent),
                           &acpi_pm_evt_ops, ar, "acpi-evt", 4);
     memory_region_add_subregion(parent, 0, &ar->pm1.evt.io);
@@ -503,16 +505,19 @@ static inline int64_t acpi_pm_tmr_get_clock(void)
                     NANOSECONDS_PER_SECOND);
 }
 
+/* TMR_STS sets each time the counter's top bit changes (ACPI 2.0 4.7.3.3). */
 void acpi_pm_tmr_calc_overflow_time(ACPIREGS *ar)
 {
     int64_t d = acpi_pm_tmr_get_clock();
-    ar->tmr.overflow_time = (d + 0x800000LL) & ~0x7fffffLL;
+    int64_t half = ar->tmr.ext ? 0x80000000LL : 0x800000LL;
+
+    ar->tmr.overflow_time = (d + half) & ~(half - 1);
 }
 
 static uint32_t acpi_pm_tmr_get(ACPIREGS *ar)
 {
     uint32_t d = acpi_pm_tmr_get_clock();
-    return d & 0xffffff;
+    return ar->tmr.ext ? d : d & 0xffffff;
 }
 
 static void acpi_pm_tmr_timer(void *opaque)

@@ -15,13 +15,20 @@
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
+#include "hw/block/block.h"
+#include "system/block-backend.h"
+#include "qemu/timer.h"
+#include "qemu/log.h"
 #include "hw/rtc/mc146818rtc.h"
+#include "hw/rtc/mc146818rtc_regs.h"
 #include "hw/timer/i8254.h"
 #include "hw/southbridge/intel_82468gx.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "system/runstate.h"
+#include "trace.h"
 
 typedef struct Intel82468GXSMBusState {
     PCIDevice parent_obj;
@@ -54,6 +61,34 @@ typedef struct Intel82468GXSMBusState {
  * reset; the bit therefore resets set here, and stays writable so software can
  * still select the alias.
  */
+/*
+ * General-purpose I/O (SSDM 11.1.21-22, 11.2.9): 64 bytes of I/O space at
+ * GPIOBA (D0h) bits 15:6, decoded while GPIOE (D4h) bit 0 is set.  In each
+ * register bits 28:24 are the muxed GPIO[22:18], bits 19:16 the muxed
+ * GPIO[13:10] and bits 8:0 the dedicated GPIO[8:0].  An input reads the level
+ * the board puts on its pin ("gpio-inputs"); nothing on the board listens to
+ * an output.  Blink, SMI routing, pulse and core-well control are latches
+ * only, and MGPIOC (84h), whose bits the SSDM leaves undocumented, does not
+ * gate the muxed pins.
+ */
+#define IFB_GPIOBA             0xd0
+#define IFB_GPIOE              0xd4
+#define IFB_GPIO_SIZE          64
+#define IFB_GP_OUTPUT          0x00
+#define IFB_GP_DATA            0x04
+#define IFB_GP_TTL             0x08
+#define IFB_GP_BLINK           0x0c
+#define IFB_GP_LOCK            0x10
+#define IFB_GP_INVERT          0x14
+#define IFB_GP_SMI             0x1c
+#define IFB_GP_PULSE           0x20
+#define IFB_GP_CORE            0x24
+#define IFB_GP_PULLUP          0x28
+#define IFB_GP_REGS            (IFB_GP_PULLUP / 4 + 1)
+#define IFB_GP_ALL             0x1f0f01ffU
+#define IFB_GP_DEDICATED       0x000001ffU
+#define IFB_GP_PULLUP_RESET    0x000003ffU
+
 #define IFB_FREQ_MAILBOX       0xd0
 #define IFB_FREQ_MAILBOX_DONE  0x8000
 #define IFB_RTC_CFG            0xc8
@@ -79,15 +114,19 @@ struct Intel82468GXIFBState {
     PICCommonState *master_pic;
     MemoryRegion acpi_pm;
     MemoryRegion acpi_gpe;
-    MemoryRegion acpi_glbctl;
+    MemoryRegion acpi_smi;
     MemoryRegion apm;
     ACPIREGS acpi_regs;
     /* SSDM 11.2.8.1 Global Control and Enable, at ACPI block offset 1Ah. */
     uint16_t glbctl;
+    /* SSDM 11.2.8.2 Global Status, at 1Ch: of its causes, APM_STS. */
+    uint16_t glbsts;
     /* SSDM 11.2.6 APM control and status ports, B2h/B3h. */
     uint8_t apmc;
     uint8_t apms;
-    qemu_irq apmc_irq;
+    /* The SMI# pin, asserted high here. */
+    qemu_irq smi;
+    bool smi_asserted;
     /*
      * The ACPI I/O base the board's firmware programs at POST, or 0 for the
      * part's own reset state (block disabled).  The vendor i2000 firmware
@@ -114,8 +153,17 @@ struct Intel82468GXIFBState {
      * reboot repeat forever; b18d80a).
      */
     uint32_t freq_mailbox;
+    MemoryRegion gpio;
+    uint32_t gp[IFB_GP_REGS];
+    /* Pin levels in GP Data bit positions, as the board drives or pulls them. */
+    uint32_t gpio_inputs;
     uint8_t rtc_ext_index;
     uint8_t rtc_ext_ram[IFB_RTC_BANK_SIZE];
+    /* The board's battery for both RTC banks; NULL keeps them volatile. */
+    BlockBackend *battery;
+    uint8_t *battery_shadow;
+    QEMUTimer *battery_timer;
+    VMChangeStateEntry *battery_vmstate;
 };
 
 #define IFB_ACPI_PM_IO_SIZE 0x40
@@ -139,21 +187,30 @@ struct Intel82468GXIFBState {
 #define IFB_ACPI_GPE_OFFSET 0x0c
 #define IFB_ACPI_GPE_LENGTH 4
 /*
- * Global Control and Enable (SSDM 11.2.8.1): "added to the end of the I/O
- * register space defined by the ACPI block"; bit 3 defaults to 1, bit 10
- * APMC_EN "enable SMIs based upon accesses to the APM control port at B2h".
+ * Global Control and Enable and Global Status (SSDM 11.2.8), "added to the
+ * end of the I/O register space defined by the ACPI block".  SMI_EN enables
+ * every SMI cause; APMC_EN enables "SMIs based upon accesses to the APM
+ * control port at B2h", which set APM_STS (write 1 to clear).  SMI# "remains
+ * active until the EOS bit is set", and EOS is "automatically cleared once
+ * IFB asserts SMI#" (16.2.2): software clears the status, then sets EOS, and
+ * a cause still pending asserts SMI# again.  EOS resets to 1.
  */
-#define IFB_ACPI_GLBCTL_OFFSET  0x1a
-#define IFB_GLBCTL_DEFAULT      BIT(3)
+#define IFB_ACPI_SMI_OFFSET     0x1a
+#define IFB_ACPI_SMI_LENGTH     4
+#define IFB_SMI_GLBCTL          0
+#define IFB_SMI_GLBSTS          2
+#define IFB_GLBCTL_SMI_EN       BIT(0)
+#define IFB_GLBCTL_EOS          BIT(3)
+#define IFB_GLBCTL_DEFAULT      IFB_GLBCTL_EOS
 #define IFB_GLBCTL_APMC_EN      BIT(10)
 #define IFB_GLBCTL_WRITABLE     0x1fff
+#define IFB_GLBSTS_APM_STS      BIT(3)
 /*
  * APMC/APMS (SSDM 11.2.6): "located in normal I/O space", always decoded --
  * "the APM power management ranges (B2/B3h) are always enabled and are not
  * affected by" ACPI Enable (11.1.9).  "Writes to [APMC] store data ... In
  * addition, writes generate an SMI, if the APMC_EN bit ... is set to 1.
- * Reads do not generate an SMI."  The SMI leaves as the "apmc" output
- * carrying the command; on this platform it is the processor's PMI.
+ * Reads do not generate an SMI."
  */
 #define IFB_APM_IOPORT          0xb2
 
@@ -281,6 +338,7 @@ static void ifb_rtc_ext_write(void *opaque, hwaddr addr, uint64_t value,
     }
     if (!ifb_rtc_ext_locked(s)) {
         s->rtc_ext_ram[s->rtc_ext_index] = value;
+        trace_ifb_rtc_ext_write(s->rtc_ext_index, value);
     }
 }
 
@@ -364,31 +422,53 @@ static const MemoryRegionOps ifb_acpi_gpe_ops = {
     },
 };
 
-static uint64_t ifb_acpi_glbctl_read(void *opaque, hwaddr addr,
-                                     unsigned size)
+static void ifb_smi_update(Intel82468GXIFBState *s)
 {
-    Intel82468GXIFBState *s = opaque;
+    bool cause = (s->glbsts & IFB_GLBSTS_APM_STS) &&
+                 (s->glbctl & IFB_GLBCTL_APMC_EN);
 
-    return (s->glbctl >> (addr * 8)) & ((1u << (size * 8)) - 1);
+    if (s->smi_asserted && (s->glbctl & IFB_GLBCTL_EOS)) {
+        s->smi_asserted = false;
+        qemu_set_irq(s->smi, 0);
+    }
+    if (!s->smi_asserted && cause && (s->glbctl & IFB_GLBCTL_SMI_EN) &&
+        (s->glbctl & IFB_GLBCTL_EOS)) {
+        s->smi_asserted = true;
+        s->glbctl &= ~IFB_GLBCTL_EOS;
+        qemu_set_irq(s->smi, 1);
+    }
 }
 
-static void ifb_acpi_glbctl_write(void *opaque, hwaddr addr, uint64_t value,
-                                  unsigned size)
+static uint64_t ifb_acpi_smi_read(void *opaque, hwaddr addr, unsigned size)
 {
     Intel82468GXIFBState *s = opaque;
-    uint16_t mask = ((1u << (size * 8)) - 1) << (addr * 8);
+    uint32_t regs = s->glbctl | ((uint32_t)s->glbsts << 16);
 
-    s->glbctl = ((s->glbctl & ~mask) | ((value << (addr * 8)) & mask)) &
+    return (regs >> (addr * 8)) & MAKE_64BIT_MASK(0, size * 8);
+}
+
+static void ifb_acpi_smi_write(void *opaque, hwaddr addr, uint64_t value,
+                               unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+    uint32_t mask = MAKE_64BIT_MASK(0, size * 8) << (addr * 8);
+    uint32_t data = (value << (addr * 8)) & mask;
+    uint16_t ctl_mask = mask >> (IFB_SMI_GLBCTL * 8);
+    uint16_t sts_clear = data >> (IFB_SMI_GLBSTS * 8);
+
+    s->glbctl = ((s->glbctl & ~ctl_mask) | (data & ctl_mask)) &
                 IFB_GLBCTL_WRITABLE;
+    s->glbsts &= ~(sts_clear & IFB_GLBSTS_APM_STS);
+    ifb_smi_update(s);
 }
 
-static const MemoryRegionOps ifb_acpi_glbctl_ops = {
-    .read = ifb_acpi_glbctl_read,
-    .write = ifb_acpi_glbctl_write,
+static const MemoryRegionOps ifb_acpi_smi_ops = {
+    .read = ifb_acpi_smi_read,
+    .write = ifb_acpi_smi_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
         .min_access_size = 1,
-        .max_access_size = 2,
+        .max_access_size = 4,
     },
 };
 
@@ -407,7 +487,8 @@ static void ifb_apm_write(void *opaque, hwaddr addr, uint64_t value,
     if (addr == 0) {
         s->apmc = value;
         if (s->glbctl & IFB_GLBCTL_APMC_EN) {
-            qemu_set_irq(s->apmc_irq, s->apmc);
+            s->glbsts |= IFB_GLBSTS_APM_STS;
+            ifb_smi_update(s);
         }
     } else {
         s->apms = value;
@@ -423,6 +504,99 @@ static const MemoryRegionOps ifb_apm_ops = {
         .max_access_size = 1,
     },
 };
+
+static const uint32_t ifb_gp_mask[IFB_GP_REGS] = {
+    [IFB_GP_OUTPUT / 4] = IFB_GP_ALL,
+    [IFB_GP_DATA / 4] = IFB_GP_ALL,
+    [IFB_GP_TTL / 4] = IFB_GP_ALL,
+    [IFB_GP_BLINK / 4] = IFB_GP_DEDICATED,
+    [IFB_GP_LOCK / 4] = IFB_GP_ALL,
+    [IFB_GP_INVERT / 4] = IFB_GP_DEDICATED,
+    [IFB_GP_SMI / 4] = IFB_GP_DEDICATED,
+    [IFB_GP_PULSE / 4] = IFB_GP_DEDICATED,
+    [IFB_GP_CORE / 4] = IFB_GP_DEDICATED,
+    [IFB_GP_PULLUP / 4] = IFB_GP_PULLUP_RESET,
+};
+
+static uint32_t ifb_gp_read_reg(Intel82468GXIFBState *s, unsigned reg)
+{
+    uint32_t out, in;
+
+    if (reg != IFB_GP_DATA / 4) {
+        return s->gp[reg];
+    }
+    /* An input is inverted "before entering the data register" (11.2.9.6). */
+    out = s->gp[IFB_GP_OUTPUT / 4];
+    in = (s->gpio_inputs ^ s->gp[IFB_GP_INVERT / 4]) & IFB_GP_ALL;
+    return (s->gp[reg] & out) | (in & ~out);
+}
+
+static uint64_t ifb_gpio_read(void *opaque, hwaddr addr, unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+    unsigned reg = addr / 4;
+    uint32_t value;
+
+    if (reg >= IFB_GP_REGS) {
+        return 0;
+    }
+    value = extract32(ifb_gp_read_reg(s, reg), (addr & 3) * 8, size * 8);
+    if (reg == IFB_GP_DATA / 4) {
+        trace_ifb_gp_data_read(value);
+    }
+    return value;
+}
+
+static void ifb_gpio_write(void *opaque, hwaddr addr, uint64_t value,
+                           unsigned size)
+{
+    Intel82468GXIFBState *s = opaque;
+    unsigned reg = addr / 4;
+    unsigned shift = (addr & 3) * 8;
+    uint32_t wmask;
+
+    if (reg >= IFB_GP_REGS) {
+        return;
+    }
+    wmask = ifb_gp_mask[reg] & MAKE_64BIT_MASK(shift, size * 8);
+    value <<= shift;
+    if (reg == IFB_GP_LOCK / 4) {
+        /* Set-only: "it can only be cleared by a PCIRST#" (11.2.9.5). */
+        s->gp[reg] |= value & wmask;
+        return;
+    }
+    wmask &= ~s->gp[IFB_GP_LOCK / 4];
+    if (reg == IFB_GP_DATA / 4) {
+        wmask &= s->gp[IFB_GP_OUTPUT / 4];
+    }
+    s->gp[reg] = (s->gp[reg] & ~wmask) | (value & wmask);
+}
+
+static const MemoryRegionOps ifb_gpio_ops = {
+    .read = ifb_gpio_read,
+    .write = ifb_gpio_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 4,
+    },
+};
+
+/*
+ * Decode at the written base: the D0h read-back carries the frequency
+ * mailbox's done flag (bit 15, see freq_mailbox), which is not an address.
+ */
+static void ifb_gpio_io_update(Intel82468GXIFBState *s)
+{
+    PCIDevice *pci = PCI_DEVICE(s);
+
+    memory_region_transaction_begin();
+    memory_region_set_address(&s->gpio,
+                              pci_get_long(pci->config + IFB_GPIOBA) &
+                              0xffc0U);
+    memory_region_set_enabled(&s->gpio, pci->config[IFB_GPIOE] & BIT(0));
+    memory_region_transaction_commit();
+}
 
 static void ifb_acpi_io_update(Intel82468GXIFBState *s)
 {
@@ -474,6 +648,9 @@ static void ifb_lpc_reset(DeviceState *dev)
 
     s->nmisc_value = 0;
     s->rtc_ext_index = 0;
+    memset(s->gp, 0, sizeof(s->gp));
+    s->gp[IFB_GP_PULLUP / 4] = IFB_GP_PULLUP_RESET;
+    ifb_gpio_io_update(s);
 
     acpi_pm1_evt_reset(&s->acpi_regs);
     acpi_pm1_cnt_reset(&s->acpi_regs);
@@ -481,18 +658,22 @@ static void ifb_lpc_reset(DeviceState *dev)
     acpi_gpe_reset(&s->acpi_regs);
     s->acpi_regs.gpe.sts[1] = BIT(3);
     s->glbctl = IFB_GLBCTL_DEFAULT;
+    s->glbsts = 0;
     s->apmc = 0;
     s->apms = 0;
+    if (s->smi_asserted) {
+        s->smi_asserted = false;
+        qemu_set_irq(s->smi, 0);
+    }
     if (s->init_acpi_base != 0) {
         /*
          * The board firmware's chipset-init pokes, in its order: ACPI Enable
          * off, ACPI Base, ACPI Enable on (the vendor script at bios130.BIN
-         * 0x2c7a80: 00:03.0 @44h = 0, @40h = 0A00h, @44h = 1), and the APM
-         * SMI enable its PMI handler relies on.
+         * 0x2c7a80: 00:03.0 @44h = 0, @40h = 0A00h, @44h = 1).  SMI_EN and
+         * APMC_EN are the firmware's own (SAL_B run-time 0x3FF17CE0).
          */
         pci_set_long(pci->config + 0x40, (s->init_acpi_base & 0xffc0U) | 1U);
         pci->config[0x44] = BIT(0);
-        s->glbctl |= IFB_GLBCTL_APMC_EN;
     }
     ifb_acpi_update_sci(&s->acpi_regs);
     ifb_acpi_io_update(s);
@@ -570,6 +751,9 @@ static void ifb_lpc_write_config(PCIDevice *pci, uint32_t address,
     if (ranges_overlap(address, length, 0x40, 5)) {
         ifb_acpi_io_update(INTEL_82468GX_IFB(pci));
     }
+    if (ranges_overlap(address, length, IFB_GPIOBA, 5)) {
+        ifb_gpio_io_update(s);
+    }
 }
 
 static void ifb_lpc_init_config(PCIDevice *pci)
@@ -636,6 +820,115 @@ static void ifb_remove_function(PCIDevice **pci)
     *pci = NULL;
 }
 
+/*
+ * The clock registers (00h-0Dh) and the century byte come from -rtc at each
+ * start, as the part's own clock would have kept counting; the rest of both
+ * banks is what the battery kept.
+ */
+#define IFB_BATTERY_HEADER      16
+#define IFB_BATTERY_PERIOD_MS   1000
+
+static bool ifb_battery_restores(unsigned index)
+{
+    return index >= IFB_RTC_BANK_SIZE ||
+           (index > RTC_REG_D && index != RTC_CENTURY);
+}
+
+static void ifb_battery_image(Intel82468GXIFBState *s, uint8_t *area)
+{
+    memset(area, 0, INTEL_82468GX_IFB_BATTERY_SIZE);
+    memcpy(area, INTEL_82468GX_IFB_BATTERY_MAGIC, 8);
+    memcpy(area + IFB_BATTERY_HEADER, s->rtc->cmos_data, IFB_RTC_BANK_SIZE);
+    memcpy(area + IFB_BATTERY_HEADER + IFB_RTC_BANK_SIZE, s->rtc_ext_ram,
+           IFB_RTC_BANK_SIZE);
+}
+
+/*
+ * The banks are written through I/O ports that do not trap here, so compare
+ * the banks with what the file holds and write only a change, once a second
+ * while the machine runs and whenever it stops.  A ticking clock alone is
+ * not a change.
+ */
+static void ifb_battery_flush(Intel82468GXIFBState *s)
+{
+    g_autofree uint8_t *area = g_malloc(INTEL_82468GX_IFB_BATTERY_SIZE);
+    unsigned i;
+
+    ifb_battery_image(s, area);
+    for (i = 0; i < 2 * IFB_RTC_BANK_SIZE; i++) {
+        if (ifb_battery_restores(i) &&
+            area[IFB_BATTERY_HEADER + i] !=
+            s->battery_shadow[IFB_BATTERY_HEADER + i]) {
+            break;
+        }
+    }
+    if (i == 2 * IFB_RTC_BANK_SIZE &&
+        memcmp(area, s->battery_shadow, IFB_BATTERY_HEADER) == 0) {
+        return;
+    }
+    memcpy(s->battery_shadow, area, INTEL_82468GX_IFB_BATTERY_SIZE);
+    if (blk_pwrite(s->battery, 0, INTEL_82468GX_IFB_BATTERY_SIZE, area,
+                   0) < 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "82468gx: cannot write the RTC battery area\n");
+    }
+}
+
+static void ifb_battery_timer(void *opaque)
+{
+    Intel82468GXIFBState *s = opaque;
+
+    ifb_battery_flush(s);
+    timer_mod(s->battery_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+              IFB_BATTERY_PERIOD_MS);
+}
+
+static void ifb_battery_vm_state(void *opaque, bool running, RunState state)
+{
+    Intel82468GXIFBState *s = opaque;
+
+    if (running) {
+        timer_mod(s->battery_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) +
+                  IFB_BATTERY_PERIOD_MS);
+    } else {
+        timer_del(s->battery_timer);
+        ifb_battery_flush(s);
+    }
+}
+
+static bool ifb_battery_load(Intel82468GXIFBState *s, Error **errp)
+{
+    g_autofree uint8_t *area = g_malloc(INTEL_82468GX_IFB_BATTERY_SIZE);
+    unsigned i;
+
+    if (blk_set_perm(s->battery, BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE,
+                     BLK_PERM_ALL, errp) < 0 ||
+        !blk_check_size_and_read_all(s->battery, DEVICE(s), area,
+                                     INTEL_82468GX_IFB_BATTERY_SIZE, errp)) {
+        return false;
+    }
+    if (memcmp(area, INTEL_82468GX_IFB_BATTERY_MAGIC, 8) == 0) {
+        for (i = 0; i < 2 * IFB_RTC_BANK_SIZE; i++) {
+            uint8_t byte = area[IFB_BATTERY_HEADER + i];
+
+            if (!ifb_battery_restores(i)) {
+                continue;
+            }
+            if (i < IFB_RTC_BANK_SIZE) {
+                s->rtc->cmos_data[i] = byte;
+            } else {
+                s->rtc_ext_ram[i - IFB_RTC_BANK_SIZE] = byte;
+            }
+        }
+    }
+    /* A new battery reads as zeros and is written once the banks change. */
+    s->battery_shadow = g_steal_pointer(&area);
+    s->battery_timer = timer_new_ms(QEMU_CLOCK_REALTIME, ifb_battery_timer, s);
+    s->battery_vmstate = qemu_add_vm_change_state_handler(ifb_battery_vm_state,
+                                                          s);
+    return true;
+}
+
 static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
 {
     Intel82468GXIFBState *s = INTEL_82468GX_IFB(pci);
@@ -676,6 +969,9 @@ static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
 
     /* The bridge carries the RTC too (SSDM 15.5), both of its banks. */
     s->rtc = mc146818_rtc_init(s->isa_bus, 2000, NULL);
+    if (s->battery && !ifb_battery_load(s, errp)) {
+        return;
+    }
     memory_region_init_io(&s->rtc_ext, OBJECT(s), &ifb_rtc_ext_ops, s,
                           TYPE_INTEL_82468GX_IFB ".rtc-ext", 2);
     memory_region_init_alias(&s->rtc_ext_alias, OBJECT(s),
@@ -703,10 +999,15 @@ static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
                           IFB_ACPI_GPE_LENGTH);
     memory_region_add_subregion(&s->acpi_pm, IFB_ACPI_GPE_OFFSET,
                                 &s->acpi_gpe);
-    memory_region_init_io(&s->acpi_glbctl, OBJECT(s), &ifb_acpi_glbctl_ops,
-                          s, TYPE_INTEL_82468GX_IFB ".acpi-glbctl", 2);
-    memory_region_add_subregion(&s->acpi_pm, IFB_ACPI_GLBCTL_OFFSET,
-                                &s->acpi_glbctl);
+    memory_region_init_io(&s->acpi_smi, OBJECT(s), &ifb_acpi_smi_ops,
+                          s, TYPE_INTEL_82468GX_IFB ".acpi-smi",
+                          IFB_ACPI_SMI_LENGTH);
+    memory_region_add_subregion(&s->acpi_pm, IFB_ACPI_SMI_OFFSET,
+                                &s->acpi_smi);
+    memory_region_init_io(&s->gpio, OBJECT(s), &ifb_gpio_ops, s,
+                          TYPE_INTEL_82468GX_IFB ".gpio", IFB_GPIO_SIZE);
+    memory_region_add_subregion(pci_address_space_io(pci), 0, &s->gpio);
+    memory_region_set_enabled(&s->gpio, false);
     memory_region_init_io(&s->apm, OBJECT(s), &ifb_apm_ops, s,
                           TYPE_INTEL_82468GX_IFB ".apm", 2);
     memory_region_add_subregion(pci_address_space_io(pci), IFB_APM_IOPORT,
@@ -736,6 +1037,13 @@ static void ifb_lpc_exit(PCIDevice *pci)
 {
     Intel82468GXIFBState *s = INTEL_82468GX_IFB(pci);
 
+    if (s->battery_vmstate) {
+        qemu_del_vm_change_state_handler(s->battery_vmstate);
+        s->battery_vmstate = NULL;
+    }
+    g_clear_pointer(&s->battery_timer, timer_free);
+    g_clear_pointer(&s->battery_shadow, g_free);
+
     ifb_remove_function(&s->functions[3]);
     ifb_remove_function(&s->functions[2]);
     ifb_remove_function(&s->functions[1]);
@@ -761,13 +1069,14 @@ static int ifb_lpc_post_load(void *opaque, int version_id)
         QEMU_WAKEUP_REASON_PMTIMER,
         (pm_enable & ACPI_BITMASK_TIMER_ENABLE) != 0);
     ifb_acpi_io_update(s);
+    ifb_gpio_io_update(s);
     ifb_acpi_update_sci(&s->acpi_regs);
     return 0;
 }
 
 static const VMStateDescription vmstate_ifb_lpc = {
     .name = TYPE_INTEL_82468GX_IFB,
-    .version_id = 3,
+    .version_id = 5,
     .minimum_version_id = 1,
     .post_load = ifb_lpc_post_load,
     .fields = (const VMStateField[]) {
@@ -791,6 +1100,9 @@ static const VMStateDescription vmstate_ifb_lpc = {
         VMSTATE_UINT16_V(glbctl, Intel82468GXIFBState, 3),
         VMSTATE_UINT8_V(apmc, Intel82468GXIFBState, 3),
         VMSTATE_UINT8_V(apms, Intel82468GXIFBState, 3),
+        VMSTATE_UINT16_V(glbsts, Intel82468GXIFBState, 4),
+        VMSTATE_BOOL_V(smi_asserted, Intel82468GXIFBState, 4),
+        VMSTATE_UINT32_ARRAY_V(gp, Intel82468GXIFBState, IFB_GP_REGS, 5),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -811,13 +1123,17 @@ static void ifb_lpc_init(Object *obj)
                              ISA_NUM_IRQS);
     qdev_init_gpio_out_named(DEVICE(obj), &s->sci,
                              INTEL_82468GX_IFB_GPIO_SCI, 1);
-    qdev_init_gpio_out_named(DEVICE(obj), &s->apmc_irq,
-                             INTEL_82468GX_IFB_GPIO_APMC, 1);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->smi,
+                             INTEL_82468GX_IFB_GPIO_SMI, 1);
 }
 
 static const Property ifb_lpc_properties[] = {
     DEFINE_PROP_UINT16(INTEL_82468GX_IFB_PROP_INIT_ACPI_BASE,
                        Intel82468GXIFBState, init_acpi_base, 0),
+    DEFINE_PROP_UINT32(INTEL_82468GX_IFB_PROP_GPIO_INPUTS,
+                       Intel82468GXIFBState, gpio_inputs, UINT32_MAX),
+    DEFINE_PROP_DRIVE(INTEL_82468GX_IFB_PROP_BATTERY, Intel82468GXIFBState,
+                      battery),
 };
 
 static void ifb_lpc_class_init(ObjectClass *klass, const void *data)
@@ -831,7 +1147,7 @@ static void ifb_lpc_class_init(ObjectClass *klass, const void *data)
     pc->config_write = ifb_lpc_write_config;
     pc->vendor_id = INTEL_82468GX_IFB_VENDOR_ID;
     pc->device_id = INTEL_82468GX_IFB_LPC_DEVICE_ID;
-    pc->revision = 0;
+    pc->revision = INTEL_82468GX_IFB_REVISION;
     pc->class_id = PCI_CLASS_BRIDGE_ISA;
     dc->desc = "Intel 82468GX I/O and Firmware Bridge";
     dc->user_creatable = false;
@@ -940,7 +1256,7 @@ static void ifb_smbus_class_init(ObjectClass *klass, const void *data)
     pc->config_write = ifb_smbus_write_config;
     pc->vendor_id = INTEL_82468GX_IFB_VENDOR_ID;
     pc->device_id = INTEL_82468GX_IFB_SMBUS_DEVICE_ID;
-    pc->revision = 0;
+    pc->revision = INTEL_82468GX_IFB_REVISION;
     pc->class_id = PCI_CLASS_SERIAL_SMBUS;
     dc->desc = "Intel 82468GX SMBus controller";
     dc->user_creatable = false;
@@ -977,6 +1293,8 @@ static const TypeInfo intel_82468gx_ifb_types[] = {
 DEFINE_TYPES(intel_82468gx_ifb_types)
 
 Intel82468GXIFBState *intel_82468gx_ifb_create(PCIBus *bus, int devfn,
+                                               uint32_t gpio_inputs,
+                                               BlockBackend *battery,
                                                uint16_t init_acpi_base,
                                                Error **errp)
 {
@@ -994,6 +1312,12 @@ Intel82468GXIFBState *intel_82468gx_ifb_create(PCIBus *bus, int devfn,
     pci = pci_new_multifunction(devfn, TYPE_INTEL_82468GX_IFB);
     qdev_prop_set_uint16(DEVICE(pci), INTEL_82468GX_IFB_PROP_INIT_ACPI_BASE,
                          init_acpi_base);
+    qdev_prop_set_uint32(DEVICE(pci), INTEL_82468GX_IFB_PROP_GPIO_INPUTS,
+                         gpio_inputs);
+    if (battery) {
+        qdev_prop_set_drive_err(DEVICE(pci), INTEL_82468GX_IFB_PROP_BATTERY,
+                                battery, &error_abort);
+    }
     if (!pci_realize_and_unref(pci, bus, errp)) {
         return NULL;
     }
@@ -1038,24 +1362,6 @@ I2CBus *intel_82468gx_ifb_smbus(Intel82468GXIFBState *s)
 int intel_82468gx_ifb_pic_read_irq(Intel82468GXIFBState *s)
 {
     return s && s->master_pic ? pic_read_irq(s->master_pic) : -1;
-}
-
-/*
- * What the platform's PMI handler does with the FADT's ACPI_ENABLE and
- * ACPI_DISABLE commands (SMI_CMD B2h, A0h/A1h): the vendor i2000 firmware's
- * handler (SAL_B, registered through PAL_PMI_ENTRYPOINT) answers A0h by
- * clearing pending PM1/GPE status, enabling the power button in PM1_EN and
- * setting SCI_EN in PM1_CNT, all through the block's ports at A00h.
- */
-void intel_82468gx_ifb_acpi_sci_enable(Intel82468GXIFBState *s, bool enable)
-{
-    g_return_if_fail(s != NULL);
-    if (enable) {
-        s->acpi_regs.pm1.evt.sts = 0;
-        s->acpi_regs.pm1.evt.en |= ACPI_BITMASK_POWER_BUTTON_ENABLE;
-    }
-    acpi_pm1_cnt_update(&s->acpi_regs, enable, !enable);
-    ifb_acpi_update_sci(&s->acpi_regs);
 }
 
 void intel_82468gx_ifb_configure_acpi(Intel82468GXIFBState *s,

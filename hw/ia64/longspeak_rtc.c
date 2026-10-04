@@ -49,6 +49,7 @@
 /* Control B bit 7; the month register keeps the oscillator bits. */
 #define LONGSPEAK_RTC_TRANSFER_ENABLE 0x80
 #define LONGSPEAK_RTC_MONTH_BITS      0xe0
+#define LONGSPEAK_RTC_TIME_REGS       8
 
 struct LongspeakRTCState {
     SysBusDevice parent_obj;
@@ -61,13 +62,18 @@ struct LongspeakRTCState {
     uint8_t month_bits;
     uint8_t ram_addr;
     uint8_t ram[IA64_PDH_RTC_RAM];
+    /* Time registers written while the transfer is off, one bit each. */
+    uint8_t pending[LONGSPEAK_RTC_TIME_REGS];
+    uint8_t pending_mask;
 };
 
 OBJECT_DECLARE_SIMPLE_TYPE(LongspeakRTCState, LONGSPEAK_RTC)
 
 /*
  * Control B bit 7 clear freezes the registers, so that a read of all eight is
- * coherent and a write of all eight takes effect together.
+ * coherent; what is written meanwhile loads together when the bit is set
+ * again, so that no field is ever combined with a stale one (day 31 written
+ * in a 30-day month).
  */
 static int64_t longspeak_rtc_count(LongspeakRTCState *s)
 {
@@ -89,6 +95,9 @@ static uint64_t longspeak_rtc_read(void *opaque, hwaddr addr, unsigned size)
     LongspeakRTCState *s = LONGSPEAK_RTC(opaque);
     struct tm now;
 
+    if (addr < LONGSPEAK_RTC_TIME_REGS && (s->pending_mask & (1u << addr))) {
+        return s->pending[addr];
+    }
     longspeak_rtc_now(s, &now);
     switch (addr) {
     case LONGSPEAK_RTC_SECONDS:
@@ -120,56 +129,95 @@ static uint64_t longspeak_rtc_read(void *opaque, hwaddr addr, unsigned size)
     }
 }
 
+/* The weekday follows the date, so a write to it is dropped. */
+static void longspeak_rtc_set_field(LongspeakRTCState *s, struct tm *tm,
+                                    hwaddr addr, uint8_t data)
+{
+    switch (addr) {
+    case LONGSPEAK_RTC_SECONDS:
+        tm->tm_sec = from_bcd(data & 0x7f);
+        break;
+    case LONGSPEAK_RTC_MINUTES:
+        tm->tm_min = from_bcd(data & 0x7f);
+        break;
+    case LONGSPEAK_RTC_HOURS:
+        tm->tm_hour = from_bcd(data & 0x3f);
+        break;
+    case LONGSPEAK_RTC_DATE:
+        tm->tm_mday = from_bcd(data & 0x3f);
+        break;
+    case LONGSPEAK_RTC_MONTH:
+        s->month_bits = data & LONGSPEAK_RTC_MONTH_BITS;
+        tm->tm_mon = from_bcd(data & 0x1f) - 1;
+        break;
+    case LONGSPEAK_RTC_YEAR:
+        tm->tm_year = tm->tm_year - tm->tm_year % 100 + from_bcd(data);
+        break;
+    case LONGSPEAK_RTC_CENTURY:
+        tm->tm_year = from_bcd(data) * 100 + tm->tm_year % 100 - 1900;
+        break;
+    }
+}
+
+/* Setting the transfer bit again loads the frozen time with what was written. */
+static void longspeak_rtc_load(LongspeakRTCState *s)
+{
+    time_t t = s->base + s->frozen_ms / 1000;
+    struct tm tm;
+    unsigned i;
+
+    gmtime_r(&t, &tm);
+    for (i = 0; i < LONGSPEAK_RTC_TIME_REGS; i++) {
+        if (s->pending_mask & (1u << i)) {
+            longspeak_rtc_set_field(s, &tm, i, s->pending[i]);
+        }
+    }
+    s->pending_mask = 0;
+    s->base = mktimegm(&tm) - longspeak_rtc_count(s) / 1000;
+}
+
 static void longspeak_rtc_write(void *opaque, hwaddr addr, uint64_t data,
                                 unsigned size)
 {
     LongspeakRTCState *s = LONGSPEAK_RTC(opaque);
     struct tm now;
 
-    longspeak_rtc_now(s, &now);
+    if (addr < LONGSPEAK_RTC_TIME_REGS) {
+        if (!(s->control_b & LONGSPEAK_RTC_TRANSFER_ENABLE)) {
+            s->pending[addr] = data;
+            s->pending_mask |= 1u << addr;
+            return;
+        }
+        longspeak_rtc_now(s, &now);
+        longspeak_rtc_set_field(s, &now, addr, data);
+        s->base = mktimegm(&now) - longspeak_rtc_count(s) / 1000;
+        return;
+    }
     switch (addr) {
-    case LONGSPEAK_RTC_SECONDS:
-        now.tm_sec = from_bcd(data & 0x7f);
-        break;
-    case LONGSPEAK_RTC_MINUTES:
-        now.tm_min = from_bcd(data & 0x7f);
-        break;
-    case LONGSPEAK_RTC_HOURS:
-        now.tm_hour = from_bcd(data & 0x3f);
-        break;
-    case LONGSPEAK_RTC_DATE:
-        now.tm_mday = from_bcd(data & 0x3f);
-        break;
-    case LONGSPEAK_RTC_MONTH:
-        s->month_bits = data & LONGSPEAK_RTC_MONTH_BITS;
-        now.tm_mon = from_bcd(data & 0x1f) - 1;
-        break;
-    case LONGSPEAK_RTC_YEAR:
-        now.tm_year = now.tm_year - now.tm_year % 100 + from_bcd(data);
-        break;
-    case LONGSPEAK_RTC_CENTURY:
-        now.tm_year = from_bcd(data) * 100 + now.tm_year % 100 - 1900;
-        break;
     case LONGSPEAK_RTC_CONTROL_A:
         s->control_a = data;
-        return;
+        break;
     case LONGSPEAK_RTC_CONTROL_B:
         if (!(data & LONGSPEAK_RTC_TRANSFER_ENABLE)) {
             s->frozen_ms = longspeak_rtc_count(s);
+            s->control_b = data;
+        } else {
+            s->control_b = data;
+            if (s->pending_mask) {
+                longspeak_rtc_load(s);
+            }
         }
-        s->control_b = data;
-        return;
+        break;
     case LONGSPEAK_RTC_RAM_ADDR:
         s->ram_addr = data;
-        return;
+        break;
     case LONGSPEAK_RTC_RAM_DATA:
         s->ram[s->ram_addr] = data;
-        return;
+        break;
     default:
-        /* The weekday follows the date, and nothing else is modelled. */
-        return;
+        /* Nothing else is modelled. */
+        break;
     }
-    s->base = mktimegm(&now) - longspeak_rtc_count(s) / 1000;
 }
 
 static const MemoryRegionOps longspeak_rtc_ops = {
@@ -185,7 +233,7 @@ static const MemoryRegionOps longspeak_rtc_ops = {
 /* The part is battery-backed, so a system reset leaves all of this alone. */
 static const VMStateDescription vmstate_longspeak_rtc = {
     .name = "longspeak-rtc",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_INT64(base, LongspeakRTCState),
@@ -195,6 +243,9 @@ static const VMStateDescription vmstate_longspeak_rtc = {
         VMSTATE_UINT8(month_bits, LongspeakRTCState),
         VMSTATE_UINT8(ram_addr, LongspeakRTCState),
         VMSTATE_UINT8_ARRAY(ram, LongspeakRTCState, IA64_PDH_RTC_RAM),
+        VMSTATE_UINT8_ARRAY_V(pending, LongspeakRTCState,
+                              LONGSPEAK_RTC_TIME_REGS, 2),
+        VMSTATE_UINT8_V(pending_mask, LongspeakRTCState, 2),
         VMSTATE_END_OF_LIST()
     }
 };

@@ -18,8 +18,9 @@ SERVICE_CASES = {
     "multiple-protocol-services",
     "controller-services", "image-services", "start-image-connect",
     "memory-primitives", "time-services", "variable-services",
-    "block-disk-protocols", "pci-root-io", "pci-io",
+    "block-disk-protocols", "pci-root-io", "pci-io", "pci-io-scsi-seat",
     "graphics-output", "tcg-no-tpm", "sal-state-info-no-log",
+    "sal-os-init",
 }
 EXITBS_CASES = {
     "memory-map", "exit-boot-services", "system-table-handoff",

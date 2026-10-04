@@ -36,9 +36,18 @@
  * from the FRU device of each slot (FFF96CD8 gives the twelve devices) and
  * asks HP's own storage command 0xd0 about each of them.  Without the SPD the
  * firmware reports "SPD found no memory DIMMs" and halts the cell.
+ *
+ * Command 0xd0 answers four bytes for a populated slot.  The firmware keeps
+ * them with its memory configuration in the NVM (FFEE5660 stores them at
+ * entry +24) and compares them at the next boot (FFEE5240, FFF45100): the
+ * same bytes in every slot make it reuse the saved configuration ("memory
+ * unchanged--use saved config from NVM"), so they identify the module.  No HP
+ * document names the value; the model answers the module's serial number
+ * (SPD bytes 95-98), made from the slot and the module size.
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bswap.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "hw/core/boards.h"
@@ -88,6 +97,18 @@ DECLARE_CLASS_CHECKERS(LongspeakBmcClass, LONGSPEAK_BMC, TYPE_LONGSPEAK_BMC)
 #define LONGSPEAK_BMC_PRODUCT_SIZE  128
 
 #define LONGSPEAK_BMC_SPD_SIZE      256
+
+/*
+ * FRU device 5.  SAL_B reads its first byte and takes the board with the
+ * I/O backplane when the BMC answers: ropes 0 to 4 (4 double-wide) and 6, the
+ * rx2600's; without it, the core I/O ropes 0 and 1 alone (FFEAB2F0, tables
+ * from FFF7_F160).  An answer from device 6 would add rope 7, which the
+ * rx2600 does not have.  The device's contents are not captured, so it is an
+ * empty FRU: the common header alone, version 1, no areas (IPMI FRU 1.0
+ * sec 8).
+ */
+#define LONGSPEAK_BMC_FRU_IO        0x05
+#define LONGSPEAK_BMC_FRU_IO_SIZE   8
 
 /* The DIMM slots 0A, 0B, 1A ... 5B and the FRU device of each (FFF96CD8). */
 static const uint8_t longspeak_bmc_dimm_dev[] = {
@@ -181,12 +202,19 @@ static void longspeak_bmc_board_fru(uint8_t *fru)
     longspeak_bmc_fru_sum(area, LONGSPEAK_BMC_PRODUCT_SIZE);
 }
 
+static uint32_t longspeak_bmc_dimm_serial(const LongspeakBmcDimm *dimm,
+                                          unsigned int slot)
+{
+    return (uint32_t)(dimm->size >> 20) << 8 | slot;
+}
+
 /*
  * A JEDEC SPD for a registered ECC PC2100 module (SPD revision 1.2).  The
  * firmware reads the whole 128 bytes, rereads byte 63 and compares the two
  * (FFF62010), so only a consistent image passes.
  */
-static void longspeak_bmc_spd(const LongspeakBmcDimm *dimm, uint8_t *spd)
+static void longspeak_bmc_spd(const LongspeakBmcDimm *dimm, unsigned int slot,
+                              uint8_t *spd)
 {
     uint8_t sum = 0;
     unsigned int i;
@@ -224,6 +252,7 @@ static void longspeak_bmc_spd(const LongspeakBmcDimm *dimm, uint8_t *spd)
         sum += spd[i];
     }
     spd[63] = sum;
+    stl_le_p(&spd[95], longspeak_bmc_dimm_serial(dimm, slot));
 }
 
 /*
@@ -519,6 +548,7 @@ static bool longspeak_bmc_fru(uint8_t *cmd, unsigned int cmd_len,
 {
     uint8_t image[LONGSPEAK_BMC_FRU0_SIZE];
     const LongspeakBmcDimm *dimm;
+    unsigned int i;
     int slot;
 
     if (cmd_len < 3) {
@@ -535,10 +565,15 @@ static bool longspeak_bmc_fru(uint8_t *cmd, unsigned int cmd_len,
                     : longspeak_bmc_slot(current_machine->ram_size, slot);
 
     if (cmd[1] == LONGSPEAK_BMC_CMD_FRU_STATUS) {
+        uint32_t serial;
+
         if (!dimm) {
             return false;       /* only a populated slot answers it */
         }
-        rsp_buffer_push(rsp, 0x01);
+        serial = longspeak_bmc_dimm_serial(dimm, slot);
+        for (i = 0; i < 4; i++) {
+            rsp_buffer_push(rsp, serial >> (8 * i));
+        }
         return true;
     }
 
@@ -546,6 +581,15 @@ static bool longspeak_bmc_fru(uint8_t *cmd, unsigned int cmd_len,
         longspeak_bmc_board_fru(image);
         return longspeak_bmc_fru_image(cmd, cmd_len, rsp, image,
                                        LONGSPEAK_BMC_FRU0_SIZE);
+    }
+
+    if (cmd[2] == LONGSPEAK_BMC_FRU_IO) {
+        static const uint8_t header[LONGSPEAK_BMC_FRU_IO_SIZE] = {
+            0x01, 0, 0, 0, 0, 0, 0, 0xff
+        };
+
+        return longspeak_bmc_fru_image(cmd, cmd_len, rsp, header,
+                                       LONGSPEAK_BMC_FRU_IO_SIZE);
     }
 
     if (cmd[2] >= LONGSPEAK_BMC_FRU_FIRST &&
@@ -557,7 +601,7 @@ static bool longspeak_bmc_fru(uint8_t *cmd, unsigned int cmd_len,
     if (!dimm) {
         return false;           /* no such device, or an empty slot */
     }
-    longspeak_bmc_spd(dimm, image);
+    longspeak_bmc_spd(dimm, slot, image);
     return longspeak_bmc_fru_image(cmd, cmd_len, rsp, image,
                                    LONGSPEAK_BMC_SPD_SIZE);
 }

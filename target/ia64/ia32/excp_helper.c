@@ -529,7 +529,11 @@ G_NORETURN void helper_raise_interrupt(CPUX86State *xenv, int vector,
                                        int next_eip_addend)
 {
     CPUIA64State *env = (CPUIA64State *)xenv;
-    bool int3 = vector & IA64_IA32_INT_BREAKPOINT;
+    /*
+     * The decoder sign-extends INT n's 8-bit operand (X86_TYPE_I), so
+     * INT 80h-FFh arrive with bits 31:8 set: only the exact marker is INT3.
+     */
+    bool int3 = (vector & ~0xff) == IA64_IA32_INT_BREAKPOINT;
     uint32_t fault_ip = ia64_ia32_virtual_ip(env);
     uint32_t next_ip = fault_ip + next_eip_addend;
     uint32_t code = ia32_trap_code(env);

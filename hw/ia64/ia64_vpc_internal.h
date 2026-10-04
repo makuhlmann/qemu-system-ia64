@@ -27,12 +27,11 @@
 #include "qemu/timer.h"
 
 /*
- * Low (sub-aperture) DRAM runs contiguously from 0 up to the PCI/MMIO
- * aperture, exactly as the real 460GX keeps a single MMIO gap at the top of
- * the 32-bit space; RAM displaced by that gap is remapped above 4 GiB.  There
- * is no DRAM island between the aperture and the chipset/SAPIC region.
+ * Low DRAM runs contiguously from 0 up to the 460GX's variable gap, which
+ * holds the AGP aperture and the PCI windows; RAM displaced by the gap is
+ * remapped above 4 GiB (SSDM 4.1.5).
  */
-#define IA64_LOW_RAM_LIMIT IA64_PCI_MMIO_BASE
+#define IA64_LOW_RAM_LIMIT IA64_460GX_LOW_RAM_END
 
 /*
  * The spare Programmable Interrupt Device inputs a 460gx root swizzles an
@@ -92,6 +91,7 @@ struct IA64VpcMachineClass {
     /* IOSAPIC inputs and version register; 0 keeps the device's defaults. */
     uint32_t iosapic_pins;
     uint32_t iosapic_version;
+    uint8_t iosapic_face;
     /* Per-slot INTx routing of PCI bus 0; NULL = the (slot+pin)%4 swizzle. */
     const IA64IntxRoute *pci0_intx;
     unsigned int pci0_nintx;
@@ -99,6 +99,14 @@ struct IA64VpcMachineClass {
     unsigned int pci0_intx_fallback;
     /* Where the board also answers the PM block in memory space, or zero. */
     uint64_t acpi_pm_mmio_base;
+    /* The PM timer counts 32 bits (TMR_VAL_EXT), not 24. */
+    bool acpi_pm_tmr_ext;
+    /* The PM1_EN bits the board implements; 0 keeps all 16. */
+    uint16_t acpi_pm1_en_mask;
+    /* The board LAN's subsystem ids (vendor 0: the chip's own) and ROM. */
+    uint16_t nic_subsystem_vendor_id;
+    uint16_t nic_subsystem_id;
+    const char *nic_romfile;
     /*
      * The SLP_TYP value this board's firmware puts in _S5, where that is
      * not the architected 0 the ACPI core always takes.  It goes in the
@@ -115,6 +123,11 @@ struct IA64VpcMachineClass {
      * SRAM, and its flash holds no NVRAM block at all.
      */
     bool nvram_is_pdh_store;
+    /*
+     * Bytes after the flash image in the `nvram=` file that keep the RTC's
+     * battery-backed RAM (the 460GX board's south bridge); 0 = none.
+     */
+    uint32_t nvram_battery_size;
     /*
      * The board's boot flash part.  A size of zero makes the part exactly
      * the -bios image, which is what the SDV's Firmware Hubs look like: the
@@ -143,7 +156,7 @@ struct IA64VpcMachineClass {
      * what rx2600/zx2000 carry; false the QLogic ISP12160 of the i2000.
      */
     bool lsi_default;
-    /* The board's own graphics adapter ("rage128", "mach64", "nv15gl"). */
+    /* The board's own graphics adapter ("rage128", "rage128gl", ...). */
     const char *vga_default;
     /* The console is COM1 (3F8h, IRQ 4); a debug port is COM2 (2F8h, IRQ 3). */
     bool legacy_com1_console;
@@ -154,24 +167,19 @@ struct IA64VpcMachineClass {
      */
     const uint8_t *processor_ids;
     unsigned int nprocessor_ids;
-    /*
-     * PALE_RESET calls SALE_ENTRY twice on this board, the first time with
-     * function RECOVERY_CHECK (SDM vol. 2 11.2.2).  The zx1 firmware needs
-     * the call: it rendezvouses its processors there.  The vendor 460GX
-     * firmware's recovery-check pass does not complete under emulation, so
-     * that board makes the RESET call only -- see ia64_base.c's boot info.
-     */
-    bool sale_recovery_check;
 
     /* Board-specific configuration checks; NULL = none. */
     bool (*validate)(IA64VpcMachineState *s, Error **errp);
     /*
-     * Map the low DRAM band from backing offset @offset, @remaining bytes
-     * left; returns the bytes mapped.  NULL = one contiguous run up to
-     * low_ram_limit (ia64_vpc_map_ram_alias).
+     * Map the DRAM the board fills before its run at 4 GiB, from backing
+     * offset @offset, @remaining bytes left; returns the bytes mapped.
+     * NULL = one contiguous run at 0 up to low_ram_limit
+     * (ia64_vpc_map_ram_alias).
      */
     uint64_t (*map_low_ram)(IA64VpcMachineState *s, uint64_t offset,
                             uint64_t remaining);
+    /* Where the DRAM run at 0 ends once RAM fills it (IA64_FW_LOW_RAM_END). */
+    uint64_t low_ram_top;
     /*
      * Create the core chipset: its DMA-translation device (before any other
      * PCI device) and its further PCI roots.
@@ -189,6 +197,11 @@ struct IA64VpcMachineClass {
     ISABus *(*build_isa)(IA64VpcMachineState *s, PCIBus *pci_bus,
                          MemoryRegion *pci_io, DeviceState *iosapic,
                          Error **errp);
+    /*
+     * A processor's store to its XTP byte (SDM Vol. 2 §5.8.4.4): the bus
+     * transaction's effect on the platform, or NULL where it is discarded.
+     */
+    void (*xtp_cycle)(IA64VpcMachineState *s, CPUState *cs, uint8_t data);
     /* Where a built-in device sits; *bus preset to PCI0, *devfn to -1. */
     void (*seat)(IA64VpcMachineState *s, IA64VpcSeat seat, PCIBus **bus,
                  int *devfn);
@@ -217,6 +230,8 @@ struct IA64VpcMachineState {
     uint64_t firmware_console;
     uint16_t firmware_boot_timeout;
     char *nvram_path;
+    /* The RTC battery area of the `nvram=` file, or NULL. */
+    BlockBackend *nvram_battery;
     uint64_t realfw_entry;
     uint64_t realfw_base;
     PFlashCFI01 *realfw_flash;
@@ -237,10 +252,11 @@ struct IA64VpcMachineState {
     bool vga_model_set;
     bool alat_full;
 
-    PCIDevice *agp_dev;
+    DeviceState *agp_dev;
     PCIDevice *sba_dev;
     DeviceState *lba_dev;
     DeviceState *rope0_lba_dev;     /* zx1: the primary root's ioa   */
+    DeviceState *rope1_lba_dev;     /* zx1: rope 1's ioa, no bus yet */
     DeviceState *mercury_host;      /* zx1: the Mercury (LBA) PCI host bridge */
     /* 460gx: the WXB0, WXB1 and GXB expander roots (buses 1, 2 and 3). */
     DeviceState *expander_host[IA64_460GX_EXPANDER_ROOTS];
@@ -273,6 +289,8 @@ struct IA64VpcMachineState {
     MemoryRegion acpi_reset;
     SerialMM *debug_uart;
     SerialMM *console_uart;
+    /* The board's Super I/O (smsc-lpc47b27x), or NULL. */
+    ISADevice *super_io;
     DeviceState *pci_host_dev;
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     MemoryRegion int10_pci_io;
@@ -300,6 +318,7 @@ struct IA64VpcMachineState {
 /* Base-machine helpers the boards use. */
 void ia64_vpc_add_compat_defaults(MachineClass *mc);
 const char *ia64_vpc_vga_model(IA64VpcMachineState *s);
+void ia64_vpc_rage128_agp(IA64VpcMachineState *s);
 
 /*
  * Open the `nvram=` file of a board that keeps its settings in the PDH

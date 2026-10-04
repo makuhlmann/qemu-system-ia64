@@ -158,12 +158,13 @@ def run_program_jit(qemu, bundles, entry=0x10, terminal_ip=None, memory=None):
 
 def require_registers(name, bundles, expected, entry=0x10, alat="full",
                       cpu=None, smp="1", machine="ia64-vpc", extra_args=(),
-                      state_cpu=0):
+                      state_cpu=0, timeout=2.0, poll_max_s=0.020):
     def tc(qemu):
         run_program(qemu, bundles, entry=entry, alat=alat,
                     expected=expected, name=name, cpu=cpu, smp=smp,
                     machine=machine, extra_args=extra_args,
-                    state_cpu=state_cpu)
+                    state_cpu=state_cpu, timeout=timeout,
+                    poll_max_s=poll_max_s)
     features = set()
     if alat is not None:
         features.add(f"alat:{alat}")

@@ -39,6 +39,7 @@ G_NORETURN void helper_ia32_jmpe(CPUIA64State *env,
     env->gr[IA64_GR_IA32_JMPE_RETURN] = (uint32_t)next_ip;
     ia64_gr_nat_set(env, IA64_GR_IA32_JMPE_RETURN, false);
     env->psr &= ~(IA64_PSR_IS | IA64_PSR_ID | IA64_PSR_RI_MASK);
+    ia64_pmu_sync(env);
     env->ip = target_ip;
     env->last_successful_bundle = source_ip;
     env->instruction_group_start = true;

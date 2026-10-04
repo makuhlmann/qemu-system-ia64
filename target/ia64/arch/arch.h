@@ -52,6 +52,10 @@ uint32_t ia64_firmware_debug_restore(CPUIA64State *env);
 uint32_t ia64_sal_runtime_enter(CPUIA64State *env);
 uint32_t ia64_sal_runtime_exit(CPUIA64State *env);
 uint32_t ia64_pal_dispatch(CPUIA64State *env, uintptr_t ra);
+void ia64_pal_init_event(CPUIA64State *env, uint64_t iip, uint64_t ipsr);
+void ia64_pal_pmi_event(CPUIA64State *env, uint64_t iip, uint64_t ipsr,
+                        unsigned vector);
+G_NORETURN void ia64_pal_pmi_return(CPUIA64State *env, uint64_t ip);
 
 void ia64_itm_timer_cb(void *opaque);
 bool ia64_cpu_has_work(CPUState *cs);

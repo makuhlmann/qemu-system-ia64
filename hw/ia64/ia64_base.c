@@ -31,6 +31,8 @@
 #include "hw/display/edid.h"
 #include "hw/display/vga_regs.h"
 #include "hw/core/loader.h"
+#include "hw/core/nmi.h"
+#include "trace.h"
 #include "hw/core/sysbus.h"
 #include "hw/block/flash.h"
 #include "system/block-backend.h"
@@ -62,7 +64,6 @@
 #include "hw/rtc/mc146818rtc.h"
 #include "hw/intc/i8259.h"
 #include "hw/timer/i8254.h"
-#include "hw/usb/hcd-uhci.h"
 #include "hw/usb/usb.h"
 #include "hw/ia64/ia64_pci.h"
 #include "hw/ia64/ia64_iosapic.h"
@@ -112,6 +113,8 @@
 #define IA64_PAL_ROM_SIZE         0x1000
 /* PAL_RESET's return address for SAL's RECOVERY_CHECK call, in that ROM. */
 #define IA64_PAL_RESET_RETURN     (IA64_PAL_ROM_BASE + 0x20)
+/* PALE_PMI's return address SAL gets in BR0, in that ROM. */
+#define IA64_PAL_PMI_RETURN       (IA64_PAL_ROM_BASE + 0x40)
 /*
  * The reset IVT: a 32 KiB-aligned interruption vector table whose every
  * bundle is a branch-to-self, pointed to by cr.iva in the SALE_ENTRY entry
@@ -287,11 +290,14 @@
 #define IA64_BDA_VIDEO_SWITCHES  0x00000488U
 #define IA64_ATI_VENDOR_ID        0x1002U
 #define IA64_ATI_RAGE128_PF_ID    0x5046U
+#define IA64_ATI_RAGE128_RF_ID    0x5246U
 #define IA64_ATI_PLL_XCLK         12000U
 #define IA64_ATI_PLL_REFERENCE_FREQ 2950U
 #define IA64_ATI_PLL_REFERENCE_DIV  65U
 #define IA64_ATI_PLL_MIN_FREQ     12500U
 #define IA64_ATI_PLL_MAX_FREQ     40000U
+/* The GL's PLLs reach 250 MHz (GCS-C04100 §4.7). */
+#define IA64_ATI_GL_PLL_MAX_FREQ  25000U
 #endif
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
@@ -304,7 +310,9 @@
  */
 
 #define IA64_SAPIC_DELIVERY_INT     0
+#define IA64_SAPIC_DELIVERY_PMI     2
 #define IA64_SAPIC_DELIVERY_NMI     4
+#define IA64_SAPIC_DELIVERY_INIT    5
 #define IA64_SAPIC_DELIVERY_EXTINT  7
 
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -1333,8 +1341,18 @@ static const MemoryRegionOps ia64_int10_io_ops = {
 #define IA64_ATI_HDR_SIZE  0x40U
 #define IA64_ATI_PLL_SIZE  0x32U
 
-static void ia64_ati_write_bios_tables(uint8_t *rom, uint32_t hdr, uint32_t pll)
+static bool ia64_ati_is_rage128(uint16_t device)
 {
+    return device == IA64_ATI_RAGE128_PF_ID ||
+           device == IA64_ATI_RAGE128_RF_ID;
+}
+
+static void ia64_ati_write_bios_tables(uint8_t *rom, uint32_t hdr, uint32_t pll,
+                                       uint16_t device)
+{
+    uint32_t max = device == IA64_ATI_RAGE128_RF_ID ?
+                   IA64_ATI_GL_PLL_MAX_FREQ : IA64_ATI_PLL_MAX_FREQ;
+
     memset(rom + hdr, 0, IA64_ATI_HDR_SIZE);
     memset(rom + pll, 0, IA64_ATI_PLL_SIZE);
     stw_le_p(rom + hdr + 0x14, hdr);
@@ -1344,10 +1362,10 @@ static void ia64_ati_write_bios_tables(uint8_t *rom, uint32_t hdr, uint32_t pll)
     stw_le_p(rom + pll + 0x0e, IA64_ATI_PLL_REFERENCE_FREQ);
     stw_le_p(rom + pll + 0x10, IA64_ATI_PLL_REFERENCE_DIV);
     stl_le_p(rom + pll + 0x12, IA64_ATI_PLL_MIN_FREQ);
-    stl_le_p(rom + pll + 0x16, IA64_ATI_PLL_MAX_FREQ);
-    stl_le_p(rom + pll + 0x22, IA64_ATI_PLL_MAX_FREQ);
-    stw_le_p(rom + pll + 0x2e, IA64_ATI_PLL_MAX_FREQ & 0xffffU);
-    stw_le_p(rom + pll + 0x30, IA64_ATI_PLL_MAX_FREQ >> 16);
+    stl_le_p(rom + pll + 0x16, max);
+    stl_le_p(rom + pll + 0x22, max);
+    stw_le_p(rom + pll + 0x2e, max & 0xffffU);
+    stw_le_p(rom + pll + 0x30, max >> 16);
 }
 
 static void ia64_int10_install_ati_bios_info(uint8_t *rom,
@@ -1377,7 +1395,7 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      */
     memcpy(rom + IA64_INT10_ROM_ATI_SIG_OFFSET, " 761295520", 10);
 
-    if (device != IA64_ATI_RAGE128_PF_ID) {
+    if (!ia64_ati_is_rage128(device)) {
         /*
          * mach64 (DEV_4752 Rage XL): do not publish the Rage128-format
          * header/PLL block below.  The mach64 miniports (XP atimpae.sys,
@@ -1403,7 +1421,7 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      */
     stw_le_p(rom + 0x48, IA64_INT10_ROM_ATI_HEADER_OFFSET);
     ia64_ati_write_bios_tables(rom, IA64_INT10_ROM_ATI_HEADER_OFFSET,
-                               IA64_INT10_ROM_ATI_PLL_OFFSET);
+                               IA64_INT10_ROM_ATI_PLL_OFFSET, device);
 }
 
 static void ia64_vpc_install_int10(IA64VpcMachineState *s)
@@ -1595,7 +1613,9 @@ void ia64_vpc_add_compat_defaults(MachineClass *mc)
 
 static uint64_t ia64_vpc_fw_base(IA64VpcMachineState *s, uint64_t ram_size)
 {
-    return s->fw_relocate ? IA64_FW_IMAGE_BASE_FOR(ram_size)
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
+
+    return s->fw_relocate ? IA64_FW_IMAGE_BASE_FOR(ram_size, imc->low_ram_top)
                           : IA64_FW_LINK_BASE;
 }
 
@@ -1984,13 +2004,14 @@ static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
     if (g_strcmp0(value, "rage128") != 0 &&
+        g_strcmp0(value, "rage128gl") != 0 &&
         g_strcmp0(value, "mach64") != 0 &&
         g_strcmp0(value, "nv15gl") != 0 &&
         g_strcmp0(value, "none") != 0 &&
         g_strcmp0(value, "std") != 0) {
         error_setg(errp,
-                   "vga must be 'rage128', 'mach64', 'nv15gl', 'std' or "
-                   "'none'");
+                   "vga must be 'rage128', 'rage128gl', 'mach64', 'nv15gl', "
+                   "'std' or 'none'");
         return;
     }
     g_free(s->vga_model);
@@ -2018,6 +2039,27 @@ const char *ia64_vpc_vga_model(IA64VpcMachineState *s)
     }
     return s->vga_model;
 }
+
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+/*
+ * With agp=on the board's Rage 128 presents its AGP capability.
+ * pci_vga_init() realizes the adapter internally, so a global property
+ * reaches it; register it only when a Rage 128 is this run's adapter,
+ * because an unused global is reported as a warning.
+ */
+void ia64_vpc_rage128_agp(IA64VpcMachineState *s)
+{
+    static GlobalProperty ati_agp = {
+        .driver = "ati-vga", .property = "agp", .value = "on",
+    };
+    const char *model = ia64_vpc_vga_model(s);
+
+    if (s->agp_enabled && (g_strcmp0(model, "rage128") == 0 ||
+                           g_strcmp0(model, "rage128gl") == 0)) {
+        qdev_prop_register_global(&ati_agp);
+    }
+}
+#endif
 
 static char *ia64_vpc_get_alat(Object *obj, Error **errp)
 {
@@ -2098,6 +2140,11 @@ static void ia64_vpc_init_acpi_pm(IA64VpcMachineState *s,
                       IA64_VPC_MACHINE_GET_CLASS(s)->acpi_s5_slp_typ, true);
     acpi_pm_tmr_init(&s->acpi_regs, ia64_vpc_acpi_update_sci,
                      &s->acpi_pm);
+    s->acpi_regs.tmr.ext = IA64_VPC_MACHINE_GET_CLASS(s)->acpi_pm_tmr_ext;
+    if (IA64_VPC_MACHINE_GET_CLASS(s)->acpi_pm1_en_mask != 0) {
+        s->acpi_regs.pm1.evt.en_mask =
+            IA64_VPC_MACHINE_GET_CLASS(s)->acpi_pm1_en_mask;
+    }
     memory_region_init_io(&s->acpi_reset, OBJECT(s),
                           &ia64_vpc_acpi_reset_ops, s,
                           "ia64-acpi-reset", 1);
@@ -2286,19 +2333,24 @@ static uint64_t ia64_vpc_lsapic_read(void *opaque, hwaddr addr,
 static void ia64_vpc_lsapic_write(void *opaque, hwaddr addr,
                                     uint64_t value, unsigned size)
 {
+    IA64VpcMachineState *s = opaque;
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
     CPUState *cs;
     unsigned delivery;
     uint8_t id;
     uint8_t eid;
     uint8_t vector;
 
-    (void)opaque;
     /*
      * The upper half of the Processor Interrupt Block contains the XTP byte.
      * XTP is a platform hint; systems without XTP support must still accept
      * and discard the one-byte store.
      */
     if (addr == IA64_PIB_XTP_OFFSET && size == 1) {
+        trace_ia64_vpc_xtp(current_cpu ? current_cpu->cpu_index : -1, value);
+        if (imc->xtp_cycle != NULL && current_cpu != NULL) {
+            imc->xtp_cycle(s, current_cpu, value);
+        }
         return;
     }
 
@@ -2327,6 +2379,18 @@ static void ia64_vpc_lsapic_write(void *opaque, hwaddr addr,
     case IA64_SAPIC_DELIVERY_EXTINT:
         vector = 0;
         break;
+    case IA64_SAPIC_DELIVERY_INIT:
+        cs = ia64_cpu_by_sapic_id(id, eid);
+        if (cs != NULL) {
+            ia64_cpu_raise_init(cs);
+        }
+        return;
+    case IA64_SAPIC_DELIVERY_PMI:
+        cs = ia64_cpu_by_sapic_id(id, eid);
+        if (cs != NULL) {
+            ia64_cpu_raise_pmi(cs, value & 0xff);
+        }
+        return;
     default:
         return;
     }
@@ -2441,23 +2505,8 @@ static void ia64_vpc_map_ram(IA64VpcMachineState *s)
      * band is a single unbroken run, which also avoids the fragmented
      * single-DMA-zone layout that Linux 2.6.8 IA-64 mishandled.
      *
-     * The zx1 machine additionally carves a DRAM hole for the SBA "safe IOVA
-     * space" [IA64_SBA_IOVA_BASE, IA64_SBA_IOVA_END) (1-2 GiB): the RAM that
-     * would sit there is shifted up past IA64_SBA_IOVA_END, so the enabled IOVA
-     * window overlaps no DRAM (see IA64_SBA_IOVA_BASE in ia64_vpc_abi.h).
-     *
-     * The hole is only carved once installed RAM exceeds the PCI aperture
-     * (IA64_LOW_RAM_LIMIT ~= 3.72 GiB), i.e. exactly when there is already RAM
-     * displaced above 4 GiB.  In that regime the low band fills to the aperture
-     * regardless of the hole, so the firmware's aperture-relative self-placement
-     * (image, CPU-assist, SRAT/SMBIOS top) is unaffected and the two maps stay
-     * trivially consistent.  For a guest at or below the aperture the layout is
-     * identical to 460gx (a single contiguous low run) -- carving the hole there
-     * would move the top of low RAM and the firmware image with it, which needs
-     * a hole-aware low_ram_end the firmware does not yet compute.
-     *
-     * Keep this in lockstep with fw_init_guest_high_ram_ranges() +
-     * efi_add_low_ram_band() in roms/ia64-firmware/.
+     * A board whose chipset places DRAM otherwise maps its part before the
+     * run at 4 GiB through imc->map_low_ram (zx1: longspeak_map_low_ram()).
      */
     if (s->low_ram_limit == 0) {
         s->low_ram_limit = IA64_LOW_RAM_LIMIT;
@@ -2748,8 +2797,8 @@ static void ia64_vpc_configure_lsi(IA64VpcMachineState *s, PCIDevice *pci_dev)
  *
  * The blocks written here are ours, not ATI's - the layout is the documented
  * one (signature at 30h, header pointer at 48h, PLL pointer at header+30h)
- * and the clock parameters are the Rage 128 Pro's published values, which is
- * also what the synthesised INT 10h ROM publishes.  Nothing is copied out of
+ * and the clock parameters are the chip's published values, which is also
+ * what the synthesised INT 10h ROM publishes.  Nothing is copied out of
  * a retail BIOS image.
  *
  * A user-supplied romfile that already carries the signature is left strictly
@@ -2758,6 +2807,7 @@ static void ia64_vpc_configure_lsi(IA64VpcMachineState *s, PCIDevice *pci_dev)
 static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
 {
     static const char ati_signature[] = " 761295520";
+    uint16_t device = pci_get_word(pci_dev->config + PCI_DEVICE_ID);
     uint8_t *rom;
     uint64_t rom_size;
     uint32_t declared;
@@ -2769,8 +2819,7 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
 
     if (pci_get_word(pci_dev->config + PCI_VENDOR_ID) !=
             IA64_ATI_VENDOR_ID ||
-        pci_get_word(pci_dev->config + PCI_DEVICE_ID) !=
-            IA64_ATI_RAGE128_PF_ID) {
+        !ia64_ati_is_rage128(device)) {
         return;
     }
     if (pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
@@ -2841,7 +2890,7 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
 
     memcpy(rom + 0x30, ati_signature, sizeof(ati_signature) - 1);
     stw_le_p(rom + 0x48, hdr);
-    ia64_ati_write_bios_tables(rom, hdr, pll);
+    ia64_ati_write_bios_tables(rom, hdr, pll, device);
 
     /* Grow the declared image so a bounds-checking parser sees the tables. */
     if (pll + IA64_ATI_PLL_SIZE > declared) {
@@ -2861,10 +2910,10 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
          * the PCIR vendor/device ID to match the adapter's configuration
          * header, and a driver that validates the ROM against the device it
          * bound to will reject an image belonging to another chip.  We only
-         * get here when the header really is 1002:5046, so restate that.
+         * get here for a Rage 128 header, so restate its id.
          */
         stw_le_p(rom + pcir + 0x04, IA64_ATI_VENDOR_ID);
-        stw_le_p(rom + pcir + 0x06, IA64_ATI_RAGE128_PF_ID);
+        stw_le_p(rom + pcir + 0x06, device);
     }
     rom[declared - 1] = 0;
     for (i = 0; i < declared - 1U; i++) {
@@ -3212,11 +3261,36 @@ static void ia64_vpc_record_nic(IA64VpcMachineState *s, PCIBus *bus,
     s->nic_count++;
 }
 
+/* pci_init_nic_in_slot(), with the board's identity for its LAN. */
+static void ia64_vpc_init_board_nic(IA64VpcMachineState *s, PCIBus *bus,
+                                    unsigned int slot)
+{
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
+    MachineClass *mc = MACHINE_GET_CLASS(s);
+    NICInfo *nd = qemu_find_nic_info(mc->default_nic, true, NULL);
+    PCIDevice *pci_dev;
+
+    if (!nd) {
+        return;
+    }
+    pci_dev = pci_new(PCI_DEVFN(slot, 0), mc->default_nic);
+    qdev_set_nic_properties(DEVICE(pci_dev), nd);
+    if (imc->nic_subsystem_vendor_id) {
+        qdev_prop_set_uint16(DEVICE(pci_dev), "x-pci-subsystem-vendor-id",
+                             imc->nic_subsystem_vendor_id);
+        qdev_prop_set_uint16(DEVICE(pci_dev), "x-pci-subsystem-id",
+                             imc->nic_subsystem_id);
+    }
+    if (imc->nic_romfile) {
+        qdev_prop_set_string(DEVICE(pci_dev), "romfile", imc->nic_romfile);
+    }
+    pci_realize_and_unref(pci_dev, bus, &error_fatal);
+}
+
 static void ia64_vpc_init_network(IA64VpcMachineState *s, PCIBus *pci_bus)
 {
     MachineState *machine = MACHINE(s);
     MachineClass *mc = MACHINE_GET_CLASS(machine);
-    g_autofree char *slot_arg = NULL;
     unsigned int first_slot;
     unsigned int slot;
 
@@ -3231,8 +3305,7 @@ static void ia64_vpc_init_network(IA64VpcMachineState *s, PCIBus *pci_bus)
         ia64_vpc_seat(s, IA64_VPC_SEAT_NIC, &bus, &devfn);
         first_slot = PCI_SLOT(devfn);
     }
-    slot_arg = g_strdup_printf("%u", first_slot);
-    pci_init_nic_in_slot(pci_bus, mc->default_nic, NULL, slot_arg);
+    ia64_vpc_init_board_nic(s, pci_bus, first_slot);
     pci_init_nic_devices(pci_bus, mc->default_nic);
 
     for (slot = first_slot; slot < PCI_SLOT_MAX; slot++) {
@@ -3372,7 +3445,8 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
 
     /*
      * The UHCI controller is function 2 of the south bridge on 460gx, so it
-     * already exists by the time this runs; zx1 still gets a discrete one.
+     * already exists by the time this runs.  zx1 has none: the rx2600's USB
+     * is OHCI and EHCI (rx2600 capture 2026-10-03, DEV-3).
      */
     if (s->ifb != NULL) {
         s->uhci_dev = intel_82468gx_ifb_function(s->ifb,
@@ -3382,10 +3456,8 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
                        TYPE_INTEL_82468GX_IFB);
             return false;
         }
-    } else {
-        s->uhci_dev = pci_create_simple(pci_bus, -1, TYPE_PIIX3_USB_UHCI);
+        ia64_vpc_configure_uhci(s->uhci_dev);
     }
-    ia64_vpc_configure_uhci(s->uhci_dev);
 
     add_default_input = defaults_enabled() && !s->i8042_enabled;
     if (add_default_input) {
@@ -3435,6 +3507,8 @@ static void ia64_vpc_reset(void *opaque)
         acpi_pm1_evt_reset(&s->acpi_regs);
         acpi_pm1_cnt_reset(&s->acpi_regs);
         acpi_pm_tmr_reset(&s->acpi_regs);
+        /* TMR_STS waits for the top bit: the rx2600 reads PM1_STS 0. */
+        acpi_pm_tmr_calc_overflow_time(&s->acpi_regs);
         acpi_gpe_reset(&s->acpi_regs);
     }
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -3469,7 +3543,8 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
      * the top of installed low RAM, as real IA-64 firmware places its SAL
      * scratch; the firmware derives the same base from the memory it probes.
      */
-    uint64_t assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(machine->ram_size);
+    uint64_t assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(
+        machine->ram_size, IA64_VPC_MACHINE_GET_CLASS(machine)->low_ram_top);
     IA64BootInfo info = {
         .firmware_base = firmware_base,
         .firmware_entry = entry,
@@ -3485,6 +3560,8 @@ static IA64BootInfo ia64_vpc_boot_info(MachineState *machine,
          * places its PAL stub at firmware_base + 0x60 (PAL_PROC_ENTRY).
          */
         .raw_pal_proc = firmware_base + 0x60,
+        /* And its PALE_PMI return point next to it (PAL_PMI_RETURN). */
+        .raw_pal_pmi_return = firmware_base + 0x80,
         /*
          * What the project firmware registers with the PAL emulation once it
          * runs (IA64_PAL_FIRMWARE_REGISTER), for an image at firmware_base:
@@ -3560,19 +3637,9 @@ static void ia64_vpc_machine_done(Notifier *notifier, void *data)
                  */
                 .raw_pal_proc = IA64_PAL_ROM_BASE,
                 .raw_pal_auth = IA64_PAL_ROM_BASE,
-                /*
-                 * PAL_RESET's return address for the RECOVERY_CHECK call,
-                 * on the boards that make it.  0 = this board calls
-                 * SALE_ENTRY once, with function RESET: the vendor 460GX
-                 * firmware's recovery-check pass initializes the DRAM,
-                 * resets the platform itself and then spins in a software
-                 * delay loop of its RAM-resident recovery module (bios130.BIN
-                 * PspRecover, loop at RAM 0x02011C10), so it never reaches
-                 * its boot manager (0edbeda).
-                 */
-                .raw_pal_reset_return =
-                    IA64_VPC_MACHINE_GET_CLASS(s)->sale_recovery_check ?
-                    IA64_PAL_RESET_RETURN : 0,
+                /* PAL_RESET's return address for the RECOVERY_CHECK call. */
+                .raw_pal_reset_return = IA64_PAL_RESET_RETURN,
+                .raw_pal_pmi_return = IA64_PAL_PMI_RETURN,
                 /*
                  * Every processor leaves reset together and runs SAL_A,
                  * which arbitrates the BSP through the SAC's write-once
@@ -3625,14 +3692,21 @@ static bool ia64_vpc_validate_configuration(MachineState *machine,
  *   break.m 0x100007 ;;  br.few . ;;
  * The translator turns the break at that address into the second SALE_ENTRY
  * call (ia64_cpu_pal_reset_return); the branch to itself is never reached.
+ * At +0x40 PALE_PMI's return address (IA64_PAL_PMI_RETURN):
+ *   break.m 0x100008 ;;  br.few . ;;
+ * which resumes the context a PMI interrupted (ia64_pal_pmi_return).
  */
 
-static const uint8_t ia64_pal_stub[64] = {
+static const uint8_t ia64_pal_stub[96] = {
     0x0a, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
     0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x08, 0x00, 0x80, 0x00,
     0x0a, 0x38, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+    0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+    0x0a, 0x40, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
     0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
     0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
@@ -3655,7 +3729,9 @@ static const uint8_t ia64_pal_stub[64] = {
  *
  * A missing or empty file is created from the image, and a file holding
  * just the 64 KiB variable store of the earlier NVRAM window is imported
- * into the NVRAM sector.  Every other file is refused and left unchanged,
+ * into the NVRAM sector.  A board whose RTC RAM is battery-backed keeps it
+ * after the image (nvram_battery_size); a file without that area gets a new
+ * battery's.  Every other file is refused and left unchanged,
  * as a flash update tool refuses to keep NVRAM it cannot keep (WFlash64:
  * "NVRAM not found or size mismatch.  Unable to preserve NVRAM"): one of
  * another size, a 64 KiB store the image has no NVRAM block for, and a
@@ -3818,9 +3894,11 @@ static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
 {
     const uint8_t *image = s->fw_image;
     uint64_t image_size = s->fw_image_size;
+    uint64_t battery = IA64_VPC_MACHINE_GET_CLASS(s)->nvram_battery_size;
     uint64_t sector = IA64_NVRAM_BASE - (IA64_REALFW_WINDOW_END - image_size);
     IA64FlashNvramLayout image_layout;
     g_autofree uint8_t *contents = NULL;
+    g_autofree uint8_t *tail = NULL;
     g_autofree char *existing = NULL;
     gsize existing_size = 0;
     GError *gerr = NULL;
@@ -3843,6 +3921,12 @@ static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
         error_setg(errp, "nvram '%s': cannot read: %s", path, gerr->message);
         g_error_free(gerr);
         return NULL;
+    }
+    /* Any file without the battery area gets a new battery's. */
+    tail = g_malloc0(battery);
+    if (battery != 0 && existing_size == image_size + battery) {
+        memcpy(tail, existing + image_size, battery);
+        existing_size = image_size;
     }
     if (existing_size == image_size) {
         IA64FlashNvramLayout file_layout;
@@ -3897,8 +3981,10 @@ static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
                    image_size);
         return NULL;
     }
-    if (!g_file_set_contents(path, (const gchar *)contents, image_size,
-                             &gerr)) {
+    contents = g_realloc(contents, image_size + battery);
+    memcpy(contents + image_size, tail, battery);
+    if (!g_file_set_contents(path, (const gchar *)contents,
+                             image_size + battery, &gerr)) {
         error_setg(errp, "nvram '%s': cannot write: %s", path,
                    gerr->message);
         g_error_free(gerr);
@@ -3907,9 +3993,29 @@ static BlockBackend *ia64_vpc_open_flash_backing(IA64VpcMachineState *s,
 
     options = qdict_new();
     qdict_put_str(options, "driver", "raw");
+    qdict_put_int(options, "size", image_size);
     blk = blk_new_open(path, NULL, options, BDRV_O_RDWR, errp);
     if (blk == NULL) {
         error_prepend(errp, "nvram '%s': ", path);
+        return NULL;
+    }
+    if (battery != 0) {
+        /*
+         * A second view of the same file.  It writes only past the flash, so
+         * it takes no image lock of its own.
+         */
+        options = qdict_new();
+        qdict_put_str(options, "driver", "raw");
+        qdict_put_int(options, "offset", image_size);
+        qdict_put_int(options, "size", battery);
+        qdict_put_str(options, "file.locking", "off");
+        s->nvram_battery = blk_new_open(path, NULL, options, BDRV_O_RDWR,
+                                        errp);
+        if (s->nvram_battery == NULL) {
+            error_prepend(errp, "nvram '%s': ", path);
+            blk_unref(blk);
+            return NULL;
+        }
     }
     return blk;
 }
@@ -4186,6 +4292,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     DeviceState *iosapic;
     PCIBus *pci_bus;
     ISABus *isa_bus;
+    ISADevice *i8042 = NULL;
     MemoryRegion *pci_io;
 #ifdef CONFIG_IA64_VPC_STORAGE
     DriveInfo *sata_drives[6] = { NULL };
@@ -4244,6 +4351,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (imc->iosapic_pins != 0) {
         qdev_prop_set_uint32(iosapic, "num-pins", imc->iosapic_pins);
         qdev_prop_set_uint32(iosapic, "version", imc->iosapic_version);
+        qdev_prop_set_uint8(iosapic, "face", imc->iosapic_face);
     }
     if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(iosapic), errp)) {
         return false;
@@ -4339,8 +4447,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     /*
      * The i2000's COM ports: the Super I/O's UART1 at 3F8h on IRQ 4 is the
      * console, which is what the vendor DSDT reports for it (UAR1, LDN 4)
-     * and what its firmware talks to; a debug port, when configured, is
-     * UART2 at 2F8h on IRQ 3.  Early IA-64 kernel debuggers predate the
+     * and what its firmware talks to; the Super I/O moves it where its
+     * configuration says once the board's ISA bus is up.  The i2000 wires
+     * no second port: a debug port, when configured, is a machine addition
+     * at 2F8h on IRQ 3.  Early IA-64 kernel debuggers predate the
      * ACPI DBGP table and drive these fixed ports directly (Windows
      * Whistler build 2462's kdcom.dll hardcodes 0x3f8/0x2f8/0x3e8/0x2e8
      * through HAL's READ_PORT_UCHAR/WRITE_PORT_UCHAR), so /debugport=com2
@@ -4406,8 +4516,8 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
 
     /*
-     * The board's south bridge and ISA bus, with the RTC and the legacy
-     * interrupt inputs (which drive the matching IOSAPIC inputs).
+     * The board's south bridge and ISA bus, with the 460GX board's RTC and
+     * the legacy interrupt inputs (which drive the matching IOSAPIC inputs).
      */
     isa_bus = imc->build_isa(s, pci_bus, pci_io, iosapic, errp);
     if (isa_bus == NULL) {
@@ -4416,7 +4526,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 
 #ifdef CONFIG_IA64_VPC_PS2
     if (s->i8042_enabled) {
-        ISADevice *i8042 = isa_new(TYPE_I8042);
+        i8042 = isa_new(TYPE_I8042);
 
         /*
          * Model the PS/2 serial transfer latency of the Super I/O KBC (see
@@ -4433,6 +4543,16 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         }
     }
 #endif
+    if (s->super_io) {
+        SMSCLPC47B27xState *sio = SMSC_LPC47B27X(s->super_io);
+
+        if (s->console_uart) {
+            smsc_lpc47b27x_attach_uart1(sio, SYS_BUS_DEVICE(s->console_uart));
+        }
+        if (i8042) {
+            smsc_lpc47b27x_attach_kbc(sio, i8042);
+        }
+    }
 
 #ifdef CONFIG_IA64_VPC_USB
     if (!ia64_vpc_init_usb(s, pci_bus, errp)) {
@@ -4511,6 +4631,9 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
             type = "VGA";
         }
         s->vga_dev = pci_new(PCI_DEVFN(vga_slot, 0), type);
+        if (g_strcmp0(vga_model, "rage128gl") == 0) {
+            qdev_prop_set_string(DEVICE(s->vga_dev), "model", "rage128gl");
+        }
         if (!pci_realize_and_unref(s->vga_dev, vga_bus, errp)) {
             return false;
         }
@@ -4744,6 +4867,24 @@ static void ia64_vpc_machine_instance_finalize(Object *obj)
 }
 
 /*
+ * The monitor's nmi is the INIT switch every platform must have, the
+ * "CrashDump switch" (SAL spec 245359-007 2.11): the zx1 boards' TOC button
+ * and MP command TC, "system reset through INIT signal" (zx6000/rx2600
+ * Operations and Maintenance Guide, 2002).  It reaches every processor.
+ */
+static void ia64_vpc_nmi(NMIState *n, int cpu_index, Error **errp)
+{
+    CPUState *cs;
+
+    (void)n;
+    (void)cpu_index;
+    (void)errp;
+    CPU_FOREACH(cs) {
+        ia64_cpu_raise_init(cs);
+    }
+}
+
+/*
  * Shared class-init for the abstract "ia64-base": everything common to both
  * concrete machines.  The concrete 460gx/zx1 class-inits (below) run after this
  * and set the fields that differ -- desc, default CPU, and the board hooks.
@@ -4752,10 +4893,13 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
     IA64VpcMachineClass *imc = IA64_VPC_MACHINE_CLASS(oc);
+    NMIClass *nc = NMI_CLASS(oc);
 
     (void)data;
+    nc->nmi_monitor_handler = ia64_vpc_nmi;
 
-    imc->ahci_slot = 1;
+    imc->ahci_slot = IA64_460GX_AHCI_SLOT;
+    imc->low_ram_top = IA64_LOW_RAM_LIMIT;
     /*
      * Intel 82802AC Firmware Hub, 8 Mbit, 64 KiB blocks, which locks every
      * block out of reset through its register interface (datasheet 290658).
@@ -4778,8 +4922,8 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
 #endif
 #ifdef CONFIG_IA64_VPC_NETWORK
     /*
-     * Default to the 100 Mbit PRO/100 (i82557b, NET557.IN_ / DEV_1229).
-     * The 82543GC gigabit adapter (PCI\VEN_8086&DEV_1004&REV_02,
+     * The PRO/100 family (DEV_1229, NET557.IN_); each board sets the part it
+     * carries.  The 82543GC gigabit adapter (PCI\VEN_8086&DEV_1004&REV_02,
      * e1000w64.sys) remains available via -nic model=e1000-82543gc; the
      * plain e1000 (82540EM, DEV_100E) has no inbox IA-64 driver.
      */
@@ -4858,20 +5002,20 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_set_agp);
     object_class_property_set_description(oc, "agp",
         "AGP support (default on for both chipsets, as on real hardware). On "
-        "460gx it enables the GXB AGP GART; off makes the Rage 128 fall back to "
-        "its 32-bit PCI GART (clean 2D, but graphics DMA cannot reach RAM above "
-        "4 GiB). On zx1 it gives the Rage 128 a PCI AGP capability so Linux "
-        "hp-agp negotiates AGP mode reusing the SBA IOPDIR as the GART; off "
-        "keeps the Rage 128 on the SBA's PCI-GART path (which already reaches "
-        ">4 GiB)");
+        "460gx it fits the GXB's 1 MB GART SRAM; off leaves the SRAM out, so "
+        "firmware finds none and sets no aperture. On zx1 it gives the Rage "
+        "128 a PCI AGP capability so Linux hp-agp negotiates AGP mode reusing "
+        "the SBA IOPDIR as the GART; off keeps the Rage 128 on the SBA's "
+        "PCI-GART path (which already reaches >4 GiB)");
     object_class_property_add_str(oc, "vga",
                                   ia64_vpc_get_vga,
                                   ia64_vpc_set_vga);
     object_class_property_set_description(oc, "vga",
-        "Display adapter: 'rage128' (ATI Rage 128, honours -vga), 'mach64' "
+        "Display adapter: 'rage128' (ATI Rage 128 Pro, honours -vga), "
+        "'rage128gl' (ATI Rage 128 GL AGP), 'mach64' "
         "(ATI Mach64 3D Rage, a PCI 2D adapter with no AGP), 'nv15gl' "
         "(NVIDIA Quadro2 Pro), 'std' or 'none'. Each board defaults to its "
-        "own adapter");
+        "own adapter (460gx: rage128gl, zx1: mach64)");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);
@@ -4929,6 +5073,10 @@ static const TypeInfo ia64_vpc_machine_typeinfo = {
     .instance_finalize = ia64_vpc_machine_instance_finalize,
     .class_size = sizeof(IA64VpcMachineClass),
     .class_init = ia64_vpc_machine_class_init,
+    .interfaces = (const InterfaceInfo[]) {
+        { TYPE_NMI },
+        { }
+    },
 };
 
 static void ia64_vpc_register_types(void)

@@ -31,15 +31,23 @@
 /* The 82557 seat on the compatibility bus. */
 #define IA64_460GX_NIC_SLOT         5
 
-static void ia64_vpc_realfw_apmc(void *opaque, int n, int level)
+/*
+ * The south bridge's SMI# is every processor's PMI pin, PMI vector 0 (SDM
+ * Vol. 2 11.5.1).  No 460GX document shows the board trace; the vendor
+ * firmware does: its SALE_PMI (bios130.BIN SAL_B, run-time 0x3FF46BC0)
+ * sorts GR24 (0x3FF47860) and takes vector 0 to the code that reads the
+ * IFB's Global Status and answers APMC (0x3FF47920 -> 0x3FF178A0 ->
+ * 0x3FF1A4C0), where all processors but one wait for the one that
+ * services it.
+ */
+static void ia64_vpc_smi(void *opaque, int n, int level)
 {
-    IA64VpcMachineState *s = opaque;
+    CPUState *cs;
 
+    (void)opaque;
     (void)n;
-    if (level == IA64_460GX_ACPI_ENABLE_CMD) {
-        intel_82468gx_ifb_acpi_sci_enable(s->ifb, true);
-    } else if (level == IA64_460GX_ACPI_DISABLE_CMD) {
-        intel_82468gx_ifb_acpi_sci_enable(s->ifb, false);
+    CPU_FOREACH(cs) {
+        ia64_cpu_set_pmi_pin(cs, level);
     }
 }
 
@@ -104,10 +112,14 @@ static const struct {
                                ARRAY_SIZE(ia64_i2000_gxb_intx) },
 };
 
-/* The lowest programmed expander-port PCIS moved the top of the low DRAM band. */
+/*
+ * The lowest programmed expander-port PCIS moved the top of the low DRAM
+ * band; with none programmed (~0) the band is our firmware's layout.
+ */
 static void ia64_vpc_460gx_window_moved(void *opaque, uint64_t base)
 {
-    ia64_vpc_set_low_ram_limit(opaque, MIN(base, IA64_LOW_RAM_LIMIT));
+    ia64_vpc_set_low_ram_limit(opaque, base == ~0ULL ? IA64_LOW_RAM_LIMIT :
+                                       MIN(base, IA64_PCI_MMIO_BASE));
 }
 
 /*
@@ -120,6 +132,32 @@ static void ia64_vpc_460gx_window_moved(void *opaque, uint64_t base)
  * checks in, is published as id 3, and never hears the IPI.
  */
 static const uint8_t sdv_processor_ids[] = { 0, 3 };
+
+/*
+ * The processor's XTP byte store is an XTPR update special cycle, which
+ * the SAC decodes by the requesting agent's id (SSDM 3.7).
+ */
+static void sdv_xtp_cycle(IA64VpcMachineState *s, CPUState *cs, uint8_t data)
+{
+    uint64_t lid = IA64_CPU(cs)->env.cr[IA64_CR_SAPIC_LID];
+
+    ia64_460gx_xtp_cycle(s->chipset, (lid & IA64_SAPIC_LID_ID_MASK) >>
+                                     IA64_SAPIC_LID_ID_SHIFT, data);
+}
+
+/* The SAC sends a redirectable interrupt to the lowest XTPR (SSDM 3.7). */
+static bool sdv_redirect(void *opaque, uint8_t *id, uint8_t *eid)
+{
+    IA64VpcMachineState *s = opaque;
+    int agent = ia64_460gx_xtp_lowest(s->chipset);
+
+    if (agent < 0 || ia64_cpu_by_sapic_id(agent, 0) == NULL) {
+        return false;
+    }
+    *id = agent;
+    *eid = 0;
+    return true;
+}
 
 static bool sdv_validate(IA64VpcMachineState *s, Error **errp)
 {
@@ -158,19 +196,30 @@ static bool sdv_build_chipset(IA64VpcMachineState *s, DeviceState *pci_host,
 {
     MachineState *machine = MACHINE(s);
 
-    s->agp_dev = pci_new(PCI_DEVFN(PCI_SLOT_MAX - 1, 0), TYPE_IA64_AGP);
     /*
-     * The AGP master is the graphics adapter on the GXB's downstream
-     * root, so the GART translates that bus's device 0.
+     * The GXB's aperture registers live on the chipset bus only, so the
+     * model sits on no PCI bus.  The AGP master is the graphics adapter on
+     * the GXB's downstream root, so the GART translates that bus's device 0.
+     * agp=off leaves the GART SRAM unfitted.
      */
+    s->agp_dev = qdev_new(TYPE_IA64_AGP);
     object_property_set_int(OBJECT(s->agp_dev), "agp-master-devfn",
                             PCI_DEVFN(IA64_460GX_GXB_VGA_SLOT, 0),
                             &error_abort);
-    object_property_set_bool(OBJECT(s->agp_dev), "gart-enabled",
-                            s->agp_enabled, &error_abort);
-    if (!pci_realize_and_unref(s->agp_dev, pci_bus, errp)) {
+    if (!s->agp_enabled) {
+        object_property_set_uint(OBJECT(s->agp_dev), "sram-size", 0,
+                                 &error_abort);
+    }
+    if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(s->agp_dev), errp)) {
         return false;
     }
+#ifdef CONFIG_IA64_VPC_GRAPHICS
+    /*
+     * agp460 starts the AGP master only when the card has its capability
+     * (WXPSP1/NT/base/busdrv/agp/agp460/init.c:142-147).
+     */
+    ia64_vpc_rage128_agp(s);
+#endif
 
     s->chipset = ia64_460gx_create(OBJECT(s), pci_io, pci_host,
                                    machine->ram_size,
@@ -178,7 +227,9 @@ static bool sdv_build_chipset(IA64VpcMachineState *s, DeviceState *pci_host,
     if (s->chipset == NULL) {
         return false;
     }
+    ia64_460gx_attach_gxb_agp(s->chipset, IA64_AGP(s->agp_dev));
     ia64_460gx_attach_root(s->chipset, -1, pci_bus);
+    ia64_iosapic_set_redirect(iosapic, sdv_redirect, s);
 
     /*
      * The i2000's other three PCI roots: the two WXB buses and the GXB AGP
@@ -236,11 +287,7 @@ static bool sdv_build_chipset(IA64VpcMachineState *s, DeviceState *pci_host,
             }
         }
 
-        /*
-         * The GART translates the AGP master, which lives on the GXB's
-         * downstream root, so that bus needs the same DMA routing as the
-         * bus the GXB bridge itself sits on.
-         */
+        /* The GART translates the AGP master on the GXB's downstream root. */
         if (s->agp_dev != NULL) {
             ia64_agp_attach_bus(IA64_AGP(s->agp_dev),
                                 s->expander_bus[IA64_460GX_ROOT_GXB]);
@@ -284,6 +331,18 @@ static void sdv_wire_intx(IA64VpcMachineState *s, DeviceState *pci_host,
     }
 }
 
+
+/*
+ * The IFB's GPIO inputs as the board drives them, in GP Data bit positions.
+ * J29 (Owner's Guide Table 21: NORM 1-2, OVRD/CLRCMOS 2-3, RECOVERY no
+ * jumper) reaches the firmware on GPIO[13] (bit 19) and GPIO[18] (bit 24):
+ * SAL_A FFFDE8D6 takes both high as a recovery request.  NORM grounds
+ * GPIO[13]; with GPIO[18] grounded instead, bios130.BIN opens its BIOS
+ * Configuration Manager at every boot.  Every other input is pulled high.
+ */
+#define SDV_GPIO_J29_NORM       (1U << 19)
+#define SDV_GPIO_INPUTS         (UINT32_MAX & ~SDV_GPIO_J29_NORM)
+
 static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
                              MemoryRegion *pci_io, DeviceState *iosapic,
                              Error **errp)
@@ -305,7 +364,7 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
     s->ifb = intel_82468gx_ifb_create(
         pci_bus, PCI_DEVFN(IA64_460GX_IFB_SLOT,
                            IA64_460GX_IFB_LPC_FUNCTION),
-        IA64_460GX_ACPI_PM_IO_BASE, errp);
+        SDV_GPIO_INPUTS, s->nvram_battery, IA64_460GX_ACPI_PM_IO_BASE, errp);
     if (s->ifb == NULL) {
         return NULL;
     }
@@ -319,16 +378,8 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
     qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_SCI,
                                 0, qdev_get_gpio_in(iosapic,
                                                     IA64_460GX_SCI_GSI));
-    /*
-     * The APM control port's SMI is the processor's PMI on this platform,
-     * and the vendor SAL's PMI handler answers the FADT's ACPI_ENABLE and
-     * ACPI_DISABLE commands by setting or clearing SCI_EN.  PMI delivery is
-     * not modelled; this stands in for that handler's effect
-     * (intel_82468gx_ifb_acpi_sci_enable).
-     */
-    qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_APMC,
-                                0, qemu_allocate_irq(ia64_vpc_realfw_apmc,
-                                                     s, 0));
+    qdev_connect_gpio_out_named(DEVICE(s->ifb), INTEL_82468GX_IFB_GPIO_SMI,
+                                0, qemu_allocate_irq(ia64_vpc_smi, s, 0));
     for (i = 0; i < INTEL_82468GX_IFB_FUNCTIONS; i++) {
         PCIDevice *fn = intel_82468gx_ifb_function(s->ifb, i);
 
@@ -379,20 +430,16 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
                                 INTEL_82468GX_IFB_GPIO_LEGACY, 0,
                                 s->extint);
     /*
-     * The board's Super I/O behind the bridge, as far as its
-     * configuration space: the vendor DSDT finds COM1 and the keyboard
-     * controller through it (see hw/isa/smsc_lpc47b27x.c).  Its UART2 is
-     * fitted when the machine has a debug port, which the base machine
-     * then decodes at COM2.
+     * The board's Super I/O behind the bridge, in the state the vendor
+     * firmware's chipset-init script leaves it (as the IFB's ACPI base
+     * above).  The base machine attaches COM1 and the keyboard controller
+     * to it once it has built them.
      */
-    {
-        ISADevice *sio = isa_new(TYPE_SMSC_LPC47B27X);
-
-        qdev_prop_set_bit(DEVICE(sio), SMSC_LPC47B27X_PROP_UART2,
-                          s->debug_uart != NULL);
-        if (!isa_realize_and_unref(sio, isa_bus, errp)) {
-            return NULL;
-        }
+    s->super_io = isa_new(TYPE_SMSC_LPC47B27X);
+    qdev_prop_set_bit(DEVICE(s->super_io), SMSC_LPC47B27X_PROP_FIRMWARE_INIT,
+                      true);
+    if (!isa_realize_and_unref(s->super_io, isa_bus, errp)) {
+        return NULL;
     }
     return isa_bus;
 }
@@ -441,6 +488,13 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
 
     (void)data;
     mc->desc = "Intel SDV / HP i2000 (460GX chipset, Merced)";
+#ifdef CONFIG_IA64_VPC_NETWORK
+    /*
+     * The I/O board's LAN is an Intel 82559 (i2000 Owner's Guide 2.5); the
+     * guide names no stepping.
+     */
+    mc->default_nic = "i82559c";
+#endif
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("merced");
     /*
      * On the i2000 the interrupt controller is the 460GX Programmable
@@ -450,6 +504,7 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
      */
     imc->iosapic_pins = IA64_IOSAPIC_460GX_PINS;
     imc->iosapic_version = IA64_IOSAPIC_460GX_VERSION;
+    imc->iosapic_face = IA64_IOSAPIC_FACE_PID;
     imc->pci0_intx = ia64_i2000_pci0_intx;
     imc->pci0_nintx = ARRAY_SIZE(ia64_i2000_pci0_intx);
     imc->pci0_intx_fallback = IA64_460GX_INTX_FALLBACK_GSI;
@@ -461,22 +516,17 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
      * it.  Either default can be overridden with i8042=on|off.
      */
     imc->i8042_default = true;
+    /* The Rage 128 GL AGP, as on a real SDV with firmware 1.30. */
+    imc->vga_default = "rage128gl";
     imc->legacy_com1_console = true;
-    /*
-     * imc->sale_recovery_check stays false: PALE_RESET makes the RESET call
-     * only on this board.  The vendor firmware's recovery-check pass sizes
-     * and initializes the DRAM, hands the result to the next pass through
-     * the SAC (see ia64_460gx_reset), resets the platform, and the pass
-     * after the reset stalls in a software delay loop of its RAM-resident
-     * recovery module (PspRecover, loop at RAM 0x02011C10) -- 30 minutes
-     * with no further progress and no boot manager (0edbeda).
-     */
+    imc->nvram_battery_size = INTEL_82468GX_IFB_BATTERY_SIZE;
     imc->processor_ids = sdv_processor_ids;
     imc->nprocessor_ids = ARRAY_SIZE(sdv_processor_ids);
     imc->validate = sdv_validate;
     imc->build_chipset = sdv_build_chipset;
     imc->wire_intx = sdv_wire_intx;
     imc->build_isa = sdv_build_isa;
+    imc->xtp_cycle = sdv_xtp_cycle;
     imc->seat = sdv_seat;
     imc->root_gsi_base = sdv_root_gsi_base;
     ia64_vpc_add_compat_defaults(mc);

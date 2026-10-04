@@ -39,6 +39,7 @@ from .encoding import (
     IA64_GENEX_UNIMPL_DATA_ADDR,
     IA64_IMPL_PA_BITS,
     IA64_IMPL_VA_MSB,
+    IA64_MERCED_IMPL_PA_BITS,
     IA64_INST_ACCESS_BIT_VECTOR,
     IA64_INST_ACCESS_VECTOR,
     IA64_INST_KEY_MISS_VECTOR,
@@ -1709,13 +1710,13 @@ test_itr_i_slot_uses_low_8_bits = require_registers(
         "r31": 0x7b,
     }, entry=0x10)
 
-test_itr_i_reserved_slot_faults = require_exception(
+test_itr_i_reserved_slot_faults = require_uncollected_reserved_field(
     "itr_i_reserved_slot_faults", [
         (0x10, *movl_mlx(18, 0x0010000004000661)),
         (0x20, 0x00, adds(5, IA64_TR_COUNT, 0), nop_i(), nop_i()),
         (0x30, 0x00, itr_i(5, 18), nop_i(),
          nop_i()),
-    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30, entry=0x10)
+    ], fault_ip=0x30, fault_imm=itr_i(5, 18), entry=0x10)
 
 test_itr_i_resumes_next_slot_after_tb_exit = require_registers(
     "itr_i_resumes_next_slot_after_tb_exit", [
@@ -4468,34 +4469,85 @@ test_itr_d_slot_uses_low_8_bits = require_registers(
 # (251110-003 table 6-1) and takes the same insertion without faulting.
 ONE_GIGABYTE_ITIR = 30 << 2
 
-# require_exception() wraps the program in a stub that sets PSR.ic so the
-# fault is collected and vectored, but mov-to-CR on the interruption
-# registers is illegal while PSR.ic is set, so drop it around the ITIR and
-# IFA writes and restore it before the insertion.
+# The insert runs with PSR.ic = 0, as itc requires, so the fault is not
+# collected and stops at the faulting bundle.
 ONE_GIGABYTE_ITC_PROGRAM = (
     (0x10, *movl_mlx(2, KEY_TEST_VA)),
     (0x20, *movl_mlx(16, KEY_TEST_RR)),
     (0x30, *movl_mlx(18, 0x0010000004000661)),
     (0x40, *movl_mlx(7, ONE_GIGABYTE_ITIR)),
     (0x50, 0x00, mov_rr_write(16, 0), nop_i(), nop_i()),
-    (0x60, 0x00, rsm(IA64_PSR_IC), nop_i(), nop_i()),
-    (0x70, 0x00, srlz_d(), nop_i(), nop_i()),
-    (0x80, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
-    (0x90, 0x00, mov_m_gr_cr(2, 20), nop_i(), nop_i()),
-    (0xa0, 0x00, ssm(IA64_PSR_IC), nop_i(), nop_i()),
-    (0xb0, 0x00, srlz_d(), nop_i(), nop_i()),
-    (0xc0, 0x00, itc_d(18), nop_i(), nop_i()),
+    (0x60, 0x00, srlz_d(), nop_i(), nop_i()),
+    (0x70, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+    (0x80, 0x00, mov_m_gr_cr(2, 20), nop_i(), nop_i()),
+    (0x90, 0x00, itc_d(18), nop_i(), nop_i()),
 )
 
-test_itc_d_merced_rejects_1gb_page = require_exception(
-    "itc_d_merced_rejects_1gb_page", list(ONE_GIGABYTE_ITC_PROGRAM),
-    IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0xc0, entry=0x10, cpu="merced")
+test_itc_d_merced_rejects_1gb_page = require_registers(
+    "itc_d_merced_rejects_1gb_page", list(ONE_GIGABYTE_ITC_PROGRAM), {
+        "ip": 0x90,
+        "fault_ip": 0x90,
+        "fault_imm": itc_d(18),
+        "exception": IA64_EXCP_RESERVED_REG_FIELD,
+        "fault_code": IA64_EXCP_RESERVED_REG_FIELD,
+    }, entry=0x10, cpu="merced")
+
+# 245318-001 sec 4.3.1 (p.4-26): a present translation whose PPN sets an
+# unimplemented physical address bit makes itc and itr take an Unimplemented
+# Data Address fault.  PPN{49:12} exceeds only Merced's 44 bits
+# (245320-002 sec 3.2), so the same PTE inserts on Itanium 2.
+MERCED_UNIMPLEMENTED_PPN_PTE = LOW_VECTOR_TR_PTE | (1 << IA64_MERCED_IMPL_PA_BITS)
+
+UNIMPLEMENTED_PPN_ITC_PROGRAM = (
+    (0x10, *movl_mlx(18, MERCED_UNIMPLEMENTED_PPN_PTE)),
+    (0x20, *movl_mlx(19, HIGH_TR_BASE + 0x20000)),
+    (0x30, 0x00, adds(7, LOW_VECTOR_ITIR, 0), nop_i(), nop_i()),
+    (0x40, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+    (0x50, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+    (0x60, 0x00, itc_d(18), nop_i(), nop_i()),
+)
+
+# The insert runs with PSR.ic = 0, so the fault is not collected (ISR.ni).
+UNIMPLEMENTED_PPN_HANDLER = (
+    (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+    (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(10, 20),
+     nop_i(), nop_i()),
+    (IA64_GENERAL_VECTOR + 0x20, 0x10, nop_m(), nop_i(),
+     br_cond(IA64_GENERAL_VECTOR + 0x20, IA64_GENERAL_VECTOR + 0x20)),
+)
+
+UNIMPLEMENTED_PPN_FAULT_STATE = {
+    "ip": IA64_GENERAL_VECTOR + 0x20,
+    "exception": IA64_EXCP_NONE,
+    "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_NA | IA64_ISR_NI,
+    "r10": HIGH_TR_BASE + 0x20000,
+}
+
+test_itc_d_merced_unimplemented_ppn_faults = require_registers(
+    "itc_d_merced_unimplemented_ppn_faults", [
+        *UNIMPLEMENTED_PPN_ITC_PROGRAM,
+        *UNIMPLEMENTED_PPN_HANDLER,
+    ], UNIMPLEMENTED_PPN_FAULT_STATE, entry=0x10, cpu="merced")
+
+test_itr_d_merced_unimplemented_ppn_faults = require_registers(
+    "itr_d_merced_unimplemented_ppn_faults", [
+        *UNIMPLEMENTED_PPN_ITC_PROGRAM[:-1],
+        (0x60, 0x00, adds(5, 5, 0), nop_i(), nop_i()),
+        (0x70, 0x00, itr_d(5, 18), nop_i(), nop_i()),
+        *UNIMPLEMENTED_PPN_HANDLER,
+    ], UNIMPLEMENTED_PPN_FAULT_STATE, entry=0x10, cpu="merced")
+
+test_itc_d_madison_accepts_ppn_bit_44 = require_registers(
+    "itc_d_madison_accepts_ppn_bit_44", [
+        *UNIMPLEMENTED_PPN_ITC_PROGRAM,
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {"ip": 0x70, "exception": IA64_EXCP_NONE}, entry=0x10, cpu="madison")
 
 test_itc_d_madison_accepts_1gb_page = require_registers(
     "itc_d_madison_accepts_1gb_page", [
         *ONE_GIGABYTE_ITC_PROGRAM,
-        (0xd0, 0x10, nop_m(), nop_i(), br_cond(0xd0, 0xd0)),
-    ], {"ip": 0xd0, "exception": IA64_EXCP_NONE}, entry=0x10, cpu="madison")
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0xa0)),
+    ], {"ip": 0xa0, "exception": IA64_EXCP_NONE}, entry=0x10, cpu="madison")
 
 
 def _itc_d_mii_slot0_without_stop_is_illegal(name, template):
@@ -4524,13 +4576,42 @@ test_itc_d_mii_03_slot0_without_stop_is_illegal = \
     _itc_d_mii_slot0_without_stop_is_illegal(
         "itc_d_mii_03_slot0_without_stop_is_illegal", 0x03)
 
-test_itr_d_reserved_slot_faults = require_exception(
+test_itr_d_reserved_slot_faults = require_uncollected_reserved_field(
     "itr_d_reserved_slot_faults", [
         (0x10, *movl_mlx(18, 0x0010000004000661)),
         (0x20, 0x00, adds(5, IA64_TR_COUNT, 0), nop_i(), nop_i()),
         (0x30, 0x00, itr_d(5, 18), nop_i(),
          nop_i()),
-    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x30, entry=0x10)
+    ], fault_ip=0x30, fault_imm=itr_d(5, 18), entry=0x10)
+
+# 245319-001 itc (p.2-122) and itr (p.2-124): with PSR.ic = 1 the insert is
+# an Illegal Operation fault, tested before privilege, NaT and reserved
+# fields; require_exception() sets PSR.ic before the program runs.
+test_itc_d_psr_ic_raises_illegal_operation = require_exception(
+    "itc_d_psr_ic_raises_illegal_operation", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, itc_d(18), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x20, entry=0x10)
+
+test_itc_i_psr_ic_raises_illegal_operation = require_exception(
+    "itc_i_psr_ic_raises_illegal_operation", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, itc_i(18), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x20, entry=0x10)
+
+test_itr_i_psr_ic_raises_illegal_operation = require_exception(
+    "itr_i_psr_ic_raises_illegal_operation", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, adds(5, 5, 0), nop_i(), nop_i()),
+        (0x30, 0x00, itr_i(5, 18), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x30, entry=0x10)
+
+test_itr_d_psr_ic_precedes_reserved_slot = require_exception(
+    "itr_d_psr_ic_precedes_reserved_slot", [
+        (0x10, *movl_mlx(18, 0x0010000004000661)),
+        (0x20, 0x00, adds(5, IA64_TR_COUNT, 0), nop_i(), nop_i()),
+        (0x30, 0x00, itr_d(5, 18), nop_i(), nop_i()),
+    ], IA64_EXCP_ILLEGAL, fault_ip=0x30, entry=0x10)
 
 test_tpa_dt_disabled_uses_dtlb_entry = require_registers(
     "tpa_dt_disabled_uses_dtlb_entry", [
@@ -4801,6 +4882,53 @@ test_short_vhpt_reserved_pte_aborts_to_dtlb_miss = require_registers(
         "r30": 0xa000000000000430,
         "r31": 0xbffc000000000000,
     }, entry=0x10)
+
+# The VHPT walker aborts on a PTE with unimplemented PPN bits (245318-001
+# sec 4.3.1), so the short-format walk for the tpa ends in a Data TLB fault on
+# Merced; the control walk with an implemented PPN translates.
+def short_vhpt_tpa_program(pte):
+    return [
+        (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
+        (0x20, *movl_mlx(17, 0xa000000000000000)),
+        (0x30, *movl_mlx(18, 0x539)),
+        (0x40, *movl_mlx(19, 0xbffc000000000000)),
+        (0x50, *movl_mlx(20, 0x0010000004009661)),
+        (0x60, *movl_mlx(21, pte)),
+        (0x70, *movl_mlx(22, 0x4008000)),
+        (0x80, 0x00, st8(22, 21), nop_i(), nop_i()),
+        (0x90, 0x00, mov_m_gr_cr(16, 8), adds(7, 0x38, 0), nop_i()),
+        (0xa0, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0xb0, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0), nop_i()),
+        (0xd0, 0x00, itr_d(5, 20), nop_i(), nop_i()),
+        (0xe0, *movl_mlx(2, 0xa000000000000430)),
+        (0xf0, 0x00, ssm((1 << 13) | (1 << 17)), nop_i(), nop_i()),
+        (0x100, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x110, 0x00, tpa(29, 2), nop_i(), nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+        (IA64_DTLB_VECTOR, 0x00, mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+        (IA64_DTLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DTLB_VECTOR + 0x10, IA64_DTLB_VECTOR + 0x10)),
+    ]
+
+test_short_vhpt_merced_walk_translates = require_registers(
+    "short_vhpt_merced_walk_translates",
+    short_vhpt_tpa_program(0x0010000004000661), {
+        "ip": 0x120,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0x4000430,
+    }, entry=0x10, cpu="merced")
+
+test_short_vhpt_merced_unimplemented_ppn_aborts_to_dtlb_miss = \
+    require_registers(
+    "short_vhpt_merced_unimplemented_ppn_aborts_to_dtlb_miss",
+    short_vhpt_tpa_program(
+        0x0010000004000661 | (1 << IA64_MERCED_IMPL_PA_BITS)), {
+        "ip": IA64_DTLB_VECTOR + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0,
+        "r30": 0xa000000000000430,
+    }, entry=0x10, cpu="merced")
 
 test_short_vhpt_walker_ignores_uncacheable_mapping = require_registers(
     "short_vhpt_walker_ignores_uncacheable_mapping", [
@@ -7323,7 +7451,8 @@ test_fc_i_cpl3_access_rights_fault_is_nonaccess = require_registers(
 
 
 
-FC_HIGH_RAM_TARGET = 0x80210000
+# zx1 Memory1: DRAM that the machine aliases from backing offset 1 GiB.
+FC_HIGH_RAM_TARGET = 0x4040210000
 FC_ABOVE_4G_RAM_TARGET = 0x100100000
 
 
@@ -7340,7 +7469,7 @@ def test_fc_i_high_ram_invalidates_translated_target(qemu):
         (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
         (FC_HIGH_RAM_TARGET, 0x10, nop_m(), adds(30, 1, 0),
          br_indirect(1)),
-    ], entry=0x10, terminal_ip=0x90, memory="4G")
+    ], entry=0x10, terminal_ip=0x90, memory="2G")
     if stats.get("TB invalidate count", 0) < 1:
         raise AssertionError(
             "fc.i did not invalidate code in aliased high RAM:\n" + output)
@@ -7399,56 +7528,53 @@ test_no_ic_data_access_enters_vector_with_ni = require_registers(
 )
 
 GROUP = 'mmu'
-# Region-7 boot accesses above the 0x8000_0000 direct-map base resolve to
-# physical memory biased down by that base: VA 0xe000_0000_8000_1240 (region-7
-# offset 0x8000_1240) must read PA 0x1240, not the unbiased identity alias
-# 0x8000_1240.  The IA-64 loaders rely on this to reach top-of-RAM free-memory
-# descriptors that no explicit TR covers; without the bias those pages alias
-# unbacked physical memory 0x8000_0000 too high (see
-# IA64_FW_REGION7_DIRECTMAP_BASE) and the loader's free list reads back a NULL
-# link.
-REGION7_DIRECTMAP_DATA = bundle_words(0x00, 0x00c0ffee1234abcd, 0, 0)[0]
-test_sal_boot_identity_region7_directmap_bias = require_registers(
-    "sal_boot_identity_region7_directmap_bias", [
+# While the firmware IVT serves TLB misses, SAL inserts identity TCs: VA = PA
+# with the region bits removed and no bias (SAL 245359-007 3.3.1; the i2000
+# SAL_B data-miss handler).  tpa of offset 0x8000_1240 gives 0x8000_1240 in
+# region 7 and in region 1 (tpa, because the harness has no RAM at 2 GiB).
+test_sal_boot_identity_has_no_bias = require_registers(
+    "sal_boot_identity_has_no_bias", [
         (0x10, *movl_mlx(17, 0xe000000080001240)),
-        (0x20, *movl_mlx(18, (1 << 8) | (13 << 2))),
-        (0x30, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
-        (0x40, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
-        (0x50, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
-        (0x60, *movl_mlx(19, (1 << 13) | (1 << 17))),
-        (0x70, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
-        (0x80, 0x08, ld8(31, 17), nop_i(), nop_i()),
-        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
-        (0x1240, 0x00, 0x00c0ffee1234abcd, 0, 0),
+        (0x20, *movl_mlx(16, 0x2000000080001240)),
+        (0x30, *movl_mlx(18, (1 << 8) | (13 << 2))),
+        (0x40, *movl_mlx(2, IA64_FIRMWARE_IVT_BASE)),
+        (0x50, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
+        (0x60, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0x70, 0x00, mov_rr_write(18, 16), nop_i(), nop_i()),
+        (0x80, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x90, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0xa0, 0x00, tpa(31, 17), nop_i(), nop_i()),
+        (0xb0, 0x00, tpa(30, 16), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
     ], {
-        "ip": 0x90,
+        "ip": 0xc0,
         "exception": IA64_EXCP_NONE,
-        "r31": REGION7_DIRECTMAP_DATA,
+        "r30": 0x80001240,
+        "r31": 0x80001240,
     }, entry=0x10)
 
-# The region-7 KSEG physical alias (VA = PA + 0x8000_0000) must persist after
-# the SAL boot environment ends (cr.iva != the firmware IVT): the early kernel
-# reaches loader-built structures near the top of RAM through it before its
-# self-mapped page tables are active.  Here cr.iva is a non-firmware (kernel)
-# IVT, so ia64_sal_boot_environment_active() is false, yet the region-7 offset
-# 0x8000_1240 must still resolve to PA 0x1240.  Bounded to backed RAM
-# (region7_directmap_limit), so it is a no-op outside physical memory.
-test_region7_kseg_alias_persists_without_sal = require_registers(
-    "region7_kseg_alias_persists_without_sal", [
+# Region 7 has no alias of low memory once the OS owns the IVT: a region-7
+# access with no TR, TC or VHPT translation takes an Alternate Data TLB fault
+# (SDM Vol 2 5.1.1), whatever its offset.  SAL's identity TCs exist only while
+# the firmware IVT serves the misses (SAL 3.3.1).
+test_region7_miss_without_sal_takes_alt_dtlb = require_registers(
+    "region7_miss_without_sal_takes_alt_dtlb", [
         (0x10, *movl_mlx(17, 0xe000000080001240)),
         (0x20, *movl_mlx(18, (1 << 8) | (13 << 2))),
-        (0x30, *movl_mlx(2, 0x100000)),
-        (0x40, 0x00, mov_m_gr_cr(2, 2), nop_i(), nop_i()),
-        (0x50, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
-        (0x60, *movl_mlx(19, (1 << 13) | (1 << 17))),
-        (0x70, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
-        (0x80, 0x08, ld8(31, 17), nop_i(), nop_i()),
-        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, 0x90)),
+        (0x30, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0x40, *movl_mlx(19, (1 << 13) | (1 << 17))),
+        (0x50, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x60, 0x08, ld8(31, 17), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+        (IA64_ALT_DTLB_VECTOR, 0x00, mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x10, IA64_ALT_DTLB_VECTOR + 0x10)),
         (0x1240, 0x00, 0x00c0ffee1234abcd, 0, 0),
     ], {
-        "ip": 0x90,
+        "ip": IA64_ALT_DTLB_VECTOR + 0x10,
         "exception": IA64_EXCP_NONE,
-        "r31": REGION7_DIRECTMAP_DATA,
+        "r30": 0xe000000080001240,
+        "r31": 0,
     }, entry=0x10)
 
 CASE_NAMES = (
@@ -7546,7 +7672,14 @@ CASE_NAMES = (
     'itr_d_not_present_raises_page_fault',
     'itc_d_madison_accepts_1gb_page',
     'itc_d_merced_rejects_1gb_page',
+    'itc_d_merced_unimplemented_ppn_faults',
+    'itr_d_merced_unimplemented_ppn_faults',
+    'itc_d_madison_accepts_ppn_bit_44',
     'itr_d_reserved_slot_faults',
+    'itc_d_psr_ic_raises_illegal_operation',
+    'itc_i_psr_ic_raises_illegal_operation',
+    'itr_i_psr_ic_raises_illegal_operation',
+    'itr_d_psr_ic_precedes_reserved_slot',
     'itr_d_slot_replacement_keeps_old_translation_cached',
     'itr_d_slot_uses_low_8_bits',
     'itr_d_uses_slot_register_value',
@@ -7656,15 +7789,17 @@ CASE_NAMES = (
     'rfi_serializes_pending_ptr_i',
     'rsm_ic_inflight_dtlb_not_data_nested',
     'rsm_ic_serialized_data_nested_tlb',
-    'region7_kseg_alias_persists_without_sal',
+    'region7_miss_without_sal_takes_alt_dtlb',
     'sal_boot_identity_does_not_override_explicit_rid_miss',
     'sal_boot_identity_handles_nonzero_region7_rid',
-    'sal_boot_identity_region7_directmap_bias',
+    'sal_boot_identity_has_no_bias',
     'short_vhpt_entry_not_present_aborts_to_dtlb_miss',
     'short_vhpt_ifetch_read_only_raises_inst_access',
     'short_vhpt_not_present_entry_is_cached',
     'short_vhpt_not_present_raises_page_fault',
     'short_vhpt_reserved_pte_aborts_to_dtlb_miss',
+    'short_vhpt_merced_walk_translates',
+    'short_vhpt_merced_unimplemented_ppn_aborts_to_dtlb_miss',
     'short_vhpt_thash_decode',
     'short_vhpt_thash_high_region_self_map',
     'short_vhpt_thash_uses_implemented_va_bits',
@@ -7710,6 +7845,9 @@ CASE_METADATA = {
     'itc_d_present_reserved_itir_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itc_d_present_reserved_ma_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itc_d_present_reserved_pte_field_fault': CaseMetadata(terminal_is_fault_ip=True),
+    'itc_d_merced_rejects_1gb_page': CaseMetadata(terminal_is_fault_ip=True),
+    'itr_d_reserved_slot_faults': CaseMetadata(terminal_is_fault_ip=True),
+    'itr_i_reserved_slot_faults': CaseMetadata(terminal_is_fault_ip=True),
     'itc_i_present_reserved_pte_field_fault': CaseMetadata(terminal_is_fault_ip=True),
     'itr_i_8k_translation_uses_unrounded_paddr': CaseMetadata(nonterminal_effect_loop=True),
     'itr_i_clear_accessed_raises_inst_access_bit': CaseMetadata(nonterminal_effect_loop=True),

@@ -48,12 +48,15 @@ extern char __fw_ivt[];
 
 /*
  * ITC rate, set at boot from PAL_FREQ_RATIOS: the ITC counts processor
- * clocks (800 MHz on Merced, 1.6 GHz on the Itanium 2 models).  20 (200 MHz)
- * only until fw_init_itc_rate() has run.
+ * clocks (800 MHz on Merced, 1.3 GHz on Madison, 1.6 GHz on Montecito).  20
+ * (200 MHz) only until fw_init_itc_rate() has run.
  */
 extern UINT64 fw_itc_ticks_per_100ns;
 #define FW_ITC_TICKS_PER_100NS fw_itc_ticks_per_100ns
 void fw_pal_freq_ratios(UINT64 *Processor, UINT64 *Bus, UINT64 *Itc);
+/* SAL_FREQ_BASE's platform clock, from PAL_FREQ_BASE at boot. */
+extern UINT64 mFwPlatformBaseFrequency;
+void fw_init_platform_base_frequency(void);
 /* PAL_LOGICAL_TO_PHYSICAL for the calling processor: status, first return. */
 UINT64 fw_pal_logical_to_physical(UINT64 *Info);
 /* Register this image with the PAL emulation (IA64_PAL_FIRMWARE_REGISTER). */
@@ -63,6 +66,8 @@ BOOLEAN fw_platform_install_pal(UINT64 Processor, UINT64 ResetPalProc);
 extern UINT64 mFwPalProc;
 extern UINT64 mFwResetPalProc;
 BOOLEAN fw_platform_register_processor(UINT64 ResetPalProc);
+void fw_platform_register_minstate(BOOLEAN OsOwned);
+void fw_platform_register_pmi(void);
 /* What the flash stage probed, before anything derives from it. */
 void fw_platform_set_probed(UINT64 RamSize, UINT64 Chipset);
 void fw_init_itc_rate(void);
@@ -186,7 +191,6 @@ extern const UINT8 mDevicePathProtocolGuid[16];
 
 UINT64 fw_guest_ram_size(void);
 UINT64 fw_guest_low_ram_end(void);
-BOOLEAN fw_zx1_iova_hole_active(void);
 UINTN fw_guest_processor_count(void);
 UINT8 fw_processor_lsapic_id(UINTN Index);
 UINT64 fw_processor_ids_late(void);

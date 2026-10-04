@@ -82,13 +82,6 @@ typedef struct IA64MMUState {
     /* Transient bookkeeping for architected purge operations. */
     uint16_t pending_purge_data_count;
     uint16_t pending_purge_inst_count;
-
-    /*
-     * Upper bound (region-7 offset) of the persistent KSEG physical alias:
-     * IA64_FW_REGION7_DIRECTMAP_BASE + guest RAM size.  Set at reset from the
-     * machine RAM size; see ia64_sal_boot_identity_pa_type().
-     */
-    uint64_t region7_directmap_limit;
 } IA64MMUState;
 
 typedef struct IA64InterruptState {
@@ -117,12 +110,22 @@ typedef struct IA64InterruptState {
     bool itm_last_match_valid;
 } IA64InterruptState;
 
+/* PAL_PROC_GET_FEATURES implementation-specific sets 16 up a model may have. */
+#define IA64_PAL_IMPL_FEATURE_SETS 3
+
 typedef struct IA64PalState {
     /* Architected PAL registration and machine-check state. */
     bool pal_mc_expected;
+    /* XR0: the min-state save area as registered, bit 63 included. */
     uint64_t pal_mc_save_addr;
+    /* PALE_INIT has saved a context that PAL_MC_RESUME has not resumed. */
+    bool pal_mc_event_active;
     /* SAL's PMI entry, from PAL_PMI_ENTRYPOINT (not PAL's own PALE_PMI). */
     uint64_t pal_pmi_entry;
+    /* PMI vectors latched and not yet taken by PALE_PMI (SDM Vol. 2 11.5.1). */
+    uint16_t pal_pmi_pending;
+    /* The PMI pin's level: an assertion latches vector 0. */
+    bool pal_pmi_pin;
     /*
      * PAL_PROC entries this processor recognises: the one PAL handed over at
      * reset (from the boot info on every reset), and the copy PAL_COPY_PAL
@@ -136,6 +139,12 @@ typedef struct IA64PalState {
     uint64_t pal_proc_copy_addr;
     uint64_t pal_interrupt_block_addr;
     uint64_t pal_io_block_addr;
+    /*
+     * features_status of PAL_PROC_GET_FEATURES set 0 and sets 16 up (index
+     * 1 + n for set 16 + n), and of PAL_BUS_GET_FEATURES.
+     */
+    uint64_t proc_feature_status[1 + IA64_PAL_IMPL_FEATURE_SETS];
+    uint64_t bus_feature_status;
 } IA64PalState;
 
 typedef struct IA64RSEState {

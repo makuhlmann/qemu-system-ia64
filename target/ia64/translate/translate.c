@@ -200,6 +200,27 @@ bool ia64_is_pal_reset_return_break(CPUIA64State *env, uint64_t address)
                env, address, env->pal.pal_reset_return_addr);
 }
 
+/*
+ * SALE_PMI's return to PALE_PMI through BR0 (break 0x100008): in the PAL
+ * handed over at reset, which stays PAL after a copy, or in the copy.
+ */
+bool ia64_is_pal_pmi_return_break(CPUIA64State *env, uint64_t address)
+{
+    IA64CPU *cpu = env_archcpu(env);
+    uint64_t reset_pa = cpu->boot_info_valid ?
+                        cpu->boot_info.raw_pal_pmi_return : 0;
+
+    if (reset_pa != 0 &&
+        ia64_instruction_address_matches_physical_entry(env, address,
+                                                        reset_pa)) {
+        return true;
+    }
+    return qatomic_load_acquire(&env->pal.pal_proc_copy_valid) &&
+           ia64_instruction_address_matches_physical_entry(
+               env, address, qatomic_read(&env->pal.pal_proc_copy_addr) +
+                             IA64_PAL_COPY_PMI_RETURN_OFFSET);
+}
+
 bool ia64_is_sal_runtime_break(CPUIA64State *env, uint64_t address,
                                uint64_t imm)
 {
@@ -804,6 +825,35 @@ static void ia64_set_exit_nat_known(DisasContext *ctx,
     ctx->memory.nat_known_at_exit[0] = ctx->memory.nat_known_clear[0];
     ctx->memory.nat_known_at_exit[1] = ctx->memory.nat_known_clear[1];
     ia64_drop_nat_known_renamed(insn, ctx->memory.nat_known_at_exit);
+}
+
+static bool ia64_insn_is_translation_insert(const Ia64Instruction *insn)
+{
+    switch (insn->opcode) {
+    case IA64_OP_ITC_D:
+    case IA64_OP_ITC_I:
+    case IA64_OP_ITR_D:
+    case IA64_OP_ITR_I:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * itc and itr raise Illegal Operation while PSR.ic is 1, before the privilege
+ * check (SDM Vol. 3 itc and itr; 245319-001 p.2-122, p.2-124).
+ */
+static void ia64_gen_check_insert_psr_ic(const Ia64Instruction *insn)
+{
+    TCGv_i64 ic = tcg_temp_new_i64();
+    TCGLabel *ok = gen_new_label();
+
+    tcg_gen_andi_i64(ic, cpu_psr, IA64_PSR_IC);
+    tcg_gen_brcondi_i64(TCG_COND_EQ, ic, 0, ok);
+    ia64_gen_raise_exception(IA64_EXCP_ILLEGAL, insn->address, insn->raw,
+                              insn->slot);
+    gen_set_label(ok);
 }
 
 static bool ia64_insn_is_privileged(const Ia64Instruction *insn)
@@ -2316,6 +2366,13 @@ bool ia64_cr_write_reads_clock(uint32_t cr_num)
     return cr_num == IA64_CR_ITM || cr_num == IA64_CR_ITV;
 }
 
+/* helper_read_cr() pends a reached ITM deadline before these reads. */
+bool ia64_cr_read_reads_clock(uint32_t cr_num)
+{
+    return cr_num == IA64_CR_SAPIC_IVR ||
+           (cr_num >= IA64_CR_SAPIC_IRR0 && cr_num <= IA64_CR_SAPIC_IRR3);
+}
+
 bool ia64_clock_access_needs_io(const DisasContext *ctx)
 {
     return tb_cflags(ctx->base.tb) & CF_USE_ICOUNT;
@@ -2916,6 +2973,8 @@ void ia64_gen_write_user_mask(TCGv_i64 value)
     gen_set_label(done);
 
     tcg_gen_mov_i64(cpu_psr, new_psr);
+    /* PSR.up starts and stops the user performance monitors. */
+    gen_helper_pmu_sync(tcg_env);
 }
 
 void ia64_gen_validate_ar_access(const Ia64Instruction *insn,
@@ -3683,6 +3742,9 @@ static IA64PrepareResult ia64_gen_prepare_insn(
     }
     if (insn->reg_base_update || insn->imm_base_update) {
         ia64_gen_check_gr_in_frame(insn, insn->operands.common.source2);
+    }
+    if (ia64_insn_is_translation_insert(insn)) {
+        ia64_gen_check_insert_psr_ic(insn);
     }
     if (ia64_insn_is_privileged(insn)) {
         ia64_gen_check_privileged(ctx, insn);

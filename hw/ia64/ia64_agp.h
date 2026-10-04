@@ -8,6 +8,7 @@
 #define HW_IA64_AGP_H
 
 #include "hw/pci/pci_device.h"
+#include "hw/core/sysbus.h"
 #include "system/memory.h"
 #include "qom/object.h"
 
@@ -17,14 +18,25 @@ OBJECT_DECLARE_SIMPLE_TYPE(IA64AGPState, IA64_AGP)
 #define TYPE_IA64_AGP_IOMMU_MEMORY_REGION "ia64-agp-iommu-memory-region"
 
 struct IA64AGPState {
-    PCIDevice parent_obj;
+    SysBusDevice parent_obj;
 
     MemoryRegion gart_window;    /* GART SRAM window at 0xFE200000           */
     IOMMUMemoryRegion iommu;     /* per-bus DMA translation                  */
     AddressSpace dma_as;
 
-    uint32_t *gatt;              /* GART SRAM, one 32-bit entry per 4 KiB    */
-    uint64_t aperture_base;      /* current aperture base (from BAPBASE)     */
+    uint32_t *gatt;              /* GART SRAM, one 32-bit entry per page     */
+    uint32_t gatt_entries;       /* sram_size / 4                            */
+
+    /* Function 1 registers (SSDM ch. 7; agp460.h, i460-agp for the layout). */
+    uint8_t gxbctl;
+    uint8_t agpsiz;
+    uint64_t apbase;             /* 10h, the base while AGPSIZ bit 3 is 0    */
+    uint64_t bapbase;            /* 98h, the base while AGPSIZ bit 3 is 1    */
+    uint32_t agp_command;
+
+    uint64_t aperture_base;      /* decoded from the registers above         */
+    uint64_t aperture_size;      /* 0 = no aperture                          */
+    unsigned page_shift;         /* 12, or 22 with GXBCTL 4 MB pages         */
     bool aperture_enabled;
 
     /*
@@ -35,16 +47,19 @@ struct IA64AGPState {
      */
     int32_t agp_master_devfn;
 
-    /*
-     * Whether the GART SRAM I/O is enabled.  Set false by the ia64-vpc "agp=off"
-     * machine option to advertise AGPSIZ.SRAM_IO_DISABLE, so i460-agp declines
-     * the GART and the guest falls back to the Rage 128's own PCI GART -- a way
-     * out for guest drivers whose AGP path is broken, without altering the
-     * (always-present, as on real silicon) AGP capability.
-     */
-    bool gart_enabled;
+    /* GART SRAM fitted on the board: 0 (none), 256 KiB or 1 MiB. */
+    uint32_t sram_size;
 };
 
 void ia64_agp_attach_bus(IA64AGPState *s, PCIBus *bus);
+
+/*
+ * The GXB's function 1 on the chipset bus: the offsets this model answers
+ * for, and byte accesses to them.  The rest of the function's header is
+ * the chipset's configuration store.
+ */
+bool ia64_agp_cfg_owns(unsigned off);
+uint8_t ia64_agp_cfg_readb(IA64AGPState *s, unsigned off);
+void ia64_agp_cfg_writeb(IA64AGPState *s, unsigned off, uint8_t val);
 
 #endif /* HW_IA64_AGP_H */

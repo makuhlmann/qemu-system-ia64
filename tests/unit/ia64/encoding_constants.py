@@ -92,10 +92,12 @@ IA64_CR_ITM = 1
 IA64_CR_SAPIC_IVR = 65
 IA64_CR_SAPIC_TPR = 66
 IA64_CR_SAPIC_EOI = 67
+IA64_CR_PMV = 73
 IA64_CR_SAPIC_IRR0 = 68
 IA64_CR_SAPIC_IRR3 = 71
 IA64_CR_ITV = 72
 IA64_CR_LRR0 = 80
+IA64_LRR_IPP = 1 << 13
 IA64_LRR_TM = 1 << 15
 IA64_LRR_DM_EXTINT = 7 << 8
 IA64_TPR_MMI = 1 << 16
@@ -236,7 +238,7 @@ IA64_MERCED_IMPL_KEY_BITS = 21
 IA64_MERCED_ITR_COUNT = 8
 IA64_MERCED_DTR_COUNT = 48
 IA64_MERCED_UNIQUE_TCS = 3
-PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_IMPL_PA_BITS << 1) |
+PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_MERCED_IMPL_PA_BITS << 1) |
                                 (IA64_MERCED_IMPL_KEY_BITS << 8) |
                                 ((IA64_PKR_COUNT - 1) << 16) |
                                 (8 << 24) |
@@ -247,10 +249,11 @@ PAL_VM_SUMMARY_INFO_2_MERCED = (IA64_MERCED_IMPL_VA_MSB |
                                 (IA64_MERCED_IMPL_RID_BITS << 8))
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_16_3 = (16 << 32) | 3
-PAL_RATIO_4_1 = (4 << 32) | 1
-PAL_RATIO_4_3 = (4 << 32) | 3
-PAL_RATIO_8_1 = (8 << 32) | 1
 PAL_RATIO_2_1 = (2 << 32) | 1
+PAL_RATIO_16_2 = (16 << 32) | 2
+PAL_RATIO_13_2 = (13 << 32) | 2
+PAL_RATIO_1_1 = (1 << 32) | 1
+PAL_RATIO_12_2 = (12 << 32) | 2
 # WB(0), UC(4), UCE(5) and WC(6) are all implemented by both supported
 # generations (251110-003 sec 12.1; 245320-002 ch. 4 for Merced's WC buffer);
 # NaTPage(7) is architected (SDM Vol. 2 Table 4-11).
@@ -284,12 +287,13 @@ PAL_CACHE_INFO_DATA_HINTS = (0x09 << 48) | (0x0b << 56)
 
 # --- Merced cache and TC geometry -------------------------------------------
 # L1I/L1D 16 KB 4-way 32 B lines; L2 unified 96 KB 6-way 64 B write-back;
-# L3 unified 4 MB 4-way 64 B (245473-002 sec 4.1-4.4, 248701-002 sec 2.5.4).
+# L3 unified 2 MB 4-way 64 B, the i2000 part (245473-002 sec 4.1-4.4,
+# 248701-002 sec 2.5.4, HP i2000 Owner's Guide sec 11.1.3).
 # Integer load latencies: L1 2, L2 6, L3 21 (245473-002 sec 4.1, 4.3, 4.4).
 PAL_CACHE_INFO_MERCED_L0_I_1 = ((4 << 8) | (5 << 16) |
                                 (5 << 24) | (0xff << 32) | (1 << 40))
 PAL_CACHE_INFO_MERCED_L0_I_2 = (16384 | (12 << 32) | (12 << 40) |
-                                (IA64_IMPL_PA_BITS - 1 << 48))
+                                (IA64_MERCED_IMPL_PA_BITS - 1 << 48))
 PAL_CACHE_INFO_MERCED_L0_D_1 = ((4 << 8) | (5 << 16) |
                                 (5 << 24) | (1 << 32) | (2 << 40) |
                                 PAL_CACHE_INFO_DATA_HINTS)
@@ -297,12 +301,12 @@ PAL_CACHE_INFO_MERCED_L1_U_1 = (1 | (1 << 1) | (6 << 8) | (6 << 16) |
                                 (6 << 24) | (1 << 32) | (6 << 40) |
                                 PAL_CACHE_INFO_DATA_HINTS)
 PAL_CACHE_INFO_MERCED_L1_U_2 = (96 * 1024 | (14 << 32) | (14 << 40) |
-                                (IA64_IMPL_PA_BITS - 1 << 48))
+                                (IA64_MERCED_IMPL_PA_BITS - 1 << 48))
 PAL_CACHE_INFO_MERCED_L2_U_1 = (1 | (1 << 1) | (4 << 8) | (6 << 16) |
                                 (6 << 24) | (1 << 32) | (21 << 40) |
                                 PAL_CACHE_INFO_DATA_HINTS)
-PAL_CACHE_INFO_MERCED_L2_U_2 = (4 * 1024 * 1024 | (20 << 32) | (20 << 40) |
-                                (IA64_IMPL_PA_BITS - 1 << 48))
+PAL_CACHE_INFO_MERCED_L2_U_2 = (2 * 1024 * 1024 | (19 << 32) | (19 << 40) |
+                                (IA64_MERCED_IMPL_PA_BITS - 1 << 48))
 # ITLB 64 entries holding the instruction TRs; DTLB1 32 entries holding none;
 # DTLB2 96 entries holding the data TRs (248701-002 sec 2.5.6).  All levels
 # hold every architected page size (245473-002 sec 4.7).
@@ -448,10 +452,12 @@ __all__ = (
     'IA64_CR_SAPIC_IVR',
     'IA64_CR_SAPIC_TPR',
     'IA64_CR_SAPIC_EOI',
+    'IA64_CR_PMV',
     'IA64_CR_SAPIC_IRR0',
     'IA64_CR_SAPIC_IRR3',
     'IA64_CR_ITV',
     'IA64_CR_LRR0',
+    'IA64_LRR_IPP',
     'IA64_LRR_TM',
     'IA64_LRR_DM_EXTINT',
     'IA64_TPR_MMI',
@@ -567,9 +573,10 @@ __all__ = (
     'IA64_MERCED_DTR_COUNT',
     'PAL_RATIO_16_1',
     'PAL_RATIO_16_3',
-    'PAL_RATIO_4_1',
-    'PAL_RATIO_4_3',
-    'PAL_RATIO_8_1',
+    'PAL_RATIO_16_2',
+    'PAL_RATIO_13_2',
+    'PAL_RATIO_1_1',
+    'PAL_RATIO_12_2',
     'PAL_RATIO_2_1',
     'PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE',
     'PAL_CACHE_INFO_DATA_HINTS',

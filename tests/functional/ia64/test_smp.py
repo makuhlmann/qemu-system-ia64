@@ -41,7 +41,9 @@ class Ia64Smp(Ia64FirmwareTest):
             media=disk, smp=4, memory="8G",
             machine_options=f"firmware-console=serial,nvram={nvram}",
             extra_args=("-accel", "tcg,thread=multi"))
-        result = self.wait_ia64_suite(vm, "smp", SMP_CASES, timeout=60.0)
+        # Six seconds alone, but every round needs all four vCPU threads and
+        # synced global purges: beside one busy guest thread it took 51 s.
+        result = self.wait_ia64_suite(vm, "smp", SMP_CASES, timeout=300.0)
         self.assertSetEqual(set(result.cases), SMP_CASES)
 
 

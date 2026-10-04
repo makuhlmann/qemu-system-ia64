@@ -65,7 +65,7 @@ By default, a PS/2 controller and peripherals are attached. Some operating syste
 
 #### Networking
 
-By default, an Intel® 8255x 10/100 Mbps Ethernet Controller (`model=i82557b`) is attached to the machine in user mode. You can change it to a different type depending on needs (such as for newer operating systems). These are other tested models confirmed to work:
+By default, the board's Intel® 8255x 10/100 Mbps Ethernet Controller is attached to the machine in user mode: an 82550 (`model=i82550`) on `zx1` and an 82559 (`model=i82559c`) on `460gx`. A guest installed with an earlier release, which attached an 82557 (`model=i82557b`), finds a new network adapter; `-nic user,model=i82557b` keeps the old one. You can change it to a different type depending on needs (such as for newer operating systems). These are other tested models confirmed to work:
 
 - Intel® 82543GC Gigabit Ethernet Controller: `-nic model=e1000-82543gc`
 - Intel® 82545EM Gigabit Ethernet Controller: `-nic model=e1000-82545em`
@@ -76,9 +76,7 @@ To disable networking, use `-nic none`
 
 By default, QEMU will show a GTK window when launched, letting you see the graphical output of the guest. Alternatively you can use the more basic SDL output as well (`-display sdl`) or have no output at all (`-display none`), which might be useful for server systems.
 
-The default graphics card attached to guests is an ATI Rage 128 Pro (AGP) with rudimentary 2D acceleration. To attach it via PCI instead (may be needed for some guests), you can add the setting `agp=off` to the machine flag: `-machine ia64-vpc,agp=off`.
-
-Experimental support for mach64 based GPUs is present as well and can be enabled via `-machine ia64-vpc,vga=mach64`.
+The default graphics card depends on the machine: an ATI Rage 128 GL (AGP) on `-M 460gx` and an ATI Mach64 3D Rage (PCI) on `-M zx1`, both with rudimentary 2D acceleration. `vga=rage128` selects the ATI Rage 128 Pro (AGP) and `vga=rage128gl` the Rage 128 GL, for example `-machine zx1,vga=rage128`. To attach a Rage 128 without its AGP capability (may be needed for some guests), add `agp=off` to the machine flag: `-machine 460gx,agp=off`.
 
 To fall back to a standard VGA capable graphics card, use the flag `-vga std` flag.
 
@@ -193,7 +191,7 @@ ninja -C build-win64 qemu-system-ia64.exe qemu-system-ia64w.exe \
   roms/ia64-firmware/ia64-firmware.bin
 ```
 
-To make the result relocatable, copy beside the executables: the runtime DLLs from `$WIN_SYSROOT/mingw64/bin` (`SDL2.dll libglib-2.0-0.dll libiconv-2.dll libintl-8.dll libpcre2-8-0.dll libpixman-1-0.dll libslirp-0.dll zlib1.dll`), `libwinpthread-1.dll` from `x86_64-w64-mingw32-gcc -print-file-name=libwinpthread-1.dll`, the built `ia64-firmware.bin`, and the `pc-bios` ROMs and keymaps the machine loads. Each run loads one graphics ROM and one network ROM depending on the selected devices, so bundle all of them to keep every parameter combination working: `vgabios-ati.bin` (default ATI graphics), `vgabios-stdvga.bin` (`-vga std`), `vgabios-mach64.bin` (`vga=mach64`), `pxe-eepro100.rom` (default `i82557b` NIC), `efi-e1000.rom` (`e1000`-family NICs such as `e1000-82543gc`/`e1000-82545em`), and `efi-e1000e.rom` (`e1000e` NIC).
+To make the result relocatable, copy beside the executables: the runtime DLLs from `$WIN_SYSROOT/mingw64/bin` (`SDL2.dll libglib-2.0-0.dll libiconv-2.dll libintl-8.dll libpcre2-8-0.dll libpixman-1-0.dll libslirp-0.dll zlib1.dll`), `libwinpthread-1.dll` from `x86_64-w64-mingw32-gcc -print-file-name=libwinpthread-1.dll`, the built `ia64-firmware.bin`, and the `pc-bios` ROMs and keymaps the machine loads. Each run loads one graphics ROM and one network ROM depending on the selected devices, so bundle all of them to keep every parameter combination working: `vgabios-ati.bin` (default ATI graphics), `vgabios-stdvga.bin` (`-vga std`), `vgabios-mach64.bin` (`vga=mach64`), `pxe-eepro100.rom` (the default 8255x NICs), `efi-e1000.rom` (`e1000`-family NICs such as `e1000-82543gc`/`e1000-82545em`), and `efi-e1000e.rom` (`e1000e` NIC).
 
 
 ### Console and debugging

@@ -107,6 +107,13 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     QWordMemory (ResourceProducer, PosDecode, MinFixed,
                         MaxFixed, NonCacheable, ReadWrite,
                         0, 0xEE000000, 0xEFFFFFFF, 0, 0x02000000)
+                    // The 8 bytes of UAR0 (IA64_UART_BASE), as the vendor
+                    // firmware's \CLIB.LGMR adds its serial ports' registers
+                    // to the owning root's _CRS.  Without a window the root's
+                    // arbiter has no range for UAR0 (Windows: code 12).
+                    QWordMemory (ResourceProducer, PosDecode, MinFixed,
+                        MaxFixed, NonCacheable, ReadWrite,
+                        0, 0x00000047F0000000, 0x00000047F0000007, 0, 8)
                 })
                 Name (_PRT, Package ()
                 {

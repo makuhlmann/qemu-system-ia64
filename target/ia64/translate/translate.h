@@ -295,6 +295,7 @@ void ia64_gen_validate_cr_access(TCGv_i64 result,
                                  TCGv_i64 value, bool write);
 bool ia64_cr_is_read_only(uint32_t cr_num);
 bool ia64_cr_write_reads_clock(uint32_t cr_num);
+bool ia64_cr_read_reads_clock(uint32_t cr_num);
 void ia64_gen_raise_exception(uint32_t exception, uint64_t fault_ip,
                               uint64_t fault_imm, uint32_t fault_slot);
 void ia64_gen_check_register_index(const Ia64Instruction *insn,
@@ -370,6 +371,7 @@ void ia64_gen_check_branch(DisasContext *ctx, TCGv_i64 failed,
                            bool track_psr_suppression);
 bool ia64_is_pal_proc_break(CPUIA64State *env, uint64_t address);
 bool ia64_is_pal_reset_return_break(CPUIA64State *env, uint64_t address);
+bool ia64_is_pal_pmi_return_break(CPUIA64State *env, uint64_t address);
 bool ia64_is_firmware_debug_break(CPUIA64State *env, uint64_t address,
                                   uint64_t imm);
 bool ia64_is_sal_runtime_break(CPUIA64State *env, uint64_t address,

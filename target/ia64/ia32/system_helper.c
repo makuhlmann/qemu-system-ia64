@@ -248,6 +248,7 @@ void helper_ia32_rdpmc(CPUIA64State *env)
         raise_exception_err_ra(xenv, EXCP0D_GPF, 0, GETPC());
     }
 
+    ia64_pmu_sync(env);
     value = env->pmd[index];
     xenv->regs[R_EAX] = (uint32_t)value;
     xenv->regs[R_EDX] = value >> 32;
@@ -459,6 +460,10 @@ void cpu_x86_cpuid(CPUX86State *xenv, uint32_t index, uint32_t count,
                    uint32_t *edx)
 {
     *eax = *ebx = *ecx = *edx = 0;
+    if (index > xenv->cpuid_level &&
+        ia64_env_cpu_class((CPUIA64State *)xenv)->ia32_cpuid_high_leaf_repeats) {
+        index = xenv->cpuid_level;
+    }
     switch (index) {
     case 0:
         *eax = xenv->cpuid_level;

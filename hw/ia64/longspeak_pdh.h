@@ -75,8 +75,8 @@ struct LongspeakPDHState {
     /* The two PDH UARTs, FF5E_0000 and FF5E_2000. */
     DeviceState *uart[IA64_PDH_UARTS];
     DeviceState *bt;               /* IPMI BT, FF5B_00E4 */
-    DeviceState *kcs;              /* IPMI KCS, FF5B_0CA2 */
-    /* The BMC's tokens, which both interfaces reach (longspeak_bmc.c). */
+    DeviceState *kcs[3];           /* IPMI KCS1, 2, 3: FF5B_0CA2, 0000, 0062 */
+    /* The BMC's tokens, which every interface reaches (longspeak_bmc.c). */
     uint8_t bmc_tokens[LONGSPEAK_BMC_TOKEN_BYTES];
     DeviceState *rtc;              /* the clock, FF5B_8000 */
 };
