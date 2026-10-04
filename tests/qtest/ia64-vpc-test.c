@@ -1865,6 +1865,55 @@ static void test_pdh_io_backplane_fru(void)
     qtest_quit(qts);
 }
 
+/*
+ * HP's firmware reads the product area at fixed offsets (longspeak_bmc.c):
+ * every field has its own width, so each type/length byte sits where an IPMI
+ * FRU parser also finds it.
+ */
+static void test_pdh_product_area(void)
+{
+    static const struct {
+        uint8_t off;
+        uint8_t type_length;
+    } fields[] = {
+        { 3, 0xc2 }, { 6, 0xe0 }, { 39, 0xcb }, { 51, 0xc6 }, { 58, 0xd4 },
+        { 79, 0xe0 }, { 112, 0x01 }, { 114, 0x04 }, { 119, 0xc1 },
+    };
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    uint8_t read[] = { IPMI_NETFN_STORAGE_LUN0, IPMI_CMD_READ_FRU_DATA,
+                       0x00, 0x00, 0x00, 8 };
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t rsp[48], area[128];
+    unsigned int base, off, i;
+    uint8_t sum = 0;
+
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, sizeof(read),
+                                     rsp, sizeof(rsp)), ==, 4 + 8);
+    base = rsp[4 + 4] * 8;
+    for (off = 0; off < sizeof(area); off += 32) {
+        read[3] = (base + off) & 0xff;
+        read[4] = (base + off) >> 8;
+        read[5] = 32;
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, sizeof(read),
+                                         rsp, sizeof(rsp)), ==, 4 + 32);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        memcpy(area + off, rsp + 4, 32);
+    }
+    g_assert_cmpuint(area[1], ==, sizeof(area) / 8);
+    for (i = 0; i < G_N_ELEMENTS(fields); i++) {
+        g_assert_cmphex(area[fields[i].off], ==, fields[i].type_length);
+    }
+    g_assert_cmpmem(area + 4, 2, "QE", 2);
+    g_assert_cmpmem(area + 7, 11, "Longs Peak ", 11);
+    g_assert_cmphex(ldl_le_p(area + IA64_PDH_BMC_PRODUCT_ID_OFFSET), ==,
+                    IA64_PDH_BMC_PRODUCT_ID);
+    for (i = 0; i < sizeof(area); i++) {
+        sum += area[i];
+    }
+    g_assert_cmphex(sum, ==, 0);
+    qtest_quit(qts);
+}
+
 static void test_pdh_dimm_spd(void)
 {
     const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
@@ -9752,6 +9801,7 @@ int main(int argc, char **argv)
                    test_pdh_bmc_tokens_persist);
     qtest_add_func("/ia64-vpc/pdh/clock", test_pdh_clock);
     qtest_add_func("/ia64-vpc/pdh/dimm-spd", test_pdh_dimm_spd);
+    qtest_add_func("/ia64-vpc/pdh/product-area", test_pdh_product_area);
     qtest_add_func("/ia64-vpc/pdh/io-backplane-fru",
                    test_pdh_io_backplane_fru);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",
