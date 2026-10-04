@@ -2956,6 +2956,7 @@ static void test_ohci_reset_suspended_port(void)
 #define IA64_E100_SCB_CTRL_MDI  16U
 #define IA64_E100_EEPROM_CS     0x02U
 #define IA64_E100_MDI_READY     (1U << 28)
+#define IA64_E100_MDI_OP_WRITE  (1U << 26)
 #define IA64_E100_MDI_OP_READ   (2U << 26)
 #define IA64_E100_MDI_PHY_1     (1U << 21)
 
@@ -2965,40 +2966,59 @@ static void test_ohci_reset_suspended_port(void)
 #define IA64_E100_EEPROM_DI     0x04U
 #define IA64_E100_EEPROM_DO     0x08U
 
-static void e100_eeprom_clock(QTestState *qts, uint16_t control)
+static void e100_eeprom_clock(QTestState *qts, uint64_t csr, uint16_t control)
 {
-    qtest_writew(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_EEPROM, control);
-    qtest_writew(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_EEPROM,
+    qtest_writew(qts, csr + IA64_E100_SCB_EEPROM, control);
+    qtest_writew(qts, csr + IA64_E100_SCB_EEPROM,
                  control | IA64_E100_EEPROM_SK);
 }
 
-/* 93C46 read: start bit, opcode 10, six address bits, sixteen data bits. */
-static uint16_t e100_eeprom_read_word(QTestState *qts, uint8_t address)
+/*
+ * 93C46/93C66 read: start bit, opcode 10, six or eight address bits, sixteen
+ * data bits.
+ */
+static uint16_t e100_eeprom_read(QTestState *qts, uint64_t csr,
+                                 uint8_t address, int address_bits)
 {
     static const uint8_t opcode[] = { 1, 1, 0 };
     uint16_t value = 0;
     unsigned int i;
     int bit;
 
-    qtest_writew(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_EEPROM,
-                 IA64_E100_EEPROM_CS);
+    qtest_writew(qts, csr + IA64_E100_SCB_EEPROM, IA64_E100_EEPROM_CS);
     for (i = 0; i < ARRAY_SIZE(opcode); i++) {
-        e100_eeprom_clock(qts, IA64_E100_EEPROM_CS |
+        e100_eeprom_clock(qts, csr, IA64_E100_EEPROM_CS |
                           (opcode[i] ? IA64_E100_EEPROM_DI : 0));
     }
-    for (bit = 5; bit >= 0; bit--) {
-        e100_eeprom_clock(qts, IA64_E100_EEPROM_CS |
+    for (bit = address_bits - 1; bit >= 0; bit--) {
+        e100_eeprom_clock(qts, csr, IA64_E100_EEPROM_CS |
                           ((address >> bit) & 1 ? IA64_E100_EEPROM_DI : 0));
     }
     for (i = 0; i < 16; i++) {
-        e100_eeprom_clock(qts, IA64_E100_EEPROM_CS);
+        e100_eeprom_clock(qts, csr, IA64_E100_EEPROM_CS);
         value = (value << 1) |
-                ((qtest_readw(qts, IA64_E100_CSR_BASE +
-                              IA64_E100_SCB_EEPROM) &
+                ((qtest_readw(qts, csr + IA64_E100_SCB_EEPROM) &
                   IA64_E100_EEPROM_DO) ? 1 : 0);
     }
-    qtest_writew(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_EEPROM, 0);
+    qtest_writew(qts, csr + IA64_E100_SCB_EEPROM, 0);
     return value;
+}
+
+static uint16_t e100_eeprom_read_word(QTestState *qts, uint8_t address)
+{
+    return e100_eeprom_read(qts, IA64_E100_CSR_BASE, address, 6);
+}
+
+static uint16_t e100_mdi(QTestState *qts, uint32_t op, unsigned int reg,
+                         uint16_t data)
+{
+    uint32_t mdi;
+
+    qtest_writel(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_CTRL_MDI,
+                 op | IA64_E100_MDI_PHY_1 | reg << 16 | data);
+    mdi = qtest_readl(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_CTRL_MDI);
+    g_assert_cmphex(mdi & IA64_E100_MDI_READY, ==, IA64_E100_MDI_READY);
+    return mdi & 0xffff;
 }
 
 static void test_eepro100_eeprom_map(void)
@@ -3058,6 +3078,48 @@ static void test_eepro100_eeprom_map(void)
 }
 
 /*
+ * The zx1 board LAN's EEPROM is the rx2600's 256-word part (capture
+ * 2026-10-04, DEV-1): eight address bits, the board's words, erased words
+ * elsewhere and the 0xBABA sum.
+ */
+static void test_eepro100_board_eeprom(void)
+{
+    static const struct {
+        uint8_t word;
+        uint16_t value;
+    } image[] = {
+        { 0x03, 0x0d13 }, { 0x04, 0xffff }, { 0x05, 0x0201 }, { 0x06, 0x4701 },
+        { 0x08, 0x0000 }, { 0x0a, 0x4820 }, { 0x0b, 0x1274 }, { 0x0c, 0x103c },
+        { 0x0d, 0x007f }, { 0x23, 0x1229 }, { 0x30, 0x0028 }, { 0x40, 0xffff },
+        { 0xfe, 0xffff },
+    };
+    const uint8_t zx1_slot = 3;
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S "
+                                 "-nic user,model=i82550,"
+                                 "mac=52:54:00:12:34:56");
+    uint64_t csr;
+    uint32_t sum = 0;
+    unsigned int i;
+
+    csr = ia64_cfg_readl(qts, 0, zx1_slot, 0, PCI_BASE_ADDRESS_0) & ~0xfULL;
+    g_assert_cmphex(csr, !=, 0);
+    ia64_cfg_writew(qts, 0, zx1_slot, 0, PCI_COMMAND,
+                    PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+
+    g_assert_cmphex(e100_eeprom_read(qts, csr, 0, 8), ==, 0x5452);
+    g_assert_cmphex(e100_eeprom_read(qts, csr, 2, 8), ==, 0x5634);
+    for (i = 0; i < ARRAY_SIZE(image); i++) {
+        g_assert_cmphex(e100_eeprom_read(qts, csr, image[i].word, 8), ==,
+                        image[i].value);
+    }
+    for (i = 0; i < 256; i++) {
+        sum += e100_eeprom_read(qts, csr, i, 8);
+    }
+    g_assert_cmphex(sum & 0xffff, ==, 0xbaba);
+    qtest_quit(qts);
+}
+
+/*
  * The zx1 board LAN reads as the rx2600's 82550 (capture 2026-10-03, DEV-1),
  * with the manual's cache line, latency and PMCSR rules; the 460gx 82559
  * keeps Intel's identity and reports the manual's power figures.
@@ -3094,10 +3156,23 @@ static void test_eepro100_board_identity(void)
     g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0, pm), ==, 0xfe220001);
     g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL), ==,
                     0x4b004000);
-    /* Only select 0 was captured; the others report nothing. */
-    ia64_cfg_writew(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL, 1 << 9);
-    g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL), ==,
-                    0x00000200);
+    /* The rx2600's power figures for each Data Select (capture B5). */
+    {
+        static const uint32_t pm_data[16] = {
+            0x4b004000, 0x28004200, 0x28004400, 0x28004600,
+            0x4b004800, 0x28004a00, 0x28004c00, 0x28004e00,
+            0x00005000, 0x00001200, 0x00001400, 0x00001600,
+            0x00001800, 0x00001a00, 0x00001c00, 0x00001e00,
+        };
+        unsigned int sel;
+
+        for (sel = 0; sel < ARRAY_SIZE(pm_data); sel++) {
+            ia64_cfg_writew(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL, sel << 9);
+            g_assert_cmphex(ia64_cfg_readl(qts, 0, zx1_slot, 0,
+                                           pm + PCI_PM_CTRL), ==,
+                            pm_data[sel]);
+        }
+    }
     ia64_cfg_writew(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL, 3);
     g_assert_cmphex(ia64_cfg_readw(qts, 0, zx1_slot, 0, pm + PCI_PM_CTRL), ==,
                     0x4003);
@@ -3177,7 +3252,7 @@ static void test_eepro100_csr_windows(void)
                          ((uint64_t)IA64_E100_SLOT << 15);
     QTestState *qts = qtest_init("-machine ia64-vpc -m 256M -S "
                                  "-device i82559c,bus=mercury,addr=8,"
-                                 "romfile=");
+                                 "romfile=,id=nic0");
     uint32_t mdi;
 
     g_assert_cmphex(qtest_readl(qts, cfg), ==, 0x12298086);
@@ -3209,6 +3284,20 @@ static void test_eepro100_csr_windows(void)
     mdi = qtest_readl(qts, IA64_E100_CSR_BASE + IA64_E100_SCB_CTRL_MDI);
     g_assert_cmphex(mdi & IA64_E100_MDI_READY, ==, IA64_E100_MDI_READY);
     g_assert_cmphex(mdi & 0xffff, ==, 0x0001);
+
+    /*
+     * Register 16 bits 1:0 give the negotiated speed and duplex, and none
+     * without a link; a write of auto-negotiation enable and restart reads
+     * back without the self-clearing restart bit.
+     */
+    g_assert_cmphex(e100_mdi(qts, IA64_E100_MDI_OP_READ, 16, 0), ==, 0x0003);
+    qtest_qmp_assert_success(qts, "{'execute': 'set_link', 'arguments':"
+                             " {'name': 'nic0', 'up': false}}");
+    g_assert_cmphex(e100_mdi(qts, IA64_E100_MDI_OP_READ, 16, 0), ==, 0);
+    g_assert_cmphex(e100_mdi(qts, IA64_E100_MDI_OP_READ, 1, 0), ==, 0x7809);
+    g_assert_cmphex(e100_mdi(qts, IA64_E100_MDI_OP_READ, 0, 0), ==, 0x3000);
+    e100_mdi(qts, IA64_E100_MDI_OP_WRITE, 0, 0x1200);
+    g_assert_cmphex(e100_mdi(qts, IA64_E100_MDI_OP_READ, 0, 0), ==, 0x1000);
 
     qtest_quit(qts);
 }
@@ -10131,6 +10220,8 @@ int main(int argc, char **argv)
                    test_zx1_root_window_containment);
     qtest_add_func("/ia64-vpc/zx1/bus0-population",
                    test_zx1_bus0_population);
+    qtest_add_func("/ia64-vpc/eepro100/board-eeprom",
+                   test_eepro100_board_eeprom);
     qtest_add_func("/ia64-vpc/eepro100/board-identity",
                    test_eepro100_board_identity);
     qtest_add_func("/ia64-vpc/eepro100/eeprom-map",

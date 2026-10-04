@@ -307,6 +307,9 @@ typedef struct {
     uint16_t pci_subsystem_vendor_override;
     uint16_t pci_subsystem_override;
     uint16_t eeprom_compatibility;
+    uint16_t eeprom_words;
+    uint32_t eeprom_image_len;
+    uint32_t *eeprom_image;
 } EEPRO100State;
 
 /* Word indices in EEPROM. */
@@ -344,13 +347,15 @@ static const uint16_t eepro100_mdi_default[] = {
     /* MDI Registers 8 - 15 */
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     /* MDI Registers 16 - 31 */
-    0x0003, 0x0000, 0x0001, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x0000, 0x0001, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
 };
 
 #define E100_MII_BMSR                    1U
 #define E100_MII_BMSR_LINK_STATUS        0x0004U
 #define E100_MII_BMSR_AUTONEG_COMPLETE   0x0020U
+#define E100_MII_PHY_STATUS              16U
+#define E100_MII_PHY_STATUS_100_FD       0x0003U
 
 /* Readonly mask for MDI (PHY) registers */
 static const uint16_t eepro100_mdi_mask[] = {
@@ -364,14 +369,20 @@ static E100PCIDeviceInfo *eepro100_get_class(EEPRO100State *s);
 
 static void eepro100_update_link_status(EEPRO100State *s, bool link_down)
 {
+    /*
+     * The 82555's register 16 bits 1:0 are the auto-negotiation result
+     * (manual 7.3.1), 0 without a link (rx2600 capture 2026-10-04, DEV-1).
+     */
     if (link_down) {
         s->mdimem[E100_MII_BMSR] &=
             ~(E100_MII_BMSR_LINK_STATUS |
               E100_MII_BMSR_AUTONEG_COMPLETE);
+        s->mdimem[E100_MII_PHY_STATUS] &= ~E100_MII_PHY_STATUS_100_FD;
     } else {
         s->mdimem[E100_MII_BMSR] |=
             E100_MII_BMSR_LINK_STATUS |
             E100_MII_BMSR_AUTONEG_COMPLETE;
+        s->mdimem[E100_MII_PHY_STATUS] |= E100_MII_PHY_STATUS_100_FD;
     }
 }
 
@@ -567,11 +578,14 @@ static bool e100_has_pm_data(EEPRO100State *s)
 
 /*
  * The Data register and Data Scale follow Data Select (manual Table 6, the
- * 82559's values).  Of the 82550 only select 0 is known: 0.75 W in D0
- * (rx2600 capture 2026-10-03, DEV-1).
+ * 82559's values): consumed and dissipated power in D0-D3, then the common
+ * function, all in 0.01 W, and nothing for selects 9 to 15.  The 82550 has
+ * the same table with 0.75 W in D0 and 0.40 W in D1-D3 (rx2600 capture
+ * 2026-10-04, B5).
  */
 static void e100_pm_update_data(EEPRO100State *s)
 {
+    static const uint8_t i82550_data[9] = { 75, 40, 40, 40, 75, 40, 40, 40, 0 };
     static const uint8_t i82559_data[9] = { 58, 40, 40, 40, 58, 40, 40, 40, 0 };
     uint8_t *pm = s->dev.config + s->dev.pm_cap;
     uint16_t ctrl = pci_get_word(pm + PCI_PM_CTRL);
@@ -580,8 +594,8 @@ static void e100_pm_update_data(EEPRO100State *s)
 
     switch (s->device) {
     case i82550:
-        if (sel == 0) {
-            data = 0x4b;
+        if (sel < ARRAY_SIZE(i82550_data)) {
+            data = i82550_data[sel];
             scale = 2;
         }
         break;
@@ -751,9 +765,24 @@ static void nic_selective_reset(EEPRO100State * s)
         eeprom_contents[i] = s->conf.macaddr.a[2 * i] |
                              s->conf.macaddr.a[2 * i + 1] << 8;
     }
-    if (s->device == i82550 || s->device == i82551 ||
-        s->device == i82559A || s->device == i82559B ||
-        s->device == i82559C || s->device == i82559ER) {
+    if (s->eeprom_image_len) {
+        /*
+         * A board's own EEPROM image: the words it programs, given as
+         * index << 16 | value, and erased words elsewhere.
+         */
+        for (i = 3; i < s->eeprom_words - 1; i++) {
+            eeprom_contents[i] = 0xffff;
+        }
+        for (i = 0; i < s->eeprom_image_len; i++) {
+            unsigned int word = s->eeprom_image[i] >> 16;
+
+            if (word >= 3 && word < s->eeprom_words - 1U) {
+                eeprom_contents[word] = s->eeprom_image[i];
+            }
+        }
+    } else if (s->device == i82550 || s->device == i82551 ||
+               s->device == i82559A || s->device == i82559B ||
+               s->device == i82559C || s->device == i82559ER) {
         /* The 82550/82551 use the 82559-compatible EEPROM map. */
         eeprom_contents[EEPROM_COMPATIBILITY] = s->eeprom_compatibility;
         eeprom_contents[EEPROM_CONTROLLER] = 0x0201; /* 82559, RJ-45 */
@@ -773,11 +802,12 @@ static void nic_selective_reset(EEPRO100State * s)
         eeprom_contents[EEPROM_PHY_ID] = 1;
     }
     uint16_t sum = 0;
-    for (i = 0; i < EEPROM_SIZE - 1; i++) {
+    for (i = 0; i < s->eeprom_words - 1; i++) {
         sum += eeprom_contents[i];
     }
-    eeprom_contents[EEPROM_SIZE - 1] = 0xbaba - sum;
-    TRACE(EEPROM, logout("checksum=0x%04x\n", eeprom_contents[EEPROM_SIZE - 1]));
+    eeprom_contents[s->eeprom_words - 1] = 0xbaba - sum;
+    TRACE(EEPROM, logout("checksum=0x%04x\n",
+                         eeprom_contents[s->eeprom_words - 1]));
 
     memset(s->mem, 0, sizeof(s->mem));
     eepro100_cu_reset_contexts(s);
@@ -1903,6 +1933,7 @@ static void eepro100_write_mdi(EEPRO100State *s)
                 }
                 break;
             case 1:            /* Status Register */
+            case E100_MII_PHY_STATUS:
                 eepro100_update_link_status(
                     s, qemu_get_queue(s->nic)->link_down);
                 break;
@@ -2740,9 +2771,17 @@ static void e100_nic_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
 
-    /* Add 64 * 2 EEPROM. i82557 and i82558 support a 64 word EEPROM,
-     * i82559 and later support 64 or 256 word EEPROM. */
-    s->eeprom = eeprom93xx_new(&pci_dev->qdev, EEPROM_SIZE);
+    /*
+     * i82557 and i82558 support a 64 word EEPROM, i82559 and later 64 or
+     * 256 words.
+     */
+    if (s->eeprom_words != EEPROM_SIZE &&
+        (s->eeprom_words != 256 || !e100_has_pm_data(s))) {
+        error_setg(errp, "eepro100: x-eeprom-words must be 64%s",
+                   e100_has_pm_data(s) ? " or 256" : "");
+        return;
+    }
+    s->eeprom = eeprom93xx_new(&pci_dev->qdev, s->eeprom_words);
 
     /* Handler for memory-mapped I/O */
     memory_region_init_io(&s->mmio_bar, OBJECT(s), &eepro100_ops, s,
@@ -3029,6 +3068,10 @@ static const Property e100_properties[] = {
                        pci_subsystem_override, UINT16_MAX),
     DEFINE_PROP_UINT16("x-eeprom-compatibility", EEPRO100State,
                        eeprom_compatibility, 0x0203),
+    DEFINE_PROP_UINT16("x-eeprom-words", EEPRO100State, eeprom_words,
+                       EEPROM_SIZE),
+    DEFINE_PROP_ARRAY("x-eeprom-image", EEPRO100State, eeprom_image_len,
+                      eeprom_image, qdev_prop_uint32, uint32_t),
 };
 
 static void eepro100_class_init(ObjectClass *klass, const void *data)

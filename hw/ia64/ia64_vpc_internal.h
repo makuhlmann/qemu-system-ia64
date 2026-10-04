@@ -110,6 +110,13 @@ struct IA64VpcMachineClass {
     uint16_t nic_subsystem_id;
     const char *nic_romfile;
     /*
+     * The board LAN's EEPROM: its size in words (0: the NIC's default) and
+     * the words the board programs, as index << 16 | value.
+     */
+    uint16_t nic_eeprom_words;
+    const uint32_t *nic_eeprom_image;
+    unsigned int nic_eeprom_image_len;
+    /*
      * The SLP_TYP value this board's firmware puts in _S5, where that is
      * not the architected 0 the ACPI core always takes.  It goes in the
      * core's s4_val slot, the one other value that ends the machine.

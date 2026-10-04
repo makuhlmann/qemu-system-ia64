@@ -492,6 +492,20 @@ static int longspeak_intx_line(const IA64VpcMachineState *s, PCIDevice *dev,
  */
 static const uint8_t longspeak_processor_ids[] = { 0, 2, 1, 3, 4, 6, 5, 7 };
 
+#ifdef CONFIG_IA64_VPC_NETWORK
+/*
+ * The board LAN's 256-word EEPROM as the rx2600 programs it, besides the MAC
+ * and the checksum: compatibility, controller and PHY words, the id word
+ * (boot disable and wake on LAN), the subsystem ids, word 0Dh, the device id
+ * at 23h and word 30h; the other words are erased (rx2600 capture
+ * 2026-10-04, DEV-1).
+ */
+static const uint32_t longspeak_nic_eeprom[] = {
+    0x030d13, 0x050201, 0x064701, 0x080000, 0x090000, 0x0a4820, 0x0b1274,
+    0x0c103c, 0x0d007f, 0x200000, 0x210000, 0x220000, 0x231229, 0x300028,
+};
+#endif
+
 /* Concrete: HP rx2600 / zx2000 / zx6000 -- zx1 chipset, Itanium 2. Default. */
 static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
 {
@@ -511,6 +525,9 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->nic_subsystem_vendor_id = 0x103c;
     imc->nic_subsystem_id = 0x1274;
     imc->nic_romfile = "";
+    imc->nic_eeprom_words = 256;
+    imc->nic_eeprom_image = longspeak_nic_eeprom;
+    imc->nic_eeprom_image_len = ARRAY_SIZE(longspeak_nic_eeprom);
 #endif
     mc->default_cpu_type = IA64_CPU_TYPE_NAME("madison");
     /*

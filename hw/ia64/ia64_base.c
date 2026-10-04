@@ -38,6 +38,7 @@
 #include "system/block-backend.h"
 #include "block/block.h"
 #include "qobject/qdict.h"
+#include "qobject/qlist.h"
 #include "hw/ide/ahci-pci.h"
 #include "hw/ide/ide-dev.h"
 #include "hw/ide/pci.h"
@@ -3321,6 +3322,17 @@ static void ia64_vpc_init_board_nic(IA64VpcMachineState *s, PCIBus *bus,
     }
     if (imc->nic_romfile) {
         qdev_prop_set_string(DEVICE(pci_dev), "romfile", imc->nic_romfile);
+    }
+    if (imc->nic_eeprom_words) {
+        QList *image = qlist_new();
+        unsigned int i;
+
+        qdev_prop_set_uint16(DEVICE(pci_dev), "x-eeprom-words",
+                             imc->nic_eeprom_words);
+        for (i = 0; i < imc->nic_eeprom_image_len; i++) {
+            qlist_append_int(image, imc->nic_eeprom_image[i]);
+        }
+        qdev_prop_set_array(DEVICE(pci_dev), "x-eeprom-image", image);
     }
     pci_realize_and_unref(pci_dev, bus, &error_fatal);
 }
