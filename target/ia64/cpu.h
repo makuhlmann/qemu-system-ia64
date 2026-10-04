@@ -2035,6 +2035,12 @@ typedef struct IA64PalProfile {
      * them undefined (Vol. 2 11.2.2, PALE_RESET Exit State).
      */
     uint64_t rr_reset;
+    /*
+     * PAL_MEM_FOR_TEST (PAL_TEST_INFO in later SDMs): the bytes and the
+     * alignment of the buffer that PAL_TEST_PROC needs.
+     */
+    uint64_t test_bytes_needed;
+    uint64_t test_alignment;
 } IA64PalProfile;
 
 /*

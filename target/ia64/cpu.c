@@ -1303,6 +1303,9 @@ static const IA64PalProfile ia64_pal_profile_madison = {
      * vendor firmware has written only rr0 (capture 2026-10-03, CPU-25).
      */
     .rr_reset = 0x30,
+    /* PAL_MEM_FOR_TEST of the rx2600 (capture 2026-10-03, CPU-20). */
+    .test_bytes_needed = 6 * MiB,
+    .test_alignment = 8 * MiB,
 };
 
 static const IA64PalProfile ia64_pal_profile_montecito = {
@@ -1361,6 +1364,7 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     .perf_retired_mask = 0xf0,
     .cr_implemented_low = IA64_PAL_CR_IMPLEMENTED_LOW,
     .halt_info = IA64_PAL_HALT_INFO_PLACEHOLDER,
+    .test_alignment = 1,
 };
 
 /*
@@ -1468,6 +1472,7 @@ static const IA64PalProfile ia64_pal_profile_merced = {
     .perf_retired_mask = 0x10,
     .cr_implemented_low = IA64_PAL_CR_IMPLEMENTED_LOW,
     .halt_info = IA64_PAL_HALT_INFO_PLACEHOLDER,
+    .test_alignment = 1,
 };
 
 static const Property ia64_cpu_properties[] = {

@@ -2252,6 +2252,33 @@ test_pal_mem_for_test = require_registers("pal_mem_for_test",
     {"ip": 0x60, "r28": PAL_MEM_FOR_TEST, "r8": 0,
      "r9": 0, "r10": 1, "r11": 0}, entry=0x10)
 
+# The rx2600's PAL_TEST_PROC needs 6 MiB, aligned to 8 MiB (capture
+# 2026-10-03, CPU-20), and refuses a smaller or misaligned buffer (SDM
+# Vol. 2 PAL_TEST_PROC).
+test_pal_mem_for_test_madison = require_registers(
+    "pal_mem_for_test_madison",
+    pal_call_program(PAL_MEM_FOR_TEST, [(29, 0), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x600000, "r10": 0x800000, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_test_proc_madison = require_registers(
+    "pal_test_proc_madison",
+    pal_stacked_call_program(PAL_TEST_PROC, [0x800000, 0x600000, 1]),
+    {"ip": 0x80, "r8": 0, "r9": PAL_SELF_TEST_STATE_TESTED, "r10": 0,
+     "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_test_proc_madison_small_buffer = require_registers(
+    "pal_test_proc_madison_small_buffer",
+    pal_stacked_call_program(PAL_TEST_PROC, [0x800000, 0x5ff000, 1]),
+    {"ip": 0x80, "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0,
+     "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_test_proc_madison_misaligned = require_registers(
+    "pal_test_proc_madison_misaligned",
+    pal_stacked_call_program(PAL_TEST_PROC, [0x400000, 0x600000, 1]),
+    {"ip": 0x80, "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0,
+     "r11": 0}, entry=0x10, cpu="madison")
+
 test_pal_test_proc_healthy = require_registers("pal_test_proc_healthy",
     pal_stacked_call_program(PAL_TEST_PROC, [0x2000, 0, 1]),
     {"ip": 0x80, "r28": PAL_TEST_PROC, "r8": 0,
@@ -2428,6 +2455,10 @@ CASE_NAMES = (
     'pal_mem_attrib_natpage_merced',
     'pal_mem_attrib_reserved_arg',
     'pal_mem_for_test',
+    'pal_mem_for_test_madison',
+    'pal_test_proc_madison',
+    'pal_test_proc_madison_small_buffer',
+    'pal_test_proc_madison_misaligned',
     'pal_perf_mon_info',
     'pal_perf_mon_info_madison',
     'pal_register_info_madison_ar_implemented',

@@ -1279,11 +1279,13 @@ static void pal_firmware_register(CPUIA64State *env)
 
 static void pal_mem_for_test(CPUIA64State *env)
 {
-    env->gr[IA64_PAL_GR_STATUS] = pal_reserved_args_are_zero(env) ?
-        PAL_STATUS_SUCCESS : PAL_STATUS_INVALID_ARGUMENT;
-    env->gr[IA64_PAL_GR_RESULT1] = 0;
-    env->gr[IA64_PAL_GR_RESULT2] =
-        env->gr[IA64_PAL_GR_STATUS] == PAL_STATUS_SUCCESS ? 1 : 0;
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
+    bool ok = pal_reserved_args_are_zero(env);
+
+    env->gr[IA64_PAL_GR_STATUS] = ok ? PAL_STATUS_SUCCESS :
+                                       PAL_STATUS_INVALID_ARGUMENT;
+    env->gr[IA64_PAL_GR_RESULT1] = ok ? pal->test_bytes_needed : 0;
+    env->gr[IA64_PAL_GR_RESULT2] = ok ? pal->test_alignment : 0;
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
@@ -1805,12 +1807,20 @@ static void pal_platform_addr(CPUIA64State *env)
     env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
+/* PAL_TEST_PROC test_info: the buffer size below the test phase. */
+#define PAL_TEST_INFO_BUFFER_SIZE_MASK ((1ULL << 56) - 1)
+
 static void pal_test_proc(CPUIA64State *env)
 {
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
     uint64_t test_address = pal_stacked_arg(env, 0);
+    uint64_t buffer_size = pal_stacked_arg(env, 1) &
+                           PAL_TEST_INFO_BUFFER_SIZE_MASK;
     uint64_t attributes = pal_stacked_arg(env, 2);
 
     if ((test_address >> 63) != 0 ||
+        buffer_size < pal->test_bytes_needed ||
+        (test_address & (pal->test_alignment - 1)) != 0 ||
         (attributes & ~PAL_MEM_ATTR_VALID_MASK) != 0 ||
         (attributes & PAL_MEM_ATTR_WB) == 0) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
