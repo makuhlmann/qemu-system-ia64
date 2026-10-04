@@ -160,8 +160,9 @@
  * only falls back to a port-space scan if a signature probe there fails, so the
  * card's I/O BAR lives there: it is the address the card's own BIOS expects to
  * find it at, and a guest reads the BAR from config space and follows.  It is
- * inside the graphics root's I/O segment either way (0xD000-0xDFFF, see
- * roms/ia64-firmware/dsdt-pci-root.asl).
+ * inside the 460GX graphics root's I/O segment either way (0xD000-0xDFFF, see
+ * roms/ia64-firmware/dsdt-pci-root.asl); a board with other port routing
+ * names its own base (vga_io_base).
  */
 #define IA64_VGA_IO_BASE        0x0000d800U
 #define IA64_E1000_IO_BASE      0x0000c400U
@@ -2709,6 +2710,14 @@ static void ia64_vpc_configure_audio(PCIDevice *pci_dev)
                              PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER, 2);
 }
 
+/* The graphics I/O BAR base: the board's own, or the 460GX graphics root's. */
+static uint32_t ia64_vpc_vga_io(const IA64VpcMachineState *s)
+{
+    uint32_t base = IA64_VPC_MACHINE_GET_CLASS(s)->vga_io_base;
+
+    return base != 0 ? base : IA64_VGA_IO_BASE;
+}
+
 /* The SCSI seat's BAR bases: the board's own, or the first WXB root's. */
 static uint32_t ia64_vpc_scsi_seat_io(const IA64VpcMachineState *s)
 {
@@ -3252,8 +3261,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_ifb_smbus(
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
     ia64_vpc_configure_lsi(s, s->lsi_dev);
-    ia64_vpc_configure_vga(s->vga_dev,
-                           IA64_VGA_IO_BASE);
+    ia64_vpc_configure_vga(s->vga_dev, ia64_vpc_vga_io(s));
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_nic(s->nic_devs[i], i);
     }
@@ -4720,8 +4728,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     if (!ia64_vpc_enable_vga_legacy_switch(s->vga_dev, errp)) {
         return false;
     }
-    ia64_vpc_configure_vga(s->vga_dev,
-                           IA64_VGA_IO_BASE);
+    ia64_vpc_configure_vga(s->vga_dev, ia64_vpc_vga_io(s));
     ia64_vpc_map_vga_fixed_windows(s, s->vga_dev);
 #ifdef CONFIG_IA64_VPC_GRAPHICS
     if (s->vga_dev != NULL) {

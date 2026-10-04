@@ -413,16 +413,33 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  */
 #define IA64_MERCURY_BUS              0x10
 /*
+ * The mio hands I/O port space to the ropes by port bits 15:13, 8 KB a rope,
+ * and a double-wide rope gets both ropes' share (mio ERS 2.4.1, 2.5.4); the
+ * rx2600's own roots read so (rx2600 capture 2026-10-04, `/proc/ioports`:
+ * bus 20h at 2000h, the AGP bus 80h at 8000h-BFFFh).
+ */
+#define IA64_ZX1_ROPE_IO_SIZE         0x00002000U
+
+/*
+ * The AGP ioa is a double-wide rope 4 (B1), so the I/O ports of ropes 4 and
+ * 5 are its own; the graphics I/O BAR sits at their start, as the rx2600's
+ * card at 80:00.0 does.  Keep in lockstep with LBA0 in dsdt-pci-root-zx1.asl.
+ */
+#define IA64_ZX1_AGP_IO_BASE          (4U * IA64_ZX1_ROPE_IO_SIZE)
+#define IA64_ZX1_AGP_IO_SIZE          (2U * IA64_ZX1_ROPE_IO_SIZE)
+/*
  * Rope 1's ioa carries a bus of its own, numbered 0x20 as on the rx2600
  * (its SCRAM gives rope 1 buses 20h-3Fh; rx2600 capture 2026-10-03, DEV-3),
  * with the core I/O SCSI at device 1 and the gigabit LAN at device 2.  Under
  * our firmware the root owns this I/O and memory window, cut out of PCI0's,
  * and its INTx reaches the platform inputs from IA64_ZX1_ROPE1_GSI_BASE.
- * Keep in lockstep with PCI1 in dsdt-pci-root-zx1.asl.
+ * The SCSI's ports are where the rx2600 has its function 0's.  Keep in
+ * lockstep with PCI1 in dsdt-pci-root-zx1.asl.
  */
 #define IA64_ZX1_ROPE1_BUS            0x20
-#define IA64_ZX1_ROPE1_IO_BASE        0x0000b000U
-#define IA64_ZX1_ROPE1_IO_SIZE        0x00001000U
+#define IA64_ZX1_ROPE1_IO_BASE        (1U * IA64_ZX1_ROPE_IO_SIZE)
+#define IA64_ZX1_ROPE1_IO_SIZE        IA64_ZX1_ROPE_IO_SIZE
+#define IA64_ZX1_SCSI_IO_BASE         (IA64_ZX1_ROPE1_IO_BASE + 0x100U)
 #define IA64_ZX1_ROPE1_MMIO_BASE      IA64_U64(0x00000000ef400000)
 #define IA64_ZX1_ROPE1_MMIO_SIZE      IA64_U64(0x0000000000400000)
 #define IA64_ZX1_ROPE1_GSI_BASE       22

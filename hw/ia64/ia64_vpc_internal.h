@@ -168,6 +168,8 @@ struct IA64VpcMachineClass {
     /* The SCSI seat's I/O and memory BAR bases; 0 = the first WXB root's. */
     uint32_t scsi_seat_io_base;
     uint64_t scsi_seat_mmio_base;
+    /* The graphics I/O BAR base; 0 = IA64_VGA_IO_BASE. */
+    uint32_t vga_io_base;
     /* The board's own graphics adapter ("rage128", "rage128gl", ...). */
     const char *vga_default;
     /* The console is COM1 (3F8h, IRQ 4); a debug port is COM2 (2F8h, IRQ 3). */

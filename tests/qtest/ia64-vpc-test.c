@@ -3230,7 +3230,7 @@ static void test_zx1_bus0_population(void)
                     IA64_ZX1_ROPE1_GSI_BASE);
     g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
                                    0, PCI_BASE_ADDRESS_0), ==,
-                    IA64_ZX1_ROPE1_IO_BASE | PCI_BASE_ADDRESS_SPACE_IO);
+                    IA64_ZX1_SCSI_IO_BASE | PCI_BASE_ADDRESS_SPACE_IO);
     g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
                                    0, PCI_BASE_ADDRESS_1), ==,
                     IA64_ZX1_ROPE1_MMIO_BASE);
@@ -4081,24 +4081,34 @@ static const PCIWindow gxb_mem[] = {
 static const PCIWindow gxb_io[] = { { 0x03B0, 0x03DF }, { 0xD000, 0xDFFF } };
 
 /*
- * zx1's PCI0 and rope-1 windows, mirroring PCI0 and PCI1 in
- * roms/ia64-firmware/dsdt-pci-root-zx1.asl.
+ * zx1's PCI0, rope-1 and AGP windows, mirroring PCI0, PCI1 and LBA0 in
+ * roms/ia64-firmware/dsdt-pci-root-zx1.asl: the mio's 8 KB of ports a rope
+ * (mio ERS 2.4.1), rope 0 with ropes 6 and 7's share, the AGP ioa with
+ * ropes 4 and 5's.
  */
 static const PCIWindow zx1_pci0_mem[] = {
     { 0xEE000000, 0xEF3FFFFF }, { 0xEF800000, 0xEFFFFFFF },
 };
 static const PCIWindow zx1_pci0_io[] = {
-    { 0x0000, 0x03AF }, { 0x03E0, 0xAFFF }, { 0xC000, 0xC2FF },
-    { 0xC400, 0xFFFF },
+    { 0x0000, 0x03AF }, { 0x03E0, 0x1FFF }, { 0xC000, 0xFFFF },
 };
 static const PCIWindow zx1_pci1_mem[] = { { 0xEF400000, 0xEF7FFFFF } };
-static const PCIWindow zx1_pci1_io[] = { { 0xB000, 0xBFFF } };
+static const PCIWindow zx1_pci1_io[] = { { 0x2000, 0x3FFF } };
+static const PCIWindow zx1_agp_mem[] = {
+    { 0x000A0000, 0x000BFFFF }, { 0x000C0000, 0x000DFFFF },
+    { 0xF0000000, 0xFDFFFFFF },
+};
+static const PCIWindow zx1_agp_io[] = {
+    { 0x03B0, 0x03DF }, { 0x8000, 0xBFFF },
+};
 
 static const PCIRootWindows zx1_root_windows[] = {
     { 0, zx1_pci0_mem, G_N_ELEMENTS(zx1_pci0_mem),
       zx1_pci0_io, G_N_ELEMENTS(zx1_pci0_io) },
     { IA64_ZX1_ROPE1_BUS, zx1_pci1_mem, G_N_ELEMENTS(zx1_pci1_mem),
       zx1_pci1_io, G_N_ELEMENTS(zx1_pci1_io) },
+    { IA64_MERCURY_BUS, zx1_agp_mem, G_N_ELEMENTS(zx1_agp_mem),
+      zx1_agp_io, G_N_ELEMENTS(zx1_agp_io) },
 };
 
 static const PCIRootWindows root_windows[] = {
@@ -5883,10 +5893,17 @@ static void check_root_window_containment(const char *args)
     check_windows_contain_bars(args, root_windows, G_N_ELEMENTS(root_windows));
 }
 
-/* Rope 1's root owns its own windows, cut out of PCI0's. */
+/*
+ * Rope 1's root and the AGP root own their own windows, cut out of PCI0's,
+ * and every BAR the machine assigns lies in its root's: the graphics I/O BAR
+ * in the AGP ioa's ports too, also with the other graphics adapters.
+ */
 static void test_zx1_root_window_containment(void)
 {
     check_windows_contain_bars("-machine zx1,ahci=on,ide=on -m 256M -S",
+                               zx1_root_windows,
+                               G_N_ELEMENTS(zx1_root_windows));
+    check_windows_contain_bars("-machine zx1,vga=rage128 -m 256M -S",
                                zx1_root_windows,
                                G_N_ELEMENTS(zx1_root_windows));
 }

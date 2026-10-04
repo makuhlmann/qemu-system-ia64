@@ -2099,10 +2099,10 @@ static BOOLEAN test_dsdt_pci1_crs(const TEST_TABLE_CONTEXT *Context)
             bus = 1;
         } else if (descriptor[0] == 0x8aU && length == 43U &&
                    descriptor[3] == 1U && descriptor[5] == 0x33U &&
-                   get_u64(descriptor + 14U) == 0x0000b000U &&
-                   get_u64(descriptor + 22U) == 0x0000bfffU &&
+                   get_u64(descriptor + 14U) == 0x00002000U &&
+                   get_u64(descriptor + 22U) == 0x00003fffU &&
                    get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
-                   get_u64(descriptor + 38U) == 0x00001000U) {
+                   get_u64(descriptor + 38U) == 0x00002000U) {
             io = 1;
         } else if (descriptor[0] == 0x8aU && length == 43U &&
                    descriptor[3] == 0U &&
@@ -2114,6 +2114,57 @@ static BOOLEAN test_dsdt_pci1_crs(const TEST_TABLE_CONTEXT *Context)
         offset += 3U + length;
     }
     return bus && io && memory;
+}
+
+/*
+ * The AGP root LBA0 produces the legacy VGA ports and ropes 4 and 5's ports,
+ * where the machine puts the graphics I/O BAR (IA64_ZX1_AGP_IO_* in
+ * ia64_vpc_abi.h).
+ */
+static BOOLEAN test_dsdt_lba0_crs(const TEST_TABLE_CONTEXT *Context)
+{
+    static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
+    static const UINT8 lba0_name[4] = { 'L', 'B', 'A', '0' };
+    const UINT8 *aml = (const UINT8 *)Context->Dsdt + sizeof(TEST_SDT_HEADER);
+    UINTN aml_length = get_u32((const UINT8 *)Context->Dsdt + 4) -
+                       sizeof(TEST_SDT_HEADER);
+    const UINT8 *lba0;
+    const UINT8 *resources;
+    UINTN resource_length;
+    UINTN offset = 0;
+    BOOLEAN vga = 0, ports = 0;
+
+    lba0 = find_bytes(aml, aml_length, lba0_name, sizeof(lba0_name), 0);
+    if (lba0 == NULL ||
+        !aml_named_buffer(aml, aml_length, crs_name, (UINTN)(lba0 - aml),
+                          &resources, &resource_length)) {
+        return 0;
+    }
+    while (offset + 3U <= resource_length && (resources[offset] & 0x80U)) {
+        const UINT8 *descriptor = resources + offset;
+        UINTN length = get_u16(descriptor + 1U);
+
+        if (length > resource_length - offset - 3U) {
+            return 0;
+        }
+        if (descriptor[0] == 0x8aU && length == 43U && descriptor[3] == 1U &&
+            descriptor[5] == 0x33U &&
+            get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE) {
+            if (get_u64(descriptor + 14U) == 0x000003b0U &&
+                get_u64(descriptor + 22U) == 0x000003dfU &&
+                get_u64(descriptor + 38U) == 0x00000030U) {
+                vga = 1;
+            } else if (get_u64(descriptor + 14U) == 0x00008000U &&
+                       get_u64(descriptor + 22U) == 0x0000bfffU &&
+                       get_u64(descriptor + 38U) == 0x00004000U) {
+                ports = 1;
+            } else {
+                return 0;
+            }
+        }
+        offset += 3U + length;
+    }
+    return vga && ports;
 }
 
 static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
@@ -2128,9 +2179,8 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
     UINTN offset = 0;
     BOOLEAN bus = 0;
     BOOLEAN io_a = 0;   /* 0x0000..0x03AF (below the VGA legacy hole)        */
-    BOOLEAN io_b = 0;   /* 0x03E0..0xAFFF (between the VGA and rope-1 holes)  */
-    BOOLEAN io_d = 0;   /* 0xC000..0xC2FF (between rope 1 and graphics)       */
-    BOOLEAN io_c = 0;   /* 0xC400..0xFFFF (above the graphics I/O hole)       */
+    BOOLEAN io_b = 0;   /* 0x03E0..0x1FFF (the rest of rope 0's ports)       */
+    BOOLEAN io_c = 0;   /* 0xC000..0xFFFF (ropes 6 and 7's, directed)        */
     BOOLEAN memory = 0;
     BOOLEAN memory_high = 0;
     BOOLEAN uart_window = 0;
@@ -2188,37 +2238,29 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                        get_u64(descriptor + 38U) == 0x000003b0U) {
                 /*
                  * Architectural I/O with a sparse translation (_TTP|_TRS, type
-                 * flags 0x33; _TRA = the memory-mapped port window base), split
-                 * around two holes both behind the Mercury root: the legacy VGA
-                 * ports 0x3B0..0x3DF (the graphics is the VGA owner) and the
-                 * graphics I/O BAR 0xC300..0xC3FF.  The sparse-translation
-                 * shaping (48321d4) that keeps Windows' PnP I/O arbiter from
-                 * rebalancing a BAR past the decodable range is preserved.
+                 * flags 0x33; _TRA = the memory-mapped port window base): rope
+                 * 0's 8 KB less the legacy VGA ports 0x3B0..0x3DF, which belong
+                 * to the Mercury root (the graphics is the VGA owner), and the
+                 * share of ropes 6 and 7.  The sparse-translation shaping
+                 * (48321d4) that keeps Windows' PnP I/O arbiter from rebalancing
+                 * a BAR past the decodable range is preserved.
                  */
                 io_a = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 1U && descriptor[5] == 0x33U &&
                        get_u64(descriptor + 6U) == 0 &&
                        get_u64(descriptor + 14U) == 0x000003e0U &&
-                       get_u64(descriptor + 22U) == 0x0000afffU &&
+                       get_u64(descriptor + 22U) == 0x00001fffU &&
                        get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
-                       get_u64(descriptor + 38U) == 0x0000ac20U) {
+                       get_u64(descriptor + 38U) == 0x00001c20U) {
                 io_b = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 1U && descriptor[5] == 0x33U &&
                        get_u64(descriptor + 6U) == 0 &&
                        get_u64(descriptor + 14U) == 0x0000c000U &&
-                       get_u64(descriptor + 22U) == 0x0000c2ffU &&
-                       get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
-                       get_u64(descriptor + 38U) == 0x00000300U) {
-                io_d = 1;
-            } else if (descriptor[0] == 0x8aU && length == 43U &&
-                       descriptor[3] == 1U && descriptor[5] == 0x33U &&
-                       get_u64(descriptor + 6U) == 0 &&
-                       get_u64(descriptor + 14U) == 0x0000c400U &&
                        get_u64(descriptor + 22U) == 0xffffU &&
                        get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
-                       get_u64(descriptor + 38U) == 0x00003c00U) {
+                       get_u64(descriptor + 38U) == 0x00004000U) {
                 io_c = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 0U &&
@@ -2270,8 +2312,9 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
      * Server 2003 leaves COM1 at code 12.  The window that 5a58a91 dropped
      * (XP 2600: STOP 0x50) was in the 460gx tables, which XP 2600 reads.
      */
-    return bus && io_a && io_b && io_d && io_c && memory && memory_high &&
-           uart_window && end_tag && test_dsdt_pci1_crs(Context);
+    return bus && io_a && io_b && io_c && memory && memory_high &&
+           uart_window && end_tag && test_dsdt_pci1_crs(Context) &&
+           test_dsdt_lba0_crs(Context);
 }
 
 static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)

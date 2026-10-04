@@ -585,8 +585,9 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->flash_device_id = 0x0017;
     imc->flash_block_locking = false;
     imc->lsi_default = true;
-    imc->scsi_seat_io_base = IA64_ZX1_ROPE1_IO_BASE;
+    imc->scsi_seat_io_base = IA64_ZX1_SCSI_IO_BASE;
     imc->scsi_seat_mmio_base = IA64_ZX1_ROPE1_MMIO_BASE;
+    imc->vga_io_base = IA64_ZX1_AGP_IO_BASE;
     imc->vga_default = "mach64";
     /* Devices 1 to 3 are core I/O on this board; the AHCI takes device 4. */
     imc->ahci_slot = IA64_ZX1_AHCI_SLOT;
