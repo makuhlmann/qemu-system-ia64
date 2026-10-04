@@ -711,9 +711,15 @@ static void cmd_request_sense(IDEState *s, uint8_t *buf)
     buf[7] = 10;
     buf[12] = s->asc;
 
-    if (s->sense_key == UNIT_ATTENTION) {
-        s->sense_key = NO_SENSE;
-    }
+    /*
+     * Sense data is kept only until a REQUEST SENSE retrieves it; with none
+     * left the drive reports NO SENSE (SCSI-2 8.2.14).  A condition that
+     * persists, such as an empty tray, is reported again by the next command
+     * that checks for it.  The EFI 1.10.14.61 IDE driver in the HP rx2600
+     * firmware fetches sense data until it reads NO SENSE, with no limit.
+     */
+    s->sense_key = NO_SENSE;
+    s->asc = 0;
 
     ide_atapi_cmd_reply(s, 18, max_len);
 }

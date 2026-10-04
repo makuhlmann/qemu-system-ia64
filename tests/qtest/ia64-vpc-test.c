@@ -6978,6 +6978,88 @@ static void test_ide_on_seat(void)
     qtest_quit(qts);
 }
 
+#define ZX1_IDE_TEST_CMD   0x1100U
+#define ZX1_IDE_TEST_CTRL  0x1108U
+
+static uint64_t zx1_ide_port(uint32_t port)
+{
+    return IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port);
+}
+
+/* One ATAPI packet in PIO to the primary master; returns the final status. */
+static uint8_t zx1_atapi_packet(QTestState *qts, uint8_t opcode,
+                                uint8_t alloc, uint8_t *reply)
+{
+    const uint64_t cmd = ZX1_IDE_TEST_CMD;
+    uint8_t status;
+    unsigned int i;
+
+    qtest_writeb(qts, zx1_ide_port(cmd + 6), 0xa0);
+    qtest_writeb(qts, zx1_ide_port(cmd + 1), 0x00);
+    qtest_writeb(qts, zx1_ide_port(cmd + 4), 0xfe);
+    qtest_writeb(qts, zx1_ide_port(cmd + 5), 0xff);
+    qtest_writeb(qts, zx1_ide_port(cmd + 7), 0xa0);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(cmd + 7)) & 0x89, ==, 0x08);
+    qtest_writew(qts, zx1_ide_port(cmd), opcode);
+    qtest_writew(qts, zx1_ide_port(cmd), 0);
+    qtest_writew(qts, zx1_ide_port(cmd), alloc);
+    for (i = 3; i < 6; i++) {
+        qtest_writew(qts, zx1_ide_port(cmd), 0);
+    }
+    status = qtest_readb(qts, zx1_ide_port(cmd + 7));
+    if (reply != NULL && (status & 0x08)) {
+        for (i = 0; i < alloc; i += 2) {
+            uint16_t w = qtest_readw(qts, zx1_ide_port(cmd));
+
+            reply[i] = w;
+            reply[i + 1] = w >> 8;
+        }
+        status = qtest_readb(qts, zx1_ide_port(cmd + 7));
+    }
+    return status;
+}
+
+/*
+ * An empty optical drive at the primary master of zx1's IDE.  TEST UNIT
+ * READY fails with NOT READY / MEDIUM NOT PRESENT; REQUEST SENSE reports
+ * that once, and a second one reads NO SENSE, because sense data lives only
+ * until it is retrieved (SCSI-2 8.2.14).  The EFI IDE driver of the HP rx2600
+ * firmware fetches sense data until it gets NO SENSE.  The condition itself
+ * stays: the next TEST UNIT READY fails the same way.
+ */
+static void test_zx1_empty_optical_sense(void)
+{
+    QTestState *qts = qtest_initf("-machine zx1,ide=on -m 256M -S "
+                                  "-drive if=ide,index=0,media=cdrom");
+    uint8_t sense[18];
+
+    ia64_cfg_writel(qts, 0, IA64_ZX1_IDE_SLOT, 0, PCI_BASE_ADDRESS_0,
+                    ZX1_IDE_TEST_CMD | PCI_BASE_ADDRESS_SPACE_IO);
+    ia64_cfg_writel(qts, 0, IA64_ZX1_IDE_SLOT, 0, PCI_BASE_ADDRESS_1,
+                    ZX1_IDE_TEST_CTRL | PCI_BASE_ADDRESS_SPACE_IO);
+    ia64_cfg_writew(qts, 0, IA64_ZX1_IDE_SLOT, 0, PCI_COMMAND, PCI_COMMAND_IO);
+    qtest_writeb(qts, zx1_ide_port(ZX1_IDE_TEST_CTRL + 2), 0x02);
+
+    g_assert_cmphex(zx1_atapi_packet(qts, 0x00, 0, NULL) & 0x01, ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(ZX1_IDE_TEST_CMD + 1)), ==,
+                    0x20);
+
+    g_assert_cmphex(zx1_atapi_packet(qts, 0x03, sizeof(sense), sense) & 0x01,
+                    ==, 0x00);
+    g_assert_cmphex(sense[2] & 0x0f, ==, 0x02);
+    g_assert_cmphex(sense[12], ==, 0x3a);
+
+    g_assert_cmphex(zx1_atapi_packet(qts, 0x03, sizeof(sense), sense) & 0x01,
+                    ==, 0x00);
+    g_assert_cmphex(sense[2] & 0x0f, ==, 0x00);
+    g_assert_cmphex(sense[12], ==, 0x00);
+
+    g_assert_cmphex(zx1_atapi_packet(qts, 0x00, 0, NULL) & 0x01, ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(ZX1_IDE_TEST_CMD + 1)), ==,
+                    0x20);
+    qtest_quit(qts);
+}
+
 /*
  * IDETIM bit 15, the channel's IDE Decode Enable (SSDM 12.2.10).  It resets
  * clear, and while it is clear the channel's ATA command and control blocks
@@ -10135,6 +10217,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/explicit-cmd646-slot0",
                    test_pci_explicit_cmd646_slot0);
     qtest_add_func("/ia64-vpc/pci/ide-on-seat", test_ide_on_seat);
+    qtest_add_func("/ia64-vpc/zx1/empty-optical-sense",
+                   test_zx1_empty_optical_sense);
     qtest_add_func("/ia64-vpc/network/resources-survive-reset",
                    test_e1000_resources_survive_reset);
     qtest_add_func("/ia64-vpc/network/intx-route",
