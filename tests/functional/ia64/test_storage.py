@@ -80,10 +80,11 @@ class Ia64Storage(Ia64FirmwareTest):
         self.run_scenario(f"scsi-{layout}{suffix}", media,
                           required_cases=required)
 
-    # A hand-attached CMD646 goes to slot 0 of the compatibility bus ("pci"),
-    # the seat ide=on also uses.  It must name that bus: the zx1 machine has a
-    # second PCI root behind Mercury, and without bus= the device lands there,
-    # on the slot the graphics adapter holds.
+    # A hand-attached CMD646 goes to slot 0 of the compatibility bus ("pci").
+    # It must name that bus: the zx1 machine has a second PCI root behind
+    # Mercury, and without bus= the device lands there, on the slot the
+    # graphics adapter holds.  ide=off removes the zx1 board's own CMD649,
+    # whose channels would otherwise share the "ide.0" bus name.
     CMD646_DEVICE = "cmd646-ide,id=ide,secondary=1,bus=pci,addr=0"
 
     def run_ide(self, mode):
@@ -97,8 +98,8 @@ class Ia64Storage(Ia64FirmwareTest):
         )
         self.run_scenario(
             f"ide-{mode}", media,
-            machine_options=("firmware-ide-dma=off"
-                             if mode == "pio" else ""),
+            machine_options=("ide=off,firmware-ide-dma=off"
+                             if mode == "pio" else "ide=off"),
             drive_args=drive_args, ide_mode=mode)
 
     # An empty optical drive at the primary master must not hide a disk or a
@@ -109,7 +110,7 @@ class Ia64Storage(Ia64FirmwareTest):
         """The ide=on machine option with an auto-attached if=ide disk.
 
         index 0 lands on the primary master, index 2 on the secondary master,
-        exercising the built-in CMD646 in slot 0 and both channels.
+        exercising both channels of the zx1 board's CMD649.
         """
         app = app_path("storage")
         where = "secondary" if secondary else "primary"
@@ -169,8 +170,8 @@ class Ia64Storage(Ia64FirmwareTest):
             "-drive", f"file={media},format=raw,if=ide,index=0",
         )
         self.run_scenario(
-            name, media, drive_args=drive_args, machine_options="ahci=on",
-            required_cases=required)
+            name, media, drive_args=drive_args,
+            machine_options="ahci=on,ide=off", required_cases=required)
 
     def run_empty_cd(self, transport):
         app = app_path("storage")
@@ -198,7 +199,8 @@ class Ia64Storage(Ia64FirmwareTest):
             raise ValueError(f"unknown empty-media transport: {transport}")
         self.run_scenario(
             f"{transport}-empty-cd", media, drive_args=tuple(drive_args),
-            machine_options="ahci=on" if transport == "ahci" else "",
+            machine_options=("ahci=on,ide=off" if transport == "ahci" else
+                             "ide=off" if transport == "ide" else ""),
             required_cases=("empty-removable-media",))
 
     def run_optical(self, name, builder, *, udf=False):

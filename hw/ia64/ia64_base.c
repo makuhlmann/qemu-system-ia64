@@ -4827,11 +4827,15 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * channels are in compatibility mode and decode the fixed legacy ports,
      * so only the bus-master BAR is placed.
      *
-     * On zx1, which has no such bridge, ide=on seats a dual-channel CMD646
-     * where the rx2600 carries its CMD649, device 2 of PCI0: the firmware's
-     * fixed PCI-I/O table and the DSDT _PRT describe an IDE function there.
-     * The firmware assigns its I/O BARs on demand, exactly as for a
-     * hand-attached -device cmd646-ide.
+     * On zx1, which has no such bridge, the board's own controller sits at
+     * device 2 of PCI0, the rx2600's CMD649 (ide=off removes it): the
+     * firmware's fixed PCI-I/O table and the DSDT _PRT describe an IDE
+     * function there.  The firmware assigns its I/O BARs on demand, exactly
+     * as for a hand-attached -device cmd646-ide.  The rx2600's optical drive
+     * is its primary master (rx2600 capture 2026-10-04, dmesg: "hda: DV-28E-B,
+     * ATAPI CD/DVD-ROM drive"); with no drive in the bay and no disk, HP's
+     * EFI boot manager has no block device at all and frees a null buffer
+     * (FF80_0000 image, rva 0x27290: the EFI 1.10 boot manager's disk search).
      */
     if (s->ifb != NULL) {
         s->ide_dev = intel_82468gx_ifb_function(s->ifb,
@@ -4843,13 +4847,25 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         int ide_devfn = -1;
 
         ia64_vpc_seat(s, IA64_VPC_SEAT_IDE, &ide_bus, &ide_devfn);
-        s->ide_dev = pci_new(ide_devfn, "cmd646-ide");
+        s->ide_dev = pci_new(ide_devfn,
+                             imc->ide_type ? imc->ide_type : "cmd646-ide");
         qdev_prop_set_uint32(DEVICE(s->ide_dev), "secondary", 1);
         if (!pci_realize_and_unref(s->ide_dev, ide_bus, errp)) {
             return false;
         }
         ia64_vpc_configure_pci_irq(s, s->ide_dev);
         pci_ide_create_devs(s->ide_dev);
+        if (imc->ide_optical && defaults_enabled() &&
+            drive_get(IF_IDE, 0, 0) == NULL) {
+            DeviceState *cd = qdev_new("ide-cd");
+
+            qdev_prop_set_uint32(cd, "unit", 0);
+            if (!qdev_realize_and_unref(cd,
+                                        BUS(&PCI_IDE(s->ide_dev)->bus[0]),
+                                        errp)) {
+                return false;
+            }
+        }
     }
 #endif
 
@@ -4893,8 +4909,8 @@ static void ia64_vpc_machine_instance_init(Object *obj)
      * Default the SATA controller off: Windows XP/2003 IA-64 ship no inbox
      * AHCI driver and otherwise see an unidentified PCI device, so the guest
      * that most wants storage is better served booting off the SCSI HBA.
-     * Re-enable with ahci=on for SATA-aware guests.  IDE (cmd646) is likewise
-     * opt-in via ide=on.
+     * Re-enable with ahci=on for SATA-aware guests.  A board without a south
+     * bridge has its IDE controller only where the board carries one.
      *
      * The SCSI HBA is the one the board carries: the QLogic ISP12160 on the
      * i2000, the LSI on rx2600/zx2000.  The other is opt-in (isp=on / lsi=on)
@@ -4904,7 +4920,7 @@ static void ia64_vpc_machine_instance_init(Object *obj)
     s->audio_enabled = false;
     s->isp_enabled = !IA64_VPC_MACHINE_GET_CLASS(s)->lsi_default;
     s->lsi_enabled = IA64_VPC_MACHINE_GET_CLASS(s)->lsi_default;
-    s->ide_enabled = false;
+    s->ide_enabled = IA64_VPC_MACHINE_GET_CLASS(s)->ide_default;
     s->firmware_ide_dma = true;
 #endif
 #ifdef CONFIG_IA64_VPC_GRAPHICS
@@ -5070,9 +5086,11 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_get_ide,
                                    ia64_vpc_set_ide);
     object_class_property_set_description(oc, "ide",
-        "Set on/off to enable/disable the CMD646 PCI IDE controller "
-        "(default off; on adds a dual-channel ATA/ATAPI controller in slot 0 "
-        "and auto-attaches if=ide drives)");
+        "Set on/off to enable/disable the board's PCI IDE controller where "
+        "the board has no south bridge (zx1: the core I/O CMD649 at 00:02, "
+        "default on, with an empty optical drive at the primary master "
+        "unless -drive if=ide,index=0 or -nodefaults); if=ide drives "
+        "attach to it");
     object_class_property_add_bool(oc, "agp",
                                    ia64_vpc_get_agp,
                                    ia64_vpc_set_agp);

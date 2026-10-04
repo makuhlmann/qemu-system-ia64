@@ -3207,9 +3207,9 @@ static void test_eepro100_board_identity(void)
 
 /*
  * zx1 core I/O as the rx2600 lays it out (capture 2026-10-03, DEV-3, DEV-4):
- * on bus 0 the OHCI at device 1, the IDE seat at 2 (ide=on) and the LAN at
- * 3, and no UHCI, which the board does not have; the SCSI at device 1 of
- * rope 1's bus 0x20, whose INTA reaches the first of rope 1's two lines.
+ * on bus 0 the OHCI at device 1, the CMD649 IDE at 2 and the LAN at 3, and
+ * no UHCI, which the board does not have; the SCSI at device 1 of rope 1's
+ * bus 0x20, whose INTA reaches the first of rope 1's two lines.
  */
 static void test_zx1_bus0_population(void)
 {
@@ -3219,7 +3219,7 @@ static void test_zx1_bus0_population(void)
     g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_ZX1_USB_SLOT, 0,
                                    PCI_VENDOR_ID), ==, 0x003f106b);
     g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_ZX1_IDE_SLOT, 0,
-                                   PCI_VENDOR_ID), ==, 0xffffffff);
+                                   PCI_VENDOR_ID), ==, 0x06491095);
     g_assert_cmphex(ia64_cfg_readl(qts, 0, 3, 0, PCI_VENDOR_ID), ==,
                     0x12298086);
     g_assert_cmphex(ia64_cfg_readb(qts, 0, 3, 0, PCI_INTERRUPT_PIN), ==, 1);
@@ -6917,7 +6917,8 @@ static void test_e100_ipcb_ip_checksum(void)
     close(sockets[0]);
 }
 
-static void assert_cmd646_at(QTestState *qts, unsigned int slot)
+static void check_cmd64x_at(QTestState *qts, unsigned int slot,
+                            uint16_t device_id, uint8_t revision)
 {
     QGenericPCIBus gbus;
     QPCIDevice *dev;
@@ -6926,11 +6927,27 @@ static void assert_cmd646_at(QTestState *qts, unsigned int slot)
     dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(slot, 0));
     g_assert_nonnull(dev);
     g_assert_cmphex(qpci_config_readw(dev, PCI_VENDOR_ID), ==, 0x1095);
-    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x0646);
+    g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, device_id);
+    g_assert_cmphex(qpci_config_readb(dev, PCI_REVISION_ID), ==, revision);
     g_assert_cmphex(qpci_config_readw(dev, PCI_CLASS_DEVICE), ==,
                     PCI_CLASS_STORAGE_IDE);
+    g_assert_cmphex(qpci_config_readb(dev, PCI_CLASS_PROG), ==, 0x8f);
     g_free(dev);
+}
+
+static void assert_cmd646_at(QTestState *qts, unsigned int slot)
+{
+    check_cmd64x_at(qts, slot, 0x0646, 0x07);
     qtest_quit(qts);
+}
+
+static bool qtree_has(QTestState *qts, const char *needle)
+{
+    char *tree = qtest_hmp(qts, "info qtree");
+    bool found = strstr(tree, needle) != NULL;
+
+    g_free(tree);
+    return found;
 }
 
 /*
@@ -6941,13 +6958,15 @@ static void assert_cmd646_at(QTestState *qts, unsigned int slot)
 static void test_pci_explicit_cmd646_slot0(void)
 {
     assert_cmd646_at(qtest_initf(
-        "-machine zx1 -m 256M -S "
+        "-machine zx1,ide=off -m 256M -S "
         "-device cmd646-ide,secondary=1,addr=0,bus=pci"), 0);
 }
 
 /*
- * On zx1 the ide=on machine option instantiates the same CMD646 at the IDE
- * seat, device 2.  On 460gx it has nothing to do: the IDE controller is
+ * zx1's core I/O IDE is the rx2600's CMD649 at the IDE seat, device 2, with
+ * the optical drive at its primary master; -nodefaults leaves the bay empty,
+ * a drive given for that position takes it, and ide=off removes the
+ * controller.  On 460gx the option has nothing to do: the IDE controller is
  * function 1 of the south bridge, part of the board and not switchable, and
  * slot 0 belongs to the Programmable Interrupt Device, so the option is
  * accepted without effect.
@@ -6958,8 +6977,27 @@ static void test_ide_on_seat(void)
     QGenericPCIBus gbus;
     QPCIDevice *dev;
 
-    assert_cmd646_at(qtest_initf("-machine zx1,ide=on -m 256M -S"),
-                     IA64_ZX1_IDE_SLOT);
+    qts = qtest_initf("-machine zx1 -m 256M -S");
+    check_cmd64x_at(qts, IA64_ZX1_IDE_SLOT, 0x0649, 0x02);
+    g_assert_true(qtree_has(qts, "dev: ide-cd"));
+    qtest_quit(qts);
+
+    qts = qtest_initf("-machine zx1 -m 256M -S -nodefaults");
+    check_cmd64x_at(qts, IA64_ZX1_IDE_SLOT, 0x0649, 0x02);
+    g_assert_false(qtree_has(qts, "dev: ide-cd"));
+    qtest_quit(qts);
+
+    qts = qtest_initf("-machine zx1 -m 256M -S "
+                      "-drive if=ide,index=0,media=disk,driver=null-co");
+    g_assert_false(qtree_has(qts, "dev: ide-cd"));
+    g_assert_true(qtree_has(qts, "dev: ide-hd"));
+    qtest_quit(qts);
+
+    qts = qtest_initf("-machine zx1,ide=off -m 256M -S");
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_ZX1_IDE_SLOT, 0,
+                                   PCI_VENDOR_ID), ==, 0xffffffff);
+    g_assert_false(qtree_has(qts, "dev: ide-cd"));
+    qtest_quit(qts);
 
     qts = ia64_vpc_start("-machine ide=on");
     ia64_qpci_init(&gbus, qts);

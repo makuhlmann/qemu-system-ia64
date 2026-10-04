@@ -353,9 +353,30 @@ static const TypeInfo cmd646_ide_info = {
     .class_init    = cmd646_ide_class_init,
 };
 
+/*
+ * The HP rx2600's core I/O IDE is a CMD649, revision 02h with both channels
+ * native (programming interface 8Fh, rx2600 capture 2026-10-04, 00:02.0).
+ * Only its identity differs from the CMD646 here: without a CMD649 document
+ * its Ultra DMA timings are not modelled.
+ */
+static void cmd649_ide_class_init(ObjectClass *klass, const void *data)
+{
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
+    k->device_id = PCI_DEVICE_ID_CMD_649;
+    k->revision = 0x02;
+}
+
+static const TypeInfo cmd649_ide_info = {
+    .name          = "cmd649-ide",
+    .parent        = "cmd646-ide",
+    .class_init    = cmd649_ide_class_init,
+};
+
 static void cmd646_ide_register_types(void)
 {
     type_register_static(&cmd646_ide_info);
+    type_register_static(&cmd649_ide_info);
 }
 
 type_init(cmd646_ide_register_types)
