@@ -101,6 +101,10 @@ class Ia64Storage(Ia64FirmwareTest):
                              if mode == "pio" else ""),
             drive_args=drive_args, ide_mode=mode)
 
+    # An empty optical drive at the primary master must not hide a disk or a
+    # bootable CD on the secondary channel.
+    EMPTY_PRIMARY_CD = ("-drive", "if=ide,index=0,media=cdrom")
+
     def run_ide_machine(self, *, secondary=False):
         """The ide=on machine option with an auto-attached if=ide disk.
 
@@ -114,7 +118,7 @@ class Ia64Storage(Ia64FirmwareTest):
         make_fat_disk(media, app)
         drive_args = (
             "-drive", f"file={media},format=raw,if=ide,index={index}",
-        )
+        ) + (self.EMPTY_PRIMARY_CD if secondary else ())
         self.run_scenario(
             f"ide-machine-{where}", media, machine_options="ide=on",
             drive_args=drive_args)
@@ -143,6 +147,8 @@ class Ia64Storage(Ia64FirmwareTest):
             drive_args = [
                 "-drive", f"file={disk},format=raw,if=ide,index=0",
             ] + drive_args
+        elif secondary:
+            drive_args.extend(self.EMPTY_PRIMARY_CD)
         self.run_scenario(
             tag, media, optical=True, machine_options="ide=on",
             drive_args=tuple(drive_args))

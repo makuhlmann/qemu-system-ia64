@@ -1472,7 +1472,7 @@ static void fw_set_storage_path_node(FW_ATAPI_DEVICE_PATH_NODE *Node,
     if (Device != NULL && Device->Kind == FW_STORAGE_IDE &&
         Device->Ide != NULL) {
         Node->Header.SubType = 0x01; /* ATAPI */
-        Node->PrimarySecondary = 0;
+        Node->PrimarySecondary = Device->Ide->channel;
         Node->SlaveMaster = Device->Ide->unit;
         return;
     }
@@ -1501,7 +1501,7 @@ static BOOLEAN fw_storage_path_node_matches(
 
     if (Device->Kind == FW_STORAGE_IDE && Device->Ide != NULL) {
         return Node->Header.SubType == 0x01 &&
-               Node->PrimarySecondary == 0 &&
+               Node->PrimarySecondary == Device->Ide->channel &&
                Node->SlaveMaster == Device->Ide->unit &&
                Node->Lun == 0;
     }
