@@ -73,8 +73,8 @@ void efi_insert_memory_descriptor(UINTN Index,
 /*
  * Guest-specific map workarounds ("quirks"), each keyed to a named guest
  * bug at its emission site.  The machine sets the defaults
- * (IA64_VPC_FW_QUIRK_DEFAULT_DISABLE in hw/ia64/ia64_base.c): split-page and
- * pal-8k-page are on, the retired ones off.  Each can be toggled for A/B
+ * (IA64_VPC_FW_QUIRK_DEFAULT_DISABLE in hw/ia64/ia64_base.c): split-page is
+ * on, the retired ones off.  Each can be toggled for A/B
  * experiments with -machine <type>,fw-quirks=+<name> or -<name>.
  */
 BOOLEAN fw_map_quirk_enabled(UINT64 QuirkBit)
@@ -395,52 +395,39 @@ UINT64 fw_low_anchor_base(void)
 }
 
 /*
- * The resident firmware image, shadowed at the top of low RAM.  Linux
- * discovers the PAL entry through an EfiPalCode memory descriptor and calls
- * it through a region 7 alias, so expose the actual PAL trampoline page
- * separately.  Keep the one-time entry path as boot-services code, then
- * expose the aligned runtime text and data as ONE runtime descriptor: IA-64
- * SAL enters with a GP supplied by the SAL system table, and the linked code
- * uses GP-relative references into rodata/data - a loader may assign
- * unrelated virtual bases to separate runtime descriptors, which would break
- * those references.
+ * The resident firmware image, shadowed at the top of low RAM.  Keep the
+ * one-time entry path as boot-services code, then expose the aligned runtime
+ * text and data as ONE runtime descriptor: IA-64 SAL enters with a GP
+ * supplied by the SAL system table, and the linked code uses GP-relative
+ * references into rodata/data - a loader may assign unrelated virtual bases
+ * to separate runtime descriptors, which would break those references.
+ * Linux and the Windows loader find PAL through the EfiPalCode descriptor
+ * (WXPSP1 base/boot/efi/sumain.c:909 takes the PAL TR size from it), which
+ * covers the PAL buffer past the bss.
  */
 static void efi_add_firmware_image(UINTN *Index)
 {
     UINTN image_start = (UINTN)__fw_image_start;
     UINTN firmware_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
     UINTN runtime_code_start = (UINTN)&__runtime_code_start;
-    /*
-     * Describe PAL code as a whole 8 KB OS page.  The Windows IA-64 loader
-     * stores its descriptors in 4 KB units and, in InsertDescriptor
-     * (WXPSP1 base/boot/efi/sumain.c), sets MustCoellesce whenever an
-     * entry's 4 KB base is odd or the PREVIOUS entry's 4 KB page count is
-     * odd -- and for MemoryFirmwarePermanent it then resolves that by
-     * "stealing" a page from the prior (free) entry.  A 4 KB PAL descriptor
-     * makes the run odd and perturbs every boundary after it.
-     */
-    UINTN pal_align = fw_map_quirk_enabled(IA64_FW_QUIRK_PAL_8K_PAGE) ?
-                      0x1FFFULL : 0xFFFULL;
-    UINTN pal_start = (UINTN)fw_pal_buffer & ~pal_align;
-    UINTN pal_end = pal_start + pal_align + 1U;
+    UINTN pal_start = (UINTN)fw_pal_buffer;
 
-    if (pal_start >= image_start && pal_end <= firmware_end) {
-        efi_add_memory_range(Index, EfiBootServicesCode, image_start,
-                             pal_start, EFI_MEMORY_WB);
-        efi_add_memory_range(Index, EfiPalCode, pal_start, pal_end,
-                             EFI_MEMORY_WB);
-        efi_add_memory_range(Index, EfiBootServicesCode, pal_end,
-                             runtime_code_start, EFI_MEMORY_WB);
-        efi_add_memory_range(Index, EfiRuntimeServicesCode,
-                             runtime_code_start, firmware_end,
-                             efi_memory_attribute(EfiRuntimeServicesCode,
-                                                  EFI_MEMORY_WB));
-    } else {
-        efi_add_memory_range(Index, EfiRuntimeServicesCode, image_start,
-                             firmware_end,
-                             efi_memory_attribute(EfiRuntimeServicesCode,
-                                                  EFI_MEMORY_WB));
-    }
+    efi_add_memory_range(Index, EfiBootServicesCode, image_start,
+                         runtime_code_start, EFI_MEMORY_WB);
+    efi_add_memory_range(Index, EfiRuntimeServicesCode,
+                         runtime_code_start, firmware_end,
+                         efi_memory_attribute(EfiRuntimeServicesCode,
+                                              EFI_MEMORY_WB));
+    efi_add_memory_range(Index, EfiBootServicesData, firmware_end, pal_start,
+                         EFI_MEMORY_WB);
+    efi_add_memory_range(Index, EfiPalCode, pal_start,
+                         pal_start + IA64_FW_PAL_BUFFER_SIZE, EFI_MEMORY_WB);
+}
+
+/* The end of what efi_add_firmware_image describes. */
+static UINTN efi_firmware_image_end(void)
+{
+    return (UINTN)fw_pal_buffer + IA64_FW_PAL_BUFFER_SIZE;
 }
 
 void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
@@ -448,7 +435,7 @@ void efi_add_boot_stack_low_ram(UINTN *Index, UINT64 StartRam,
 {
     UINTN image_start = (UINTN)__fw_image_start;
     BOOLEAN image_low = image_start == 0x00100000ULL;
-    UINTN image_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
+    UINTN image_end = efi_firmware_image_end();
     BOOLEAN island = fw_map_quirk_enabled(IA64_FW_QUIRK_ACPI_LOW_ISLAND);
     UINT64 top_block = island ? mCpuAssistBase : mAcpiRegionBase;
 
@@ -508,7 +495,7 @@ void efi_init_memory_map(void)
      */
     UINTN image_start = (UINTN)__fw_image_start;
     BOOLEAN image_low = image_start == 0x00100000ULL;
-    UINTN image_end = ((UINTN)&_end + 0x1FFFU) & ~0x1FFFULL;
+    UINTN image_end = efi_firmware_image_end();
     UINT64 low_conv_start = image_low ? image_end : 0x00100000ULL;
     UINTN index = 0;
     UINTN i;

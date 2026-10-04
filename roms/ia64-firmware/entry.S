@@ -10,11 +10,11 @@
 #include "fw-sal-init.h"
 
     /*
-     * The buffer PAL copies itself into (PAL_COPY_PAL, SAL 3.2.3 step 9):
-     * the image's first page, which the memory map's EfiPalCode descriptor
-     * covers.  The SAL system table's PAL_PROC is the copy.
+     * The buffer PAL copies itself into (PAL_COPY_PAL, SAL 3.2.3 step 9),
+     * which the memory map's EfiPalCode descriptor covers.  The SAL system
+     * table's PAL_PROC is the copy.
      */
-    .section .text.pal_buffer, "ax"
+    .section .pal_buffer, "aw", @nobits
     .global fw_pal_buffer
 fw_pal_buffer:
     .skip IA64_FW_PAL_BUFFER_SIZE

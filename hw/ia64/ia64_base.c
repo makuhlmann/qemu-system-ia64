@@ -1843,7 +1843,6 @@ static const struct {
     { "low-anchor",          IA64_FW_QUIRK_LOW_ANCHOR },
     { "anchor-version-sniff", IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF },
     { "2g-scratch",          IA64_FW_QUIRK_SCRATCH_2G },
-    { "pal-8k-page",         IA64_FW_QUIRK_PAL_8K_PAGE },
     { "acpi-low-island",     IA64_FW_QUIRK_ACPI_LOW_ISLAND },
 };
 
@@ -1864,7 +1863,7 @@ static const struct {
  *  NOT retired: split-page - without it the XP 2002 installer's loader heap
  *  grows past the kernel's [16, 64) MB loader-TR coverage (WXPSP1
  *  base/boot/lib/blmemory.c:927) and MiConvertToLoaderVirtual bugchecks
- *  0x1A (WXPSP1 base/ntos/mm/ia64/initia64.c:2425); pal-8k-page.
+ *  0x1A (WXPSP1 base/ntos/mm/ia64/initia64.c:2425).
  */
 #define IA64_VPC_FW_QUIRK_DEFAULT_DISABLE \
     (IA64_FW_QUIRK_ACPI_LOW_ISLAND | IA64_FW_QUIRK_SCRATCH_2G | \
@@ -5122,7 +5121,7 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Comma list of firmware memory-map quirks to toggle: '-name' "
         "disables, '+name'/'name' re-enables, 'default' resets.  Names: "
         "split-page, low-boundaries, low-anchor, anchor-version-sniff, "
-        "2g-scratch, pal-8k-page, acpi-low-island.  Retired quirks "
+        "2g-scratch, acpi-low-island.  Retired quirks "
         "(acpi-low-island, 2g-scratch, low-boundaries, low-anchor, "
         "anchor-version-sniff) default off, the rest default on; "
         "toggling changes the guest-visible EFI memory map "

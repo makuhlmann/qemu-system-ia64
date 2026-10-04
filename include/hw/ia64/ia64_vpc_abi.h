@@ -51,9 +51,9 @@
 #define IA64_FW_QUIRK_LOW_ANCHOR           (1ULL << 2) /* 8K reserve at 128 MB */
 #define IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF (1ULL << 3) /* drop anchor for >=5.2.3790 loaders */
 #define IA64_FW_QUIRK_SCRATCH_2G           (1ULL << 4) /* 1 MiB reserve at 2 GiB */
-#define IA64_FW_QUIRK_PAL_8K_PAGE          (1ULL << 5) /* whole-8K EfiPalCode page */
+/* Bit 5 was pal-8k-page: the EfiPalCode descriptor is 256 KB now. */
 #define IA64_FW_QUIRK_ACPI_LOW_ISLAND      (1ULL << 6) /* ACPI tables at 8 MB */
-#define IA64_FW_QUIRK_ALL                  0x7fULL
+#define IA64_FW_QUIRK_ALL                  0x5fULL
 
 /*
  * CPU-private physical memory used before and after ExitBootServices().
@@ -182,11 +182,12 @@
 #define IA64_FW_SAL_RUNTIME_RETURN_OFF 0x2020
 #define IA64_FW_SAL_DISPATCH_BLOCK_OFF 0x2040
 /*
- * The first page of the image is the buffer PAL copies itself into
- * (PAL_COPY_PAL, SAL 3.2.3 step 9); the firmware publishes the copy as the
- * SAL system table's PAL_PROC.
+ * The buffer PAL copies itself into (PAL_COPY_PAL, SAL 3.2.3 step 9), past
+ * the image's bss.  It is the alignment every vendor PAL_COPY_INFO asks for,
+ * and also the most the SDM allows (Vol. 2 PAL_COPY_INFO); the rx2600's
+ * EfiPalCode descriptor is 256 KB too (capture 2026-10-03, memmap).
  */
-#define IA64_FW_PAL_BUFFER_SIZE        0x1000
+#define IA64_FW_PAL_BUFFER_SIZE        0x40000
 /* The low part of the image a firmware context reaches identity-mapped. */
 #define IA64_FW_IDENTITY_WINDOW_SIZE   IA64_U64(0x0000000000100000)
 

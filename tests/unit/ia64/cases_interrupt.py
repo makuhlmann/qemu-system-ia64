@@ -87,6 +87,7 @@ from .encoding import (
     LOW_VECTOR_TR_PTE,
     PAL_COPY_BUFFER_SIZE,
     PAL_COPY_PAL,
+    PAL_COPY_PROC,
     PAL_COPY_TARGET,
     PAL_HALT_LIGHT,
     PAL_PROC_ENTRY,
@@ -6945,7 +6946,7 @@ test_pmi_return_moves_with_pal_copy = require_registers(
     ], {
         "ip": _PMI_HANDLER,
         "exception": IA64_EXCP_NONE,
-        "b0": PAL_COPY_TARGET + 0x20,
+        "b0": PAL_COPY_PROC + 0x20,
         "r24": 1,
     }, entry=0x10)
 

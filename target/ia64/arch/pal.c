@@ -67,9 +67,19 @@
 #define PAL_VM_TR_READ      0x0105
 #define PAL_BRAND_INFO      0x0112
 
-#define PAL_COPY_BUFFER_SIZE  0x1000ULL
-#define PAL_COPY_BUFFER_ALIGN 0x1000ULL
-#define PAL_COPY_PROC_OFFSET  0
+/*
+ * PAL_COPY_INFO and PAL_COPY_PAL as the vendor PAL_B images answer them: HP
+ * Madison 5.65 (FFDC92E0, FFDC9100) and McKinley 7.59 (FFD1EF30, FFD1ED50)
+ * in the rx2600's 2.31 flash, and the Merced PAL_B of the i2000's
+ * bios130.BIN (FFDCFE80, FFDCFCE0).  All three align the copy to 256 KB,
+ * put PAL_PROC 0x8010 into it, and size the IA-32 buffer of copy type 1 as
+ * a fixed part (IA64PalProfile.copy_ia32_bytes), mca_proc_state_info plus
+ * 128 KB per processor, and 4 KB per interrupt controller.
+ */
+#define PAL_COPY_BUFFER_ALIGN 0x40000ULL
+#define PAL_COPY_PROC_OFFSET  0x8010ULL
+#define PAL_COPY_IA32_PROC_BYTES  0x20000ULL
+#define PAL_COPY_IA32_IOPIC_BYTES 0x1000ULL
 #define PAL_COPY_CODE_SIZE    0x40ULL
 #define PAL_COPY_TARGET_CACHE_ATTR (1ULL << 63)
 #define PAL_SELF_TEST_STATE_TESTED (1ULL << 2)
@@ -484,23 +494,29 @@ static void pal_cache_summary(CPUIA64State *env)
 
 static void pal_copy_info(CPUIA64State *env)
 {
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
     uint64_t copy_type = env->gr[IA64_PAL_GR_ARG1];
     uint64_t platform_info = env->gr[IA64_PAL_GR_ARG2];
+    uint64_t mca_state_bytes = env->gr[IA64_PAL_GR_ARG3];
+    uint64_t num_procs = platform_info >> 32;
+    uint64_t num_iopics = (uint32_t)platform_info;
 
-    if (copy_type == 0 && platform_info == 0) {
-        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
-        env->gr[IA64_PAL_GR_RESULT1] = PAL_COPY_BUFFER_SIZE;
-        env->gr[IA64_PAL_GR_RESULT2] = PAL_COPY_BUFFER_ALIGN;
+    env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
+    env->gr[IA64_PAL_GR_RESULT2] = PAL_COPY_BUFFER_ALIGN;
+    env->gr[IA64_PAL_GR_RESULT3] = 0;
+    if (copy_type == 0 && platform_info == 0 && mca_state_bytes == 0) {
+        env->gr[IA64_PAL_GR_RESULT1] = pal->copy_bytes;
     } else if (copy_type == 1) {
-        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_ERROR;
-        env->gr[IA64_PAL_GR_RESULT1] = 0;
-        env->gr[IA64_PAL_GR_RESULT2] = 0;
+        /* The vendor PALs check none of the counts. */
+        env->gr[IA64_PAL_GR_RESULT1] =
+            pal->copy_ia32_bytes +
+            num_procs * (mca_state_bytes + PAL_COPY_IA32_PROC_BYTES) +
+            num_iopics * PAL_COPY_IA32_IOPIC_BYTES;
     } else {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
         env->gr[IA64_PAL_GR_RESULT2] = 0;
     }
-    env->gr[IA64_PAL_GR_RESULT3] = 0;
 }
 
 static void pal_copy_pal(CPUIA64State *env)
@@ -529,15 +545,18 @@ static void pal_copy_pal(CPUIA64State *env)
         0x0000000100000011ULL,
         0x4000000000000200ULL,
     };
+    const IA64PalProfile *pal = ia64_env_cpu_class(env)->pal;
     uint64_t target_addr = pal_stacked_arg(env, 0);
     uint64_t alloc_size = pal_stacked_arg(env, 1);
     uint64_t processor = pal_stacked_arg(env, 2);
     uint64_t target_pa = target_addr & ~PAL_COPY_TARGET_CACHE_ATTR;
+    uint64_t proc_pa = target_pa + PAL_COPY_PROC_OFFSET;
 
+    /* The vendor PALs compare the size signed. */
     if (processor > 1 ||
-        alloc_size < PAL_COPY_BUFFER_SIZE ||
         (target_pa & (PAL_COPY_BUFFER_ALIGN - 1)) != 0 ||
-        target_pa > UINT64_MAX - PAL_COPY_CODE_SIZE) {
+        !ia64_pa_bits_implemented(env->impl_pa_bits, target_pa) ||
+        (int64_t)alloc_size < (int64_t)pal->copy_bytes) {
         env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_INVALID_ARGUMENT;
         env->gr[IA64_PAL_GR_RESULT1] = 0;
         env->gr[IA64_PAL_GR_RESULT2] = 0;
@@ -553,9 +572,9 @@ static void pal_copy_pal(CPUIA64State *env)
         for (i = 0; i < ARRAY_SIZE(pal_proc_words); i++) {
             le_words[i] = cpu_to_le64(pal_proc_words[i]);
         }
-        (void)ia64_exec_physical_rw(target_pa, le_words,
+        (void)ia64_exec_physical_rw(proc_pa, le_words,
                                     sizeof(le_words), true);
-        ia64_exec_invalidate_phys_range(env, target_pa, PAL_COPY_CODE_SIZE);
+        ia64_exec_invalidate_phys_range(env, proc_pa, PAL_COPY_CODE_SIZE);
 
         /*
          * The copy is memory: any processor that branches to it runs PAL,
@@ -567,8 +586,7 @@ static void pal_copy_pal(CPUIA64State *env)
         CPU_FOREACH(cs) {
             CPUIA64State *other = cpu_env(cs);
 
-            qatomic_set(&other->pal.pal_proc_copy_addr,
-                        target_pa + PAL_COPY_PROC_OFFSET);
+            qatomic_set(&other->pal.pal_proc_copy_addr, proc_pa);
             qatomic_store_release(&other->pal.pal_proc_copy_valid, true);
         }
     }
@@ -580,8 +598,7 @@ static void pal_copy_pal(CPUIA64State *env)
      * return address PALE_PMI hands SAL; SAL's PMI entry, registered by
      * PAL_PMI_ENTRYPOINT, stays as it was.
      */
-    qatomic_set(&env->pal.pal_proc_copy_addr,
-                target_pa + PAL_COPY_PROC_OFFSET);
+    qatomic_set(&env->pal.pal_proc_copy_addr, proc_pa);
     qatomic_store_release(&env->pal.pal_proc_copy_valid, true);
 
     env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;

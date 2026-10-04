@@ -2041,6 +2041,12 @@ typedef struct IA64PalProfile {
      */
     uint64_t test_bytes_needed;
     uint64_t test_alignment;
+    /*
+     * PAL_COPY_INFO: the bytes of copy type 0, and the fixed part of the
+     * IA-32 buffer of copy type 1 (target/ia64/arch/pal.c).
+     */
+    uint64_t copy_bytes;
+    uint64_t copy_ia32_bytes;
 } IA64PalProfile;
 
 /*

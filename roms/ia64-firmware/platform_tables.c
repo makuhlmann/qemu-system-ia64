@@ -496,7 +496,7 @@ static void efi_init_sal_system_table(void)
     }
     {
         IA64_SAL_MEMORY_DESCRIPTOR *md = mSalSystemTable.MemoryDescriptors;
-        UINTN image_base = (UINTN)fw_pal_buffer & ~0xFFFULL;
+        UINTN image_base = (UINTN)__fw_image_start;
         UINTN data_start = (UINTN)&__runtime_data_start;
         UINTN image_end = ((UINTN)&_end + 0xFFFULL) & ~0xFFFULL;
         UINTN n;
@@ -515,11 +515,11 @@ static void efi_init_sal_system_table(void)
                 md[n].OemReserved[i] = 0;
             }
         }
-        /* PAL code: the boot page holding PAL_PROC. */
+        /* PAL code: the buffer PAL_COPY_PAL filled. */
         md[0].MemoryType = SAL_MEM_TYPE_REGULAR;
         md[0].MemoryUsage = SAL_MEM_USAGE_PAL_CODE;
-        md[0].PhysicalAddress = image_base;
-        md[0].Length = 1;
+        md[0].PhysicalAddress = (UINTN)fw_pal_buffer;
+        md[0].Length = IA64_FW_PAL_BUFFER_SIZE >> 12;
         /* SAL code: the page holding the SAL_PROC runtime stubs. */
         md[1].MemoryType = SAL_MEM_TYPE_REGULAR;
         md[1].MemoryUsage = SAL_MEM_USAGE_SAL_CODE;

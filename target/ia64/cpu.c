@@ -1306,6 +1306,9 @@ static const IA64PalProfile ia64_pal_profile_madison = {
     /* PAL_MEM_FOR_TEST of the rx2600 (capture 2026-10-03, CPU-20). */
     .test_bytes_needed = 6 * MiB,
     .test_alignment = 8 * MiB,
+    /* The HP Madison PAL_B 5.65 (capture 2026-10-04, CPU-20). */
+    .copy_bytes = 0x3e000,
+    .copy_ia32_bytes = 0x4c000,
 };
 
 static const IA64PalProfile ia64_pal_profile_montecito = {
@@ -1365,6 +1368,9 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     .cr_implemented_low = IA64_PAL_CR_IMPLEMENTED_LOW,
     .halt_info = IA64_PAL_HALT_INFO_PLACEHOLDER,
     .test_alignment = 1,
+    /* No Montecito PAL_B was at hand: the Madison one's. */
+    .copy_bytes = 0x3e000,
+    .copy_ia32_bytes = 0x4c000,
 };
 
 /*
@@ -1473,6 +1479,9 @@ static const IA64PalProfile ia64_pal_profile_merced = {
     .cr_implemented_low = IA64_PAL_CR_IMPLEMENTED_LOW,
     .halt_info = IA64_PAL_HALT_INFO_PLACEHOLDER,
     .test_alignment = 1,
+    /* The PAL_B of the i2000's bios130.BIN. */
+    .copy_bytes = 0x3a800,
+    .copy_ia32_bytes = 0x44000,
 };
 
 static const Property ia64_cpu_properties[] = {

@@ -6516,6 +6516,10 @@ BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         !efi_memory_map_covers_range(EfiRuntimeServicesCode,
                                      runtime_code_start, firmware_end,
                                      EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
+        !efi_memory_map_has_descriptor(EfiPalCode, (UINTN)fw_pal_buffer,
+                                       (UINTN)fw_pal_buffer +
+                                       IA64_FW_PAL_BUFFER_SIZE,
+                                       EFI_MEMORY_WB) ||
         /* The 32/48/64/80 MB no-coalesce rule only holds with its quirk. */
         (fw_map_quirk_enabled(IA64_FW_QUIRK_LOW_BOUNDARIES) &&
          (efi_memory_descriptors_can_merge(&before, &preserved) ||

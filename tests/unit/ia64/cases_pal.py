@@ -44,6 +44,7 @@ from .encoding import (
     PAL_COPY_BUFFER_SIZE,
     PAL_COPY_INFO,
     PAL_COPY_PAL,
+    PAL_COPY_PROC,
     PAL_COPY_TARGET,
     PAL_CR_IMPLEMENTED_HIGH,
     PAL_CR_IMPLEMENTED_LOW,
@@ -1804,31 +1805,38 @@ test_pal_mc_clear_log = require_registers("pal_mc_clear_log",
     {"ip": 0x60, "r28": PAL_MC_CLEAR_LOG, "r8": 0,
      "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
 
-test_pal_copy_info = require_registers("pal_copy_info",
-    pal_call_program(PAL_COPY_INFO, [(29, 0), (30, 0), (31, 0)]),
-    {"ip": 0x60, "r28": PAL_COPY_INFO, "r8": 0,
-     "r9": PAL_COPY_BUFFER_SIZE, "r10": PAL_COPY_BUFFER_ALIGN, "r11": 0},
-    entry=0x10)
+# PAL_COPY_INFO as the vendor PAL_Bs answer it: the rx2600's Madison PAL
+# (capture 2026-10-04, CPU-20) and the i2000's Merced PAL (bios130.BIN).
+# platform_info has num_procs in bits 63:32 and num_iopics in bits 31:0.
+def _pal_copy_info_case(name, args, status, size, align, cpu=None):
+    return require_registers(name,
+        pal_call_program(PAL_COPY_INFO,
+                         [(29, args[0]), (30, args[1]), (31, args[2])]),
+        {"ip": 0x60, "r28": PAL_COPY_INFO, "r8": status & UINT64_MAX,
+         "r9": size, "r10": align, "r11": 0},
+        entry=0x10, cpu=cpu)
 
-test_pal_copy_info_bad_type = require_registers("pal_copy_info_bad_type",
-    pal_call_program(PAL_COPY_INFO, [(29, 2), (30, 0), (31, 0)]),
-    {"ip": 0x60, "r28": PAL_COPY_INFO,
-     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
-    entry=0x10)
-
-test_pal_copy_info_ia32_unsupported = require_registers(
-    "pal_copy_info_ia32_unsupported",
-    pal_call_program(PAL_COPY_INFO, [(29, 1), (30, 1), (31, 0)]),
-    {"ip": 0x60, "r28": PAL_COPY_INFO,
-     "r8": (-3 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
-    entry=0x10)
-
-test_pal_copy_info_platform_for_ia64 = require_registers(
-    "pal_copy_info_platform_for_ia64",
-    pal_call_program(PAL_COPY_INFO, [(29, 0), (30, 1), (31, 0)]),
-    {"ip": 0x60, "r28": PAL_COPY_INFO,
-     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
-    entry=0x10)
+test_pal_copy_info = _pal_copy_info_case(
+    "pal_copy_info", (0, 0, 0), 0, PAL_COPY_BUFFER_SIZE,
+    PAL_COPY_BUFFER_ALIGN)
+test_pal_copy_info_merced = _pal_copy_info_case(
+    "pal_copy_info_merced", (0, 0, 0), 0, 0x3a800, PAL_COPY_BUFFER_ALIGN,
+    cpu="merced")
+test_pal_copy_info_bad_type = _pal_copy_info_case(
+    "pal_copy_info_bad_type", (2, 0, 0), -2, 0, 0)
+test_pal_copy_info_platform_for_ia64 = _pal_copy_info_case(
+    "pal_copy_info_platform_for_ia64", (0, 1, 0), -2, 0, 0)
+test_pal_copy_info_mca_state_for_ia64 = _pal_copy_info_case(
+    "pal_copy_info_mca_state_for_ia64", (0, 0, 0x400), -2, 0, 0)
+test_pal_copy_info_ia32 = _pal_copy_info_case(
+    "pal_copy_info_ia32", (1, (2 << 32) | 1, 0), 0, 0x8d000,
+    PAL_COPY_BUFFER_ALIGN)
+test_pal_copy_info_ia32_mca_state = _pal_copy_info_case(
+    "pal_copy_info_ia32_mca_state", (1, (2 << 32) | 6, 0x400), 0, 0x92800,
+    PAL_COPY_BUFFER_ALIGN)
+test_pal_copy_info_ia32_merced = _pal_copy_info_case(
+    "pal_copy_info_ia32_merced", (1, (2 << 32) | 1, 0), 0, 0x85000,
+    PAL_COPY_BUFFER_ALIGN, cpu="merced")
 
 # PAL_FIRMWARE_REGISTER (hw/ia64/ia64_vpc_abi.h): the project firmware's
 # registration with the PAL emulation.  A record without the magic -- any
@@ -1901,7 +1909,7 @@ test_pal_copy_pal_entry_callable = require_registers(
         (0x80, *movl_mlx(28, PAL_VERSION)),
         (0x90, 0x00, nop_m(), addl(29, 0, 0), addl(30, 0, 0)),
         (0xa0, 0x10, nop_m(), addl(31, 0, 0),
-         br_call(0, 0xa0, PAL_COPY_TARGET)),
+         br_call(0, 0xa0, PAL_COPY_PROC)),
         (0xb0, 0x10, nop_m(), nop_i(),
          br_cond(0xb0, 0xb0)),
         (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
@@ -1925,14 +1933,14 @@ test_pal_copy_pal_ap_entry_callable = require_registers(
         (0x80, *movl_mlx(28, PAL_VERSION)),
         (0x90, 0x00, nop_m(), addl(29, 0, 0), addl(30, 0, 0)),
         (0xa0, 0x10, nop_m(), addl(31, 0, 0),
-         br_call(0, 0xa0, PAL_COPY_TARGET)),
+         br_call(0, 0xa0, PAL_COPY_PROC)),
         (0xb0, 0x10, nop_m(), nop_i(),
          br_cond(0xb0, 0xb0)),
         (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
         (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(),
          br_ret(0)),
-        (PAL_COPY_TARGET, 0x0a, pal_break(), nop_m(), nop_i()),
-        (PAL_COPY_TARGET + 0x10, 0x10, nop_m(), nop_i(),
+        (PAL_COPY_PROC, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_COPY_PROC + 0x10, 0x10, nop_m(), nop_i(),
          br_ret(0)),
     ],
     {"ip": 0xb0, "r28": PAL_VERSION, "r8": 0,
@@ -1962,7 +1970,7 @@ test_pal_copy_pal_entry_callable_on_other_cpu = require_registers(
         (0x100000, *movl_mlx(28, PAL_VERSION)),
         (0x100010, 0x00, nop_m(), addl(29, 0, 0), addl(30, 0, 0)),
         (0x100020, 0x10, nop_m(), addl(31, 0, 0),
-         br_call(0, 0x100020, PAL_COPY_TARGET)),
+         br_call(0, 0x100020, PAL_COPY_PROC)),
         (0x100030, 0x10, nop_m(), nop_i(),
          br_cond(0x100030, 0x100030)),
         (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
@@ -1996,13 +2004,13 @@ test_pal_copy_pal_relocated_entry_plain_branch = require_registers(
         # Invoke PAL_VERSION at the relocated entry via a plain branch: b1 is
         # the entry, b0 is the return (0xd0); no frame is pushed.
         (0x70, *movl_mlx(28, PAL_VERSION)),
-        (0x80, *movl_mlx(7, PAL_COPY_TARGET)),
+        (0x80, *movl_mlx(7, PAL_COPY_PROC)),
         (0x90, 0x00, nop_m(), mov_b_gr(1, 7), nop_i()),
         (0xa0, *movl_mlx(7, 0xd0)),
         (0xb0, 0x00, nop_m(), mov_b_gr(0, 7), nop_i()),
         (0xc0, 0x10, nop_m(), nop_i(), br_indirect(1)),
         # Read the relocated return bundle back and check it is br.many.
-        (0xd0, *movl_mlx(5, PAL_COPY_TARGET + 0x10)),
+        (0xd0, *movl_mlx(5, PAL_COPY_PROC + 0x10)),
         (0xe0, 0x00, ld8(6, 5), nop_i(), nop_i()),
         (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
         (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
@@ -2027,6 +2035,58 @@ test_pal_copy_pal_bad_alignment = require_registers(
     {"ip": 0x80, "r28": PAL_COPY_PAL,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
+
+# The copy is 256 KB aligned, PAL_PROC is 0x8010 into it, and the target
+# must lie in the implemented physical space (Madison 50 bits, Merced 44).
+test_pal_copy_pal_proc_offset = require_registers(
+    "pal_copy_pal_proc_offset",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [PAL_COPY_TARGET, PAL_COPY_BUFFER_SIZE, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": 0, "r9": PAL_COPY_PROC - PAL_COPY_TARGET, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_copy_pal_bad_256k_alignment = require_registers(
+    "pal_copy_pal_bad_256k_alignment",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [PAL_COPY_TARGET + 0x1000,
+                              PAL_COPY_BUFFER_SIZE, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_copy_pal_negative_alloc = require_registers(
+    "pal_copy_pal_negative_alloc",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [PAL_COPY_TARGET, 1 << 63, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_copy_pal_unimplemented_target = require_registers(
+    "pal_copy_pal_unimplemented_target",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [(1 << 50) | PAL_COPY_TARGET,
+                              PAL_COPY_BUFFER_SIZE, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_copy_pal_unimplemented_target_merced = require_registers(
+    "pal_copy_pal_unimplemented_target_merced",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [(1 << 44) | PAL_COPY_TARGET, 0x3a800, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_copy_pal_merced_size = require_registers(
+    "pal_copy_pal_merced_size",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [PAL_COPY_TARGET, 0x3a800, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": 0, "r9": PAL_COPY_PROC - PAL_COPY_TARGET, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_copy_pal_bad_processor = require_registers(
     "pal_copy_pal_bad_processor",
@@ -2358,11 +2418,21 @@ CASE_NAMES = (
     'pal_cache_shared_info_sibling_thread',
     'pal_copy_info',
     'pal_copy_info_bad_type',
-    'pal_copy_info_ia32_unsupported',
+    'pal_copy_info_ia32',
+    'pal_copy_info_ia32_mca_state',
+    'pal_copy_info_ia32_merced',
+    'pal_copy_info_mca_state_for_ia64',
+    'pal_copy_info_merced',
     'pal_copy_info_platform_for_ia64',
+    'pal_copy_pal_bad_256k_alignment',
     'pal_copy_pal_bad_alignment',
     'pal_copy_pal_bad_alloc',
     'pal_copy_pal_bad_processor',
+    'pal_copy_pal_merced_size',
+    'pal_copy_pal_negative_alloc',
+    'pal_copy_pal_proc_offset',
+    'pal_copy_pal_unimplemented_target',
+    'pal_copy_pal_unimplemented_target_merced',
     'pal_copy_pal_ap_entry_callable',
     'pal_copy_pal_entry_callable_on_other_cpu',
     'pal_copy_pal_entry_callable',
