@@ -713,7 +713,7 @@ static void cmd_request_sense(IDEState *s, uint8_t *buf)
 
     /*
      * Sense data is kept only until a REQUEST SENSE retrieves it; with none
-     * left the drive reports NO SENSE (SCSI-2 8.2.14).  A condition that
+     * left the drive reports NO SENSE (SFF-8020i 10.8.20).  A condition that
      * persists, such as an empty tray, is reported again by the next command
      * that checks for it.  The EFI 1.10.14.61 IDE driver in the HP rx2600
      * firmware fetches sense data until it reads NO SENSE, with no limit.
@@ -1353,6 +1353,15 @@ void ide_atapi_cmd(IDEState *s)
     if (s->sense_key == UNIT_ATTENTION && !(cmd->flags & ALLOW_UA)) {
         ide_atapi_cmd_check_status(s);
         return;
+    }
+    /*
+     * Any other command loses the sense data of the last one (SFF-8020i
+     * 10.8.20, 10.8.20.4); a unit attention stays until REQUEST SENSE
+     * reports it, and INQUIRY does not clear it (10.6).
+     */
+    if (buf[0] != GPCMD_REQUEST_SENSE && s->sense_key != UNIT_ATTENTION) {
+        s->sense_key = NO_SENSE;
+        s->asc = 0;
     }
     /*
      * When a CD gets changed, we have to report an ejected state and

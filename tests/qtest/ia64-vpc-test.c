@@ -7061,15 +7061,17 @@ static uint8_t zx1_atapi_packet(QTestState *qts, uint8_t opcode,
  * An empty optical drive at the primary master of zx1's IDE.  TEST UNIT
  * READY fails with NOT READY / MEDIUM NOT PRESENT; REQUEST SENSE reports
  * that once, and a second one reads NO SENSE, because sense data lives only
- * until it is retrieved (SCSI-2 8.2.14).  The EFI IDE driver of the HP rx2600
- * firmware fetches sense data until it gets NO SENSE.  The condition itself
- * stays: the next TEST UNIT READY fails the same way.
+ * until it is retrieved or another command arrives (SFF-8020i 10.8.20).  The
+ * EFI IDE driver of the HP rx2600 firmware fetches sense data until it gets
+ * NO SENSE.  The condition itself stays: the next TEST UNIT READY fails the
+ * same way.
  */
 static void test_zx1_empty_optical_sense(void)
 {
     QTestState *qts = qtest_initf("-machine zx1,ide=on -m 256M -S "
                                   "-drive if=ide,index=0,media=cdrom");
     uint8_t sense[18];
+    uint8_t inquiry[36];
 
     ia64_cfg_writel(qts, 0, IA64_ZX1_IDE_SLOT, 0, PCI_BASE_ADDRESS_0,
                     ZX1_IDE_TEST_CMD | PCI_BASE_ADDRESS_SPACE_IO);
@@ -7095,6 +7097,13 @@ static void test_zx1_empty_optical_sense(void)
     g_assert_cmphex(zx1_atapi_packet(qts, 0x00, 0, NULL) & 0x01, ==, 0x01);
     g_assert_cmphex(qtest_readb(qts, zx1_ide_port(ZX1_IDE_TEST_CMD + 1)), ==,
                     0x20);
+
+    g_assert_cmphex(zx1_atapi_packet(qts, 0x12, sizeof(inquiry), inquiry) &
+                    0x01, ==, 0x00);
+    g_assert_cmphex(inquiry[0] & 0x1f, ==, 0x05);
+    g_assert_cmphex(zx1_atapi_packet(qts, 0x03, sizeof(sense), sense) & 0x01,
+                    ==, 0x00);
+    g_assert_cmphex(sense[2] & 0x0f, ==, 0x00);
     qtest_quit(qts);
 }
 
