@@ -50,6 +50,9 @@
 #include "qemu/bswap.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
+#include "qemu/cutils.h"
+#include "qemu/uuid.h"
+#include "system/system.h"
 #include "hw/core/boards.h"
 #include "hw/ipmi/ipmi.h"
 #include "qom/object.h"
@@ -89,11 +92,19 @@ DECLARE_CLASS_CHECKERS(LongspeakBmcClass, LONGSPEAK_BMC, TYPE_LONGSPEAK_BMC)
  */
 #define LONGSPEAK_BMC_CMD_FRU_STATUS 0xd0
 
+/*
+ * FRU device 0 in the rx2600's layout (rx2600 capture 2026-10-04, BMC-3):
+ * 512 bytes, an internal-use area, the chassis, board and product areas, and
+ * 0xFF after them.
+ */
 #define LONGSPEAK_BMC_FRU0          0x00
-#define LONGSPEAK_BMC_FRU0_SIZE     256
-#define LONGSPEAK_BMC_BOARD_OFF     16
-#define LONGSPEAK_BMC_BOARD_SIZE    32
-#define LONGSPEAK_BMC_PRODUCT_OFF   48
+#define LONGSPEAK_BMC_FRU0_SIZE     512
+#define LONGSPEAK_BMC_INTERNAL_OFF  8
+#define LONGSPEAK_BMC_CHASSIS_OFF   72
+#define LONGSPEAK_BMC_CHASSIS_SIZE  32
+#define LONGSPEAK_BMC_BOARD_OFF     104
+#define LONGSPEAK_BMC_BOARD_SIZE    120
+#define LONGSPEAK_BMC_PRODUCT_OFF   224
 #define LONGSPEAK_BMC_PRODUCT_SIZE  128
 
 #define LONGSPEAK_BMC_SPD_SIZE      256
@@ -133,48 +144,70 @@ static const LongspeakBmcDimm longspeak_bmc_modules[] = {
     { 256 * MiB, 12, 1, 0x40 },
 };
 
-static uint8_t *longspeak_bmc_fru_field(uint8_t *p, const char *text)
-{
-    size_t len = strlen(text);
-
-    *p++ = 0xc0 | len;          /* 8-bit ASCII (IPMI FRU sec 13) */
-    memcpy(p, text, len);
-    return p + len;
-}
-
-/* A text field of a fixed width, padded with spaces. */
+/* A text field of a fixed width, padded with NULs as on the rx2600. */
 static uint8_t *longspeak_bmc_fru_padded(uint8_t *p, const char *text,
                                          unsigned int width)
 {
-    *p++ = 0xc0 | width;
-    memset(p, ' ', width);
+    *p++ = 0xc0 | width;        /* 8-bit ASCII (IPMI FRU sec 13) */
+    memset(p, 0, width);
     memcpy(p, text, MIN(strlen(text), width));
     return p + width;
 }
 
-/*
- * HP's product area has fixed field widths, and the firmware reads it at
- * fixed offsets (its dump of the area, FFF5C370; SMBIOS type 1 takes the
- * product name's type/length byte at offset 6): manufacturer 2 characters
- * ("hp" on HP's boards), product name 32, part number 11, version 6, serial
- * number 20, asset tag 32, then a one-byte FRU file id at 112 and the
- * product id, a custom field, at 114 (its value at 115 to 118, FFF5A110).
- * Text is padded with spaces, as on the rx2600 ("server rx2600" in 32
- * characters, rx2600 capture 2026-10-03).  The type/length bytes stay right,
- * so an IPMI FRU 1.0 parser reads the same fields.
- */
-static const struct {
+typedef struct LongspeakBmcFruField {
     const char *text;
     uint8_t width;
-} longspeak_bmc_product_fields[] = {
-    { "QE", 2 },
-    { "Longs Peak", 32 },
-    { "", 11 },
-    { "", 6 },
-    { "", 20 },
-    { "", 32 },
+} LongspeakBmcFruField;
+
+static uint8_t *longspeak_bmc_fru_fields(uint8_t *p,
+                                         const LongspeakBmcFruField *f,
+                                         unsigned int n)
+{
+    unsigned int i;
+
+    for (i = 0; i < n; i++) {
+        p = longspeak_bmc_fru_padded(p, f[i].text, f[i].width);
+    }
+    return p;
+}
+
+/*
+ * HP gives every field of its areas a fixed width, and SAL_B reads them at
+ * fixed offsets (its dumps FFF5BBC0, FFF5C370; SMBIOS type 1 takes the
+ * product name from offset 6, with the NULs as spaces).  The type/length
+ * bytes stay right, so an IPMI FRU 1.0 parser reads the same fields.
+ *
+ * Chassis: part number 11, serial number 12.  Board: manufacturer 10,
+ * product 32, serial number 16, part number 11, the FRU file id, revision 8,
+ * engineering date 4, artwork 2, then 16 binary bytes ("Fru Info").
+ * Product: manufacturer 2 ("hp" on HP's boards), product 32, part number 11,
+ * version 6, serial number 20, asset tag 32, the FRU file id at 112 and the
+ * product id, a custom field, at 114 (its value at 115 to 118, FFF5A110).
+ * The FRU file id is one BCD-plus byte, 11h on the rx2600.  The serial
+ * and part numbers are the model's own.
+ */
+static const LongspeakBmcFruField longspeak_bmc_chassis_fields[] = {
+    { "", 11 }, { "", 12 },
 };
 
+static const LongspeakBmcFruField longspeak_bmc_board_fields[] = {
+    { "QE", 10 }, { "Longs Peak", 32 }, { "", 16 }, { "", 11 },
+};
+
+static const LongspeakBmcFruField longspeak_bmc_board_late_fields[] = {
+    { "", 8 }, { "", 4 }, { "", 2 },
+};
+
+static const LongspeakBmcFruField longspeak_bmc_product_fields[] = {
+    { "QE", 2 }, { "Longs Peak", 32 }, { "QE-LP1", 11 }, { "", 6 },
+    { "QE00000001", 20 }, { "", 32 },
+};
+
+#define LONGSPEAK_BMC_CHASSIS_RACK      0x17
+#define LONGSPEAK_BMC_FRU_FILE_TL       0x41
+#define LONGSPEAK_BMC_FRU_FILE_ID       0x11
+#define LONGSPEAK_BMC_BOARD_INFO_OFF    98
+#define LONGSPEAK_BMC_BOARD_INFO_SIZE   16
 #define LONGSPEAK_BMC_PRODUCT_FILE_ID   112
 
 static void longspeak_bmc_fru_sum(uint8_t *area, unsigned int size)
@@ -191,54 +224,58 @@ static void longspeak_bmc_fru_sum(uint8_t *area, unsigned int size)
 static void longspeak_bmc_board_fru(uint8_t *fru)
 {
     uint8_t *area, *p;
-    unsigned int i;
 
     QEMU_BUILD_BUG_ON(LONGSPEAK_BMC_PRODUCT_OFF + LONGSPEAK_BMC_PRODUCT_SIZE >
                       LONGSPEAK_BMC_FRU0_SIZE);
     QEMU_BUILD_BUG_ON(IA64_PDH_BMC_PRODUCT_ID_OFFSET + 5 >
                       LONGSPEAK_BMC_PRODUCT_SIZE);
 
-    memset(fru, 0, LONGSPEAK_BMC_FRU0_SIZE);
+    memset(fru, 0xff, LONGSPEAK_BMC_FRU0_SIZE);
+    memset(fru, 0, LONGSPEAK_BMC_PRODUCT_OFF + LONGSPEAK_BMC_PRODUCT_SIZE);
     fru[0] = 0x01;
-    fru[2] = 8 / 8;
+    fru[1] = LONGSPEAK_BMC_INTERNAL_OFF / 8;
+    fru[2] = LONGSPEAK_BMC_CHASSIS_OFF / 8;
     fru[3] = LONGSPEAK_BMC_BOARD_OFF / 8;
     fru[4] = LONGSPEAK_BMC_PRODUCT_OFF / 8;
     longspeak_bmc_fru_sum(fru, 8);
+    fru[LONGSPEAK_BMC_INTERNAL_OFF] = 0x01;
 
-    area = fru + 8;                             /* chassis: type "other" */
+    area = fru + LONGSPEAK_BMC_CHASSIS_OFF;
     area[0] = 0x01;
-    area[1] = 8 / 8;
-    area[2] = 0x01;
-    p = longspeak_bmc_fru_field(area + 3, "");
-    p = longspeak_bmc_fru_field(p, "");
+    area[1] = LONGSPEAK_BMC_CHASSIS_SIZE / 8;
+    area[2] = LONGSPEAK_BMC_CHASSIS_RACK;
+    p = longspeak_bmc_fru_fields(area + 3, longspeak_bmc_chassis_fields,
+                                 ARRAY_SIZE(longspeak_bmc_chassis_fields));
     *p = 0xc1;                  /* no more fields */
-    longspeak_bmc_fru_sum(area, 8);
+    longspeak_bmc_fru_sum(area, LONGSPEAK_BMC_CHASSIS_SIZE);
 
-    area = fru + LONGSPEAK_BMC_BOARD_OFF;       /* board */
+    area = fru + LONGSPEAK_BMC_BOARD_OFF;   /* language and date 0 */
     area[0] = 0x01;
     area[1] = LONGSPEAK_BMC_BOARD_SIZE / 8;
-    p = longspeak_bmc_fru_field(area + 6, "QEMU");
-    p = longspeak_bmc_fru_field(p, "Longs Peak");
-    p = longspeak_bmc_fru_field(p, "");
-    p = longspeak_bmc_fru_field(p, "");
-    *p = 0xc1;                  /* no more fields */
+    p = longspeak_bmc_fru_fields(area + 6, longspeak_bmc_board_fields,
+                                 ARRAY_SIZE(longspeak_bmc_board_fields));
+    *p++ = LONGSPEAK_BMC_FRU_FILE_TL;
+    *p++ = LONGSPEAK_BMC_FRU_FILE_ID;
+    p = longspeak_bmc_fru_fields(p, longspeak_bmc_board_late_fields,
+                                 ARRAY_SIZE(longspeak_bmc_board_late_fields));
+    assert(p == area + LONGSPEAK_BMC_BOARD_INFO_OFF);
+    *p = LONGSPEAK_BMC_BOARD_INFO_SIZE;     /* binary */
+    p += 1 + LONGSPEAK_BMC_BOARD_INFO_SIZE;
+    *p = 0xc1;
     longspeak_bmc_fru_sum(area, LONGSPEAK_BMC_BOARD_SIZE);
 
-    area = fru + LONGSPEAK_BMC_PRODUCT_OFF;     /* product */
+    area = fru + LONGSPEAK_BMC_PRODUCT_OFF;
     area[0] = 0x01;
     area[1] = LONGSPEAK_BMC_PRODUCT_SIZE / 8;
-    p = area + 3;
-    for (i = 0; i < ARRAY_SIZE(longspeak_bmc_product_fields); i++) {
-        p = longspeak_bmc_fru_padded(p, longspeak_bmc_product_fields[i].text,
-                                     longspeak_bmc_product_fields[i].width);
-    }
+    p = longspeak_bmc_fru_fields(area + 3, longspeak_bmc_product_fields,
+                                 ARRAY_SIZE(longspeak_bmc_product_fields));
     assert(p == area + LONGSPEAK_BMC_PRODUCT_FILE_ID);
-    *p++ = 0x01;                /* FRU file id: one binary byte */
-    *p++ = 0;
+    *p++ = LONGSPEAK_BMC_FRU_FILE_TL;
+    *p++ = LONGSPEAK_BMC_FRU_FILE_ID;
     *p++ = 0x04;                /* the product id: four binary bytes */
     assert(p == area + IA64_PDH_BMC_PRODUCT_ID_OFFSET);
     stl_le_p(p, IA64_PDH_BMC_PRODUCT_ID);
-    p[4] = 0xc1;                /* no more fields */
+    p[4] = 0xc1;
     longspeak_bmc_fru_sum(area, LONGSPEAK_BMC_PRODUCT_SIZE);
 }
 
@@ -420,6 +457,41 @@ static const LongspeakBmcToken *longspeak_bmc_token_find(uint16_t id,
         at += longspeak_bmc_tokens[i].size;
     }
     return NULL;
+}
+
+/*
+ * The system UUID is the BMC's own, in token 0xD02 in EFI GUID byte order
+ * (rx2600 capture 2026-10-04, BMC-3: `67F52C74-E8E5-11D7-...` reads
+ * `74 2C F5 67 E5 E8 D7 11 ...`).  SAL_B reads it for SMBIOS type 1 and
+ * `info sys` (FFF54FE0) and writes it only from FFF55790, its "set system
+ * id" path, so a BMC without one reports a zero UUID.  The model's BMC
+ * comes with a UUID of its own, kept like the other tokens; -uuid replaces
+ * it.
+ */
+#define LONGSPEAK_BMC_TOKEN_UUID    0x0d02
+
+static const QemuUUID longspeak_bmc_uuid = {
+    .data = { 0x4c, 0x6f, 0x6e, 0x67, 0x73, 0x50, 0x45, 0x61,
+              0x8b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 },
+};
+
+void longspeak_bmc_tokens_init(uint8_t *tokens)
+{
+    const LongspeakBmcToken *token;
+    QemuUUID uuid;
+    unsigned int base;
+
+    token = longspeak_bmc_token_find(LONGSPEAK_BMC_TOKEN_UUID, &base);
+    assert(token != NULL && token->size == sizeof(uuid.data));
+    if (qemu_uuid_set) {
+        uuid = qemu_uuid;
+    } else if (buffer_is_zero(tokens + base, token->size)) {
+        uuid = longspeak_bmc_uuid;
+    } else {
+        return;
+    }
+    uuid = qemu_uuid_bswap(uuid);
+    memcpy(tokens + base, uuid.data, token->size);
 }
 
 /*

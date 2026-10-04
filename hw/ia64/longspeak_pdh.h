@@ -87,6 +87,8 @@ void longspeak_pdh_store_seeded(DeviceState *dev);
 /* The BMC's tokens in and out of their area of the nvram= file. */
 void longspeak_bmc_tokens_save(const uint8_t *tokens, uint8_t *area);
 void longspeak_bmc_tokens_load(uint8_t *tokens, const uint8_t *area);
+/* The values the BMC has before the firmware writes any: the system UUID. */
+void longspeak_bmc_tokens_init(uint8_t *tokens);
 
 /* sysbus MMIO indexes */
 #define LONGSPEAK_PDH_MMIO_BBSRAM  0

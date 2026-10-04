@@ -1877,7 +1877,8 @@ static void test_pdh_product_area(void)
         uint8_t type_length;
     } fields[] = {
         { 3, 0xc2 }, { 6, 0xe0 }, { 39, 0xcb }, { 51, 0xc6 }, { 58, 0xd4 },
-        { 79, 0xe0 }, { 112, 0x01 }, { 114, 0x04 }, { 119, 0xc1 },
+        { 79, 0xe0 }, { 112, 0x41 }, { 113, 0x11 }, { 114, 0x04 },
+        { 119, 0xc1 },
     };
     const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
     uint8_t read[] = { IPMI_NETFN_STORAGE_LUN0, IPMI_CMD_READ_FRU_DATA,
@@ -1904,13 +1905,96 @@ static void test_pdh_product_area(void)
         g_assert_cmphex(area[fields[i].off], ==, fields[i].type_length);
     }
     g_assert_cmpmem(area + 4, 2, "QE", 2);
-    g_assert_cmpmem(area + 7, 11, "Longs Peak ", 11);
+    g_assert_cmpmem(area + 7, 11, "Longs Peak", 11);
+    g_assert_cmpmem(area + 40, 7, "QE-LP1", 7);
+    g_assert_cmpmem(area + 59, 11, "QE00000001", 11);
     g_assert_cmphex(ldl_le_p(area + IA64_PDH_BMC_PRODUCT_ID_OFFSET), ==,
                     IA64_PDH_BMC_PRODUCT_ID);
     for (i = 0; i < sizeof(area); i++) {
         sum += area[i];
     }
     g_assert_cmphex(sum, ==, 0);
+    qtest_quit(qts);
+}
+
+static void bmc_read_fru0(QTestState *qts, uint8_t *fru, unsigned int size)
+{
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    uint8_t read[] = { IPMI_NETFN_STORAGE_LUN0, IPMI_CMD_READ_FRU_DATA,
+                       0x00, 0x00, 0x00, 32 };
+    uint8_t rsp[48];
+    unsigned int off;
+
+    for (off = 0; off < size; off += 32) {
+        read[3] = off & 0xff;
+        read[4] = off >> 8;
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, sizeof(read),
+                                         rsp, sizeof(rsp)), ==, 4 + 32);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        memcpy(fru + off, rsp + 4, 32);
+    }
+}
+
+static uint8_t fru_sum(const uint8_t *p, unsigned int size)
+{
+    uint8_t sum = 0;
+
+    while (size--) {
+        sum += *p++;
+    }
+    return sum;
+}
+
+/*
+ * FRU 0 has the rx2600's 512-byte layout: an internal-use area and the
+ * chassis, board and product areas where the rx2600 has them, each field of
+ * the board area at the offset SAL_B reads it from, and 0xFF after the areas.
+ */
+static void test_pdh_board_fru_layout(void)
+{
+    static const struct {
+        uint8_t off;
+        uint8_t type_length;
+    } board[] = {
+        { 6, 0xca }, { 17, 0xe0 }, { 50, 0xd0 }, { 67, 0xcb }, { 79, 0x41 },
+        { 80, 0x11 }, { 81, 0xc8 }, { 90, 0xc4 }, { 95, 0xc2 }, { 98, 0x10 },
+        { 115, 0xc1 },
+    };
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    const uint8_t info[] = { IPMI_NETFN_STORAGE_LUN0,
+                             IPMI_CMD_GET_FRU_AREA_INFO, 0x00 };
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t fru[512], rsp[16];
+    unsigned int i;
+
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, G_N_ELEMENTS(info),
+                                     rsp, sizeof(rsp)), ==, 6);
+    g_assert_cmpuint(rsp[3] | rsp[4] << 8, ==, sizeof(fru));
+    bmc_read_fru0(qts, fru, sizeof(fru));
+
+    g_assert_cmpmem(fru, 5, "\x01\x01\x09\x0d\x1c", 5);
+    g_assert_cmphex(fru_sum(fru, 8), ==, 0);
+    g_assert_cmphex(fru[8], ==, 0x01);
+    /* Chassis at 72: a rack chassis, part number 11, serial number 12. */
+    g_assert_cmphex(fru[72 + 1], ==, 32 / 8);
+    g_assert_cmphex(fru[72 + 2], ==, 0x17);
+    g_assert_cmphex(fru[72 + 3], ==, 0xcb);
+    g_assert_cmphex(fru[72 + 15], ==, 0xcc);
+    g_assert_cmphex(fru[72 + 28], ==, 0xc1);
+    g_assert_cmphex(fru_sum(fru + 72, 32), ==, 0);
+    /* Board at 104, 120 bytes. */
+    g_assert_cmphex(fru[104 + 1], ==, 120 / 8);
+    for (i = 0; i < G_N_ELEMENTS(board); i++) {
+        g_assert_cmphex(fru[104 + board[i].off], ==, board[i].type_length);
+    }
+    g_assert_cmpmem(fru + 104 + 7, 3, "QE", 3);
+    g_assert_cmphex(fru_sum(fru + 104, 120), ==, 0);
+    /* Product at 224; nothing follows the areas. */
+    g_assert_cmphex(fru[224 + 1], ==, 128 / 8);
+    g_assert_cmphex(fru_sum(fru + 224, 128), ==, 0);
+    for (i = 224 + 128; i < sizeof(fru); i++) {
+        g_assert_cmphex(fru[i], ==, 0xff);
+    }
     qtest_quit(qts);
 }
 
@@ -2097,7 +2181,7 @@ static void test_pdh_bmc(void)
     uint8_t fru_area[] = { IPMI_NETFN_STORAGE_LUN0,
                            IPMI_CMD_READ_FRU_DATA, 0x00, 0x00, 0x00, 0x00 };
     QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
-    uint8_t rsp[64];
+    uint8_t rsp[160];
     uint8_t sum = 0;
     unsigned i;
 
@@ -2249,6 +2333,40 @@ static void test_pdh_bmc_ports(void)
  * HP's token commands: the BMC keeps what the firmware writes through either
  * interface, and moves a value too long for one BT message in parts.
  */
+/*
+ * The system UUID is the BMC's token 0xD02, in EFI GUID byte order: the
+ * model's own UUID unless -uuid gives one, and kept in the nvram file.
+ */
+static void test_pdh_system_uuid(void)
+{
+    static const uint8_t own[16] = {
+        0x67, 0x6e, 0x6f, 0x4c, 0x50, 0x73, 0x61, 0x45,
+        0x8b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    };
+    static const uint8_t given[16] = {
+        0x74, 0x2c, 0xf5, 0x67, 0xe5, 0xe8, 0xd7, 0x11,
+        0xa9, 0x27, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+    };
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    const uint8_t read[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_READ,
+                             0x02, 0x0d };
+    QTestState *qts;
+    uint8_t rsp[32];
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                     rsp, sizeof(rsp)), ==, 3 + 16);
+    g_assert_cmpmem(rsp + 3, 16, own, 16);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S "
+                     "-uuid 67f52c74-e8e5-11d7-a927-001122334455");
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                     rsp, sizeof(rsp)), ==, 3 + 16);
+    g_assert_cmpmem(rsp + 3, 16, given, 16);
+    qtest_quit(qts);
+}
+
 static void test_pdh_bmc_tokens(void)
 {
     const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
@@ -9859,6 +9977,9 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pdh/clock", test_pdh_clock);
     qtest_add_func("/ia64-vpc/pdh/dimm-spd", test_pdh_dimm_spd);
     qtest_add_func("/ia64-vpc/pdh/product-area", test_pdh_product_area);
+    qtest_add_func("/ia64-vpc/pdh/board-fru-layout",
+                   test_pdh_board_fru_layout);
+    qtest_add_func("/ia64-vpc/pdh/system-uuid", test_pdh_system_uuid);
     qtest_add_func("/ia64-vpc/pdh/io-backplane-fru",
                    test_pdh_io_backplane_fru);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",

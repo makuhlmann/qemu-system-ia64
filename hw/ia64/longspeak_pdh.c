@@ -517,6 +517,7 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
         s->store_vmstate =
             qemu_add_vm_change_state_handler(longspeak_pdh_store_vm_state, s);
     }
+    longspeak_bmc_tokens_init(s->bmc_tokens);
     for (i = 0; i < LONGSPEAK_PDH_BLOCKS; i++) {
         LongspeakPDHBlock *b = &s->block[i];
 
