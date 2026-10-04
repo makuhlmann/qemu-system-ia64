@@ -3013,22 +3013,34 @@ static void test_eepro100_board_identity(void)
 }
 
 /*
- * zx1 bus 0 as far as the rx2600's layout goes (capture 2026-10-03, DEV-4):
- * the LAN at device 3, where the vendor firmware's _PRT routes it, and no
- * UHCI, which the board does not have.  SCSI and the OHCI keep 1 and 2.
+ * zx1 core I/O as the rx2600 lays it out (capture 2026-10-03, DEV-3, DEV-4):
+ * on bus 0 the OHCI at device 1, the IDE seat at 2 (ide=on) and the LAN at
+ * 3, and no UHCI, which the board does not have; the SCSI at device 1 of
+ * rope 1's bus 0x20, whose INTA reaches the first of rope 1's two lines.
  */
 static void test_zx1_bus0_population(void)
 {
     QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
     unsigned int slot;
 
-    g_assert_cmphex(ia64_cfg_readl(qts, 0, 1, 0, PCI_VENDOR_ID), ==,
-                    0x00121000);
-    g_assert_cmphex(ia64_cfg_readl(qts, 0, 2, 0, PCI_VENDOR_ID), ==,
-                    0x003f106b);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_ZX1_USB_SLOT, 0,
+                                   PCI_VENDOR_ID), ==, 0x003f106b);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, IA64_ZX1_IDE_SLOT, 0,
+                                   PCI_VENDOR_ID), ==, 0xffffffff);
     g_assert_cmphex(ia64_cfg_readl(qts, 0, 3, 0, PCI_VENDOR_ID), ==,
                     0x12298086);
     g_assert_cmphex(ia64_cfg_readb(qts, 0, 3, 0, PCI_INTERRUPT_PIN), ==, 1);
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
+                                   0, PCI_VENDOR_ID), ==, 0x00121000);
+    g_assert_cmphex(ia64_cfg_readb(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
+                                   0, PCI_INTERRUPT_LINE), ==,
+                    IA64_ZX1_ROPE1_GSI_BASE);
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
+                                   0, PCI_BASE_ADDRESS_0), ==,
+                    IA64_ZX1_ROPE1_IO_BASE | PCI_BASE_ADDRESS_SPACE_IO);
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
+                                   0, PCI_BASE_ADDRESS_1), ==,
+                    IA64_ZX1_ROPE1_MMIO_BASE);
     for (slot = 0; slot < PCI_SLOT_MAX; slot++) {
         /* A USB controller with programming interface 00h is a UHCI. */
         if (ia64_cfg_readw(qts, 0, slot, 0, PCI_CLASS_DEVICE) ==
@@ -3861,6 +3873,27 @@ static const PCIWindow gxb_mem[] = {
 };
 static const PCIWindow gxb_io[] = { { 0x03B0, 0x03DF }, { 0xD000, 0xDFFF } };
 
+/*
+ * zx1's PCI0 and rope-1 windows, mirroring PCI0 and PCI1 in
+ * roms/ia64-firmware/dsdt-pci-root-zx1.asl.
+ */
+static const PCIWindow zx1_pci0_mem[] = {
+    { 0xEE000000, 0xEF3FFFFF }, { 0xEF800000, 0xEFFFFFFF },
+};
+static const PCIWindow zx1_pci0_io[] = {
+    { 0x0000, 0x03AF }, { 0x03E0, 0xAFFF }, { 0xC000, 0xC2FF },
+    { 0xC400, 0xFFFF },
+};
+static const PCIWindow zx1_pci1_mem[] = { { 0xEF400000, 0xEF7FFFFF } };
+static const PCIWindow zx1_pci1_io[] = { { 0xB000, 0xBFFF } };
+
+static const PCIRootWindows zx1_root_windows[] = {
+    { 0, zx1_pci0_mem, G_N_ELEMENTS(zx1_pci0_mem),
+      zx1_pci0_io, G_N_ELEMENTS(zx1_pci0_io) },
+    { IA64_ZX1_ROPE1_BUS, zx1_pci1_mem, G_N_ELEMENTS(zx1_pci1_mem),
+      zx1_pci1_io, G_N_ELEMENTS(zx1_pci1_io) },
+};
+
 static const PCIRootWindows root_windows[] = {
     { 0, pci0_mem, G_N_ELEMENTS(pci0_mem), pci0_io, G_N_ELEMENTS(pci0_io) },
     { IA64_460GX_WXB0_BUS, wxb0_mem, G_N_ELEMENTS(wxb0_mem),
@@ -3884,13 +3917,15 @@ static bool pci_window_contains(const PCIWindow *windows, size_t count,
     return false;
 }
 
-static void check_root_window_containment(const char *args)
+static void check_windows_contain_bars(const char *args,
+                                       const PCIRootWindows *roots,
+                                       size_t nroots)
 {
     QTestState *qts = qtest_init(args);
     size_t root;
 
-    for (root = 0; root < G_N_ELEMENTS(root_windows); root++) {
-        const PCIRootWindows *rw = &root_windows[root];
+    for (root = 0; root < nroots; root++) {
+        const PCIRootWindows *rw = &roots[root];
         unsigned int slot;
 
         for (slot = 0; slot < 32; slot++) {
@@ -3910,11 +3945,19 @@ static void check_root_window_containment(const char *args)
                 }
                 if (value & PCI_BASE_ADDRESS_SPACE_IO) {
                     address = value & PCI_BASE_ADDRESS_IO_MASK;
+                    if (!pci_window_contains(rw->io, rw->io_count, address)) {
+                        g_test_message("%02x:%02x BAR%u I/O 0x%" PRIx64,
+                                       rw->bus, slot, bar, address);
+                    }
                     g_assert_true(pci_window_contains(rw->io, rw->io_count,
                                                       address));
                     continue;
                 }
                 address = value & PCI_BASE_ADDRESS_MEM_MASK;
+                if (!pci_window_contains(rw->mem, rw->mem_count, address)) {
+                    g_test_message("%02x:%02x BAR%u memory 0x%" PRIx64,
+                                   rw->bus, slot, bar, address);
+                }
                 g_assert_true(pci_window_contains(rw->mem, rw->mem_count,
                                                   address));
                 if ((value & PCI_BASE_ADDRESS_MEM_TYPE_MASK) ==
@@ -5628,6 +5671,19 @@ static void test_460gx_pcis_window(void)
     qtest_quit(qts);
 }
 
+static void check_root_window_containment(const char *args)
+{
+    check_windows_contain_bars(args, root_windows, G_N_ELEMENTS(root_windows));
+}
+
+/* Rope 1's root owns its own windows, cut out of PCI0's. */
+static void test_zx1_root_window_containment(void)
+{
+    check_windows_contain_bars("-machine zx1,ahci=on,ide=on -m 256M -S",
+                               zx1_root_windows,
+                               G_N_ELEMENTS(zx1_root_windows));
+}
+
 static void test_460gx_root_window_containment(void)
 {
     /*
@@ -6637,13 +6693,13 @@ static void test_e100_ipcb_ip_checksum(void)
     close(sockets[0]);
 }
 
-static void assert_cmd646_at_slot0(QTestState *qts)
+static void assert_cmd646_at(QTestState *qts, unsigned int slot)
 {
     QGenericPCIBus gbus;
     QPCIDevice *dev;
 
     ia64_qpci_init(&gbus, qts);
-    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(0, 0));
+    dev = qpci_device_find(&gbus.bus, QPCI_DEVFN(slot, 0));
     g_assert_nonnull(dev);
     g_assert_cmphex(qpci_config_readw(dev, PCI_VENDOR_ID), ==, 0x1095);
     g_assert_cmphex(qpci_config_readw(dev, PCI_DEVICE_ID), ==, 0x0646);
@@ -6656,29 +6712,30 @@ static void assert_cmd646_at_slot0(QTestState *qts)
 /*
  * A hand-attached CMD646 lands where it is told.  Slot 0 of the
  * compatibility bus is the Programmable Interrupt Device's seat on 460gx, so
- * this runs on zx1, where that slot is IDE's platform-anticipated home.
+ * this runs on zx1, where that slot is free.
  */
 static void test_pci_explicit_cmd646_slot0(void)
 {
-    assert_cmd646_at_slot0(qtest_initf(
+    assert_cmd646_at(qtest_initf(
         "-machine zx1 -m 256M -S "
-        "-device cmd646-ide,secondary=1,addr=0,bus=pci"));
+        "-device cmd646-ide,secondary=1,addr=0,bus=pci"), 0);
 }
 
 /*
- * On zx1 the ide=on machine option instantiates the same CMD646 at slot 0.
- * On 460gx it has nothing to do: the IDE controller is function 1 of the
- * south bridge, part of the board and not switchable, and slot 0 belongs to
- * the Programmable Interrupt Device, so the option is accepted without
- * effect.
+ * On zx1 the ide=on machine option instantiates the same CMD646 at the IDE
+ * seat, device 2.  On 460gx it has nothing to do: the IDE controller is
+ * function 1 of the south bridge, part of the board and not switchable, and
+ * slot 0 belongs to the Programmable Interrupt Device, so the option is
+ * accepted without effect.
  */
-static void test_ide_on_slot0(void)
+static void test_ide_on_seat(void)
 {
     QTestState *qts;
     QGenericPCIBus gbus;
     QPCIDevice *dev;
 
-    assert_cmd646_at_slot0(qtest_initf("-machine zx1,ide=on -m 256M -S"));
+    assert_cmd646_at(qtest_initf("-machine zx1,ide=on -m 256M -S"),
+                     IA64_ZX1_IDE_SLOT);
 
     qts = ia64_vpc_start("-machine ide=on");
     ia64_qpci_init(&gbus, qts);
@@ -9850,7 +9907,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/default-layout", test_pci_default_layout);
     qtest_add_func("/ia64-vpc/pci/explicit-cmd646-slot0",
                    test_pci_explicit_cmd646_slot0);
-    qtest_add_func("/ia64-vpc/pci/ide-on-slot0", test_ide_on_slot0);
+    qtest_add_func("/ia64-vpc/pci/ide-on-seat", test_ide_on_seat);
     qtest_add_func("/ia64-vpc/network/resources-survive-reset",
                    test_e1000_resources_survive_reset);
     qtest_add_func("/ia64-vpc/network/intx-route",
@@ -9949,6 +10006,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
     qtest_add_func("/ia64-vpc/eepro100/csr-windows",
                    test_eepro100_csr_windows);
+    qtest_add_func("/ia64-vpc/zx1/root-window-containment",
+                   test_zx1_root_window_containment);
     qtest_add_func("/ia64-vpc/zx1/bus0-population",
                    test_zx1_bus0_population);
     qtest_add_func("/ia64-vpc/eepro100/board-identity",

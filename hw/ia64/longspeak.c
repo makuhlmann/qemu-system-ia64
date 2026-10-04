@@ -18,6 +18,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_bus.h"
+#include "hw/ia64/ia64_expander.h"
 #include "hw/ia64/ia64_lba.h"
 #include "hw/ia64/ia64_mercury.h"
 #include "hw/ia64/ia64_sba.h"
@@ -30,8 +31,7 @@
 
 /*
  * The board LAN is device 3 of rope 0, where the vendor firmware's _PRT
- * routes it; the rx2600 has USB at 1 and IDE at 2 (rx2600 capture
- * 2026-10-03, DEV-4).
+ * routes it, with USB at 1 and IDE at 2 (rx2600 capture 2026-10-03, DEV-4).
  */
 #define IA64_VPC_NIC_SLOT           3
 /* How many of the ioa I/O SAPIC's pins the board wires. */
@@ -86,10 +86,22 @@ static DeviceState *longspeak_rope_ioa(uint32_t straps, Error **errp)
  * with the _PRT packages in roms/ia64-firmware/dsdt-pci-root-zx1.asl.
  */
 static const IA64IntxRoute longspeak_pci0_intx[] = {
-    { IA64_ZX1_SCSI_SLOT, { 0, 1, 2, 3 } },    /* rx2600: USB; here SCSI */
-    { 0x02, { 5, 5, 5, 5 } },                  /* rx2600: IDE; here OHCI */
+    { IA64_ZX1_USB_SLOT, { 0, 1, 2, 3 } },     /* OHCI, OHCI, EHCI */
+    { IA64_ZX1_IDE_SLOT, { 5, 5, 5, 5 } },
     { IA64_VPC_NIC_SLOT, { 4, 4, 4, 4 } },     /* LAN */
 };
+
+/*
+ * Rope 1's records on the rx2600: device 1 INTA and INTB, the 53C1030's two
+ * functions, on its I/O SAPIC's pins 0 and 1, device 2 INTA (the gigabit
+ * LAN) on pin 2 (SCRAM LBA 1 at FF45_FC18, GSI 27 to 29).  The root's
+ * outputs are those pins.
+ */
+static const IA64IntxRoute longspeak_rope1_intx[] = {
+    { IA64_ZX1_SCSI_SLOT, { 0, 1, 0, 1 } },
+    { 0x02, { 2, 2, 2, 2 } },
+};
+#define LONGSPEAK_ROPE1_INTX_PINS   4
 
 /*
  * The mio's fixed DRAM map (mio ERS 2.1): Memory0 from 0 to the I/O virtual
@@ -221,15 +233,30 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
         return false;
     }
     /*
-     * Rope 1's ioa: the rx2600's carries the SCSI and the gigabit LAN, and its
-     * I/O SAPIC takes the PDH UARTs and the SCI on inputs 7 to 9 (the vendor
-     * SPCR, HCDP and FADT name GSI 34 to 36, base 27).  Its bus stays empty
-     * here, so a configuration cycle on it finds nothing, as on an empty rope.
+     * Rope 1's ioa: the rx2600's carries the SCSI and the gigabit LAN on a
+     * bus of its own, and its I/O SAPIC takes the PDH UARTs and the SCI on
+     * inputs 7 to 9 (the vendor SPCR, HCDP and FADT name GSI 34 to 36, base
+     * 27).  The bus is a root of its own; the primary host's configuration
+     * window reaches it, and so does the ioa's configuration pair.
      */
     s->rope1_lba_dev = longspeak_rope_ioa(IA64_LBA_STRAPS_PCI66, errp);
     if (s->rope1_lba_dev == NULL) {
         return false;
     }
+    s->rope1_host = ia64_expander_host_create(OBJECT(s), "rope1",
+                                              ia64_pci_host_mmio(pci_host),
+                                              ia64_pci_host_io(pci_host),
+                                              IA64_ZX1_ROPE1_BUS,
+                                              longspeak_rope1_intx,
+                                              ARRAY_SIZE(longspeak_rope1_intx),
+                                              0, errp);
+    if (s->rope1_host == NULL) {
+        return false;
+    }
+    s->rope1_bus = ia64_expander_host_bus(s->rope1_host);
+    ia64_pci_host_add_secondary_bus(pci_host, s->rope1_bus);
+    ia64_sba_attach_bus(IA64_SBA(s->sba_dev), s->rope1_bus);
+    ia64_lba_set_config_bus(IA64_LBA(s->rope1_lba_dev), s->rope1_bus);
     ia64_sba_add_rope(IA64_SBA(s->sba_dev), 0,
                       &IA64_LBA(s->rope0_lba_dev)->csr);
     ia64_sba_add_rope(IA64_SBA(s->sba_dev), 1,
@@ -342,6 +369,29 @@ static void longspeak_wire_intx(IA64VpcMachineState *s, DeviceState *pci_host,
                                     qdev_get_gpio_in(org, 1)));
         }
     }
+    /*
+     * Rope 1's pins reach its own I/O SAPIC and, for our firmware, two
+     * platform lines above PCI0's block: pin & 1 picks the line.
+     */
+    {
+        DeviceState *line[2];
+
+        for (i = 0; i < ARRAY_SIZE(line); i++) {
+            line[i] = qdev_new(TYPE_OR_IRQ);
+            object_property_set_int(OBJECT(line[i]), "num-lines",
+                                    LONGSPEAK_ROPE1_INTX_PINS / 2,
+                                    &error_abort);
+            qdev_realize_and_unref(line[i], NULL, &error_abort);
+            qdev_connect_gpio_out(line[i], 0,
+                qdev_get_gpio_in(iosapic, IA64_ZX1_ROPE1_GSI_BASE + i));
+        }
+        for (i = 0; i < LONGSPEAK_ROPE1_INTX_PINS; i++) {
+            qdev_connect_gpio_out(s->rope1_host, i,
+                longspeak_split_irq(
+                    ia64_lba_iosapic_input(IA64_LBA(s->rope1_lba_dev), i),
+                    qdev_get_gpio_in(line[i & 1], i >> 1)));
+        }
+    }
     /* The SCI also keeps the platform IOSAPIC line our own FADT names. */
     s->acpi_sci_irq = longspeak_split_irq(s->acpi_sci_irq,
         ia64_lba_iosapic_input(IA64_LBA(s->rope1_lba_dev), LONGSPEAK_SCI_PIN));
@@ -376,10 +426,18 @@ static void longspeak_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
 {
     switch (seat) {
     case IA64_VPC_SEAT_SCSI:
+        /* The core I/O SCSI is on rope 1, as on the rx2600. */
+        *bus = s->rope1_bus;
         *devfn = PCI_DEVFN(IA64_ZX1_SCSI_SLOT, 0);
         break;
     case IA64_VPC_SEAT_SCSI_PARK:
-        /* The second adapter takes the next free slot of the single root. */
+        /* The second adapter takes the next free slot of PCI0. */
+        break;
+    case IA64_VPC_SEAT_USB:
+        *devfn = PCI_DEVFN(IA64_ZX1_USB_SLOT, 0);
+        break;
+    case IA64_VPC_SEAT_IDE:
+        *devfn = PCI_DEVFN(IA64_ZX1_IDE_SLOT, 0);
         break;
     case IA64_VPC_SEAT_VGA:
         /*
@@ -398,11 +456,23 @@ static void longspeak_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
     }
 }
 
-/* Both roots wire-OR into one block of four lines. */
+/* PCI0 and the Mercury root wire-OR into one block of four lines. */
 static unsigned int longspeak_root_gsi_base(const IA64VpcMachineState *s,
                                             uint8_t bus)
 {
     return IA64_PCI_INTX_GSI_BASE;
+}
+
+/* A device on rope 1 reports the platform line its pin reaches. */
+static int longspeak_intx_line(const IA64VpcMachineState *s, PCIDevice *dev,
+                               int pin)
+{
+    PCIBus *bus = pci_get_bus(dev);
+
+    if (bus != s->rope1_bus) {
+        return -1;
+    }
+    return IA64_ZX1_ROPE1_GSI_BASE + (bus->map_irq(dev, pin) & 1);
 }
 
 /*
@@ -498,13 +568,16 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->flash_device_id = 0x0017;
     imc->flash_block_locking = false;
     imc->lsi_default = true;
+    imc->scsi_seat_io_base = IA64_ZX1_ROPE1_IO_BASE;
+    imc->scsi_seat_mmio_base = IA64_ZX1_ROPE1_MMIO_BASE;
     imc->vga_default = "mach64";
-    /* Device 1 is core I/O on this board; the opt-in AHCI takes device 4. */
+    /* Devices 1 to 3 are core I/O on this board; the AHCI takes device 4. */
     imc->ahci_slot = IA64_ZX1_AHCI_SLOT;
     imc->wire_intx = longspeak_wire_intx;
     imc->build_isa = longspeak_build_isa;
     imc->seat = longspeak_seat;
     imc->root_gsi_base = longspeak_root_gsi_base;
+    imc->intx_line = longspeak_intx_line;
     /* The zx1 machine is the default; "ia64-vpc" is a deprecated alias of it. */
     mc->is_default = true;
     mc->alias = "ia64-vpc";

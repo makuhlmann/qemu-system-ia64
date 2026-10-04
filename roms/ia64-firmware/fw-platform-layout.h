@@ -21,10 +21,12 @@ extern char __fw_image_start[];
 #define PCI_OHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define PCI_AHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00020000ULL)
 /*
- * The SCSI host bus adapter lives on the first WXB expander root, so its BAR
- * comes out of that root's 32 MiB aperture (see dsdt-pci-root.asl).
+ * The SCSI host bus adapter lives on the first WXB expander root on the
+ * i2000, so its BAR comes out of that root's 32 MiB aperture (see
+ * dsdt-pci-root.asl), and on rope 1's root on zx1, out of that root's window.
  */
 #define PCI_LSI_MMIO_BAR              (IA64_PCI_MMIO_BASE + 0x0c000000ULL)
+#define PCI_ZX1_LSI_MMIO_BAR          IA64_ZX1_ROPE1_MMIO_BASE
 #define PCI_VGA_FB_BAR                (IA64_PCI_MMIO_BASE + 0x02000000ULL)
 #define PCI_VGA_MMIO_BAR              (IA64_PCI_MMIO_BASE + 0x07000000ULL)
 #define PCI_VGA_ATI_ID                0x50461002U

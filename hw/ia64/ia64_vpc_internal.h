@@ -84,6 +84,8 @@ typedef enum IA64VpcSeat {
     IA64_VPC_SEAT_VGA,         /* the graphics adapter (the AGP master) */
     IA64_VPC_SEAT_AUDIO,       /* the CS4281; devfn -1 = anywhere */
     IA64_VPC_SEAT_NIC,         /* the first network adapter's slot */
+    IA64_VPC_SEAT_USB,         /* the OHCI; devfn -1 = anywhere */
+    IA64_VPC_SEAT_IDE,         /* the opt-in IDE controller */
 } IA64VpcSeat;
 
 struct IA64VpcMachineClass {
@@ -156,6 +158,9 @@ struct IA64VpcMachineClass {
      * what rx2600/zx2000 carry; false the QLogic ISP12160 of the i2000.
      */
     bool lsi_default;
+    /* The SCSI seat's I/O and memory BAR bases; 0 = the first WXB root's. */
+    uint32_t scsi_seat_io_base;
+    uint64_t scsi_seat_mmio_base;
     /* The board's own graphics adapter ("rage128", "rage128gl", ...). */
     const char *vga_default;
     /* The console is COM1 (3F8h, IRQ 4); a debug port is COM2 (2F8h, IRQ 3). */
@@ -207,6 +212,11 @@ struct IA64VpcMachineClass {
                  int *devfn);
     /* The interrupt block owned by the root that carries bus @bus. */
     unsigned int (*root_gsi_base)(const IA64VpcMachineState *s, uint8_t bus);
+    /*
+     * The interrupt line of @dev's INTx @pin where its root wires its own
+     * lines, or -1 to take the root_gsi_base rule; NULL = that rule always.
+     */
+    int (*intx_line)(const IA64VpcMachineState *s, PCIDevice *dev, int pin);
 };
 
 struct IA64VpcMachineState {
@@ -256,7 +266,9 @@ struct IA64VpcMachineState {
     PCIDevice *sba_dev;
     DeviceState *lba_dev;
     DeviceState *rope0_lba_dev;     /* zx1: the primary root's ioa   */
-    DeviceState *rope1_lba_dev;     /* zx1: rope 1's ioa, no bus yet */
+    DeviceState *rope1_lba_dev;     /* zx1: rope 1's ioa */
+    DeviceState *rope1_host;        /* zx1: rope 1's PCI root */
+    PCIBus *rope1_bus;              /* zx1: rope 1's bus, IA64_ZX1_ROPE1_BUS */
     DeviceState *mercury_host;      /* zx1: the Mercury (LBA) PCI host bridge */
     /* 460gx: the WXB0, WXB1 and GXB expander roots (buses 1, 2 and 3). */
     DeviceState *expander_host[IA64_460GX_EXPANDER_ROOTS];

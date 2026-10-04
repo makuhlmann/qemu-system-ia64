@@ -2654,6 +2654,31 @@ static void ia64_vpc_configure_pci_irq(IA64VpcMachineState *s,
     ia64_vpc_configure_pci_irq_on_root(pci_dev, ia64_vpc_root_gsi_base(s, 0));
 }
 
+/*
+ * A seat whose root may wire its own lines: the board says, else the
+ * interrupt block of the root that carries bus @bus.
+ */
+static void ia64_vpc_configure_seat_irq(IA64VpcMachineState *s,
+                                        PCIDevice *pci_dev, uint8_t bus)
+{
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
+    uint8_t pin;
+    int line;
+
+    if (pci_dev == NULL) {
+        return;
+    }
+    pin = pci_dev->config[PCI_INTERRUPT_PIN];
+    if (imc->intx_line != NULL && pin >= 1 && pin <= PCI_NUM_PINS) {
+        line = imc->intx_line(s, pci_dev, pin - 1);
+        if (line >= 0) {
+            pci_default_write_config(pci_dev, PCI_INTERRUPT_LINE, line, 1);
+            return;
+        }
+    }
+    ia64_vpc_configure_pci_irq_on_root(pci_dev, ia64_vpc_root_gsi_base(s, bus));
+}
+
 static void ia64_vpc_configure_ahci(PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
@@ -2683,21 +2708,36 @@ static void ia64_vpc_configure_audio(PCIDevice *pci_dev)
                              PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER, 2);
 }
 
+/* The SCSI seat's BAR bases: the board's own, or the first WXB root's. */
+static uint32_t ia64_vpc_scsi_seat_io(const IA64VpcMachineState *s)
+{
+    uint32_t base = IA64_VPC_MACHINE_GET_CLASS(s)->scsi_seat_io_base;
+
+    return base != 0 ? base : IA64_SCSI_SEAT_IO_BASE;
+}
+
+static uint64_t ia64_vpc_scsi_seat_mmio(const IA64VpcMachineState *s)
+{
+    uint64_t base = IA64_VPC_MACHINE_GET_CLASS(s)->scsi_seat_mmio_base;
+
+    return base != 0 ? base : IA64_SCSI_SEAT_MMIO_PCI_BASE;
+}
+
 /*
  * The QLogic is the default adapter and always holds the SCSI seat when it
- * is present, so its BARs come out of the first WXB root's window.
+ * is present, so its BARs come out of the seat's window.
  */
-static void ia64_vpc_configure_isp(PCIDevice *pci_dev)
+static void ia64_vpc_configure_isp(IA64VpcMachineState *s, PCIDevice *pci_dev)
 {
     if (pci_dev == NULL) {
         return;
     }
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
-                             IA64_SCSI_SEAT_IO_BASE |
+                             ia64_vpc_scsi_seat_io(s) |
                              PCI_BASE_ADDRESS_SPACE_IO, 4);
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
-                             IA64_SCSI_SEAT_MMIO_PCI_BASE, 4);
+                             ia64_vpc_scsi_seat_mmio(s), 4);
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
                              PCI_COMMAND_MASTER, 2);
@@ -2774,9 +2814,10 @@ static void ia64_vpc_configure_lsi(IA64VpcMachineState *s, PCIDevice *pci_dev)
         return;
     }
 
-    io_base = s->isp_enabled ? IA64_SCSI_PARK_IO_BASE : IA64_SCSI_SEAT_IO_BASE;
+    io_base = s->isp_enabled ? IA64_SCSI_PARK_IO_BASE :
+                               ia64_vpc_scsi_seat_io(s);
     mmio_base = s->isp_enabled ? IA64_SCSI_PARK_MMIO_PCI_BASE :
-                                 IA64_SCSI_SEAT_MMIO_PCI_BASE;
+                                 ia64_vpc_scsi_seat_mmio(s);
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0, io_base, 4);
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1, mmio_base, 4);
@@ -3166,7 +3207,7 @@ static bool ia64_vpc_init_lsi(IA64VpcMachineState *s, PCIBus *bus, int devfn,
 static void ia64_vpc_init_isp(IA64VpcMachineState *s, PCIBus *bus, int devfn)
 {
     s->isp_dev = pci_create_simple(bus, devfn, TYPE_ISP12160_SCSI);
-    ia64_vpc_configure_isp(s->isp_dev);
+    ia64_vpc_configure_isp(s, s->isp_dev);
     scsi_bus_legacy_handle_cmdline(
         SCSI_BUS(qdev_get_child_bus(DEVICE(s->isp_dev), "isp12160-scsi.0")));
 }
@@ -3202,7 +3243,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
 {
     ia64_vpc_configure_ahci(s->ahci_dev);
     ia64_vpc_configure_audio(s->audio_dev);
-    ia64_vpc_configure_isp(s->isp_dev);
+    ia64_vpc_configure_isp(s, s->isp_dev);
     ia64_vpc_configure_ohci(s->ohci_dev);
     ia64_vpc_configure_uhci(s->uhci_dev);
     ia64_vpc_configure_ifb_ide(
@@ -3217,9 +3258,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     }
     ia64_vpc_configure_pci_irq(s, s->ahci_dev);
     ia64_vpc_configure_pci_irq(s, s->audio_dev);
-    ia64_vpc_configure_pci_irq_on_root(
-        s->isp_dev,
-        ia64_vpc_root_gsi_base(s, IA64_460GX_WXB0_BUS));
+    ia64_vpc_configure_seat_irq(s, s->isp_dev, IA64_460GX_WXB0_BUS);
     ia64_vpc_configure_pci_irq(s, s->ide_dev);
     ia64_vpc_configure_pci_irq(s, s->ohci_dev);
     ia64_vpc_configure_pci_irq(s, s->uhci_dev);
@@ -3227,10 +3266,9 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_IDE_FUNCTION));
     ia64_vpc_configure_pci_irq(s,
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
-    ia64_vpc_configure_pci_irq_on_root(
-        s->lsi_dev,
-        ia64_vpc_root_gsi_base(s, s->isp_enabled ? IA64_460GX_WXB1_BUS :
-                                                   IA64_460GX_WXB0_BUS));
+    ia64_vpc_configure_seat_irq(s, s->lsi_dev,
+                                s->isp_enabled ? IA64_460GX_WXB1_BUS :
+                                                 IA64_460GX_WXB0_BUS);
     ia64_vpc_configure_pci_irq_on_root(
         s->vga_dev,
         ia64_vpc_root_gsi_base(s, IA64_460GX_GXB_BUS));
@@ -3440,7 +3478,13 @@ static bool ia64_vpc_init_usb(IA64VpcMachineState *s, PCIBus *pci_bus,
         return true;
     }
 
-    s->ohci_dev = pci_create_simple(pci_bus, -1, "pci-ohci");
+    {
+        PCIBus *usb_pci_bus = pci_bus;
+        int usb_devfn = -1;
+
+        ia64_vpc_seat(s, IA64_VPC_SEAT_USB, &usb_pci_bus, &usb_devfn);
+        s->ohci_dev = pci_create_simple(usb_pci_bus, usb_devfn, "pci-ohci");
+    }
     ia64_vpc_configure_ohci(s->ohci_dev);
 
     /*
@@ -4294,6 +4338,7 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     ISABus *isa_bus;
     ISADevice *i8042 = NULL;
     MemoryRegion *pci_io;
+    uint32_t seat_slots = 0;
 #ifdef CONFIG_IA64_VPC_STORAGE
     DriveInfo *sata_drives[6] = { NULL };
     AHCIPCIState *ahci;
@@ -4424,14 +4469,21 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * arrives, so keep it out of automatic placement until then.
      */
     {
-        PCIBus *seat_bus = pci_bus;
-        int seat_devfn = -1;
+        static const IA64VpcSeat seats[] = {
+            IA64_VPC_SEAT_SCSI, IA64_VPC_SEAT_USB, IA64_VPC_SEAT_IDE,
+        };
+        unsigned int n;
 
-        imc->seat(s, IA64_VPC_SEAT_SCSI, &seat_bus, &seat_devfn);
-        if (seat_devfn >= 0 && seat_bus == pci_bus) {
-            pci_bus_set_slot_reserved_mask(pci_bus,
-                                           1U << PCI_SLOT(seat_devfn));
+        for (n = 0; n < ARRAY_SIZE(seats); n++) {
+            PCIBus *seat_bus = pci_bus;
+            int seat_devfn = -1;
+
+            imc->seat(s, seats[n], &seat_bus, &seat_devfn);
+            if (seat_devfn >= 0 && seat_bus == pci_bus) {
+                seat_slots |= 1U << PCI_SLOT(seat_devfn);
+            }
         }
+        pci_bus_set_slot_reserved_mask(pci_bus, seat_slots);
     }
     pci_io = pci_bus->address_space_io;
     /*
@@ -4727,8 +4779,10 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         ia64_vpc_configure_audio(s->audio_dev);
     }
 #endif
+    /* A seat whose device is off is an ordinary free slot. */
     pci_bus_clear_slot_reserved_mask(pci_bus,
-                                     (1U << 0) | (1U << imc->ahci_slot));
+                                     (1U << 0) | (1U << imc->ahci_slot) |
+                                     seat_slots);
 
     /*
      * The Programmable Interrupt Device's face in configuration space.  Its
@@ -4754,12 +4808,11 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
      * channels are in compatibility mode and decode the fixed legacy ports,
      * so only the bus-master BAR is placed.
      *
-     * On zx1, which has no such bridge, ide=on populates the reserved slot 0
-     * with a dual-channel CMD646.  Slot 0 is the platform-anticipated home
-     * for IDE there: the firmware's fixed PCI-I/O table and the DSDT _PRT
-     * both describe an IDE function at that address, and it keeps every
-     * other device's BDF stable.  The firmware assigns its I/O BARs on
-     * demand, exactly as for a hand-attached -device cmd646-ide.
+     * On zx1, which has no such bridge, ide=on seats a dual-channel CMD646
+     * where the rx2600 carries its CMD649, device 2 of PCI0: the firmware's
+     * fixed PCI-I/O table and the DSDT _PRT describe an IDE function there.
+     * The firmware assigns its I/O BARs on demand, exactly as for a
+     * hand-attached -device cmd646-ide.
      */
     if (s->ifb != NULL) {
         s->ide_dev = intel_82468gx_ifb_function(s->ifb,
@@ -4767,9 +4820,13 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         ia64_vpc_configure_ifb_ide(s->ide_dev);
         pci_ide_create_devs(s->ide_dev);
     } else if (s->ide_enabled) {
-        s->ide_dev = pci_new(PCI_DEVFN(0, 0), "cmd646-ide");
+        PCIBus *ide_bus = pci_bus;
+        int ide_devfn = -1;
+
+        ia64_vpc_seat(s, IA64_VPC_SEAT_IDE, &ide_bus, &ide_devfn);
+        s->ide_dev = pci_new(ide_devfn, "cmd646-ide");
         qdev_prop_set_uint32(DEVICE(s->ide_dev), "secondary", 1);
-        if (!pci_realize_and_unref(s->ide_dev, pci_bus, errp)) {
+        if (!pci_realize_and_unref(s->ide_dev, ide_bus, errp)) {
             return false;
         }
         ia64_vpc_configure_pci_irq(s, s->ide_dev);

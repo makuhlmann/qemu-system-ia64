@@ -1,7 +1,8 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Intel 460GX expander-bridge downstream PCI root bus for the 460gx machine.
+ * Intel 460GX expander-bridge downstream PCI root bus for the 460gx machine,
+ * also the root of a zx1 ioa's own bus (rope 1, hw/ia64/longspeak.c).
  *
  * Registered against the primary host bridge's shared identity-mapped MMIO
  * and I/O windows, so a device BAR on this bus lands in the same aperture the
@@ -143,7 +144,7 @@ static void ia64_expander_class_init(ObjectClass *klass, const void *data)
 
     dc->realize = ia64_expander_realize;
     dc->user_creatable = false;
-    dc->desc = "Intel 460GX expander bridge PCI root";
+    dc->desc = "Secondary PCI root (460GX expander bridge, zx1 ioa)";
     hc->root_bus_path = ia64_expander_root_bus_path;
 }
 

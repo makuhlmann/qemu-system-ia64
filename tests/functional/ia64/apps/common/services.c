@@ -210,7 +210,8 @@ typedef struct {
 /* PCI config window at the E8870 MMCFG home, 64 MiB = 64 buses (28ea66e). */
 #define TEST_ECAM_BASE               0x00000ffff8000000ULL
 #define TEST_ECAM_SIZE               0x0000000004000000ULL
-/* zx1's SCSI seat on PCI0, IA64_ZX1_SCSI_SLOT in hw/ia64/ia64_vpc_abi.h. */
+/* zx1's SCSI seat on rope 1, IA64_ZX1_SCSI_BUS/_SLOT in ia64_vpc_abi.h. */
+#define TEST_ZX1_SCSI_BUS            0x20U
 #define TEST_ZX1_SCSI_SLOT           1U
 #define TEST_PCI_MMIO_BASE           0x00000000ee000000ULL
 #define TEST_PCI_MMIO_SIZE           0x0000000010000000ULL
@@ -1716,17 +1717,19 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
     UINT32 device_id = 0;
 
     /*
-     * Read the always-present boot HBA on the core I/O seat, device 1: the
-     * LSI (0x1000:0x0012) this board carries, or the QLogic ISP12160
-     * (0x1077:0x1216) when isp=on,lsi=off puts that one there instead.  The
-     * AHCI controller is opt-in (ahci=off by default), so it must not be
-     * assumed present here.
+     * Read the always-present boot HBA on the core I/O seat, device 1 of
+     * rope 1's bus: the LSI (0x1000:0x0012) this board carries, or the
+     * QLogic ISP12160 (0x1077:0x1216) when isp=on,lsi=off puts that one there
+     * instead.  The AHCI controller is opt-in (ahci=off by default), so it
+     * must not be assumed present here.
      */
     return SystemTable->BootServices->LocateProtocol(
                pci_root_guid, NULL, (VOID **)&root) == EFI_SUCCESS &&
            root != NULL && root->Pci.Read != NULL &&
            root->SegmentNumber == 0 &&
-           root->Pci.Read(root, EfiPciWidthUint32, 1ULL << 16, 1,
+           root->Pci.Read(root, EfiPciWidthUint32,
+                          ((UINT64)TEST_ZX1_SCSI_BUS << 24) |
+                              ((UINT64)TEST_ZX1_SCSI_SLOT << 16), 1,
                           &device_id) == EFI_SUCCESS &&
            (device_id == 0x00121000U || device_id == 0x12161077U);
 }
@@ -1844,7 +1847,8 @@ static BOOLEAN test_pci_io_scsi_seat(EFI_SYSTEM_TABLE *SystemTable)
                                (VOID **)&pci) != EFI_SUCCESS || pci == NULL ||
             pci->GetLocation(pci, &segment, &bus, &device, &function) !=
                 EFI_SUCCESS ||
-            segment != 0 || bus != 0 || device != TEST_ZX1_SCSI_SLOT ||
+            segment != 0 || bus != TEST_ZX1_SCSI_BUS ||
+            device != TEST_ZX1_SCSI_SLOT ||
             function != 0) {
             continue;
         }
@@ -2058,6 +2062,60 @@ static BOOLEAN aml_named_byte(const UINT8 *Aml, UINTN AmlLength,
     return 0;
 }
 
+/*
+ * Rope 1's root PCI1 produces buses 0x20..0x3F and the I/O and memory
+ * windows its SCSI seat takes, IA64_ZX1_ROPE1_* in ia64_vpc_abi.h.
+ */
+static BOOLEAN test_dsdt_pci1_crs(const TEST_TABLE_CONTEXT *Context)
+{
+    static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
+    static const UINT8 pci1_name[4] = { 'P', 'C', 'I', '1' };
+    const UINT8 *aml = (const UINT8 *)Context->Dsdt + sizeof(TEST_SDT_HEADER);
+    UINTN aml_length = get_u32((const UINT8 *)Context->Dsdt + 4) -
+                       sizeof(TEST_SDT_HEADER);
+    const UINT8 *pci1;
+    const UINT8 *resources;
+    UINTN resource_length;
+    UINTN offset = 0;
+    BOOLEAN bus = 0, io = 0, memory = 0;
+
+    pci1 = find_bytes(aml, aml_length, pci1_name, sizeof(pci1_name), 0);
+    if (pci1 == NULL ||
+        !aml_named_buffer(aml, aml_length, crs_name, (UINTN)(pci1 - aml),
+                          &resources, &resource_length)) {
+        return 0;
+    }
+    while (offset + 3U <= resource_length && (resources[offset] & 0x80U)) {
+        const UINT8 *descriptor = resources + offset;
+        UINTN length = get_u16(descriptor + 1U);
+
+        if (length > resource_length - offset - 3U) {
+            return 0;
+        }
+        if (descriptor[0] == 0x88U && length == 13U && descriptor[3] == 2U &&
+            get_u16(descriptor + 8U) == 0x0020U &&
+            get_u16(descriptor + 10U) == 0x003fU &&
+            get_u16(descriptor + 14U) == 0x0020U) {
+            bus = 1;
+        } else if (descriptor[0] == 0x8aU && length == 43U &&
+                   descriptor[3] == 1U && descriptor[5] == 0x33U &&
+                   get_u64(descriptor + 14U) == 0x0000b000U &&
+                   get_u64(descriptor + 22U) == 0x0000bfffU &&
+                   get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
+                   get_u64(descriptor + 38U) == 0x00001000U) {
+            io = 1;
+        } else if (descriptor[0] == 0x8aU && length == 43U &&
+                   descriptor[3] == 0U &&
+                   get_u64(descriptor + 14U) == 0xef400000U &&
+                   get_u64(descriptor + 22U) == 0xef7fffffU &&
+                   get_u64(descriptor + 38U) == 0x00400000U) {
+            memory = 1;
+        }
+        offset += 3U + length;
+    }
+    return bus && io && memory;
+}
+
 static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
 {
     static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
@@ -2070,9 +2128,11 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
     UINTN offset = 0;
     BOOLEAN bus = 0;
     BOOLEAN io_a = 0;   /* 0x0000..0x03AF (below the VGA legacy hole)        */
-    BOOLEAN io_b = 0;   /* 0x03E0..0xC2FF (between the VGA and graphics holes) */
+    BOOLEAN io_b = 0;   /* 0x03E0..0xAFFF (between the VGA and rope-1 holes)  */
+    BOOLEAN io_d = 0;   /* 0xC000..0xC2FF (between rope 1 and graphics)       */
     BOOLEAN io_c = 0;   /* 0xC400..0xFFFF (above the graphics I/O hole)       */
     BOOLEAN memory = 0;
+    BOOLEAN memory_high = 0;
     BOOLEAN uart_window = 0;
     BOOLEAN end_tag = 0;
 
@@ -2140,10 +2200,18 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                        descriptor[3] == 1U && descriptor[5] == 0x33U &&
                        get_u64(descriptor + 6U) == 0 &&
                        get_u64(descriptor + 14U) == 0x000003e0U &&
+                       get_u64(descriptor + 22U) == 0x0000afffU &&
+                       get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
+                       get_u64(descriptor + 38U) == 0x0000ac20U) {
+                io_b = 1;
+            } else if (descriptor[0] == 0x8aU && length == 43U &&
+                       descriptor[3] == 1U && descriptor[5] == 0x33U &&
+                       get_u64(descriptor + 6U) == 0 &&
+                       get_u64(descriptor + 14U) == 0x0000c000U &&
                        get_u64(descriptor + 22U) == 0x0000c2ffU &&
                        get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
-                       get_u64(descriptor + 38U) == 0x0000bf20U) {
-                io_b = 1;
+                       get_u64(descriptor + 38U) == 0x00000300U) {
+                io_d = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 1U && descriptor[5] == 0x33U &&
                        get_u64(descriptor + 6U) == 0 &&
@@ -2156,16 +2224,25 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                        descriptor[3] == 0U &&
                        get_u64(descriptor + 6U) == 0 &&
                        get_u64(descriptor + 14U) == TEST_PCI_MMIO_BASE &&
-                       get_u64(descriptor + 22U) == 0xefffffffU &&
+                       get_u64(descriptor + 22U) == 0xef3fffffU &&
                        get_u64(descriptor + 30U) == 0 &&
-                       get_u64(descriptor + 38U) == 0x02000000U) {
+                       get_u64(descriptor + 38U) == 0x01400000U) {
                 /*
-                 * PCI0's low MMIO producer window (0xEE000000..0xEFFFFFFF): the
-                 * built-in device BARs (LSI/AHCI/USB/NIC) live here.  The legacy
-                 * VGA (0xA0000) / option-ROM (0xC0000) apertures and the high
-                 * MMIO (0xF0000000+) belong to the Mercury root now.
+                 * PCI0's low MMIO producer windows (0xEE000000..0xEFFFFFFF
+                 * less rope 1's 0xEF400000..0xEF7FFFFF): the built-in device
+                 * BARs (AHCI/USB/NIC/audio) live here.  The legacy VGA
+                 * (0xA0000) / option-ROM (0xC0000) apertures and the high
+                 * MMIO (0xF0000000+) belong to the Mercury root.
                  */
                 memory = 1;
+            } else if (descriptor[0] == 0x8aU && length == 43U &&
+                       descriptor[3] == 0U &&
+                       get_u64(descriptor + 6U) == 0 &&
+                       get_u64(descriptor + 14U) == 0xef800000U &&
+                       get_u64(descriptor + 22U) == 0xefffffffU &&
+                       get_u64(descriptor + 30U) == 0 &&
+                       get_u64(descriptor + 38U) == 0x00800000U) {
+                memory_high = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 0U && descriptor[4] == 0x0cU &&
                        get_u64(descriptor + 6U) == 0 &&
@@ -2193,7 +2270,8 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
      * Server 2003 leaves COM1 at code 12.  The window that 5a58a91 dropped
      * (XP 2600: STOP 0x50) was in the 460gx tables, which XP 2600 reads.
      */
-    return bus && io_a && io_b && io_c && memory && uart_window && end_tag;
+    return bus && io_a && io_b && io_d && io_c && memory && memory_high &&
+           uart_window && end_tag && test_dsdt_pci1_crs(Context);
 }
 
 static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)

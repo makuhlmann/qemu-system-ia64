@@ -412,6 +412,20 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * chipset profile creates it; keep in lockstep with LBA0 in dsdt-pci-root-zx1.asl.
  */
 #define IA64_MERCURY_BUS              0x10
+/*
+ * Rope 1's ioa carries a bus of its own, numbered 0x20 as on the rx2600
+ * (its SCRAM gives rope 1 buses 20h-3Fh; rx2600 capture 2026-10-03, DEV-3),
+ * with the core I/O SCSI at device 1 and the gigabit LAN at device 2.  Under
+ * our firmware the root owns this I/O and memory window, cut out of PCI0's,
+ * and its INTx reaches the platform inputs from IA64_ZX1_ROPE1_GSI_BASE.
+ * Keep in lockstep with PCI1 in dsdt-pci-root-zx1.asl.
+ */
+#define IA64_ZX1_ROPE1_BUS            0x20
+#define IA64_ZX1_ROPE1_IO_BASE        0x0000b000U
+#define IA64_ZX1_ROPE1_IO_SIZE        0x00001000U
+#define IA64_ZX1_ROPE1_MMIO_BASE      IA64_U64(0x00000000ef400000)
+#define IA64_ZX1_ROPE1_MMIO_SIZE      IA64_U64(0x0000000000400000)
+#define IA64_ZX1_ROPE1_GSI_BASE       22
 
 /*
  * 460GX expander roots.  The i2000 reaches its PCI buses through expander
@@ -468,13 +482,15 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_460GX_AUDIO_SLOT         0x04
 #define IA64_MERCURY_VGA_SLOT        0x00
 /*
- * zx1's PCI0 storage seats: the SCSI adapter at device 1, which the vendor
- * firmware's SCRAM interrupt records route to the rope's first three
- * interrupts (the rx2600 itself has its SCSI on rope 1), and the opt-in AHCI
- * at device 4.  The i2000 keeps the AHCI at device 1 of its compatibility
- * bus.
+ * zx1's storage seats: the SCSI adapter at device 1 of rope 1's bus, where
+ * the rx2600 carries its 53C1030, and the opt-in AHCI at device 4 of PCI0.
+ * The i2000 keeps the AHCI at device 1 of its compatibility bus.
  */
+#define IA64_ZX1_SCSI_BUS             IA64_ZX1_ROPE1_BUS
 #define IA64_ZX1_SCSI_SLOT            0x01
+/* PCI0's core I/O: USB at device 1, IDE at 2 and the LAN at 3 (DEV-4). */
+#define IA64_ZX1_USB_SLOT             0x01
+#define IA64_ZX1_IDE_SLOT             0x02
 #define IA64_ZX1_AHCI_SLOT            0x04
 #define IA64_460GX_AHCI_SLOT          0x01
 /* 16 MiB PAL/SAL firmware address space below 4 GiB. */

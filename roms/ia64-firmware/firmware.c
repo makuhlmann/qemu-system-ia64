@@ -330,7 +330,7 @@ FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE == 2695u, dsdt_generated_aml_size);
 FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_AML_SIZE == 542u,
                  ssdt_generated_aml_size);
 /* The nested zx1-profile DSDT/SSDT; the larger sets ACPI_DSDT/SSDT Aml[]. */
-FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_ZX1_AML_SIZE == 1228u,
+FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_ZX1_AML_SIZE == 1784u,
                  dsdt_zx1_generated_aml_size);
 FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_ZX1_AML_SIZE == 506u,
                  ssdt_zx1_generated_aml_size);
@@ -14646,15 +14646,25 @@ static void fw_retarget_vga_device_paths(void)
 /*
  * The USB and IDE controllers are functions 2 and 1 of the 82468GX I/O and
  * Firmware Bridge on the i2000, not discrete function-zero devices of their
- * own.  Retarget their fixed PCI-I/O table entries and device paths, whose
- * static initializers find nothing on zx1 (no UHCI, and IDE only with
- * ide=on).  Same timing rule as fw_retarget_vga_device_paths().
+ * own.  On zx1 they are core I/O devices of PCI0: the OHCI at device
+ * IA64_ZX1_USB_SLOT, the opt-in IDE at IA64_ZX1_IDE_SLOT (no UHCI).
+ * Retarget their fixed PCI-I/O table entries and device paths.  Same timing
+ * rule as fw_retarget_vga_device_paths().
  */
 static void fw_retarget_south_bridge_device_paths(void)
 {
     UINTN i;
 
     if (fw_platform_is_zx1()) {
+        for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
+            if (mPciIoDevices[i].Protocol == &mPciOhciIoProto) {
+                mPciIoDevices[i].Device = IA64_ZX1_USB_SLOT;
+            } else if (mPciIoDevices[i].Protocol == &mPciIdeIoProto) {
+                mPciIoDevices[i].Device = IA64_ZX1_IDE_SLOT;
+            }
+        }
+        mPciOhciDevicePath.Pci.Device = IA64_ZX1_USB_SLOT;
+        mPciIdeDevicePath.Pci.Device = IA64_ZX1_IDE_SLOT;
         return;
     }
     for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
@@ -14676,17 +14686,18 @@ static void fw_retarget_south_bridge_device_paths(void)
 
 /*
  * The board's storage seats (ia64_vpc_abi.h): the LSI takes the SCSI seat,
- * device IA64_ZX1_SCSI_SLOT of the single root on zx1 and the SCSI slot of
- * the first WXB expander root (ACPI _UID IA64_460GX_WXB0_BUS) on the i2000;
- * the opt-in AHCI sits on the compatibility bus.  fw_storage_pci_device() in
- * filesystem.c names the same seats for the boot paths.  Retarget the PCI
- * I/O table entries and their device paths together.  Same timing rule as
- * fw_retarget_vga_device_paths().
+ * device IA64_ZX1_SCSI_SLOT of rope 1's root (ACPI _UID IA64_ZX1_SCSI_BUS)
+ * on zx1 and the SCSI slot of the first WXB expander root (ACPI _UID
+ * IA64_460GX_WXB0_BUS) on the i2000; the opt-in AHCI sits on the
+ * compatibility bus.  Each root's _UID is its bus number.
+ * fw_storage_pci_device() in filesystem.c names the same seats for the boot
+ * paths.  Retarget the PCI I/O table entries and their device paths
+ * together.  Same timing rule as fw_retarget_vga_device_paths().
  */
 static void fw_retarget_storage_device_paths(void)
 {
     BOOLEAN zx1 = fw_platform_is_zx1();
-    UINT8 bus = zx1 ? 0 : IA64_460GX_WXB0_BUS;
+    UINT8 bus = zx1 ? IA64_ZX1_SCSI_BUS : IA64_460GX_WXB0_BUS;
     UINT8 device = zx1 ? IA64_ZX1_SCSI_SLOT : IA64_460GX_WXB0_SCSI_SLOT;
     UINT8 ahci = zx1 ? IA64_ZX1_AHCI_SLOT : IA64_460GX_AHCI_SLOT;
     UINTN i;
@@ -14695,6 +14706,8 @@ static void fw_retarget_storage_device_paths(void)
         if (mPciIoDevices[i].Protocol == &mPciLsiIoProto) {
             mPciIoDevices[i].Bus = bus;
             mPciIoDevices[i].Device = device;
+            mPciIoDevices[i].ExpectedBarValue =
+                zx1 ? (UINT32)PCI_ZX1_LSI_MMIO_BAR : (UINT32)PCI_LSI_MMIO_BAR;
         } else if (mPciIoDevices[i].Protocol == &mPciAhciIoProto) {
             mPciIoDevices[i].Device = ahci;
         }

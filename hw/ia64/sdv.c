@@ -470,6 +470,10 @@ static void sdv_seat(IA64VpcMachineState *s, IA64VpcSeat seat, PCIBus **bus,
     case IA64_VPC_SEAT_NIC:
         *devfn = PCI_DEVFN(IA64_460GX_NIC_SLOT, 0);
         break;
+    case IA64_VPC_SEAT_USB:
+    case IA64_VPC_SEAT_IDE:
+        /* The IDE is a south-bridge function; the OHCI goes anywhere. */
+        break;
     }
 }
 
