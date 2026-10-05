@@ -7,5 +7,9 @@ longspeak_pdh_register(const char *name, uint64_t value, int cpu) "%s = 0x%" PRI
 longspeak_pdh_semaphore(const char *op, unsigned id, int cpu) "semaphore %s by id %u (cpu %d)"
 longspeak_pdh_status(unsigned slot, uint8_t value, int cpu) "status[%u] = %u (cpu %d)"
 
+# longspeak_bmc.c
+longspeak_bmc_command(uint8_t netfn, uint8_t cmd, unsigned len, uint32_t data) "netfn 0x%02x cmd 0x%02x len %u data 0x%08x"
+longspeak_bmc_response(uint8_t netfn, uint8_t cmd, uint8_t cc, unsigned len) "netfn 0x%02x cmd 0x%02x cc 0x%02x len %u"
+
 # ia64_base.c
 ia64_vpc_xtp(int cpu, uint8_t value) "cpu %d XTP byte 0x%02x"

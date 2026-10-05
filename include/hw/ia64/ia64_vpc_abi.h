@@ -558,13 +558,20 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_BMC_KCS2             0x0000U
 #define IA64_PDH_BMC_KCS3             0x0062U
 /*
- * Get Device ID of the rx2600's BMC: firmware 1.53, IPMI 1.0 (rx2600 capture
- * 2026-10-03, BMC-1), the version BCD with the major digit in bits 3:0 (IPMI
- * v2.0 table 20-2).
+ * Get Device ID of the rx2600's BMC (rx2600 captures 2026-10-03 and
+ * 2026-10-04, BMC-1): device 32h, revision 1 with device SDRs (bit 7),
+ * firmware 1.53, IPMI 1.0, the version BCD with the major digit in bits 3:0
+ * (IPMI v2.0 table 20-2), every additional device support bit up to the
+ * event generator, manufacturer 0Bh (HP), product 8201h.
  */
+#define IA64_PDH_BMC_DEVICE_ID        0x32U
+#define IA64_PDH_BMC_DEVICE_REV       0x81U
 #define IA64_PDH_BMC_FW_MAJOR         0x01U
 #define IA64_PDH_BMC_FW_MINOR         0x53U
 #define IA64_PDH_BMC_IPMI_VERSION     0x01U
+#define IA64_PDH_BMC_DEVICE_SUPPORT   0x3fU
+#define IA64_PDH_BMC_MANUFACTURER     0x00000bU
+#define IA64_PDH_BMC_IPMI_PRODUCT     0x8201U
 /* The board id the firmware picks its DIMM slot table with (FFF62880). */
 #define IA64_PDH_BMC_PRODUCT_ID       257U
 #define IA64_PDH_BMC_PRODUCT_ID_OFFSET 115U  /* in the FRU product area */

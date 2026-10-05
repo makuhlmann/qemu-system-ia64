@@ -51,6 +51,7 @@
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "qemu/cutils.h"
+#include "qemu/timer.h"
 #include "qemu/uuid.h"
 #include "system/system.h"
 #include "hw/core/boards.h"
@@ -58,6 +59,7 @@
 #include "qom/object.h"
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "longspeak_pdh.h"
+#include "trace.h"
 
 #define LONGSPEAK_BMC_NETFN_TOKEN       0x32
 #define LONGSPEAK_BMC_TOKEN_INFO        0x01
@@ -69,6 +71,21 @@
 #define LONGSPEAK_BMC_NETFN_STORAGE 0x0a
 #define LONGSPEAK_BMC_CMD_FRU_INFO  0x10
 #define LONGSPEAK_BMC_CMD_FRU_READ  0x11
+#define LONGSPEAK_BMC_CMD_SDR_TIME  0x28
+
+#define LONGSPEAK_BMC_NETFN_CHASSIS         0x00
+#define LONGSPEAK_BMC_CMD_CHASSIS_CAPS      0x00
+#define LONGSPEAK_BMC_CMD_CHASSIS_STATUS    0x01
+#define LONGSPEAK_BMC_CMD_RESTART_CAUSE     0x07
+#define LONGSPEAK_BMC_CMD_BOOT_OPTIONS      0x09
+#define LONGSPEAK_BMC_CMD_POH               0x0f
+#define LONGSPEAK_BMC_NETFN_SENSOR          0x04
+#define LONGSPEAK_BMC_CMD_EVENT_RECEIVER    0x01
+#define LONGSPEAK_BMC_CMD_PEF_CAPS          0x10
+#define LONGSPEAK_BMC_NETFN_APP             0x06
+#define LONGSPEAK_BMC_CMD_DEVICE_ID         0x01
+#define LONGSPEAK_BMC_CMD_DEVICE_GUID       0x08
+#define LONGSPEAK_BMC_CMD_CHANNEL_INFO      0x42
 
 /* The two sets of per-processor devices are four apart, so four each. */
 #define LONGSPEAK_BMC_FRU_FIRST     0x20
@@ -110,16 +127,24 @@ DECLARE_CLASS_CHECKERS(LongspeakBmcClass, LONGSPEAK_BMC, TYPE_LONGSPEAK_BMC)
 #define LONGSPEAK_BMC_SPD_SIZE      256
 
 /*
- * FRU device 5.  SAL_B reads its first byte and takes the board with the
- * I/O backplane when the BMC answers: ropes 0 to 4 (4 double-wide) and 6, the
- * rx2600's; without it, the core I/O ropes 0 and 1 alone (FFEAB2F0, tables
- * from FFF7_F160).  An answer from device 6 would add rope 7, which the
- * rx2600 does not have.  The device's contents are not captured, so it is an
- * empty FRU: the common header alone, version 1, no areas (IPMI FRU 1.0
- * sec 8).
+ * FRU device 5, the I/O riser.  SAL_B reads its first byte and takes the
+ * board with the I/O backplane when the BMC answers: ropes 0 to 4 (4
+ * double-wide) and 6, the rx2600's; without it, the core I/O ropes 0 and 1
+ * alone (FFEAB2F0, tables from FFF7_F160).  A byte read from device 6 would
+ * add rope 7.  On the rx2600 device 6 has an area of 256 bytes that cannot
+ * be read, cc CEh [inferred: the MP card's, which that machine lacks], and
+ * the riser 256 bytes: a zero internal-use area at 8 and a board area at 72
+ * whose length byte says 128 but whose fields fill 120 as on the system
+ * board (rx2600 capture 2026-10-04, BMC-3 and FRU 5).
  */
 #define LONGSPEAK_BMC_FRU_IO        0x05
-#define LONGSPEAK_BMC_FRU_IO_SIZE   8
+#define LONGSPEAK_BMC_FRU_IO_SIZE   256
+#define LONGSPEAK_BMC_FRU_IO_BOARD_OFF 72
+#define LONGSPEAK_BMC_FRU_IO_BOARD_UNITS 16
+#define LONGSPEAK_BMC_FRU_IO_FILE_ID 0x10
+#define LONGSPEAK_BMC_FRU_MP        0x06
+#define LONGSPEAK_BMC_FRU_MP_SIZE   256
+#define LONGSPEAK_BMC_CC_NO_RESPONSE 0xce
 
 /* The DIMM slots 0A, 0B, 1A ... 5B and the FRU device of each (FFF96CD8). */
 static const uint8_t longspeak_bmc_dimm_dev[] = {
@@ -198,6 +223,10 @@ static const LongspeakBmcFruField longspeak_bmc_board_late_fields[] = {
     { "", 8 }, { "", 4 }, { "", 2 },
 };
 
+static const LongspeakBmcFruField longspeak_bmc_riser_fields[] = {
+    { "QE", 10 }, { "Longs Peak I/O riser", 32 }, { "", 16 }, { "", 11 },
+};
+
 static const LongspeakBmcFruField longspeak_bmc_product_fields[] = {
     { "QE", 2 }, { "Longs Peak", 32 }, { "QE-LP1", 11 }, { "", 6 },
     { "QE00000001", 20 }, { "", 32 },
@@ -219,6 +248,44 @@ static void longspeak_bmc_fru_sum(uint8_t *area, unsigned int size)
         sum += area[i];
     }
     area[size - 1] = -sum;
+}
+
+/* The board fields fill 120 bytes whatever the length byte says. */
+static void longspeak_bmc_board_area(uint8_t *area, uint8_t units,
+                                     const LongspeakBmcFruField *fields,
+                                     uint8_t file_id)
+{
+    uint8_t *p;
+
+    area[0] = 0x01;             /* language and date 0 */
+    area[1] = units;
+    p = longspeak_bmc_fru_fields(area + 6, fields, 4);
+    *p++ = LONGSPEAK_BMC_FRU_FILE_TL;
+    *p++ = file_id;
+    p = longspeak_bmc_fru_fields(p, longspeak_bmc_board_late_fields,
+                                 ARRAY_SIZE(longspeak_bmc_board_late_fields));
+    assert(p == area + LONGSPEAK_BMC_BOARD_INFO_OFF);
+    *p = LONGSPEAK_BMC_BOARD_INFO_SIZE;     /* binary */
+    p += 1 + LONGSPEAK_BMC_BOARD_INFO_SIZE;
+    *p = 0xc1;
+    longspeak_bmc_fru_sum(area, LONGSPEAK_BMC_BOARD_SIZE);
+}
+
+static void longspeak_bmc_riser_fru(uint8_t *fru)
+{
+    QEMU_BUILD_BUG_ON(LONGSPEAK_BMC_FRU_IO_BOARD_OFF +
+                      LONGSPEAK_BMC_FRU_IO_BOARD_UNITS * 8 >
+                      LONGSPEAK_BMC_FRU_IO_SIZE);
+
+    memset(fru, 0, LONGSPEAK_BMC_FRU_IO_SIZE);
+    fru[0] = 0x01;
+    fru[1] = LONGSPEAK_BMC_INTERNAL_OFF / 8;
+    fru[3] = LONGSPEAK_BMC_FRU_IO_BOARD_OFF / 8;
+    longspeak_bmc_fru_sum(fru, 8);
+    longspeak_bmc_board_area(fru + LONGSPEAK_BMC_FRU_IO_BOARD_OFF,
+                             LONGSPEAK_BMC_FRU_IO_BOARD_UNITS,
+                             longspeak_bmc_riser_fields,
+                             LONGSPEAK_BMC_FRU_IO_FILE_ID);
 }
 
 static void longspeak_bmc_board_fru(uint8_t *fru)
@@ -249,20 +316,12 @@ static void longspeak_bmc_board_fru(uint8_t *fru)
     *p = 0xc1;                  /* no more fields */
     longspeak_bmc_fru_sum(area, LONGSPEAK_BMC_CHASSIS_SIZE);
 
-    area = fru + LONGSPEAK_BMC_BOARD_OFF;   /* language and date 0 */
-    area[0] = 0x01;
-    area[1] = LONGSPEAK_BMC_BOARD_SIZE / 8;
-    p = longspeak_bmc_fru_fields(area + 6, longspeak_bmc_board_fields,
-                                 ARRAY_SIZE(longspeak_bmc_board_fields));
-    *p++ = LONGSPEAK_BMC_FRU_FILE_TL;
-    *p++ = LONGSPEAK_BMC_FRU_FILE_ID;
-    p = longspeak_bmc_fru_fields(p, longspeak_bmc_board_late_fields,
-                                 ARRAY_SIZE(longspeak_bmc_board_late_fields));
-    assert(p == area + LONGSPEAK_BMC_BOARD_INFO_OFF);
-    *p = LONGSPEAK_BMC_BOARD_INFO_SIZE;     /* binary */
-    p += 1 + LONGSPEAK_BMC_BOARD_INFO_SIZE;
-    *p = 0xc1;
-    longspeak_bmc_fru_sum(area, LONGSPEAK_BMC_BOARD_SIZE);
+    QEMU_BUILD_BUG_ON(ARRAY_SIZE(longspeak_bmc_board_fields) != 4 ||
+                      ARRAY_SIZE(longspeak_bmc_riser_fields) != 4);
+    longspeak_bmc_board_area(fru + LONGSPEAK_BMC_BOARD_OFF,
+                             LONGSPEAK_BMC_BOARD_SIZE / 8,
+                             longspeak_bmc_board_fields,
+                             LONGSPEAK_BMC_FRU_FILE_ID);
 
     area = fru + LONGSPEAK_BMC_PRODUCT_OFF;
     area[0] = 0x01;
@@ -286,13 +345,19 @@ static uint32_t longspeak_bmc_dimm_serial(const LongspeakBmcDimm *dimm,
 }
 
 /*
- * A JEDEC SPD for a registered ECC PC2100 module (SPD revision 1.2).  The
- * firmware reads the whole 128 bytes, rereads byte 63 and compares the two
- * (FFF62010), so only a consistent image passes.
+ * A JEDEC SPD for a registered ECC PC2100 module with x4 devices, as the
+ * rx2600's HP A6746-60001 (512 MB, 256 Mbit x4 devices; rx2600 capture
+ * 2026-10-04, MAN-3): its timing bytes, SPD revision 0, and 0xFF in the
+ * bytes nobody wrote.  The manufacturer data are the model's: no JEDEC id,
+ * a part number of its own and the serial number.  The firmware reads the
+ * whole 128 bytes, rereads byte 63 and compares the two (FFF62010), so only
+ * a consistent image passes.
  */
 static void longspeak_bmc_spd(const LongspeakBmcDimm *dimm, unsigned int slot,
                               uint8_t *spd)
 {
+    g_autofree char *part = g_strdup_printf("QE-DDR266-%uM",
+                                            (unsigned)(dimm->size >> 20));
     uint8_t sum = 0;
     unsigned int i;
 
@@ -305,31 +370,44 @@ static void longspeak_bmc_spd(const LongspeakBmcDimm *dimm, unsigned int slot,
     spd[5] = dimm->ranks;
     spd[6] = 72;                    /* module data width, ECC */
     spd[8] = 0x04;                  /* SSTL 2.5 V */
-    spd[9] = 0x75;                  /* 7.5 ns cycle: PC2100 */
-    spd[10] = 0x54;
+    spd[9] = 0x70;                  /* 7.0 ns at CAS latency 2.5 */
+    spd[10] = 0x75;                 /* tAC 0.75 ns */
     spd[11] = 0x02;                 /* ECC */
     spd[12] = 0x82;                 /* refresh every 7.8 us, self refresh */
-    spd[13] = 8;                    /* device width */
-    spd[14] = 8;                    /* checking width */
+    spd[13] = 4;                    /* device width */
+    spd[14] = 4;                    /* checking width */
+    spd[15] = 0x01;                 /* tCCD one clock */
     spd[16] = 0x0e;                 /* burst lengths 2, 4 and 8 */
     spd[17] = 4;                    /* banks per device */
     spd[18] = 0x0c;                 /* CAS latency 2 and 2.5 */
-    spd[20] = 0x02;                 /* registered */
+    spd[19] = 0x01;                 /* CS latency 0 */
+    spd[20] = 0x02;                 /* write latency 1 */
     spd[21] = 0x26;                 /* registered, one PLL, FET */
-    spd[22] = 0xc0;                 /* device attributes */
-    spd[23] = 0x75;                 /* one latency down: the same cycle */
-    spd[24] = 0x54;
+    spd[22] = 0x80;                 /* device attributes */
+    spd[23] = 0x75;                 /* 7.5 ns at CAS latency 2 */
+    spd[24] = 0x75;
     spd[27] = 0x50;                 /* tRP 20 ns */
     spd[28] = 0x3c;                 /* tRRD 15 ns */
     spd[29] = 0x50;                 /* tRCD 20 ns */
     spd[30] = 0x2d;                 /* tRAS 45 ns */
     spd[31] = dimm->density;
-    spd[62] = 0x12;                 /* SPD revision 1.2 */
+    spd[32] = 0x90;                 /* address and command setup 0.9 ns */
+    spd[33] = 0x90;                 /* and hold */
+    spd[34] = 0x50;                 /* data setup 0.5 ns */
+    spd[35] = 0x50;                 /* and hold */
+    spd[41] = 0x41;                 /* tRC 65 ns */
+    spd[42] = 0x4b;                 /* tRFC 75 ns */
+    spd[43] = 0x30;                 /* tCK maximum 12 ns */
+    spd[44] = 0x32;                 /* tDQSQ 0.5 ns */
+    spd[45] = 0x75;                 /* tQHS 0.75 ns */
     for (i = 0; i < 63; i++) {
         sum += spd[i];
     }
     spd[63] = sum;
+    memset(spd + 73, ' ', 18);
+    memcpy(spd + 73, part, MIN(strlen(part), 18));
     stl_le_p(&spd[95], longspeak_bmc_dimm_serial(dimm, slot));
+    memset(spd + 99, 0xff, LONGSPEAK_BMC_SPD_SIZE - 99);
 }
 
 /*
@@ -655,11 +733,18 @@ static bool longspeak_bmc_fru_image(uint8_t *cmd, unsigned int cmd_len,
     return true;
 }
 
+/*
+ * A device the BMC does not have answers cc CBh, also to command 0xd0 in the
+ * DIMM range 80h-BFh, where 86h and 87h answer as 88h and 89h; 0xd0 on any
+ * other device answers cc CCh (rx2600 capture 2026-10-04, BMC-4 to 6).  The
+ * processor devices are there for the processors the machine has.
+ */
 static bool longspeak_bmc_fru(uint8_t *cmd, unsigned int cmd_len,
                               RspBuffer *rsp)
 {
     uint8_t image[LONGSPEAK_BMC_FRU0_SIZE];
     const LongspeakBmcDimm *dimm;
+    uint8_t device;
     unsigned int i;
     int slot;
 
@@ -667,12 +752,18 @@ static bool longspeak_bmc_fru(uint8_t *cmd, unsigned int cmd_len,
         return false;
     }
 
+    device = cmd[2];
+    if (cmd[1] == LONGSPEAK_BMC_CMD_FRU_STATUS &&
+        (device == 0x86 || device == 0x87)) {
+        device += 2;
+    }
+
     /*
      * The machine's memory decides which slots carry a module.  It is read
      * here and not held in the device because a subclass of ipmi-bmc-sim has
      * no instance state of its own: the parent's structure is private.
      */
-    slot = longspeak_bmc_dimm_slot_of(cmd[2]);
+    slot = longspeak_bmc_dimm_slot_of(device);
     dimm = slot < 0 ? NULL
                     : longspeak_bmc_slot(current_machine->ram_size, slot);
 
@@ -680,7 +771,10 @@ static bool longspeak_bmc_fru(uint8_t *cmd, unsigned int cmd_len,
         uint32_t serial;
 
         if (!dimm) {
-            return false;       /* only a populated slot answers it */
+            rsp_buffer_set_error(rsp, device >= 0x80 && device < 0xc0 ?
+                                      IPMI_CC_REQ_ENTRY_NOT_PRESENT :
+                                      IPMI_CC_INVALID_DATA_FIELD);
+            return true;
         }
         serial = longspeak_bmc_dimm_serial(dimm, slot);
         for (i = 0; i < 4; i++) {
@@ -689,33 +783,114 @@ static bool longspeak_bmc_fru(uint8_t *cmd, unsigned int cmd_len,
         return true;
     }
 
-    if (cmd[2] == LONGSPEAK_BMC_FRU0) {
+    if (device == LONGSPEAK_BMC_FRU0) {
         longspeak_bmc_board_fru(image);
         return longspeak_bmc_fru_image(cmd, cmd_len, rsp, image,
                                        LONGSPEAK_BMC_FRU0_SIZE);
     }
 
-    if (cmd[2] == LONGSPEAK_BMC_FRU_IO) {
-        static const uint8_t header[LONGSPEAK_BMC_FRU_IO_SIZE] = {
-            0x01, 0, 0, 0, 0, 0, 0, 0xff
-        };
-
-        return longspeak_bmc_fru_image(cmd, cmd_len, rsp, header,
+    if (device == LONGSPEAK_BMC_FRU_IO) {
+        longspeak_bmc_riser_fru(image);
+        return longspeak_bmc_fru_image(cmd, cmd_len, rsp, image,
                                        LONGSPEAK_BMC_FRU_IO_SIZE);
     }
 
-    if (cmd[2] >= LONGSPEAK_BMC_FRU_FIRST &&
-        cmd[2] < LONGSPEAK_BMC_FRU_FIRST + LONGSPEAK_BMC_FRU_DEVICES) {
+    if (device == LONGSPEAK_BMC_FRU_MP) {
+        if (cmd[1] == LONGSPEAK_BMC_CMD_FRU_READ) {
+            rsp_buffer_set_error(rsp, LONGSPEAK_BMC_CC_NO_RESPONSE);
+            return true;
+        }
+        return longspeak_bmc_fru_image(cmd, cmd_len, rsp, NULL,
+                                       LONGSPEAK_BMC_FRU_MP_SIZE);
+    }
+
+    if (device >= LONGSPEAK_BMC_FRU_FIRST &&
+        device < LONGSPEAK_BMC_FRU_FIRST + LONGSPEAK_BMC_FRU_DEVICES &&
+        (device - LONGSPEAK_BMC_FRU_FIRST) % (LONGSPEAK_BMC_FRU_DEVICES / 2) <
+        current_machine->smp.cpus) {
         return longspeak_bmc_fru_image(cmd, cmd_len, rsp, NULL,
                                        LONGSPEAK_BMC_FRU_SIZE);
     }
 
     if (!dimm) {
-        return false;           /* no such device, or an empty slot */
+        rsp_buffer_set_error(rsp, IPMI_CC_REQ_ENTRY_NOT_PRESENT);
+        return true;
     }
     longspeak_bmc_spd(dimm, slot, image);
     return longspeak_bmc_fru_image(cmd, cmd_len, rsp, image,
                                    LONGSPEAK_BMC_SPD_SIZE);
+}
+
+/*
+ * Where the rx2600's BMC answers otherwise than the IPMI simulator (rx2600
+ * capture 2026-10-04, BMC-1 and the row after it).  It keeps no channel
+ * information, restart cause, boot options, event receiver or PEF, and its
+ * device GUID is all zero.  Its chassis has an intrusion sensor, a front
+ * panel lockout and a diagnostic interrupt, and was last powered on after an
+ * AC failure.  It counts the power-on time in 5-minute units, and nothing
+ * sets the clock of its SDR repository, which counts seconds from the start
+ * of the BMC; the BMC runs on standby power, so both count from the start of
+ * the machine here.
+ */
+static bool longspeak_bmc_ipmi(uint8_t *cmd, RspBuffer *rsp)
+{
+    uint64_t seconds = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) /
+                       NANOSECONDS_PER_SECOND;
+    unsigned int i;
+
+    switch ((cmd[0] >> 2) << 8 | cmd[1]) {
+    case LONGSPEAK_BMC_NETFN_APP << 8 | LONGSPEAK_BMC_CMD_DEVICE_ID:
+        rsp_buffer_push(rsp, IA64_PDH_BMC_DEVICE_ID);
+        rsp_buffer_push(rsp, IA64_PDH_BMC_DEVICE_REV);
+        rsp_buffer_push(rsp, IA64_PDH_BMC_FW_MAJOR);
+        rsp_buffer_push(rsp, IA64_PDH_BMC_FW_MINOR);
+        rsp_buffer_push(rsp, IA64_PDH_BMC_IPMI_VERSION);
+        rsp_buffer_push(rsp, IA64_PDH_BMC_DEVICE_SUPPORT);
+        for (i = 0; i < 3; i++) {
+            rsp_buffer_push(rsp, IA64_PDH_BMC_MANUFACTURER >> (8 * i));
+        }
+        rsp_buffer_push(rsp, IA64_PDH_BMC_IPMI_PRODUCT & 0xff);
+        rsp_buffer_push(rsp, IA64_PDH_BMC_IPMI_PRODUCT >> 8);
+        return true;
+    case LONGSPEAK_BMC_NETFN_APP << 8 | LONGSPEAK_BMC_CMD_DEVICE_GUID:
+        for (i = 0; i < 16; i++) {
+            rsp_buffer_push(rsp, 0);
+        }
+        return true;
+    case LONGSPEAK_BMC_NETFN_APP << 8 | LONGSPEAK_BMC_CMD_CHANNEL_INFO:
+        rsp_buffer_set_error(rsp, IPMI_CC_INVALID_CMD);
+        return true;
+    case LONGSPEAK_BMC_NETFN_CHASSIS << 8 | LONGSPEAK_BMC_CMD_CHASSIS_CAPS:
+        rsp_buffer_push(rsp, 0x07);
+        for (i = 0; i < 4; i++) {
+            rsp_buffer_push(rsp, 0x20);     /* FRU, SDR, SEL, SM: the BMC */
+        }
+        return true;
+    case LONGSPEAK_BMC_NETFN_CHASSIS << 8 | LONGSPEAK_BMC_CMD_CHASSIS_STATUS:
+        rsp_buffer_push(rsp, 0x01);         /* on; stays off after AC loss */
+        rsp_buffer_push(rsp, 0x01);         /* last event: AC failed */
+        rsp_buffer_push(rsp, 0x00);
+        return true;
+    case LONGSPEAK_BMC_NETFN_CHASSIS << 8 | LONGSPEAK_BMC_CMD_RESTART_CAUSE:
+    case LONGSPEAK_BMC_NETFN_CHASSIS << 8 | LONGSPEAK_BMC_CMD_BOOT_OPTIONS:
+    case LONGSPEAK_BMC_NETFN_SENSOR << 8 | LONGSPEAK_BMC_CMD_EVENT_RECEIVER:
+    case LONGSPEAK_BMC_NETFN_SENSOR << 8 | LONGSPEAK_BMC_CMD_PEF_CAPS:
+        rsp_buffer_set_error(rsp, IPMI_CC_COMMAND_INVALID_FOR_LUN);
+        return true;
+    case LONGSPEAK_BMC_NETFN_CHASSIS << 8 | LONGSPEAK_BMC_CMD_POH:
+        rsp_buffer_push(rsp, 5);
+        for (i = 0; i < 4; i++) {
+            rsp_buffer_push(rsp, (seconds / 300) >> (8 * i));
+        }
+        return true;
+    case LONGSPEAK_BMC_NETFN_STORAGE << 8 | LONGSPEAK_BMC_CMD_SDR_TIME:
+        for (i = 0; i < 4; i++) {
+            rsp_buffer_push(rsp, seconds >> (8 * i));
+        }
+        return true;
+    default:
+        return false;
+    }
 }
 
 static void longspeak_bmc_handle_command(IPMIBmc *s, uint8_t *cmd,
@@ -727,6 +902,15 @@ static void longspeak_bmc_handle_command(IPMIBmc *s, uint8_t *cmd,
     RspBuffer rsp = { };
     bool handled = false;
 
+    if (cmd_len >= 2) {
+        uint32_t data = 0;
+        unsigned int i;
+
+        for (i = 2; i < MIN(cmd_len, 6); i++) {
+            data |= (uint32_t)cmd[i] << (8 * (i - 2));
+        }
+        trace_longspeak_bmc_command(cmd[0] >> 2, cmd[1], cmd_len, data);
+    }
     if (cmd_len >= 2 && (cmd[0] & 0x03) == 0) {
         rsp_buffer_push(&rsp, cmd[0] | 0x04);
         rsp_buffer_push(&rsp, cmd[1]);
@@ -746,12 +930,16 @@ static void longspeak_bmc_handle_command(IPMIBmc *s, uint8_t *cmd,
         default:
             break;
         }
+        if (!handled) {
+            handled = longspeak_bmc_ipmi(cmd, &rsp);
+        }
     }
 
     if (!handled) {
         bc->parent_handle_command(s, cmd, cmd_len, max_cmd_len, msg_id);
         return;
     }
+    trace_longspeak_bmc_response(cmd[0] >> 2, cmd[1], rsp.buffer[2], rsp.len);
     IPMI_INTERFACE_GET_CLASS(s->intf)->handle_rsp(s->intf, msg_id, rsp.buffer,
                                                   rsp.len);
 }

@@ -383,9 +383,6 @@ static DeviceState *longspeak_pdh_bmc_port(LongspeakPDHState *s,
         qdev_prop_set_uint8(port, "output-size", IA64_PDH_BMC_BT_BUFFER);
         qdev_prop_set_uint8(port, "retries", IA64_PDH_BMC_BT_RETRIES);
     }
-    qdev_prop_set_uint8(bmc, "fwrev1", IA64_PDH_BMC_FW_MAJOR);
-    qdev_prop_set_uint8(bmc, "fwrev2", IA64_PDH_BMC_FW_MINOR);
-    qdev_prop_set_uint8(bmc, "ipmi_version", IA64_PDH_BMC_IPMI_VERSION);
     object_property_add_child(OBJECT(s), bmc_name, OBJECT(bmc));
     object_property_add_child(OBJECT(s), name, OBJECT(port));
     if (!qdev_realize_and_unref(bmc, NULL, errp)) {

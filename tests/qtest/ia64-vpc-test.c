@@ -1837,31 +1837,60 @@ static void test_lba_rope_window(void)
  * table from the product id in the board's own FRU and then reads a JEDEC SPD
  * from the device of each slot.
  */
+static uint8_t fru_sum(const uint8_t *p, unsigned int size)
+{
+    uint8_t sum = 0;
+
+    while (size--) {
+        sum += *p++;
+    }
+    return sum;
+}
+
 /*
- * FRU device 5 answers and device 6 does not: SAL_B then takes the table of
- * the board with the I/O backplane, the rx2600's ropes 0 to 4 and 6.
+ * FRU device 5 answers and device 6 cannot be read: SAL_B then takes the
+ * table of the board with the I/O backplane, the rx2600's ropes 0 to 4 and
+ * 6.  The riser's 256 bytes have a board area at 72, as on the rx2600.
  */
 static void test_pdh_io_backplane_fru(void)
 {
     const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    uint8_t info[] = { IPMI_NETFN_STORAGE_LUN0, IPMI_CMD_GET_FRU_AREA_INFO,
+                       0x05 };
     uint8_t read[] = { IPMI_NETFN_STORAGE_LUN0, IPMI_CMD_READ_FRU_DATA,
-                       0x05, 0x00, 0x00, 8 };
+                       0x05, 0x00, 0x00, 32 };
     QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
-    uint8_t rsp[32];
-    uint8_t sum = 0;
+    uint8_t fru[256];
+    uint8_t rsp[48];
     unsigned int i;
 
-    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, sizeof(read),
-                                     rsp, sizeof(rsp)), ==, 4 + 8);
-    g_assert_cmphex(rsp[2], ==, 0x00);
-    g_assert_cmphex(rsp[4], ==, 0x01);
-    for (i = 0; i < 8; i++) {
-        sum += rsp[4 + i];
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, sizeof(info),
+                                     rsp, sizeof(rsp)), ==, 6);
+    g_assert_cmpuint(rsp[3] | rsp[4] << 8, ==, sizeof(fru));
+    for (i = 0; i < sizeof(fru); i += 32) {
+        read[3] = i;
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, sizeof(read),
+                                         rsp, sizeof(rsp)), ==, 4 + 32);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        memcpy(fru + i, rsp + 4, 32);
     }
-    g_assert_cmphex(sum, ==, 0);
-    read[2] = 0x06;
-    bmc_kcs_command(qts, kcs, read, sizeof(read), rsp, sizeof(rsp));
-    g_assert_cmphex(rsp[2], !=, 0x00);
+    g_assert_cmphex(fru[0], ==, 0x01);
+    g_assert_cmphex(fru[1], ==, 1);
+    g_assert_cmphex(fru[3], ==, 72 / 8);
+    g_assert_cmphex(fru_sum(fru, 8), ==, 0);
+    g_assert_cmphex(fru[72], ==, 0x01);
+    g_assert_cmphex(fru[72 + 1], ==, 128 / 8);
+    g_assert_cmphex(fru[72 + 6], ==, 0xca);
+    g_assert_cmphex(fru_sum(fru + 72, 120), ==, 0);
+    g_assert_cmphex(fru_sum(fru + 72, 128), ==, 0);
+
+    info[2] = read[2] = 0x06;
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, sizeof(info),
+                                     rsp, sizeof(rsp)), ==, 6);
+    g_assert_cmpuint(rsp[3] | rsp[4] << 8, ==, 256);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, sizeof(read),
+                                     rsp, sizeof(rsp)), ==, 3);
+    g_assert_cmphex(rsp[2], ==, 0xce);
     qtest_quit(qts);
 }
 
@@ -1933,16 +1962,6 @@ static void bmc_read_fru0(QTestState *qts, uint8_t *fru, unsigned int size)
         g_assert_cmphex(rsp[2], ==, 0x00);
         memcpy(fru + off, rsp + 4, 32);
     }
-}
-
-static uint8_t fru_sum(const uint8_t *p, unsigned int size)
-{
-    uint8_t sum = 0;
-
-    while (size--) {
-        sum += *p++;
-    }
-    return sum;
 }
 
 /*
@@ -2093,6 +2112,34 @@ static void test_pdh_dimm_spd(void)
     g_assert_cmphex(rsp[2], ==, 0x00);
     g_assert_cmphex(ldl_le_p(rsp + 3), !=, serial_512m);
     qtest_quit(qts);
+
+    /*
+     * 0xd0 to 86h and 87h answers as to 88h and 89h, the second pair; a
+     * device without a module in the DIMM range answers cc CBh, any other
+     * device cc CCh (rx2600 capture 2026-10-04, BMC-5, 6).
+     */
+    qts = qtest_init("-machine zx1 -m 4G -S");
+    {
+        uint8_t d0[] = { IPMI_NETFN_STORAGE_LUN0, 0xd0, 0x88 };
+        uint32_t serial_88;
+
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, d0, sizeof(d0),
+                                         rsp, sizeof(rsp)), ==, 3 + 4);
+        serial_88 = ldl_le_p(rsp + 3);
+        d0[2] = 0x86;
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, d0, sizeof(d0),
+                                         rsp, sizeof(rsp)), ==, 3 + 4);
+        g_assert_cmphex(ldl_le_p(rsp + 3), ==, serial_88);
+        d0[2] = 0x8e;
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, d0, sizeof(d0),
+                                         rsp, sizeof(rsp)), ==, 3);
+        g_assert_cmphex(rsp[2], ==, 0xcb);
+        d0[2] = 0x05;
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, d0, sizeof(d0),
+                                         rsp, sizeof(rsp)), ==, 3);
+        g_assert_cmphex(rsp[2], ==, 0xcc);
+    }
+    qtest_quit(qts);
 }
 
 static void test_pdh_clock(void)
@@ -2225,18 +2272,19 @@ static void test_pdh_bmc(void)
 
     /*
      * Each processor has an information area of its own in FRU device
-     * 0x20 + n, with a second device at 0x24 + n.  They are present but not
-     * programmed, so the byte the firmware tests first reads zero.
+     * 0x20 + n, with a second device at 0x24 + n, for the processors there
+     * are.  They are not programmed, so the byte the firmware tests first
+     * reads zero.
      */
     {
         const uint8_t info[] = { IPMI_NETFN_STORAGE_LUN0,
                                  IPMI_CMD_GET_FRU_AREA_INFO, 0x20 };
         const uint8_t present[] = { IPMI_NETFN_STORAGE_LUN0,
-                                    IPMI_CMD_READ_FRU_DATA, 0x27, 0x16, 0, 1 };
+                                    IPMI_CMD_READ_FRU_DATA, 0x24, 0x16, 0, 1 };
         const uint8_t beyond[] = { IPMI_NETFN_STORAGE_LUN0,
                                    IPMI_CMD_READ_FRU_DATA, 0x20, 0x80, 0, 1 };
         const uint8_t absent[] = { IPMI_NETFN_STORAGE_LUN0,
-                                   IPMI_CMD_READ_FRU_DATA, 0x28, 0x16, 0, 1 };
+                                   IPMI_CMD_READ_FRU_DATA, 0x21, 0x16, 0, 1 };
 
         g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, G_N_ELEMENTS(info),
                                          rsp, sizeof(rsp)), ==, 6);
@@ -2256,7 +2304,7 @@ static void test_pdh_bmc(void)
         g_assert_cmphex(rsp[2], ==, 0xc9);
         g_assert_cmpuint(bmc_kcs_command(qts, kcs, absent, G_N_ELEMENTS(absent),
                                          rsp, sizeof(rsp)), ==, 3);
-        g_assert_cmphex(rsp[2], ==, 0xcc);
+        g_assert_cmphex(rsp[2], ==, 0xcb);
     }
 
     /* The same self test over the BT, which carries a length and a sequence. */
@@ -2320,6 +2368,70 @@ static void test_pdh_bmc_ports(void)
     g_assert_cmphex(rsp[6], ==, IA64_PDH_BMC_FW_MAJOR);
     g_assert_cmphex(rsp[7], ==, IA64_PDH_BMC_FW_MINOR);
     g_assert_cmphex(rsp[8], ==, IA64_PDH_BMC_IPMI_VERSION);
+    qtest_quit(qts);
+}
+
+/*
+ * The rx2600's BMC answers (rx2600 capture 2026-10-04, BMC-1): its Get
+ * Device ID, a zero device GUID, the chassis, a power-on counter in 5-minute
+ * units, an SDR repository clock that counts from the BMC's start, and
+ * cc C1h or C2h for what it does not keep.
+ */
+static void test_pdh_bmc_identity(void)
+{
+    static const struct {
+        uint8_t netfn, cmd;
+        uint8_t len;
+        uint8_t data[16];
+    } answers[] = {
+        { 0x06, 0x01, 11, { IA64_PDH_BMC_DEVICE_ID, IA64_PDH_BMC_DEVICE_REV,
+                            0x01, 0x53, 0x01, 0x3f, 0x0b, 0x00, 0x00,
+                            0x01, 0x82 } },
+        { 0x06, 0x08, 16, { 0 } },
+        { 0x00, 0x00, 5, { 0x07, 0x20, 0x20, 0x20, 0x20 } },
+        { 0x00, 0x01, 3, { 0x01, 0x01, 0x00 } },
+    };
+    static const struct {
+        uint8_t netfn, cmd, cc;
+    } refused[] = {
+        { 0x06, 0x37, 0xc1 }, { 0x06, 0x42, 0xc1 }, { 0x00, 0x07, 0xc2 },
+        { 0x00, 0x09, 0xc2 }, { 0x04, 0x01, 0xc2 }, { 0x04, 0x10, 0xc2 },
+    };
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS2;
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t req[5] = { 0 };
+    uint8_t rsp[64];
+    unsigned int i;
+
+    for (i = 0; i < G_N_ELEMENTS(answers); i++) {
+        req[0] = answers[i].netfn << 2;
+        req[1] = answers[i].cmd;
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, req, 2, rsp, sizeof(rsp)),
+                         ==, 3 + answers[i].len);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        g_assert_cmpmem(rsp + 3, answers[i].len, answers[i].data,
+                        answers[i].len);
+    }
+    for (i = 0; i < G_N_ELEMENTS(refused); i++) {
+        req[0] = refused[i].netfn << 2;
+        req[1] = refused[i].cmd;
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, req, 5, rsp, sizeof(rsp)),
+                         ==, 3);
+        g_assert_cmphex(rsp[2], ==, refused[i].cc);
+    }
+
+    qtest_clock_step(qts, 601 * NANOSECONDS_PER_SECOND);
+    req[0] = 0x00 << 2;
+    req[1] = 0x0f;
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, req, 2, rsp, sizeof(rsp)),
+                     ==, 3 + 5);
+    g_assert_cmphex(rsp[3], ==, 5);
+    g_assert_cmpuint(ldl_le_p(rsp + 4), ==, 2);
+    req[0] = 0x0a << 2;
+    req[1] = 0x28;
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, req, 2, rsp, sizeof(rsp)),
+                     ==, 3 + 4);
+    g_assert_cmpuint(ldl_le_p(rsp + 3), ==, 601);
     qtest_quit(qts);
 }
 
@@ -10280,6 +10392,7 @@ int main(int argc, char **argv)
                    test_pdh_unimp_logged_once);
     qtest_add_func("/ia64-vpc/pdh/bmc", test_pdh_bmc);
     qtest_add_func("/ia64-vpc/pdh/bmc-ports", test_pdh_bmc_ports);
+    qtest_add_func("/ia64-vpc/pdh/bmc-identity", test_pdh_bmc_identity);
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens", test_pdh_bmc_tokens);
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens-persist",
                    test_pdh_bmc_tokens_persist);
