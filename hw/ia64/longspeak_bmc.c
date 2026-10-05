@@ -19,15 +19,14 @@
  * GET_TOKEN_INFO, not from their caller, and move a value that does not fit
  * in one message in parts.
  *
- * Each processor has an information area of its own behind the BMC, in FRU
- * device 0x20 + n, with a second device at 0x24 + n.  The area is not an IPMI
- * FRU but HP's own 128-byte record: the firmware reads byte 0x16 first and
- * gives up on a zero ("WARNING: No SMBUS Info for CPU n"), otherwise reads
- * the record and checks it.  Refusing the device is what it calls POST
- * 0x0002E5 "access error on processor info area".  The devices are modelled
- * unprogrammed, a state the firmware handles ("WARNING: No Programmed
- * Processors intalled, bypassing ratio set!"); the record itself has no
- * published layout.
+ * Each processor has two SMBus EEPROMs behind the BMC: its information ROM
+ * in FRU device 0x20 + n and its scratch EEPROM in 0x24 + n (Itanium 2
+ * datasheet 250945-002 6.1 to 6.3; the rx2600's two processors answer 20h,
+ * 21h, 24h and 25h, capture 2026-10-04, BMC-4).  The firmware reads byte 0x16
+ * of the ROM first and gives up on a zero ("WARNING: No SMBUS Info for CPU
+ * n"), otherwise reads the ROM and checks it.  Refusing the device is what it
+ * calls POST 0x0002E5 "access error on processor info area".  The scratch
+ * EEPROM holds HP's own data and is modelled blank.
  *
  * The DIMM slots are FRU devices too.  The firmware picks the slot table for
  * the board from the product id in the BMC's own FRU (FFF62880 accepts 257 to
@@ -58,6 +57,7 @@
 #include "hw/ipmi/ipmi.h"
 #include "qom/object.h"
 #include "hw/ia64/ia64_vpc_abi.h"
+#include "cpu.h"
 #include "longspeak_pdh.h"
 #include "trace.h"
 
@@ -298,6 +298,141 @@ static void longspeak_bmc_riser_fru(uint8_t *fru)
                              LONGSPEAK_BMC_FRU_IO_BOARD_UNITS,
                              longspeak_bmc_riser_fields,
                              LONGSPEAK_BMC_FRU_IO_FILE_ID);
+}
+
+/*
+ * The processor information ROM, in the layout of 250945-002 Table 6-4: a
+ * header of section pointers, then sections that each end in a byte that
+ * makes their sum zero.  A field of several bytes holds its low byte first,
+ * and clocks and sizes are decimal digits in hex nibbles: the rx2600's ROMs
+ * read `00 13` for 1300 MHz.  SAL_B checks the eight sums (FFE84080) and
+ * keeps the core and bus clocks for its ratio checks and the cache size and
+ * strings for `info cpu` (FFE84280).  Without them it bypasses the ratio set
+ * and reports Warning 37, "At least one(1) CPU has bad fixed core ratio".
+ */
+#define PIROM_PROCESSOR         0x0e
+#define PIROM_CORE              0x17
+#define PIROM_CACHE             0x28
+#define PIROM_PACKAGE           0x37
+#define PIROM_PART              0x3e
+#define PIROM_THERMAL           0x63
+#define PIROM_FEATURES          0x67
+#define PIROM_OTHER             0x7a
+/* Table 6-4: the defaults and the Itanium 2's flags. */
+#define PIROM_UPPER_TEMP        105
+#define PIROM_IA32_FEATURES     0x4387fbffu
+#define PIROM_CORE_FEATURES     0x6380811bull
+
+/*
+ * The parts the ROM names.  SL6XD is the 1.30 GHz Madison B1 with 3 MB of L3
+ * (specification update 251141-028, "Identification Information"); the
+ * rx2600's ROMs store its S-spec without the S and give part number 80543KC,
+ * package INT3, substrate revision 1, 1350 mV and processor feature flags
+ * 0Fh (capture 2026-10-04, BMC-4).
+ */
+typedef struct LongspeakBmcPart {
+    uint64_t cpuid;
+    unsigned int core_mhz;
+    unsigned int cache_kb;
+    const char *sspec;
+    const char *part;
+    const char *package;
+    uint8_t substrate;
+    unsigned int vid_mv;
+    uint8_t features;
+} LongspeakBmcPart;
+
+static const LongspeakBmcPart longspeak_bmc_parts[] = {
+    { 0x001f010504ull, 1300, 3072, "L6XD", "80543KC", "INT3", 1, 1350, 0x0f },
+};
+
+static unsigned int longspeak_bmc_digits(unsigned int value)
+{
+    unsigned int digits = 0, shift;
+
+    for (shift = 0; shift < 16; shift += 4, value /= 10) {
+        digits |= (value % 10) << shift;
+    }
+    return digits;
+}
+
+static void longspeak_bmc_pirom(uint8_t *rom, unsigned int cpu_index)
+{
+    static const uint8_t sections[] = {
+        PIROM_PROCESSOR, PIROM_CORE, PIROM_CACHE, PIROM_PACKAGE, PIROM_PART,
+        PIROM_THERMAL, PIROM_FEATURES, PIROM_OTHER,
+    };
+    CPUState *cs = qemu_get_cpu(cpu_index);
+    IA64CPUClass *icc;
+    const IA64PalProfile *pal;
+    const LongspeakBmcPart *part = NULL;
+    uint64_t cpuid;
+    unsigned int core_mhz, bus_mhz, cache_kb, i;
+
+    memset(rom, 0, LONGSPEAK_BMC_FRU_SIZE);
+    if (cs == NULL) {
+        return;
+    }
+    icc = ia64_env_cpu_class(cpu_env(cs));
+    pal = icc->pal;
+    cpuid = icc->cpuid_version;
+    /* Table 6-4 is the Itanium 2's: other families keep a blank ROM. */
+    if (((cpuid >> 24) & 0xff) != 0x1f) {
+        return;
+    }
+    core_mhz = pal->freq_base_hz * pal->proc_ratio_num /
+               pal->proc_ratio_den / 1000000;
+    bus_mhz = pal->freq_base_hz * pal->bus_ratio_num /
+              pal->bus_ratio_den / 1000000;
+    cache_kb = 0;
+    for (i = 0; i < IA64_PAL_CACHE_LEVELS; i++) {
+        cache_kb = MAX(cache_kb, pal->cache[i][1].size / KiB);
+    }
+    for (i = 0; i < ARRAY_SIZE(longspeak_bmc_parts); i++) {
+        if (longspeak_bmc_parts[i].cpuid == (cpuid & 0xffffffffffull) &&
+            longspeak_bmc_parts[i].core_mhz == core_mhz &&
+            longspeak_bmc_parts[i].cache_kb == cache_kb) {
+            part = &longspeak_bmc_parts[i];
+        }
+    }
+
+    rom[0x00] = 0x00;
+    stw_le_p(rom + 0x01, LONGSPEAK_BMC_FRU_SIZE);
+    memcpy(rom + 0x03, sections, sizeof(sections));
+
+    rom[0x14] = 0x01;                           /* production */
+
+    rom[0x17] = cpuid >> 32;
+    rom[0x18] = cpuid >> 24;
+    rom[0x19] = cpuid >> 16;
+    rom[0x1a] = cpuid >> 8;
+    stw_le_p(rom + 0x1e, longspeak_bmc_digits(core_mhz));
+    stw_le_p(rom + 0x20, longspeak_bmc_digits(bus_mhz));
+
+    stw_le_p(rom + 0x2c, longspeak_bmc_digits(cache_kb));
+
+    rom[PIROM_THERMAL] = PIROM_UPPER_TEMP;
+
+    stl_le_p(rom + 0x67, PIROM_IA32_FEATURES);
+    stq_le_p(rom + 0x6b, PIROM_CORE_FEATURES);
+    rom[0x77] = 1;                              /* devices in the TAP chain */
+
+    if (part != NULL) {
+        strpadcpy((char *)rom + PIROM_PROCESSOR, 6, part->sspec, 0);
+        /* A tolerance of 1.5 % either way, as in Table 6-4's example. */
+        stw_le_p(rom + 0x22, longspeak_bmc_digits(part->vid_mv));
+        rom[0x24] = longspeak_bmc_digits(part->vid_mv * 15 / 1000);
+        rom[0x25] = rom[0x24];
+        strpadcpy((char *)rom + PIROM_PACKAGE, 4, part->package, 0);
+        rom[0x3b] = part->substrate;
+        strpadcpy((char *)rom + PIROM_PART, 7, part->part, 0);
+        stl_le_p(rom + 0x73, part->features);
+    }
+
+    longspeak_bmc_fru_sum(rom, PIROM_PROCESSOR);
+    for (i = 0; i + 1 < ARRAY_SIZE(sections); i++) {
+        longspeak_bmc_fru_sum(rom + sections[i], sections[i + 1] - sections[i]);
+    }
 }
 
 static void longspeak_bmc_board_fru(uint8_t *fru)
@@ -947,7 +1082,14 @@ static bool longspeak_bmc_fru(uint8_t *cmd, unsigned int cmd_len,
         device < LONGSPEAK_BMC_FRU_FIRST + LONGSPEAK_BMC_FRU_DEVICES &&
         (device - LONGSPEAK_BMC_FRU_FIRST) % (LONGSPEAK_BMC_FRU_DEVICES / 2) <
         current_machine->smp.cpus) {
-        return longspeak_bmc_fru_image(cmd, cmd_len, rsp, NULL,
+        unsigned int n = device - LONGSPEAK_BMC_FRU_FIRST;
+
+        if (n >= LONGSPEAK_BMC_FRU_DEVICES / 2) {
+            return longspeak_bmc_fru_image(cmd, cmd_len, rsp, NULL,
+                                           LONGSPEAK_BMC_FRU_SIZE);
+        }
+        longspeak_bmc_pirom(image, n);
+        return longspeak_bmc_fru_image(cmd, cmd_len, rsp, image,
                                        LONGSPEAK_BMC_FRU_SIZE);
     }
 

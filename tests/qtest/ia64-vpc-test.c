@@ -2271,11 +2271,46 @@ static void test_pdh_bmc(void)
     g_assert_cmphex(sum, ==, 0);
 
     /*
-     * Each processor has an information area of its own in FRU device
-     * 0x20 + n, with a second device at 0x24 + n, for the processors there
-     * are.  They are not programmed, so the byte the firmware tests first
-     * reads zero.
+     * Each processor has its information ROM in FRU device 0x20 + n and its
+     * scratch EEPROM at 0x24 + n, for the processors there are.  The ROM has
+     * the layout of 250945-002 Table 6-4, every section summing to zero; the
+     * blank scratch EEPROM reads zero where the firmware tests the ROM first.
      */
+    {
+        static const uint8_t sections[] = { 0x0e, 0x17, 0x28, 0x37, 0x3e,
+                                            0x63, 0x67, 0x7a };
+        uint8_t rom[128];
+        unsigned int at, s;
+
+        for (at = 0; at < sizeof(rom); at += 16) {
+            const uint8_t read[] = { IPMI_NETFN_STORAGE_LUN0,
+                                     IPMI_CMD_READ_FRU_DATA, 0x20, at, 0,
+                                     16 };
+
+            g_assert_cmpuint(bmc_kcs_command(qts, kcs, read,
+                                             G_N_ELEMENTS(read),
+                                             rsp, sizeof(rsp)), ==, 4 + 16);
+            g_assert_cmphex(rsp[2], ==, 0x00);
+            memcpy(rom + at, rsp + 4, 16);
+        }
+        g_assert_cmpuint(lduw_le_p(rom + 0x01), ==, 128);
+        g_assert_cmpmem(rom + 0x03, 8, sections, sizeof(sections));
+        for (s = 0; s < G_N_ELEMENTS(sections); s++) {
+            unsigned int from = s ? sections[s - 1] : 0;
+
+            for (i = from, sum = 0; i < sections[s]; i++) {
+                sum += rom[i];
+            }
+            g_assert_cmphex(sum, ==, 0);
+        }
+        g_assert_cmphex(rom[0x16], !=, 0);
+        /* CPUID[3] of -cpu madison, 1300 MHz on a 200 MHz bus, 3 MB L3. */
+        g_assert_cmphex(ldl_be_p(rom + 0x17), ==, 0x001f0105);
+        g_assert_cmphex(lduw_le_p(rom + 0x1e), ==, 0x1300);
+        g_assert_cmphex(lduw_le_p(rom + 0x20), ==, 0x0200);
+        g_assert_cmphex(lduw_le_p(rom + 0x2c), ==, 0x3072);
+        g_assert_cmpmem(rom + 0x3e, 7, "80543KC", 7);
+    }
     {
         const uint8_t info[] = { IPMI_NETFN_STORAGE_LUN0,
                                  IPMI_CMD_GET_FRU_AREA_INFO, 0x20 };
