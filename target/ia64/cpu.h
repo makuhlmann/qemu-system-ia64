@@ -50,11 +50,28 @@
 #define IA64_AR_COUNT    128
 #define IA64_CR_COUNT    128
 #define IA64_DBR_COUNT   16
+/* Pairs the breakpoint logic compares; at least four (SDM Vol. 2 7.1.1). */
+#define IA64_DBR_PAIRS   4
+#define IA64_IBR_PAIRS   4
 #define IA64_FR_COUNT    128
 #define IA64_IBR_COUNT   16
 #define IA64_PMC_COUNT   64
 #define IA64_PMD_COUNT   64
 #define IA64_PMC_PM      (1ULL << 6)
+/* Generic counter configuration (SDM Vol. 2 Table 7-4) and PMC0.fr. */
+#define IA64_PMC_PLM_MASK   0xfULL
+#define IA64_PMC_OI         (1ULL << 5)
+#define IA64_PMC_ES_SHIFT   8
+#define IA64_PMC_ISM_SHIFT  24
+#define IA64_PMC0_FR        1ULL
+/*
+ * The two events every model counts, as PAL_PERF_MON_INFO reports them
+ * (245320-003 Table 6-24, 251110-003 Table 10-28): cycles on PMD4-7,
+ * retired instructions on the counters of the PAL profile's retired mask.
+ */
+#define IA64_PMU_EVENT_CPU_CYCLES   0x12
+#define IA64_PMU_EVENT_INST_RETIRED 0x08
+#define IA64_PMU_CYCLE_COUNTERS     0xf0
 #define IA64_PKR_COUNT   16
 #define IA64_RR_COUNT    8
 #define IA64_MSR_COUNT   1024
@@ -161,7 +178,7 @@
 #define IA64_PSR_RI_MASK (3ULL << 41)
 #define IA64_PSR_RI_SHIFT  41
 #define IA64_PSR_FAULT_SUPPRESS_MASK \
-    (IA64_PSR_DA | IA64_PSR_DD | IA64_PSR_ED | IA64_PSR_IA)
+    (IA64_PSR_DA | IA64_PSR_DD | IA64_PSR_ED | IA64_PSR_IA | IA64_PSR_ID)
 
 #define IA64_REGION_SHIFT 61
 #define IA64_REGION_MASK  ((1ULL << IA64_REGION_BITS) - 1)
@@ -170,32 +187,6 @@
 #define IA64_REGION7_PHYS_MASK ((1ULL << IA64_REGION_SHIFT) - 1)
 #define IA64_PHYS_UC_BIT (1ULL << 63)
 #define IA64_FW_BOOT_IDENTITY_LIMIT 0x0000010000000000ULL
-/*
- * IA-64 OS loaders alias physical memory through region 7 with a fixed
- * 0x8000_0000 virtual base (region-7 VA = PA + 0x8000_0000).  The loader's
- * own region-7 TRs map e.g. 0xe000_0000_8100_0000 -> PA 0x0100_0000, and its
- * free-memory descriptors near the top of RAM carry addresses such as
- * 0xe000_0000_bf7f_ffe0 for PA 0x3f7f_ffe0.  SAL's boot-time TLB-miss handler
- * fills otherwise-unmapped region-7 pages with the same bias.
- */
-#define IA64_FW_REGION7_DIRECTMAP_BASE 0x0000000080000000ULL
-/*
- * The persistent alias only covers the Windows/2003 KSEG0 window, a *fixed*
- * 512 MiB range [KSEG0_BASE, KSEG2_BASE) = region-7 offset
- * [0x8000_0000, 0xA000_0000) (WXPSP1 base/ntos/mm/ia64/miia64.h: "The HAL,
- * kernel, initial drivers, NLS data, and registry ... which physically
- * addresses memory ... Initial NonPaged Pool is within KSEG0").  It must not
- * scale with RAM: region-7 VAs at or above KSEG2_BASE are ordinary kernel
- * system space (system cache, pools, PFN database, KI_USER_SHARED_DATA, the
- * PCR) that the OS maps through the VHPT/self-map, so a wider alias would
- * silently shadow those VAs with the wrong physical page once installed RAM
- * pushes the window past 0xA000_0000 -- corrupting the kernel and bugchecking
- * the guest (measured: XP RTM dies in KeBugCheck2 during MmInitSystem above
- * ~1.75 GiB).  Loader-phase accesses to physical memory above KSEG0 arrive
- * while the SAL boot environment still owns the IVT and are served by the
- * boot-identity fallback below, not this persistent alias.
- */
-#define IA64_FW_REGION7_DIRECTMAP_SIZE 0x0000000020000000ULL
 #define IA64_LOCAL_SAPIC_PA   IA64_LOCAL_SAPIC_BASE
 /*
  * The architected I/O block: the top 64 MB of the processor's *implemented*
@@ -554,6 +545,8 @@ typedef enum IA64PredicateRegisterIndex {
 
 typedef enum IA64BranchRegisterIndex {
     IA64_BR_RETURN_LINK = 0,
+    /* The second branch register the min-state save area keeps. */
+    IA64_BR_MINSTATE_SCRATCH = 1,
 } IA64BranchRegisterIndex;
 
 typedef enum IA64FloatingRegisterIndex {
@@ -609,8 +602,25 @@ typedef enum IA64SaleEntryRegisterIndex {
  * RECOVERY_CHECK, and after SAL returns to GR36, RESET.
  */
 #define IA64_SALE_GR_STATE              20
+/* The rest of what PALE_INIT hands over in bank 0 (SDM Vol. 2 11.4.2). */
+#define IA64_SALE_GR_MINSTATE_FREE      16
+#define IA64_SALE_GR_MINSTATE           17
+#define IA64_SALE_GR_PROC_STATE         18
+#define IA64_SALE_GR_RENDEZ_RETURN      19
 #define IA64_SALE_FUNCTION_RESET        0
+#define IA64_SALE_FUNCTION_INIT         2
 #define IA64_SALE_FUNCTION_RECOVERY_CHECK 3
+/* What PALE_PMI hands SALE_PMI in bank 0 (SDM Vol. 2 11.5.2). */
+#define IA64_SALE_PMI_GR_VECTOR         24
+#define IA64_SALE_PMI_GR_MINSTATE       25
+#define IA64_SALE_PMI_GR_RSC            26
+#define IA64_SALE_PMI_GR_B0             27
+#define IA64_SALE_PMI_GR_B1             28
+#define IA64_SALE_PMI_GR_PR             29
+/* Vectors 0-3 are SAL's, 4-15 PAL's; the PMI pin is vector 0 (11.5.1). */
+#define IA64_PMI_VECTORS                16
+#define IA64_PMI_SAL_VECTORS            4
+#define IA64_PMI_VECTOR_PIN             0
 
 typedef enum IA64FirmwareDebugRegisterIndex {
     IA64_FW_DEBUG_GR_HANDLER = 16,
@@ -792,6 +802,7 @@ typedef enum IA64Exception {
     IA64_EXCP_TAKEN_BRANCH = 37,
     IA64_EXCP_SINGLE_STEP = 38,
     IA64_EXCP_LOWER_PRIV_TRANSFER = 39,
+    IA64_EXCP_DEBUG = 40,
     IA64_EXCP_MAX,
 } IA64Exception;
 
@@ -800,6 +811,10 @@ typedef enum IA64Exception {
  * Branch or Single Step trap (IA64ExceptionState.completion_trap_*).
  */
 #define IA64_INTERRUPT_COMPLETION_TRAP CPU_INTERRUPT_TGT_INT_0
+/* An INIT is pending; it waits while PSR.mc is 1 (SDM Vol. 2 11.4.1). */
+#define IA64_INTERRUPT_INIT CPU_INTERRUPT_TGT_EXT_0
+/* A PMI vector is pending; PMIs wait while PSR.ic is 0 (Table 5-8). */
+#define IA64_INTERRUPT_PMI CPU_INTERRUPT_TGT_EXT_1
 
 /* ---- IVT vector mapping table ---- */
 extern const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX];
@@ -1014,6 +1029,12 @@ typedef struct CPUArchState {
     uint64_t msr[IA64_MSR_COUNT];
     uint64_t pmc[IA64_PMC_COUNT];
     uint64_t pmd[IA64_PMD_COUNT];
+    /* Generic counters: bit i stands for PMC/PMD[i] (arch/pmu.c). */
+    struct {
+        int64_t sync_ns;        /* virtual time the counts stand at */
+        uint8_t configured;     /* PMC selects an event it counts */
+        uint8_t counting;       /* enabled since sync_ns */
+    } pmu;
     uint64_t pkr[IA64_PKR_COUNT];
 
     /* Debug and instruction break registers */
@@ -1515,29 +1536,6 @@ static inline bool ia64_sal_boot_environment_active(const CPUIA64State *env)
            (env->psr & IA64_PSR_IC) != 0;
 }
 
-/*
- * Distinguish an OS that manages region 7 as a *flat identity* map (region-7
- * VA == physical, e.g. Linux's PAGE_OFFSET) from one that uses the loader's
- * biased KSEG (region-7 VA == physical + 0x8000_0000, e.g. Windows/2003).  The
- * two conventions collide for region-7 offsets in [0x8000_0000, KSEG2): under
- * the Windows convention that window aliases low physical memory, but under the
- * identity convention it *is* physical RAM at 2 GiB+, so the persistent KSEG
- * alias must not shadow it -- doing so hands the identity OS the wrong page and
- * crashes it once installed RAM exceeds 2 GiB (measured: Debian/Linux 2.4.17).
- *
- * The signal is where the OS placed its interruption vector table: Windows'
- * IVT lives inside KSEG0 (region 7, offset >= 0x8000_0000); Linux's is at the
- * identity-mapped KERNEL_START (region 7, offset well below KSEG0).  So a
- * region-7 IVT below the KSEG base means the running OS owns region 7 as an
- * identity map and services its own region-7 TLB misses -- suppress the alias.
- * A non-region-7 IVT (SAL/firmware, or the microprogram harness) keeps it.
- */
-static inline bool ia64_region7_is_identity_os(const CPUIA64State *env)
-{
-    return ia64_rr_index(env->cr_iva) == 7 &&
-           (env->cr_iva & IA64_REGION7_PHYS_MASK) < IA64_FW_REGION7_DIRECTMAP_BASE;
-}
-
 static inline bool ia64_data_nested_tlb_active(const CPUIA64State *env)
 {
     return !(env->psr & IA64_PSR_IC) && !env->exception_state.psr_ic_inflight;
@@ -1569,41 +1567,17 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
                                                   bool is_inst)
 {
     uint64_t phys = va & IA64_REGION7_PHYS_MASK;
-    bool region7_directmap;
-    bool boot_identity;
 
     /*
-     * Persistent region-7 physical alias (the "KSEG" direct map): the IA-64
-     * OS loaders and the early kernel reach loader-built structures near the
-     * top of RAM through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE
-     * before the kernel's self-mapped page tables are active (e.g.
-     * KdInitSystem walks a loader debug-block list this way).  Model it as a
-     * last-resort translation that survives the loader -> kernel handoff,
-     * bounded to the fixed KSEG0 window (region7_directmap_limit = base +
-     * min(RAM, IA64_FW_REGION7_DIRECTMAP_SIZE)) so that kernel system space,
-     * KI_USER_SHARED_DATA/PCR, and the recursive page-table self-map window
-     * -- all region-7 VAs at or above KSEG2_BASE -- still take ordinary
-     * TLB-miss faults instead of being shadowed by a RAM-sized alias.
+     * This models SAL's boot-time TLB miss handler, which exists only while
+     * SAL still owns the IVT (until ExitBootServices() completes); it is a
+     * miss fallback only.  It inserts VA = PA with the region bits removed
+     * (SAL 245359-007 3.3.1; the i2000 SAL_B data-miss handler drops the
+     * region bits with dep r29=0,r29,61,3).  Most calls are ordinary kernel
+     * misses, so reject them before the linear scan of the TR/TC table.
      */
-    region7_directmap = ia64_rr_index(va) == 7 &&
-        phys >= IA64_FW_REGION7_DIRECTMAP_BASE &&
-        phys < env->mmu.region7_directmap_limit &&
-        !ia64_region7_is_identity_os(env);
-
-    /*
-     * The remaining identity behaviour models SAL's boot-time TLB miss handler
-     * and only applies while SAL still owns the IVT (until ExitBootServices()
-     * completes).  It is a miss fallback only.
-     */
-    boot_identity = ia64_sal_boot_environment_active(env) &&
-        phys < IA64_FW_BOOT_IDENTITY_LIMIT;
-
-    /*
-     * Neither identity path applies: reject cheaply.  This is the common case
-     * for ordinary kernel VAs and is reached on every fill and miss, so it is
-     * checked before the linear scan of the TR/TC table below.
-     */
-    if (!region7_directmap && !boot_identity) {
+    if (!ia64_sal_boot_environment_active(env) ||
+        phys >= IA64_FW_BOOT_IDENTITY_LIMIT) {
         return false;
     }
 
@@ -1616,10 +1590,7 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
      * ITRs and DTRs are independent translation resources (SDM Vol.2 4.1.1):
      * a data reference must only defer to data TRs and an instruction fetch
      * only to instruction TRs.  The XP-era loader installs a 4th ITR for its
-     * [64-80MB] decompression range but no matching DTR; a *data* read there
-     * (e.g. KdInitSystem walking a loader debug block) must therefore still
-     * reach the region-7 direct map below rather than deferring to that ITR
-     * and taking a VHPT fault into the not-yet-installed self-map (0x2B).
+     * [64-80MB] decompression range but no matching DTR.
      */
     if (is_inst) {
         if (ia64_tlb_has_explicit_va_mapping(
@@ -1631,16 +1602,6 @@ static inline bool ia64_sal_boot_identity_pa_type(const CPUIA64State *env,
                 env->mmu.tlb_data, env->mmu.tlb_data_count, va)) {
             return false;
         }
-    }
-
-    /* region7_directmap wins over boot_identity when both apply. */
-    if (region7_directmap) {
-        *pa = phys - IA64_FW_REGION7_DIRECTMAP_BASE;
-        return true;
-    }
-
-    if (phys >= IA64_FW_REGION7_DIRECTMAP_BASE) {
-        phys -= IA64_FW_REGION7_DIRECTMAP_BASE;
     }
 
     *pa = phys;
@@ -1729,10 +1690,17 @@ bool ia64_translate_data_access(CPUIA64State *env, uint64_t va,
 
 void ia64_set_psr(CPUIA64State *env, uint64_t value);
 void ia64_set_psr_bn(CPUIA64State *env, bool bank1);
+void ia64_pmu_sync(CPUIA64State *env);
+void ia64_pmu_configure(CPUIA64State *env);
+void ia64_pmu_reset(CPUIA64State *env);
+void ia64_pmu_timer_cb(void *opaque);
 void ia64_rse_delivery_check(CPUIA64State *env, int excp);
 
 CPUState *ia64_cpu_by_sapic_id(uint8_t id, uint8_t eid);
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector);
+void ia64_cpu_raise_init(CPUState *cs);
+void ia64_cpu_raise_pmi(CPUState *cs, unsigned vector);
+void ia64_cpu_set_pmi_pin(CPUState *cs, int level);
 void ia64_cpu_set_lint(CPUState *cs, int pin, int level);
 void ia64_lint_lrr_written(CPUIA64State *env, int pin);
 void ia64_sapic_update_interrupt(CPUIA64State *env);
@@ -1855,12 +1823,21 @@ typedef struct IA64BootInfo {
      * break 0x100007 makes the second SALE_ENTRY call.
      */
     uint64_t raw_pal_reset_return;
+    /*
+     * PALE_PMI's return address in BR0 before PAL_COPY_PAL moves PAL: its
+     * break 0x100008 resumes the interrupted context.
+     */
+    uint64_t raw_pal_pmi_return;
 } IA64BootInfo;
+
+/* The same return point in PAL_COPY_PAL's copy, from its PAL_PROC entry. */
+#define IA64_PAL_COPY_PMI_RETURN_OFFSET 0x20
 
 struct ArchCPU {
     CPUState parent_obj;
     CPUIA64State env;
     QEMUTimer *itm_timer;
+    QEMUTimer *pmu_timer;
     IA64BootInfo boot_info;
     IA64FirmwareDebugState firmware_debug;
     bool boot_info_valid;
@@ -1918,14 +1895,30 @@ typedef struct IA64PalCacheLevel {
     uint8_t  associativity;
     uint8_t  line_shift;      /* log2 of the line size in bytes */
     uint8_t  stride_shift;
-    uint8_t  attribute;       /* 0 = write-through, 1 = write-back */
+    /* 0 = write-through, 1 = write-back; the rx2600's L1I reports 3. */
+    uint8_t  attribute;
     uint8_t  store_latency;
     uint8_t  load_latency;
     uint8_t  tag_lsb;
+    /*
+     * config_info_2{39:32}, log2 of the minimum separation of aliased
+     * addresses; 0 reports the way span, tag_lsb.
+     */
+    uint8_t  alias_boundary;
     uint8_t  store_hints;     /* SDM Vol. 2 Table 11-68 */
     uint8_t  load_hints;      /* SDM Vol. 2 Table 11-69 */
     bool     unified;
+    /*
+     * PAL_CACHE_PROT_INFO cache_protection[0] and [1] (SDM Vol. 2 figure
+     * 11-7); both zero report data and tag as unprotected.
+     */
+    uint32_t protection[2];
 } IA64PalCacheLevel;
+
+/* PAL_HALT_INFO power states (SDM Vol. 2 PAL_HALT_INFO). */
+#define IA64_PAL_HALT_STATES      8
+#define IA64_PAL_HALT_IMPLEMENTED (1ULL << 60)
+#define IA64_PAL_HALT_COHERENT    (1ULL << 61)
 
 #define IA64_PAL_CACHE_LEVELS 3
 #define IA64_PAL_CACHE_TYPES  2   /* index 0 = instruction, 1 = data/unified */
@@ -1945,22 +1938,34 @@ typedef struct IA64PalTcLevel {
     uint64_t page_mask;       /* page sizes usable by this TC */
 } IA64PalTcLevel;
 
+/* features_avail, features_status at reset and features_control. */
+typedef struct IA64PalFeatures {
+    uint64_t avail;
+    uint64_t status;
+    uint64_t control;
+} IA64PalFeatures;
+
 typedef struct IA64PalProfile {
     /* PAL_FREQ_BASE base clock in Hz. */
     uint64_t freq_base_hz;
     /*
      * The address PAL_PLATFORM_ADDR takes for the I/O port block: the top
-     * 64 MB of the processor's architectural physical address space (see
-     * ia64_pal_io_block_pa).  It is not derived from impl_pa_bits, which
-     * every model in this fork keeps at 50 for the machine's own windows.
+     * 64 MB of the processor's implemented physical address space (see
+     * ia64_pal_io_block_pa).
      */
     uint64_t io_block_pa;
     /*
      * PAL_PROC_GET/SET_FEATURES implementation-specific feature sets: bit n
-     * stands for set 16 + n.  The architected sets 1-15 answer -2 and set 0
-     * is always there (SDM Vol. 2, PAL_PROC_GET_FEATURES).
+     * stands for set 16 + n, described by impl_features[n].  The architected
+     * sets 1-15 answer -2 and set 0 is always there (SDM Vol. 2,
+     * PAL_PROC_GET_FEATURES).  A set above the last one answers -8, or -2
+     * with feature_set_beyond_invalid.
      */
     uint32_t impl_feature_sets;
+    IA64PalFeatures proc_features;
+    IA64PalFeatures impl_features[IA64_PAL_IMPL_FEATURE_SETS];
+    bool feature_set_beyond_invalid;
+    IA64PalFeatures bus_features;
     /* PAL_FREQ_RATIOS: each ratio is reported as (num << 32) | den. */
     uint32_t proc_ratio_num, proc_ratio_den;   /* processor / base */
     uint32_t bus_ratio_num, bus_ratio_den;      /* system bus / base */
@@ -1976,6 +1981,25 @@ typedef struct IA64PalProfile {
     uint8_t pal_b_model, pal_b_revision;
     uint8_t pal_vendor;
     uint8_t pal_a_model, pal_a_revision;
+    /*
+     * The minimum version PAL_VERSION reports first; all zero means the
+     * current one.
+     */
+    uint8_t pal_min_b_model, pal_min_b_revision;
+    uint8_t pal_min_a_model, pal_min_a_revision;
+    /* PAL_BRAND_INFO exists, which it does from Montecito on. */
+    bool has_brand_info;
+    /*
+     * PAL_MC_ERROR_INFO info_index 1 answers the processor state parameter
+     * of a corrected event with all state valid even when no machine check
+     * occurred, while info_index 0 has no error map.
+     */
+    bool mc_error_info_corrected_psp;
+    /*
+     * PAL_PREFETCH_VISIBILITY answers 1, "not necessary on remote
+     * processors", instead of 0.
+     */
+    bool prefetch_vis_not_needed;
 
     /*
      * PAL_MEM_ATTRIB: bit n set for each implemented memory-attribute
@@ -1992,10 +2016,47 @@ typedef struct IA64PalProfile {
     IA64PalTcLevel tc[IA64_PAL_CACHE_LEVELS][IA64_PAL_CACHE_TYPES];
     uint8_t tc_levels;
     uint8_t unique_tcs;
+    /* PAL_VM_SUMMARY hash_tag_id: the thash/ttag algorithm. */
+    uint8_t hash_tag_id;
+    /*
+     * PAL_VM_TR_READ reports the fixed TR_valid tr_read_valid[tr_type] for
+     * every TR, returns 0 in the PTE fields it marks invalid and no page
+     * size in the RR word.  Otherwise every field of an inserted TR is valid.
+     */
+    bool tr_read_fixed_valid;
+    uint8_t tr_read_valid[2];
 
-    /* PAL_PERF_MON_INFO: PAL_WIDTH and the low word of PAL_RETIRED_MASK. */
+    /*
+     * PAL_PERF_MON_INFO: PAL_WIDTH, the low words of PAL_PMC_MASK and
+     * PAL_RETIRED_MASK.
+     */
     uint8_t perf_counter_width;
+    uint64_t perf_pmc_mask;
     uint64_t perf_retired_mask;
+    /* PAL_REGISTER_INFO request 2, CR0-63. */
+    uint64_t cr_implemented_low;
+    /*
+     * PAL_HALT_INFO pal_power_mgmt_info per state; PAL_HALT enters a state
+     * from 1 up that is implemented here.
+     */
+    uint64_t halt_info[IA64_PAL_HALT_STATES];
+    /*
+     * The region registers as PALE_RESET hands them over; the SDM leaves
+     * them undefined (Vol. 2 11.2.2, PALE_RESET Exit State).
+     */
+    uint64_t rr_reset;
+    /*
+     * PAL_MEM_FOR_TEST (PAL_TEST_INFO in later SDMs): the bytes and the
+     * alignment of the buffer that PAL_TEST_PROC needs.
+     */
+    uint64_t test_bytes_needed;
+    uint64_t test_alignment;
+    /*
+     * PAL_COPY_INFO: the bytes of copy type 0, and the fixed part of the
+     * IA-32 buffer of copy type 1 (target/ia64/arch/pal.c).
+     */
+    uint64_t copy_bytes;
+    uint64_t copy_ia32_bytes;
 } IA64PalProfile;
 
 /*
@@ -2015,7 +2076,25 @@ typedef struct IA64PmuRegister {
 typedef struct IA64PmuLayout {
     IA64PmuRegister pmc[IA64_PMC_COUNT];
     IA64PmuRegister pmd[IA64_PMD_COUNT];
+    /* Generic counters: count bits, and whether the bit above records a carry. */
+    uint8_t count_bits;
+    bool overflow_bit;
+    /* Implemented bits of the event select field. */
+    uint8_t es_mask;
+    /* PMC4's PMU enable bit, or 0 where the model has none. */
+    uint64_t pmc4_enable;
 } IA64PmuLayout;
+
+/* The value a PMC or PMD holds after a write, per the model's layout. */
+static inline uint64_t ia64_pmu_register_value(const IA64PmuRegister *reg,
+                                               uint64_t value)
+{
+    value &= reg->mask;
+    if (reg->sext_mask && (value >> reg->sext_bit) & 1) {
+        value |= reg->sext_mask;
+    }
+    return value;
+}
 
 struct IA64CPUClass {
     CPUClass parent_class;
@@ -2029,12 +2108,17 @@ struct IA64CPUClass {
     /*
      * IA-32 CPUID(1) EAX reported by the hardware IA-32 engine.  x86
      * family 7 is the assignment for the original Itanium's engine (Intel
-     * AP-485 processor-identification tables); the Itanium 2 generation
-     * reports a P6-class identity instead.
+     * AP-485 processor-identification tables); Madison's reads 0x00100F15.
      */
     uint32_t ia32_cpuid_version;
     /* IA-32 CPUID(2) cache and TLB descriptors: EAX, EBX, ECX, EDX. */
     uint32_t ia32_cpuid_leaf2[4];
+    /*
+     * The engine reports PAE in CPUID(1) EDX, and a leaf above the highest
+     * one returns that leaf's data, as the IA-32 SDM describes for CPUID.
+     */
+    bool ia32_cpuid_pae;
+    bool ia32_cpuid_high_leaf_repeats;
     /*
      * Translation-register file sizes.  These are asymmetric on the original
      * Itanium (8 ITR / 48 DTR, 248701-002 §2.5.6); Madison/Montecito use 64 of
@@ -2085,6 +2169,8 @@ struct IA64CPUClass {
      * until that firmware runs against the SDM rule.
      */
     bool unaligned_uc_exempt;
+    /* Data Debug on every access across 16 bytes (251110-003 12.3). */
+    bool dbr_cross16;
     const IA64PalProfile *pal;
     /* NULL keeps all IA64_PMC_COUNT/IA64_PMD_COUNT registers as storage. */
     const IA64PmuLayout *pmu;

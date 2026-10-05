@@ -18,7 +18,7 @@
 
 #define IA64_PCI_INTX_GSI_BASE 16
 #define IA64_PCI_INTX_LINES    4
-/* zx1 registers one secondary root; 460gx registers three expander roots. */
+/* zx1 registers two secondary roots; 460gx registers three expander roots. */
 #define IA64_PCI_MAX_SECONDARY_ROOTS 4
 
 int ia64_pci_route_intx_gsi(uint8_t devfn, int irq_num);

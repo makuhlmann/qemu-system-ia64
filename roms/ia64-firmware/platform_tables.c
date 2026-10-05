@@ -15,6 +15,7 @@
 #include "fw-platform-handoff.h"
 #include "fw-platform-layout.h"
 #include "linker-symbols.h"
+#include "fw-sal-init.h"
 #include "ia64-fw-acpi-aml.h"
 
 static IA64_SAL_SYSTEM_TABLE   mSalSystemTable;
@@ -479,6 +480,9 @@ static void efi_init_sal_system_table(void)
      */
     mSalSystemTable.Entrypoint.SalProc = (UINTN)sal_runtime_entry;
     mSalSystemTable.Entrypoint.SalGp = fw_current_gp();
+    mFwSalInit.PalProc = mSalSystemTable.Entrypoint.PalProc;
+    mFwSalInit.SalProc = mSalSystemTable.Entrypoint.SalProc;
+    mFwSalInit.SalGp = mSalSystemTable.Entrypoint.SalGp;
     for (i = 0; i < sizeof(mSalSystemTable.Entrypoint.Reserved1); i++) {
         mSalSystemTable.Entrypoint.Reserved1[i] = 0;
     }
@@ -492,7 +496,7 @@ static void efi_init_sal_system_table(void)
     }
     {
         IA64_SAL_MEMORY_DESCRIPTOR *md = mSalSystemTable.MemoryDescriptors;
-        UINTN image_base = (UINTN)fw_pal_buffer & ~0xFFFULL;
+        UINTN image_base = (UINTN)__fw_image_start;
         UINTN data_start = (UINTN)&__runtime_data_start;
         UINTN image_end = ((UINTN)&_end + 0xFFFULL) & ~0xFFFULL;
         UINTN n;
@@ -511,11 +515,11 @@ static void efi_init_sal_system_table(void)
                 md[n].OemReserved[i] = 0;
             }
         }
-        /* PAL code: the boot page holding PAL_PROC. */
+        /* PAL code: the buffer PAL_COPY_PAL filled. */
         md[0].MemoryType = SAL_MEM_TYPE_REGULAR;
         md[0].MemoryUsage = SAL_MEM_USAGE_PAL_CODE;
-        md[0].PhysicalAddress = image_base;
-        md[0].Length = 1;
+        md[0].PhysicalAddress = (UINTN)fw_pal_buffer;
+        md[0].Length = IA64_FW_PAL_BUFFER_SIZE >> 12;
         /* SAL code: the page holding the SAL_PROC runtime stubs. */
         md[1].MemoryType = SAL_MEM_TYPE_REGULAR;
         md[1].MemoryUsage = SAL_MEM_USAGE_SAL_CODE;
@@ -533,9 +537,14 @@ static void efi_init_sal_system_table(void)
         md[3].Length = (UINT32)((image_end - image_base) >> 12);
     }
     mSalSystemTable.PlatformFeatures.Type = 2;
-    /* SAL spec platform-feature bit 0: bus lock, a 460GX-era feature. */
+    /*
+     * SAL spec 245359-007 Table 3-6: bit 0 bus lock, bit 1 IRQ
+     * redirection hint.  The 460GX sends redirectable interrupts to the
+     * lowest XTPR (SSDM 3.7), and the vendor i2000 firmware reports both
+     * (03h in its SAL system table).  zx1 has no XTP.
+     */
     mSalSystemTable.PlatformFeatures.Features =
-        fw_platform_is_460gx() ? 0x01U : 0x00U;
+        fw_platform_is_460gx() ? 0x03U : 0x00U;
     for (i = 0; i < sizeof(mSalSystemTable.PlatformFeatures.Reserved); i++) {
         mSalSystemTable.PlatformFeatures.Reserved[i] = 0;
     }
@@ -699,7 +708,8 @@ static void efi_init_acpi_tables(void)
     mFadt.Flags = ACPI_FADT_FLAG_WBINVD |
                   ACPI_FADT_FLAG_SLP_BUTTON |
                   ACPI_FADT_FLAG_RESET_REG_SUP |
-                  ACPI_FADT_FLAG_SW_CPU_SLP;
+                  ACPI_FADT_FLAG_SW_CPU_SLP |
+                  (is_460gx ? 0U : ACPI_FADT_FLAG_TMR_VAL_EXT);
     mFadt.ResetRegister.SpaceId = ACPI_GAS_SYSTEM_IO;
     mFadt.ResetRegister.BitWidth = 8;
     mFadt.ResetRegister.BitOffset = 0;
@@ -1317,7 +1327,8 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         mAcpiFadt->ResetValue != fw_acpi_reset_value() ||
         (mAcpiFadt->Flags & ACPI_FADT_FLAG_PWR_BUTTON) != 0 ||
         (mAcpiFadt->Flags & ACPI_FADT_FLAG_RESET_REG_SUP) == 0 ||
-        (mAcpiFadt->Flags & ACPI_FADT_FLAG_SW_CPU_SLP) == 0) {
+        (mAcpiFadt->Flags & ACPI_FADT_FLAG_SW_CPU_SLP) == 0 ||
+        ((mAcpiFadt->Flags & ACPI_FADT_FLAG_TMR_VAL_EXT) != 0) == is_460gx) {
         return 0;
     }
 

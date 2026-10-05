@@ -24,6 +24,7 @@
 #include "fw-memmap.h"
 #include "fw-platform-handoff.h"
 #include "fw-platform-layout.h"
+#include "fw-sal-init.h"
 #include "fw-acpi.h"
 #include "fw-pe.h"
 #include "fw-storage.h"
@@ -130,10 +131,16 @@ static BOOLEAN efi_memory_type_is_valid(EFI_MEMORY_TYPE Type)
            type >= EFI_MEMORY_TYPE_OS_RESERVED_MIN;
 }
 
+/*
+ * EfiPalCode is runtime as on the rx2600 (8000000000000008h in its EFI map);
+ * the Windows HAL gives such a descriptor the PAL TR's virtual address
+ * (WXPSP1 base/hals/halia64/ia64/i64efi.c:1642).
+ */
 UINT64 efi_memory_attribute(EFI_MEMORY_TYPE Type, UINT64 Attribute)
 {
     if (Type == EfiRuntimeServicesCode ||
-        Type == EfiRuntimeServicesData) {
+        Type == EfiRuntimeServicesData ||
+        Type == EfiPalCode) {
         return Attribute | EFI_MEMORY_RUNTIME;
     }
     return Attribute;
@@ -329,7 +336,7 @@ FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE == 2695u, dsdt_generated_aml_size);
 FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_AML_SIZE == 542u,
                  ssdt_generated_aml_size);
 /* The nested zx1-profile DSDT/SSDT; the larger sets ACPI_DSDT/SSDT Aml[]. */
-FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_ZX1_AML_SIZE == 1182u,
+FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_ZX1_AML_SIZE == 1738u,
                  dsdt_zx1_generated_aml_size);
 FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_ZX1_AML_SIZE == 506u,
                  ssdt_zx1_generated_aml_size);
@@ -418,8 +425,12 @@ static UINTN                  mRuntimeResetControl;
 static UINT8                  mRuntimeResetValue;
 /* The configuration window (ECAM, or the I/O ports); set with the board. */
 UINTN                         mRuntimePciConfigEcam;
-/* MC146818 CMOS RTC index port; the data port is index + 1 (f610823). */
+/*
+ * The clock: on the 460GX board the MC146818 CMOS index port, with the data
+ * port at index + 1 (f610823); on zx1 the PDH part, one register per byte.
+ */
 static UINTN                  mRuntimeRtc = LEGACY_IO_BASE + 0x70U;
+static BOOLEAN                mRuntimeRtcPdh;
 /*
  * The NVRAM sector's contents, kept in RAM: the variable store, the time
  * zone record and the machine's defaults record.  Read from the flash at init and
@@ -5630,8 +5641,8 @@ EFI_STATUS rs_convert_pointer(UINTN DebugDisposition, VOID **Address);
 
 /*
  * The time zone record in the NVRAM sector.  The time itself lives in the
- * CMOS clock, as on the boards: SetTime writes the clock, and the clock has
- * no place for TimeZone and Daylight, so they are kept here.  Firmware
+ * board's clock: SetTime writes the clock, and the clock has no place for
+ * TimeZone and Daylight, so they are kept here.  Firmware
  * before 2026-09-17 kept the clock as an offset from the CMOS time in
  * OffsetSeconds and Nanosecond; both are now written as 0 and ignored, so
  * an older build reads offset 0 from a record this one wrote.
@@ -5825,15 +5836,111 @@ static UINT8 fw_rtc_encode(UINT64 Value, BOOLEAN Binary)
     return Binary ? (UINT8)Value : (UINT8)(((Value / 10U) << 4) | (Value % 10U));
 }
 
-/* The years fw_rtc_read_seconds reads back from the two-digit year. */
+/*
+ * The years SetTime accepts: those fw_rtc_read_seconds reads back from the
+ * CMOS clock's two-digit year.
+ */
 #define FW_RTC_YEAR_MIN 1980U
 #define FW_RTC_YEAR_MAX 2079U
 
+/* Seconds since 1970-01-01 of a civil date (proleptic Gregorian). */
+static INT64 fw_rtc_civil_seconds(UINT64 year, UINT64 month, UINT64 day,
+                                  UINT64 hour, UINT64 min, UINT64 sec)
+{
+    UINT64 y = year - (month <= 2U ? 1U : 0U);
+    UINT64 era = y / 400U;
+    UINT64 yoe = y - era * 400U;
+    UINT64 doy = (153U * (month + (month > 2U ? (UINT64)-3 : 9U)) + 2U) / 5U +
+                 day - 1U;
+    UINT64 doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+    UINT64 days = era * 146097U + doe - 719468U;
+
+    return (INT64)(days * 86400U + hour * 3600U + min * 60U + sec);
+}
+
 /*
- * Read the MC146818 CMOS calendar (ports 0x70/0x71, as on the i2000/SDV
- * Super-I/O) and convert it to seconds since the Unix epoch.  Honors the
- * update-in-progress bit and the binary/BCD and 12/24-hour modes; a
- * double read guards against an update between fields.
+ * The zx1 board's PDH clock (hw/ia64/longspeak_rtc.c, a DS1501-class part):
+ * BCD, 24 hours, a century register, and control B's TE bit, which freezes
+ * the time registers while it is clear so that all eight read or write as
+ * one.  Bits 7:5 of the month register drive the oscillator.
+ */
+#define FW_PDH_RTC_WEEKDAY    0x03U
+#define FW_PDH_RTC_DATE       0x04U
+#define FW_PDH_RTC_MONTH      0x05U
+#define FW_PDH_RTC_YEAR       0x06U
+#define FW_PDH_RTC_CENTURY    0x07U
+#define FW_PDH_RTC_CONTROL_B  0x0FU
+#define FW_PDH_RTC_TE         0x80U
+#define FW_PDH_RTC_MONTH_BITS 0xE0U
+
+static UINT8 fw_pdh_rtc_read(UINT8 Reg)
+{
+    return *(volatile UINT8 *)(mRuntimeRtc + Reg);
+}
+
+static void fw_pdh_rtc_write(UINT8 Reg, UINT8 Value)
+{
+    *(volatile UINT8 *)(mRuntimeRtc + Reg) = Value;
+}
+
+static BOOLEAN fw_pdh_rtc_read_seconds(INT64 *Seconds)
+{
+    UINT8 control = fw_pdh_rtc_read(FW_PDH_RTC_CONTROL_B);
+    UINT64 sec, min, hour, day, month, year;
+
+    fw_pdh_rtc_write(FW_PDH_RTC_CONTROL_B,
+                     (UINT8)(control & ~FW_PDH_RTC_TE));
+    sec = fw_rtc_field(fw_pdh_rtc_read(0x00U) & 0x7FU, 0);
+    min = fw_rtc_field(fw_pdh_rtc_read(0x01U) & 0x7FU, 0);
+    hour = fw_rtc_field(fw_pdh_rtc_read(0x02U) & 0x3FU, 0);
+    day = fw_rtc_field(fw_pdh_rtc_read(FW_PDH_RTC_DATE) & 0x3FU, 0);
+    month = fw_rtc_field(fw_pdh_rtc_read(FW_PDH_RTC_MONTH) & 0x1FU, 0);
+    year = fw_rtc_field(fw_pdh_rtc_read(FW_PDH_RTC_CENTURY), 0) * 100U +
+           fw_rtc_field(fw_pdh_rtc_read(FW_PDH_RTC_YEAR), 0);
+    fw_pdh_rtc_write(FW_PDH_RTC_CONTROL_B,
+                     (UINT8)(control | FW_PDH_RTC_TE));
+
+    if (sec > 59U || min > 59U || hour > 23U || day < 1U || day > 31U ||
+        month < 1U || month > 12U || year < 1900U) {
+        return 0;
+    }
+    *Seconds = fw_rtc_civil_seconds(year, month, day, hour, min, sec);
+    return 1;
+}
+
+static void fw_pdh_rtc_write_time(const EFI_TIME *Time, INT64 Seconds)
+{
+    UINT8 control = fw_pdh_rtc_read(FW_PDH_RTC_CONTROL_B);
+    UINT8 month_bits = fw_pdh_rtc_read(FW_PDH_RTC_MONTH) &
+                       FW_PDH_RTC_MONTH_BITS;
+    INT64 days = Seconds / 86400;
+
+    if (Seconds % 86400 < 0) {
+        days--;
+    }
+    fw_pdh_rtc_write(FW_PDH_RTC_CONTROL_B,
+                     (UINT8)(control & ~FW_PDH_RTC_TE));
+    fw_pdh_rtc_write(0x00U, fw_rtc_encode(Time->Second, 0));
+    fw_pdh_rtc_write(0x01U, fw_rtc_encode(Time->Minute, 0));
+    fw_pdh_rtc_write(0x02U, fw_rtc_encode(Time->Hour, 0));
+    /* 1970-01-01 was a Thursday; the part counts Monday as 1. */
+    fw_pdh_rtc_write(FW_PDH_RTC_WEEKDAY,
+                     (UINT8)(((days + 3) % 7 + 7) % 7 + 1));
+    fw_pdh_rtc_write(FW_PDH_RTC_DATE, fw_rtc_encode(Time->Day, 0));
+    fw_pdh_rtc_write(FW_PDH_RTC_MONTH,
+                     (UINT8)(month_bits | fw_rtc_encode(Time->Month, 0)));
+    fw_pdh_rtc_write(FW_PDH_RTC_YEAR, fw_rtc_encode(Time->Year % 100U, 0));
+    fw_pdh_rtc_write(FW_PDH_RTC_CENTURY,
+                     fw_rtc_encode(Time->Year / 100U, 0));
+    fw_pdh_rtc_write(FW_PDH_RTC_CONTROL_B,
+                     (UINT8)(control | FW_PDH_RTC_TE));
+}
+
+/*
+ * Read the board's clock as seconds since the Unix epoch.  The MC146818 CMOS
+ * calendar (ports 0x70/0x71, as on the i2000/SDV Super-I/O): honors the
+ * update-in-progress bit and the binary/BCD and 12/24-hour modes; a double
+ * read guards against an update between fields.
  */
 static BOOLEAN fw_rtc_read_seconds(INT64 *Seconds)
 {
@@ -5841,6 +5948,9 @@ static BOOLEAN fw_rtc_read_seconds(INT64 *Seconds)
 
     if (Seconds == NULL) {
         return 0;
+    }
+    if (mRuntimeRtcPdh) {
+        return fw_pdh_rtc_read_seconds(Seconds);
     }
 
     for (attempt = 0; attempt < 4U; attempt++) {
@@ -5850,7 +5960,6 @@ static BOOLEAN fw_rtc_read_seconds(INT64 *Seconds)
         UINT64 sec, min, hour, day, month, year;
         UINT8 raw_hour;
         UINT64 start;
-        UINT64 era, yoe, doy, doe, days;
 
         /*
          * An update keeps UIP set for about 2 ms (244 us warning plus the
@@ -5893,41 +6002,33 @@ static BOOLEAN fw_rtc_read_seconds(INT64 *Seconds)
             continue;
         }
 
-        /*
-
-         * Days from civil date (proleptic Gregorian), epoch 1970-01-01.
-         */
-        {
-            UINT64 y = year - (month <= 2U ? 1U : 0U);
-
-            era = y / 400U;
-            yoe = y - era * 400U;
-            doy = (153U * (month + (month > 2U ? (UINT64)-3 : 9U)) + 2U) /
-                  5U + day - 1U;
-            doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
-            days = era * 146097U + doe - 719468U;
-        }
-
-        *Seconds = (INT64)(days * 86400U + hour * 3600U + min * 60U + sec);
+        *Seconds = fw_rtc_civil_seconds(year, month, day, hour, min, sec);
         return 1;
     }
     return 0;
 }
 
 /*
- * Write a calendar time to the MC146818 clock: halt updates with register B's
- * SET bit, store the fields in the data mode register B selects (binary or
+ * Write a calendar time to the board's clock.  The MC146818: halt updates
+ * with register B's SET bit, store the fields in the data mode register B selects (binary or
  * BCD, 12 or 24 hours, as fw_rtc_read_seconds reads them), then release SET.
  * The century goes to 32h, where the clock keeps it.
  */
 static void fw_rtc_write_time(const EFI_TIME *Time, INT64 Seconds)
 {
-    UINT8 reg_b = fw_cmos_read(0x0BU);
-    BOOLEAN binary = (reg_b & 0x04U) != 0;
-    BOOLEAN hours24 = (reg_b & 0x02U) != 0;
+    UINT8 reg_b;
+    BOOLEAN binary;
+    BOOLEAN hours24;
     INT64 days = Seconds / 86400;
     UINT8 hour;
 
+    if (mRuntimeRtcPdh) {
+        fw_pdh_rtc_write_time(Time, Seconds);
+        return;
+    }
+    reg_b = fw_cmos_read(0x0BU);
+    binary = (reg_b & 0x04U) != 0;
+    hours24 = (reg_b & 0x02U) != 0;
     if (Seconds % 86400 < 0) {
         days--;
     }
@@ -5987,8 +6088,8 @@ EFI_STATUS rs_get_time(EFI_TIME *Time, EFI_TIME_CAPABILITIES *Capabilities)
  * SetTime writes the clock (the part keeps the time across a reset, and the
  * machine starts it from -rtc) and commits the NVRAM only when TimeZone or
  * Daylight change, or when a record from older firmware still carries a
- * time offset.  The clock holds a two-digit year, which GetTime reads as
- * 1980-2079; a year outside that range cannot be stored.
+ * time offset.  The CMOS clock holds a two-digit year, which GetTime reads
+ * as 1980-2079; a year outside that range cannot be stored, on either board.
  */
 EFI_STATUS rs_set_time(EFI_TIME *Time)
 {
@@ -6399,6 +6500,12 @@ BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
          !efi_memory_map_has_descriptor(EfiMemoryMappedIO, IA64_UART_BASE,
                                         IA64_UART_BASE + IA64_UART_MMIO_SIZE,
                                         EFI_MEMORY_UC)) ||
+        (fw_platform_is_zx1() &&
+         !efi_memory_map_has_descriptor(EfiMemoryMappedIO,
+                                        IA64_PDH_DEV5B_BASE + IA64_PDH_RTC,
+                                        IA64_PDH_DEV5B_BASE + IA64_PDH_RTC +
+                                            IA64_EFI_MEMORY_ALIGN,
+                                        EFI_MEMORY_UC | EFI_MEMORY_RUNTIME)) ||
         !efi_memory_map_has_descriptor(EfiMemoryMappedIOPortSpace,
                                        LEGACY_IO_BASE,
                                        LEGACY_IO_SPARSE_LIMIT,
@@ -6415,6 +6522,10 @@ BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         !efi_memory_map_covers_range(EfiRuntimeServicesCode,
                                      runtime_code_start, firmware_end,
                                      EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
+        !efi_memory_map_has_descriptor(EfiPalCode, (UINTN)fw_pal_buffer,
+                                       (UINTN)fw_pal_buffer +
+                                       IA64_FW_PAL_BUFFER_SIZE,
+                                       EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
         /* The 32/48/64/80 MB no-coalesce rule only holds with its quirk. */
         (fw_map_quirk_enabled(IA64_FW_QUIRK_LOW_BOUNDARIES) &&
          (efi_memory_descriptors_can_merge(&before, &preserved) ||
@@ -9805,7 +9916,7 @@ static FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
     },
     {
         &mPciAhciHandle, &mPciAhciIoProto, &mPciAhciDevicePath,
-        0, 1, 0, FW_PCI_AHCI_ATTRIBUTES, 0x29228086U,
+        0, IA64_460GX_AHCI_SLOT, 0, FW_PCI_AHCI_ATTRIBUTES, 0x29228086U,
         5, PCI_AHCI_MMIO_BAR, 0x1000, "AHCI", 1,
     },
     {
@@ -9871,8 +9982,8 @@ static UINT32 fw_pci_io_device_id(const FW_PCI_IO_DEVICE *Dev)
 
 static BOOLEAN fw_pci_vga_id_supported(UINT32 Id)
 {
-    return Id == PCI_VGA_ATI_ID || Id == PCI_VGA_MACH64_ID ||
-           Id == PCI_VGA_STD_ID;
+    return Id == PCI_VGA_ATI_ID || Id == PCI_VGA_ATI_GL_ID ||
+           Id == PCI_VGA_MACH64_ID || Id == PCI_VGA_STD_ID;
 }
 
 static UINT32 fw_pci_io_expected_id(const FW_PCI_IO_DEVICE *Dev)
@@ -9920,13 +10031,15 @@ static UINT64 fw_pci_io_expected_bar_length(const FW_PCI_IO_DEVICE *Dev)
  */
 /*
  * Controllers a machine may leave out: IDE and AHCI (ide=, ahci=) and the
- * LSI (lsi=on).  The LSI's seat holds the QLogic ISP12160 by default.
+ * LSI (lsi=on).  The LSI's seat holds the QLogic ISP12160 by default.  zx1
+ * has no UHCI; its seat, device 3, holds the board LAN.
  */
 static BOOLEAN fw_pci_io_device_optional(const FW_PCI_IO_DEVICE *Dev)
 {
     return Dev->Protocol == &mPciIdeIoProto ||
            Dev->Protocol == &mPciAhciIoProto ||
-           Dev->Protocol == &mPciLsiIoProto;
+           Dev->Protocol == &mPciLsiIoProto ||
+           (Dev->Protocol == &mPciUhciIoProto && fw_platform_is_zx1());
 }
 
 static BOOLEAN fw_pci_io_device_present(const FW_PCI_IO_DEVICE *Dev)
@@ -10814,6 +10927,8 @@ static BOOLEAN __attribute__((noinline)) pci_io_transfer_selftest(void)
 {
     const FW_PCI_IO_DEVICE *vga = &mPciIoDevices[5];
     const FW_PCI_IO_DEVICE *uhci = &mPciIoDevices[3];
+    /* The I/O BAR checks need the UHCI, which only the i2000 has. */
+    BOOLEAN have_io = fw_pci_io_device_present(uhci);
     UINT64 vga_length = fw_pci_io_expected_bar_length(vga);
     UINT32 data[2] = { 0, 0 };
 
@@ -10888,9 +11003,10 @@ static BOOLEAN __attribute__((noinline)) pci_io_transfer_selftest(void)
                         vga->ExpectedBarIndex, 0,
                         vga->ExpectedBarIndex, 0, 1) !=
             EFI_INVALID_PARAMETER ||
-        pci_io_copy_mem(uhci->Protocol, EfiPciWidthUint32,
-                        uhci->ExpectedBarIndex, 0,
-                        uhci->ExpectedBarIndex, 0, 1) != EFI_UNSUPPORTED) {
+        (have_io &&
+         pci_io_copy_mem(uhci->Protocol, EfiPciWidthUint32,
+                         uhci->ExpectedBarIndex, 0,
+                         uhci->ExpectedBarIndex, 0, 1) != EFI_UNSUPPORTED)) {
         return 0;
     }
 
@@ -10901,6 +11017,9 @@ static BOOLEAN __attribute__((noinline)) pci_io_transfer_selftest(void)
     }
 
     /* Exercise the same exact-end and one-element-over rules for I/O BARs. */
+    if (!have_io) {
+        return 1;
+    }
     return pci_io_io_read(uhci->Protocol, EfiPciWidthUint32,
                           uhci->ExpectedBarIndex,
                           uhci->ExpectedBarLength - sizeof(data[0]),
@@ -10922,6 +11041,7 @@ static BOOLEAN __attribute__((noinline)) pci_io_poll_selftest(void)
     EFI_PCI_IO_PROTOCOL *protocol = &mPciVgaIoProto;
     EFI_PCI_IO_PROTOCOL_WIDTH width;
     UINT64 expected = pci_mmio_read(mem_address, sizeof(UINT32));
+    BOOLEAN have_io = fw_pci_io_device_present(&mPciIoDevices[3]);
     UINT64 result;
     UINT64 start;
 
@@ -10963,9 +11083,10 @@ static BOOLEAN __attribute__((noinline)) pci_io_poll_selftest(void)
         pci_io_poll_mem(protocol, EfiPciWidthUint32, 0,
                         fw_pci_io_expected_bar_length(&mPciIoDevices[5]) - 1U,
                         0, 0, 0, &result) != EFI_UNSUPPORTED ||
-        pci_io_poll_io(&mPciUhciIoProto, EfiPciWidthUint32, 4,
-                       mPciIoDevices[3].ExpectedBarLength,
-                       0, 0, 0, &result) != EFI_UNSUPPORTED) {
+        (have_io &&
+         pci_io_poll_io(&mPciUhciIoProto, EfiPciWidthUint32, 4,
+                        mPciIoDevices[3].ExpectedBarLength,
+                        0, 0, 0, &result) != EFI_UNSUPPORTED)) {
         return 0;
     }
 
@@ -10977,10 +11098,11 @@ static BOOLEAN __attribute__((noinline)) pci_io_poll_selftest(void)
         return 0;
     }
     result = ~0ULL;
-    if (pci_io_poll_io(&mPciUhciIoProto, EfiPciWidthUint32,
-                       mPciIoDevices[3].ExpectedBarIndex, 0,
-                       0, 0, 0, &result) != EFI_SUCCESS ||
-        result == ~0ULL) {
+    if (have_io &&
+        (pci_io_poll_io(&mPciUhciIoProto, EfiPciWidthUint32,
+                        mPciIoDevices[3].ExpectedBarIndex, 0,
+                        0, 0, 0, &result) != EFI_SUCCESS ||
+         result == ~0ULL)) {
         return 0;
     }
 
@@ -14429,10 +14551,18 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
     fw_program_chipset_bus_number();
     fw_platform_init_expander_ports();
     fw_platform_init_south_bridge();
+    if (fw_platform_is_zx1()) {
+        mRuntimeRtc = IA64_PDH_DEV5B_BASE + IA64_PDH_RTC;
+        mRuntimeRtcPdh = 1;
+    }
     mRuntimeAcpiPm1Cnt = LEGACY_IO_BASE + fw_acpi_pm_io_base() +
                          ACPI_PM1_CNT_OFFSET;
     mRuntimeResetControl = LEGACY_IO_BASE + fw_acpi_reset_port();
     mRuntimeResetValue = fw_acpi_reset_value();
+    mFwSalInit.ResetControl = mRuntimeResetControl;
+    mFwSalInit.ResetValue = mRuntimeResetValue;
+    fw_platform_register_minstate(1);
+    fw_platform_register_pmi();
     mResetFloatingPointDisableBits =
         fw_read_psr() & (IA64_PSR_DFL | IA64_PSR_DFH);
 
@@ -14526,15 +14656,25 @@ static void fw_retarget_vga_device_paths(void)
 /*
  * The USB and IDE controllers are functions 2 and 1 of the 82468GX I/O and
  * Firmware Bridge on the i2000, not discrete function-zero devices of their
- * own.  Retarget their fixed PCI-I/O table entries and device paths, which
- * the static initializers give the zx1 layout.  Same timing rule as
- * fw_retarget_vga_device_paths().
+ * own.  On zx1 they are core I/O devices of PCI0: the OHCI at device
+ * IA64_ZX1_USB_SLOT, the opt-in IDE at IA64_ZX1_IDE_SLOT (no UHCI).
+ * Retarget their fixed PCI-I/O table entries and device paths.  Same timing
+ * rule as fw_retarget_vga_device_paths().
  */
 static void fw_retarget_south_bridge_device_paths(void)
 {
     UINTN i;
 
     if (fw_platform_is_zx1()) {
+        for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
+            if (mPciIoDevices[i].Protocol == &mPciOhciIoProto) {
+                mPciIoDevices[i].Device = IA64_ZX1_USB_SLOT;
+            } else if (mPciIoDevices[i].Protocol == &mPciIdeIoProto) {
+                mPciIoDevices[i].Device = IA64_ZX1_IDE_SLOT;
+            }
+        }
+        mPciOhciDevicePath.Pci.Device = IA64_ZX1_USB_SLOT;
+        mPciIdeDevicePath.Pci.Device = IA64_ZX1_IDE_SLOT;
         return;
     }
     for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
@@ -14555,34 +14695,43 @@ static void fw_retarget_south_bridge_device_paths(void)
 }
 
 /*
- * The LSI (lsi=on) takes the board's SCSI seat: device 4 of the single root
- * on zx1, the SCSI slot of the first WXB expander root (ACPI _UID
- * IA64_460GX_WXB0_BUS) on the i2000.  fw_storage_pci_device() in
- * filesystem.c names the same seat for the boot paths.  Retarget the LSI's
- * PCI I/O table entry and its device path together.  Same timing rule as
- * fw_retarget_vga_device_paths().
+ * The board's storage seats (ia64_vpc_abi.h): the LSI takes the SCSI seat,
+ * device IA64_ZX1_SCSI_SLOT of rope 1's root (ACPI _UID IA64_ZX1_SCSI_BUS)
+ * on zx1 and the SCSI slot of the first WXB expander root (ACPI _UID
+ * IA64_460GX_WXB0_BUS) on the i2000; the opt-in AHCI sits on the
+ * compatibility bus.  Each root's _UID is its bus number.
+ * fw_storage_pci_device() in filesystem.c names the same seats for the boot
+ * paths.  Retarget the PCI I/O table entries and their device paths
+ * together.  Same timing rule as fw_retarget_vga_device_paths().
  */
-static void fw_retarget_scsi_device_paths(void)
+static void fw_retarget_storage_device_paths(void)
 {
-    UINT8 bus = fw_platform_is_zx1() ? 0 : IA64_460GX_WXB0_BUS;
-    UINT8 device = fw_platform_is_zx1() ? 4 : IA64_460GX_WXB0_SCSI_SLOT;
+    BOOLEAN zx1 = fw_platform_is_zx1();
+    UINT8 bus = zx1 ? IA64_ZX1_SCSI_BUS : IA64_460GX_WXB0_BUS;
+    UINT8 device = zx1 ? IA64_ZX1_SCSI_SLOT : IA64_460GX_WXB0_SCSI_SLOT;
+    UINT8 ahci = zx1 ? IA64_ZX1_AHCI_SLOT : IA64_460GX_AHCI_SLOT;
     UINTN i;
 
     for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
         if (mPciIoDevices[i].Protocol == &mPciLsiIoProto) {
             mPciIoDevices[i].Bus = bus;
             mPciIoDevices[i].Device = device;
+            mPciIoDevices[i].ExpectedBarValue =
+                zx1 ? (UINT32)PCI_ZX1_LSI_MMIO_BAR : (UINT32)PCI_LSI_MMIO_BAR;
+        } else if (mPciIoDevices[i].Protocol == &mPciAhciIoProto) {
+            mPciIoDevices[i].Device = ahci;
         }
     }
     mPciLsiDevicePath.Acpi.Uid = bus;
     mPciLsiDevicePath.Pci.Device = device;
+    mPciAhciDevicePath.Pci.Device = ahci;
 }
 
 static void fw_phase_efi_core_init(void)
 {
     fw_retarget_vga_device_paths();
     fw_retarget_south_bridge_device_paths();
-    fw_retarget_scsi_device_paths();
+    fw_retarget_storage_device_paths();
     efi_init_boot_services();
     efi_init_runtime_services();
     uart_puts("UEFI Time Services:   ");
@@ -15404,12 +15553,15 @@ void fw_init_itc_rate(void)
 {
     UINT64 processor, bus, itc, num, den;
 
+    fw_init_platform_base_frequency();
     fw_pal_freq_ratios(&processor, &bus, &itc);
     num = itc >> 32;
     den = itc & 0xffffffffULL;
+    /* Rounded: Merced's 133.33 MHz bus clock gives an ITC of 799999998 Hz. */
     if (num != 0 && den != 0) {
-        /* SAL_FREQ_BASE platform clock is 100 MHz = 10 ticks per 100 ns. */
-        fw_itc_ticks_per_100ns = 10ULL * num / den;
+        mFwItcFrequency = mFwPlatformBaseFrequency * num / den;
+        fw_itc_ticks_per_100ns =
+            (mFwItcFrequency + 5000000ULL) / 10000000ULL;
     }
 }
 

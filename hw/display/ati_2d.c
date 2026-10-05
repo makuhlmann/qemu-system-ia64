@@ -162,7 +162,7 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
                  ati_sext14(s->regs.dst_y) + 1 - ctx->dst.height);
     ctx->dst_stride = s->regs.dst_pitch;
     ctx->dst_bits = s->vga.vram_ptr + s->regs.dst_offset;
-    if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+    if (ati_is_rage128(s)) {
         /*
          * DST_PITCH is in units of 8 pixels, so the byte stride is
          * pitch * 8 * bytes_per_pixel == pitch * bpp -- except at 24bpp, where
@@ -182,7 +182,7 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
                  ati_sext14(s->regs.src_y) + 1 - ctx->dst.height);
     ctx->src_stride = s->regs.src_pitch;
     ctx->src_bits = s->vga.vram_ptr + s->regs.src_offset;
-    if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+    if (ati_is_rage128(s)) {
         ctx->src_stride *= (ctx->bpp == 24) ? 8 : ctx->bpp;
     }
     DPRINTF("%d %d %d, %d %d %d, (%d,%d) -> (%d,%d) %dx%d %c %c\n",

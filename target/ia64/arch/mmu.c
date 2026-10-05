@@ -25,6 +25,7 @@ static bool ia64_code_tlb_ed(CPUIA64State *env);
 #define IA64_PTE_AR_SHIFT 9
 #define IA64_PTE_AR_MASK  (7ULL << IA64_PTE_AR_SHIFT)
 #define IA64_PTE_RESERVED_MASK ((1ULL << 1) | (3ULL << 50))
+#define IA64_PTE_PPN_FIELD_MASK (((1ULL << 50) - 1) & ~0xfffULL)
 #define IA64_ITIR_RESERVED_MASK (3ULL | (0xffffffffULL << 32))
 #define IA64_L0_CACHE_LINE_SIZE 64ULL
 
@@ -67,6 +68,18 @@ static uint64_t ia64_gr_page_size(uint64_t value)
 {
     return ia64_page_size_from_shift((value >> IA64_ITIR_PS_SHIFT) &
                                      IA64_ITIR_PS_MASK);
+}
+
+/*
+ * A present translation may not set PPN bits above the implemented width:
+ * itc and itr take an Unimplemented Data Address fault, and the VHPT walker
+ * aborts (SDM Vol. 2 §4.3.1; 245318-001 p.4-26).  Only Merced's 44 bits are
+ * narrower than the PPN field.
+ */
+static bool ia64_pte_ppn_implemented(const CPUIA64State *env, uint64_t pte)
+{
+    return !(pte & IA64_PTE_PRESENT) ||
+           !(pte & IA64_PTE_PPN_FIELD_MASK & ~ia64_pte_ppn_mask(env));
 }
 
 static bool ia64_translation_insert_fields_valid(const CPUIA64State *env,
@@ -830,7 +843,8 @@ void ia64_mmu_itr_insert(CPUIA64State *env, uint64_t pte, uint64_t slot_reg,
     perm = ia64_pte_perm(pte, 0);
     rid = ia64_region_rid(env, env->cr_ifa);
 
-    if (!ia64_va_is_implemented(env, env->cr_ifa)) {
+    if (!ia64_va_is_implemented(env, env->cr_ifa) ||
+        !ia64_pte_ppn_implemented(env, pte)) {
         ia64_raise_unimplemented_data_address(
             env, env->cr_ifa, 0, true, false, ia64_code_tlb_ed(env));
     }
@@ -1377,8 +1391,9 @@ bool ia64_translate_data_access(CPUIA64State *env, uint64_t va,
 }
 
 static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
-                                 bool is_ifetch, bool is_rse, uint64_t *pte,
-                                 uint64_t *entry_va, uint8_t *page_shift);
+                                 bool is_ifetch, bool is_rse, bool walker,
+                                 uint64_t *pte, uint64_t *entry_va,
+                                 uint8_t *page_shift);
 
 /*
  * The ED bit of the code page the CPU is currently executing from.
@@ -1417,8 +1432,8 @@ static bool ia64_code_tlb_ed_lookup(CPUIA64State *env, bool *known)
         return (entry->pte & IA64_PTE_ED) != 0;
     }
 
-    if (ia64_vhpt_lookup_pte(env, env->ip, true, false, &pte, &entry_va,
-                             NULL)) {
+    if (ia64_vhpt_lookup_pte(env, env->ip, true, false, false, &pte,
+                             &entry_va, NULL)) {
         return (pte & IA64_PTE_ED) != 0;
     }
 
@@ -1456,6 +1471,8 @@ static uint64_t ia64_speculative_deferral_dcr_mask(IA64Exception excp)
         return IA64_DCR_DR;
     case IA64_EXCP_DATA_ACCESS_BIT:
         return IA64_DCR_DA;
+    case IA64_EXCP_DEBUG:
+        return IA64_DCR_DD;
     case IA64_EXCP_UNIMPL_DATA_ADDR:
         return UINT64_MAX;
     default:
@@ -1503,20 +1520,14 @@ static bool ia64_speculative_exception_deferrable(CPUIA64State *env,
     }
 
     /*
-     * A deferrable fault is deferred when the ld.s bundle's page carries the
-     * TLB ED bit, OR when the DCR mask bit for the fault is set.  These are
-     * independent enables (SDM Vol.2, control speculation): in particular the
-     * DCR path does not require instruction translation to be enabled, so an
-     * ld.s issued with PSR.it == 0 (physical code, as in the OS loaders) still
-     * defers a TLB/access fault whenever the corresponding DCR bit is set.
-     * (ia64_current_code_tlb_ed() already returns false when PSR.it == 0, so
-     * the ED path keeps its dependence on instruction translation.)
+     * SDM Vol. 2 Table 5-4: the DCR bit defers only while PSR.it and ITLB.ed
+     * are both 1.  Code that runs with PSR.it = 0, such as an OS loader on
+     * the firmware IVT, takes the fault, and the handler defers it in
+     * software (Part II 6.1).  An unknown ITLB.ed counts as set, as for
+     * Unaligned above.
      */
-    if (itlb_ed) {
-        return true;
-    }
-
-    return dcr_mask != 0 && (env->cr_dcr & dcr_mask);
+    return (env->psr & IA64_PSR_IT) && (itlb_ed || itlb_ed_unknown) &&
+           dcr_mask != 0 && (env->cr_dcr & dcr_mask);
 }
 
 /* window and span as in IA64UnalignedWindow (translate/translate.h). */
@@ -1756,13 +1767,44 @@ void ia64_raise_pre_unaligned_data_fault(CPUIA64State *env,
         ia64_code_tlb_ed(env), fault_ip, fault_slot);
 }
 
+/*
+ * Unimplemented Data Address and every translation fault outrank Data
+ * Debug, which outranks Unaligned Data Reference (SDM Vol. 2 Table 5-6).
+ */
+void ia64_mmu_check_data_debug(CPUIA64State *env, uint64_t va,
+                               uint32_t datum, uint32_t len, uint64_t access,
+                               uint64_t fault_ip, uint8_t fault_slot)
+{
+    uint32_t is_write = (access & IA64_ISR_W) != 0;
+    uint32_t is_rw = (access & (IA64_ISR_R | IA64_ISR_W)) ==
+                     (IA64_ISR_R | IA64_ISR_W);
+
+    if (!ia64_data_debug_hit(env, va, datum, len, access,
+                             ia64_psr_cpl(env->psr))) {
+        return;
+    }
+    ia64_raise_pre_unaligned_data_fault(env, va, is_write, is_rw, fault_ip,
+                                        fault_slot);
+    ia64_raise_data_reference_exception_at(
+        env, va, is_write, is_rw, false, 0, IA64_EXCP_DEBUG, false,
+        ia64_code_tlb_ed(env), fault_ip, fault_slot);
+}
+
+/* probe.fault and lfetch.fault are the non-access Data Debug sources. */
 void ia64_mmu_probe_fault(CPUIA64State *env, uint64_t va, uint32_t is_write,
                         uint32_t is_rw, uint64_t access_level)
 {
     uint8_t effective_pl = ia64_probe_access_level(env, access_level);
+    uint64_t access = is_rw ? IA64_ISR_R | IA64_ISR_W :
+                      is_write ? IA64_ISR_W : IA64_ISR_R;
 
     ia64_raise_data_reference_fault_if_needed(env, va, is_write, is_rw,
                                               effective_pl, true, 5);
+    if (ia64_data_debug_hit(env, va, 1, 1, access, ia64_psr_cpl(env->psr))) {
+        ia64_raise_data_reference_exception(env, va, is_write, is_rw, true,
+                                            5, IA64_EXCP_DEBUG, false,
+                                            ia64_code_tlb_ed(env));
+    }
 }
 
 void ia64_mmu_lfetch_fault(CPUIA64State *env, uint64_t va,
@@ -1771,6 +1813,11 @@ void ia64_mmu_lfetch_fault(CPUIA64State *env, uint64_t va,
     IA64Exception excp = ia64_data_reference_exception(
         env, va, false, false, ia64_psr_cpl(env->psr), true, NULL);
 
+    if (excp == IA64_EXCP_NONE &&
+        ia64_data_debug_hit(env, va, 1, 1, IA64_ISR_R,
+                            ia64_psr_cpl(env->psr))) {
+        excp = IA64_EXCP_DEBUG;
+    }
     if (excp == IA64_EXCP_NONE) {
         return;
     }
@@ -1874,6 +1921,7 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
                                   uint32_t span)
 {
     bool alignment_fault;
+    bool debug;
     bool itlb_ed = false;
     bool itlb_ed_known = true;
     IA64Exception excp;
@@ -1885,13 +1933,17 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
 
     alignment_fault = ia64_speculative_alignment_fault(env, va, size,
                                                        window, span);
+    debug = !is_ifetch &&
+            ia64_data_debug_hit(env, va, size, span,
+                                is_write ? IA64_ISR_W : IA64_ISR_R,
+                                ia64_psr_cpl(env->psr));
     /*
      * A naturally aligned load that hits a softmmu read entry has passed
      * every data-reference check at this privilege level already; only the
      * memory attribute can still defer it.  Physical accesses never allow
      * control speculation (ia64_cpu_tlb_fill), so they skip the lookup.
      */
-    if (!is_ifetch && !is_write && (env->psr & IA64_PSR_DT) &&
+    if (!debug && !is_ifetch && !is_write && (env->psr & IA64_PSR_DT) &&
         size != 0 && (va & (size - 1)) == 0) {
         int mmu_idx = MMU_IDX_VIRT_CPL(ia64_psr_cpl(env->psr));
         int speculation = ia64_exec_load_hit_speculation(env, va, mmu_idx);
@@ -1924,9 +1976,10 @@ qualify:
      */
     if (excp == IA64_EXCP_UNIMPL_DATA_ADDR) {
         alignment_fault = false;
+        debug = false;
     }
     /* ITLB.ed only qualifies a condition; the success path needs no lookup. */
-    if (excp != IA64_EXCP_NONE || alignment_fault) {
+    if (excp != IA64_EXCP_NONE || debug || alignment_fault) {
         itlb_ed = ia64_code_tlb_ed_lookup(env, &itlb_ed_known);
     }
     if (excp != IA64_EXCP_NONE &&
@@ -1935,6 +1988,19 @@ qualify:
         ia64_raise_data_reference_exception(
             env, va, is_write, false, false, 0, excp, true, itlb_ed);
     }
+    /*
+     * Data Debug ranks below the translation faults and above Unaligned
+     * Data Reference, and only an unimplemented address precludes it: a
+     * deferred translation condition leaves it to fault unless DCR.dd defers
+     * it too (SDM Vol. 2 Table 5-3, Table 5-4, Table 5-6).
+     */
+    if (debug &&
+        !ia64_speculative_exception_deferrable(env, IA64_EXCP_DEBUG, itlb_ed,
+                                               !itlb_ed_known)) {
+        ia64_raise_data_reference_exception(
+            env, va, is_write, false, false, 0, IA64_EXCP_DEBUG, true,
+            itlb_ed);
+    }
     if (alignment_fault &&
         !ia64_speculative_exception_deferrable(
             env, IA64_EXCP_UNALIGNED, itlb_ed, !itlb_ed_known)) {
@@ -1942,7 +2008,7 @@ qualify:
             env, va, is_write, false, false, 0, IA64_EXCP_UNALIGNED, true,
             itlb_ed);
     }
-    if (excp != IA64_EXCP_NONE || alignment_fault) {
+    if (excp != IA64_EXCP_NONE || debug || alignment_fault) {
         return 0;
     }
 
@@ -1960,6 +2026,13 @@ uint64_t ia64_mmu_advanced_load_allowed(CPUIA64State *env, uint64_t va)
 
     return ia64_exec_advanced_load_allowed(env, va, mmu_idx);
 }
+
+static bool ia64_vhpt_walk_entry(CPUIA64State *env, uint64_t va, uint32_t rid,
+                                 bool is_ifetch, bool is_rse,
+                                 uint8_t access_level, bool tak,
+                                 uint64_t *pa, uint8_t *perm, uint64_t *pte,
+                                 uint32_t *access_key,
+                                 const IA64TlbEntry **installed_entry);
 
 uint64_t ia64_mmu_tak(CPUIA64State *env, uint64_t va)
 {
@@ -1985,9 +2058,9 @@ uint64_t ia64_mmu_tak(CPUIA64State *env, uint64_t va)
     }
 
     if ((env->psr & IA64_PSR_DT) &&
-        ia64_vhpt_walk_full(env, va, rid, false, false,
-                            ia64_psr_cpl(env->psr), &pa, &perm, &pte, NULL,
-                            &entry) &&
+        ia64_vhpt_walk_entry(env, va, rid, false, false,
+                             ia64_psr_cpl(env->psr), true, &pa, &perm, &pte,
+                             NULL, &entry) &&
         (pte & IA64_PTE_PRESENT)) {
         if (entry && ia64_tlb_entry_present(entry)) {
             return (uint64_t)entry->key << IA64_ITIR_KEY_SHIFT;
@@ -2126,9 +2199,9 @@ typedef enum IA64VhptEntryStatus {
     IA64_VHPT_ENTRY_ABORT,
 } IA64VhptEntryStatus;
 
-static IA64VhptEntryStatus ia64_vhpt_entry_phys(CPUIA64State *env,
-                                                uint64_t entry_va,
-                                                uint64_t *entry_pa)
+static IA64VhptEntryStatus ia64_vhpt_entry_translate(CPUIA64State *env,
+                                                    uint64_t entry_va,
+                                                    uint64_t *entry_pa)
 {
     const IA64TlbEntry *entry;
     uint8_t perm;
@@ -2179,6 +2252,29 @@ static IA64VhptEntryStatus ia64_vhpt_entry_phys(CPUIA64State *env,
     return IA64_VHPT_ENTRY_TLB_MISS;
 }
 
+/*
+ * A walker read of dbr_len bytes that matches a DBR.r pair at PL0 aborts the
+ * walk to the TLB Miss fault, as a fault of the VHPT entry's translation
+ * does (SDM Vol. 2 4.1.7, 7.1.1 DBR.r); 0 skips the check, as for tak.
+ */
+static IA64VhptEntryStatus ia64_vhpt_entry_phys(CPUIA64State *env,
+                                                uint64_t entry_va,
+                                                uint64_t *entry_pa,
+                                                uint32_t dbr_len)
+{
+    IA64VhptEntryStatus status = ia64_vhpt_entry_translate(env, entry_va,
+                                                           entry_pa);
+
+    if (status == IA64_VHPT_ENTRY_TRANSLATED && dbr_len &&
+        ia64_data_debug_hit(env, entry_va, dbr_len, dbr_len, IA64_ISR_R, 0)) {
+        qemu_log_mask(CPU_LOG_MMU,
+                      "ia64 vhpt entry DBR abort va=0x%016" PRIx64 "\n",
+                      entry_va);
+        return IA64_VHPT_ENTRY_ABORT;
+    }
+    return status;
+}
+
 bool ia64_vhpt_entry_accessible(CPUIA64State *env, uint64_t va,
                                 bool is_ifetch, bool is_rse,
                                 uint64_t *entry_va)
@@ -2202,7 +2298,7 @@ bool ia64_vhpt_entry_accessible(CPUIA64State *env, uint64_t va,
      * abort to the original TLB miss.  Only a missing DTLB translation for
      * the VHPT entry raises a VHPT Translation fault.
      */
-    return ia64_vhpt_entry_phys(env, *entry_va, &entry_pa) !=
+    return ia64_vhpt_entry_phys(env, *entry_va, &entry_pa, 0) !=
            IA64_VHPT_ENTRY_TLB_MISS;
 }
 
@@ -2223,7 +2319,7 @@ static void ia64_vhpt_load_long_entry(CPUIA64State *env, uint64_t pa,
     *tag = ia64_vhpt_load_u64(env, pa + 16);
 }
 
-static bool ia64_vhpt_pte_valid(uint64_t pte)
+static bool ia64_vhpt_pte_valid(const CPUIA64State *env, uint64_t pte)
 {
     uint8_t ma;
 
@@ -2231,7 +2327,8 @@ static bool ia64_vhpt_pte_valid(uint64_t pte)
         return true;
     }
     ma = (pte & IA64_PTE_MA_MASK) >> IA64_PTE_MA_SHIFT;
-    return !(pte & IA64_PTE_RESERVED_MASK) && (ma == 0 || ma >= 4);
+    return !(pte & IA64_PTE_RESERVED_MASK) && (ma == 0 || ma >= 4) &&
+           ia64_pte_ppn_implemented(env, pte);
 }
 
 static bool ia64_vhpt_itir_valid(const CPUIA64State *env,
@@ -2247,9 +2344,11 @@ static bool ia64_vhpt_itir_valid(const CPUIA64State *env,
            ia64_page_shift_insertable(env, page_shift);
 }
 
+/* walker: the lookup stands for a walker reference, which DBRs can abort. */
 static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
-                                 bool is_ifetch, bool is_rse, uint64_t *pte,
-                                 uint64_t *entry_va, uint8_t *page_shift)
+                                 bool is_ifetch, bool is_rse, bool walker,
+                                 uint64_t *pte, uint64_t *entry_va,
+                                 uint8_t *page_shift)
 {
     uint8_t size;
     bool long_format;
@@ -2265,7 +2364,8 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
 
     if (!long_format) {
         *entry_va = ia64_vhpt_short_hash_address(env, va, size);
-        if (ia64_vhpt_entry_phys(env, *entry_va, &entry_pa) !=
+        if (ia64_vhpt_entry_phys(env, *entry_va, &entry_pa,
+                                 walker ? 8 : 0) !=
             IA64_VHPT_ENTRY_TRANSLATED) {
             return false;
         }
@@ -2273,7 +2373,7 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
         if (page_shift) {
             *page_shift = ia64_region_preferred_ps(env, va);
         }
-        return ia64_vhpt_pte_valid(*pte);
+        return ia64_vhpt_pte_valid(env, *pte);
     }
 
     {
@@ -2282,7 +2382,8 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
         uint64_t tag;
 
         *entry_va = ia64_vhpt_long_hash_address(env, va, size, NULL);
-        if (ia64_vhpt_entry_phys(env, *entry_va, &entry_pa) !=
+        if (ia64_vhpt_entry_phys(env, *entry_va, &entry_pa,
+                                 walker ? 32 : 0) !=
             IA64_VHPT_ENTRY_TRANSLATED) {
             return false;
         }
@@ -2293,7 +2394,7 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
         if (page_shift) {
             *page_shift = (itir >> IA64_ITIR_PS_SHIFT) & IA64_ITIR_PS_MASK;
         }
-        return ia64_vhpt_pte_valid(*pte) &&
+        return ia64_vhpt_pte_valid(env, *pte) &&
                ia64_vhpt_itir_valid(env, *pte, itir);
     }
 }
@@ -2309,7 +2410,7 @@ bool ia64_vhpt_pte_not_present(CPUIA64State *env, uint64_t va,
         entry_va = &local_entry_va;
     }
 
-    return ia64_vhpt_lookup_pte(env, va, is_ifetch, is_rse,
+    return ia64_vhpt_lookup_pte(env, va, is_ifetch, is_rse, true,
                                 &pte, entry_va, NULL) &&
            !(pte & IA64_PTE_PRESENT);
 }
@@ -2356,10 +2457,10 @@ bool ia64_mmu_translate_debug(CPUIA64State *env, uint64_t va, uint64_t *pa)
         return true;
     }
 
-    if ((ia64_vhpt_lookup_pte(env, va, false, false, &pte, &entry_va,
-                              &page_shift) ||
-         ia64_vhpt_lookup_pte(env, va, true, false, &pte, &entry_va,
-                              &page_shift)) &&
+    if ((ia64_vhpt_lookup_pte(env, va, false, false, false, &pte,
+                              &entry_va, &page_shift) ||
+         ia64_vhpt_lookup_pte(env, va, true, false, false, &pte,
+                              &entry_va, &page_shift)) &&
         (pte & IA64_PTE_PRESENT)) {
         uint64_t page_mask = (1ULL << page_shift) - 1;
 
@@ -2436,11 +2537,13 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
 
 /* ---- VHPT walker ---- */
 
-bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
-                         bool is_ifetch, bool is_rse, uint8_t access_level,
-                         uint64_t *pa, uint8_t *perm, uint64_t *pte,
-                         uint32_t *access_key,
-                         const IA64TlbEntry **installed_entry)
+/* tak: the walk serves tak, which DBR.r matches do not abort. */
+static bool ia64_vhpt_walk_entry(CPUIA64State *env, uint64_t va, uint32_t rid,
+                                 bool is_ifetch, bool is_rse,
+                                 uint8_t access_level, bool tak,
+                                 uint64_t *pa, uint8_t *perm, uint64_t *pte,
+                                 uint32_t *access_key,
+                                 const IA64TlbEntry **installed_entry)
 {
     uint64_t vhpt_base;
     uint64_t hash;
@@ -2481,7 +2584,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
 
         entry_va = ia64_vhpt_short_hash_address(env, va, size);
         page_shift = ia64_region_preferred_ps(env, va);
-        if (ia64_vhpt_entry_phys(env, entry_va, &entry_pa) !=
+        if (ia64_vhpt_entry_phys(env, entry_va, &entry_pa, tak ? 0 : 8) !=
             IA64_VHPT_ENTRY_TRANSLATED) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt short entry miss %c va=0x%016" PRIx64
@@ -2492,7 +2595,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
         }
 
         translation = ia64_vhpt_load_u64(env, entry_pa);
-        if (!ia64_vhpt_pte_valid(translation)) {
+        if (!ia64_vhpt_pte_valid(env, translation)) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt short reserved translation %c"
                           " va=0x%016" PRIx64 " rid=0x%06" PRIx32
@@ -2561,7 +2664,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
     expected_tag = ia64_vhpt_long_tag(env, va);
     {
         entry_va = ia64_vhpt_long_hash_address(env, va, size, &hash);
-        if (ia64_vhpt_entry_phys(env, entry_va, &entry_pa) !=
+        if (ia64_vhpt_entry_phys(env, entry_va, &entry_pa, tak ? 0 : 32) !=
             IA64_VHPT_ENTRY_TRANSLATED) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt long entry miss %c va=0x%016" PRIx64
@@ -2578,7 +2681,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
         if (tag != expected_tag) {
             goto long_miss;
         }
-        if (!ia64_vhpt_pte_valid(translation) ||
+        if (!ia64_vhpt_pte_valid(env, translation) ||
             !ia64_vhpt_itir_valid(env, translation, itir)) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt reserved translation %c"
@@ -2664,6 +2767,17 @@ long_miss:
     return false;
 }
 
+bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
+                         bool is_ifetch, bool is_rse, uint8_t access_level,
+                         uint64_t *pa, uint8_t *perm, uint64_t *pte,
+                         uint32_t *access_key,
+                         const IA64TlbEntry **installed_entry)
+{
+    return ia64_vhpt_walk_entry(env, va, rid, is_ifetch, is_rse,
+                                access_level, false, pa, perm, pte,
+                                access_key, installed_entry);
+}
+
 bool ia64_vhpt_walk(CPUIA64State *env, uint64_t va, uint32_t rid,
                     bool is_ifetch, bool is_rse, uint8_t access_level,
                     uint64_t *pa, uint8_t *perm)
@@ -2701,7 +2815,8 @@ void ia64_mmu_itc_insert(CPUIA64State *env, uint64_t pte, uint32_t is_data,
         return;
     }
 
-    if (!ia64_va_is_implemented(env, env->cr_ifa)) {
+    if (!ia64_va_is_implemented(env, env->cr_ifa) ||
+        !ia64_pte_ppn_implemented(env, pte)) {
         ia64_raise_unimplemented_data_address(
             env, env->cr_ifa, 0, true, false, ia64_code_tlb_ed(env));
     }

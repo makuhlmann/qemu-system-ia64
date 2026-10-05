@@ -202,18 +202,21 @@ static void ia32_init_features(CPUIA64State *env, CPUX86State *xenv)
     /*
      * The CPUID(1) EAX identity is per-model: Merced's engine reports x86
      * family 7 (the AP-485 assignment for the Itanium), Madison's reports
-     * family 6, model 7, stepping 3.  The feature word follows the
-     * Pentium III value for both, with PAE omitted because IA-32 paging is
-     * not available, and IA64 added to report that JMPE can return to the
-     * Itanium instruction set.  Other IA-32 paging/system bits may still be
-     * set even though the IA-64 System Environment does not make the
-     * corresponding facility usable.
+     * 0x00100F15.  The feature word follows the Pentium III value, with
+     * IA64 added to report that JMPE can return to the Itanium instruction
+     * set.  Madison's engine also reports PAE, which the IA-64 System
+     * Environment does not make usable, like other IA-32 paging and system
+     * bits here; for Merced there is no hardware value, and the model leaves
+     * PAE out.
      */
     xenv->features[FEAT_1_EDX] =
         CPUID_FP87 | CPUID_VME | CPUID_DE | CPUID_PSE | CPUID_TSC |
         CPUID_MSR | CPUID_MCE | CPUID_CX8 | CPUID_APIC | CPUID_SEP |
         CPUID_MTRR | CPUID_PGE | CPUID_MCA | CPUID_CMOV | CPUID_PAT |
         CPUID_PSE36 | CPUID_MMX | CPUID_FXSR | CPUID_SSE | CPUID_IA64;
+    if (ia64_env_cpu_class(env)->ia32_cpuid_pae) {
+        xenv->features[FEAT_1_EDX] |= CPUID_PAE;
+    }
     xenv->features[FEAT_1_ECX] = 0;
     xenv->cpuid_level = 2;
     xenv->cpuid_version = ia64_env_cpu_class(env)->ia32_cpuid_version;
@@ -365,4 +368,5 @@ void ia64_ia32_sync_psr_cpl(CPUIA64State *env)
     env->psr = (env->psr & ~IA64_PSR_CPL_MASK) |
                (uint64_t)(env->ia32.hflags & HF_CPL_MASK)
                << IA64_PSR_CPL_SHIFT;
+    ia64_pmu_sync(env);
 }

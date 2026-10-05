@@ -228,6 +228,78 @@ static void ia64_sapic_set_irq_work(CPUState *cs, run_on_cpu_data data)
     ia64_sapic_update_interrupt(&cpu->env);
 }
 
+static void ia64_raise_init_work(CPUState *cs, run_on_cpu_data data)
+{
+    (void)data;
+    cpu_set_interrupt(cs, IA64_INTERRUPT_INIT);
+    qemu_cpu_kick(cs);
+}
+
+/* An INIT message or signal for this processor (SDM Vol. 2 5.8.4.1). */
+void ia64_cpu_raise_init(CPUState *cs)
+{
+    if (qemu_cpu_is_self(cs)) {
+        ia64_raise_init_work(cs, RUN_ON_CPU_NULL);
+    } else {
+        async_run_on_cpu(cs, ia64_raise_init_work, RUN_ON_CPU_NULL);
+    }
+}
+
+static void ia64_pmi_pend(CPUIA64State *env, unsigned vector)
+{
+    CPUState *cs = env_cpu(env);
+
+    env->pal.pal_pmi_pending |= 1u << vector;
+    cpu_set_interrupt(cs, IA64_INTERRUPT_PMI);
+    qemu_cpu_kick(cs);
+}
+
+static void ia64_raise_pmi_work(CPUState *cs, run_on_cpu_data data)
+{
+    ia64_pmi_pend(cpu_env(cs), data.host_int);
+}
+
+/*
+ * A PMI message for this processor (SDM Vol. 2 5.8.4.2, Table 5-17).  The
+ * vector is 4 bits wide (11.5.1); values beyond 15 are not PMI vectors.
+ */
+void ia64_cpu_raise_pmi(CPUState *cs, unsigned vector)
+{
+    run_on_cpu_data data = RUN_ON_CPU_HOST_INT(vector);
+
+    if (vector >= IA64_PMI_VECTORS) {
+        return;
+    }
+    if (qemu_cpu_is_self(cs)) {
+        ia64_raise_pmi_work(cs, data);
+    } else {
+        async_run_on_cpu(cs, ia64_raise_pmi_work, data);
+    }
+}
+
+static void ia64_set_pmi_pin_work(CPUState *cs, run_on_cpu_data data)
+{
+    CPUIA64State *env = cpu_env(cs);
+    bool level = data.host_int != 0;
+
+    if (level && !env->pal.pal_pmi_pin) {
+        ia64_pmi_pend(env, IA64_PMI_VECTOR_PIN);
+    }
+    env->pal.pal_pmi_pin = level;
+}
+
+/* The PMI pin, asserted high here: an assertion pends PMI vector 0. */
+void ia64_cpu_set_pmi_pin(CPUState *cs, int level)
+{
+    run_on_cpu_data data = RUN_ON_CPU_HOST_INT(level != 0);
+
+    if (qemu_cpu_is_self(cs)) {
+        ia64_set_pmi_pin_work(cs, data);
+    } else {
+        async_run_on_cpu(cs, ia64_set_pmi_pin_work, data);
+    }
+}
+
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
 {
     run_on_cpu_data data = RUN_ON_CPU_HOST_INT(vector);
@@ -244,18 +316,22 @@ void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
  * processor.  Each is steered by its Local Redirection Register (SDM vol 2
  * 5.8.3.9): the mask bit discards occurrences, the delivery mode picks the
  * vector to pend (ExtINT is vector 0, NMI vector 2, INT the vector field),
- * and the trigger mode decides whether the pending indication follows the
- * pin (level) or latches on an inactive-to-active edge.  On the 460GX the
- * south bridge's 8259 pair drives LINT0, which is how the SDV firmware runs
- * its legacy tick (it programs LRR0 = 0x8700: level ExtINT) and why the XP
- * HAL masks both pins (LRR = 0x10000) before it enables interrupts.
+ * ipp picks the active level, and the trigger mode decides whether the
+ * pending indication follows the pin (level) or latches on an
+ * inactive-to-active edge.  On the 460GX the south bridge's 8259 pair drives
+ * LINT0, which is how the SDV firmware runs its legacy tick (it programs
+ * LRR0 = 0x8700: level ExtINT) and why the XP HAL masks both pins
+ * (LRR = 0x10000) before it enables interrupts.
  */
 #define IA64_LRR_VECTOR_MASK    0xffULL
 #define IA64_LRR_DM_SHIFT       8
 #define IA64_LRR_DM_MASK        7ULL
 #define IA64_LRR_DM_INT         0
+#define IA64_LRR_DM_PMI         2
 #define IA64_LRR_DM_NMI         4
+#define IA64_LRR_DM_INIT        5
 #define IA64_LRR_DM_EXTINT      7
+#define IA64_LRR_IPP            (1ULL << 13)
 #define IA64_LRR_TM             (1ULL << 15)
 #define IA64_LRR_M              (1ULL << 16)
 
@@ -272,9 +348,16 @@ static int ia64_lrr_vector(uint64_t lrr)
     case IA64_LRR_DM_EXTINT:
         return 0;
     default:
-        /* PMI and INIT delivery through a LINT pin are not modelled. */
         return -1;
     }
+}
+
+/* lint_level is the pin's electrical level; LRR.ipp = 1 makes low active. */
+static bool ia64_lint_asserted(CPUIA64State *env, int pin)
+{
+    bool active_low = env->cr[IA64_CR_LRR0 + pin] & IA64_LRR_IPP;
+
+    return env->interrupt.lint_level[pin] != active_low;
 }
 
 static void ia64_lint_update(CPUIA64State *env, int pin, bool rising)
@@ -283,6 +366,22 @@ static void ia64_lint_update(CPUIA64State *env, int pin, bool rising)
     int vector = ia64_lrr_vector(lrr);
     bool level = (lrr & IA64_LRR_TM) != 0;
 
+    /*
+     * INIT and PMI are events, not external vectors: an unmasked rising
+     * edge raises them, a LINT PMI at vector 0 (Table 5-14).
+     */
+    switch ((lrr >> IA64_LRR_DM_SHIFT) & IA64_LRR_DM_MASK) {
+    case IA64_LRR_DM_INIT:
+        if (rising && !(lrr & IA64_LRR_M)) {
+            ia64_cpu_raise_init(env_cpu(env));
+        }
+        return;
+    case IA64_LRR_DM_PMI:
+        if (rising && !(lrr & IA64_LRR_M)) {
+            ia64_pmi_pend(env, IA64_PMI_VECTOR_PIN);
+        }
+        return;
+    }
     if (vector < 0) {
         return;
     }
@@ -292,7 +391,7 @@ static void ia64_lint_update(CPUIA64State *env, int pin, bool rising)
          * withdraws it otherwise (deassertion clears the indication, and a
          * masked pin's occurrences are not pended).
          */
-        if (env->interrupt.lint_level[pin] && !(lrr & IA64_LRR_M)) {
+        if (ia64_lint_asserted(env, pin) && !(lrr & IA64_LRR_M)) {
             env->interrupt.sapic_irr[vector / 64] |= 1ULL << (vector % 64);
         } else {
             env->interrupt.sapic_irr[vector / 64] &= ~(1ULL << (vector % 64));
@@ -312,11 +411,11 @@ static void ia64_cpu_set_lint_work(CPUState *cs, run_on_cpu_data data)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     int pin = data.host_int >> 1;
-    bool level = data.host_int & 1;
-    bool rising = level && !cpu->env.interrupt.lint_level[pin];
+    bool was_asserted = ia64_lint_asserted(&cpu->env, pin);
 
-    cpu->env.interrupt.lint_level[pin] = level;
-    ia64_lint_update(&cpu->env, pin, rising);
+    cpu->env.interrupt.lint_level[pin] = data.host_int & 1;
+    ia64_lint_update(&cpu->env, pin,
+                     !was_asserted && ia64_lint_asserted(&cpu->env, pin));
 }
 
 void ia64_cpu_set_lint(CPUState *cs, int pin, int level)
@@ -515,7 +614,6 @@ bool ia64_cpu_has_work(CPUState *cs)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     CPUIA64State *env = &cpu->env;
-    bool nmi_pending = (env->interrupt.sapic_irr[0] & (1ULL << 2)) != 0;
     bool interrupts_enabled = (env->psr & IA64_PSR_I) ||
                               (cs->halted && env->interrupt.pal_halt_wake);
 
@@ -523,11 +621,19 @@ bool ia64_cpu_has_work(CPUState *cs)
      * ia64_sapic_update_interrupt() maintains CPU_INTERRUPT_HARD whenever
      * IRR, ISR or TPR changes, and the ITM callback does the same when its
      * deadline expires.  Do not rescan IRR or reschedule the timer from this
-     * exec-loop hot path.  PAL_HALT_LIGHT wakes only for an interrupt that
-     * is actually deliverable; PSR.i does not mask NMI vector 2.
+     * exec-loop hot path.  PAL_HALT_LIGHT wakes for any interrupt that TPR
+     * and the in-service priority leave unmasked, NMI included, whatever
+     * PSR.i (SDM Vol. 2 rev 1.0 11.6); outside it PSR.i gates NMI too.
      */
-    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) &&
-           (interrupts_enabled || nmi_pending);
+    if (cpu_test_interrupt(cs, IA64_INTERRUPT_INIT) &&
+        !(env->psr & IA64_PSR_MC)) {
+        return true;
+    }
+    if (cpu_test_interrupt(cs, IA64_INTERRUPT_PMI) &&
+        (env->psr & IA64_PSR_IC)) {
+        return true;
+    }
+    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) && interrupts_enabled;
 }
 
 

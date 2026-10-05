@@ -199,16 +199,20 @@ typedef struct {
 #define TEST_UART_BASE               0x00000047f0000000ULL
 #define TEST_UART_SIZE               0x0000000000002000ULL
 /*
- * The RTC is a legacy CMOS device on the I/O ports now (f610823); it no
- * longer has a memory-mapped runtime descriptor of its own.  This suite runs
- * on the zx1 board, which keeps the variable store in the PDH part and not in
- * the flash.
+ * This suite runs on the zx1 board, which keeps the variable store in the
+ * PDH part and not in the flash, and whose clock is the PDH clock: the time
+ * services reach both at run time.
  */
 #define TEST_NVRAM_BASE              0x00000000ff420000ULL
 #define TEST_NVRAM_SIZE              0x0000000000010000ULL
+#define TEST_PDH_CLOCK_BASE          0x00000000ff5b8000ULL
+#define TEST_PDH_CLOCK_SIZE          0x0000000000002000ULL
 /* PCI config window at the E8870 MMCFG home, 64 MiB = 64 buses (28ea66e). */
 #define TEST_ECAM_BASE               0x00000ffff8000000ULL
 #define TEST_ECAM_SIZE               0x0000000004000000ULL
+/* zx1's SCSI seat on rope 1, IA64_ZX1_SCSI_BUS/_SLOT in ia64_vpc_abi.h. */
+#define TEST_ZX1_SCSI_BUS            0x20U
+#define TEST_ZX1_SCSI_SLOT           1U
 #define TEST_PCI_MMIO_BASE           0x00000000ee000000ULL
 #define TEST_PCI_MMIO_SIZE           0x0000000010000000ULL
 #define TEST_SPARSE_IO_BASE          0x00000ffffc000000ULL
@@ -1713,17 +1717,19 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
     UINT32 device_id = 0;
 
     /*
-     * Read the always-present boot HBA on the core I/O seat, device 1: the
-     * LSI (0x1000:0x0012) this board carries, or the QLogic ISP12160
-     * (0x1077:0x1216) when isp=on,lsi=off puts that one there instead.  The
-     * AHCI controller is opt-in (ahci=off by default), so it must not be
-     * assumed present here.
+     * Read the always-present boot HBA on the core I/O seat, device 1 of
+     * rope 1's bus: the LSI (0x1000:0x0012) this board carries, or the
+     * QLogic ISP12160 (0x1077:0x1216) when isp=on,lsi=off puts that one there
+     * instead.  The AHCI controller is opt-in (ahci=off by default), so it
+     * must not be assumed present here.
      */
     return SystemTable->BootServices->LocateProtocol(
                pci_root_guid, NULL, (VOID **)&root) == EFI_SUCCESS &&
            root != NULL && root->Pci.Read != NULL &&
            root->SegmentNumber == 0 &&
-           root->Pci.Read(root, EfiPciWidthUint32, 1ULL << 16, 1,
+           root->Pci.Read(root, EfiPciWidthUint32,
+                          ((UINT64)TEST_ZX1_SCSI_BUS << 24) |
+                              ((UINT64)TEST_ZX1_SCSI_SLOT << 16), 1,
                           &device_id) == EFI_SUCCESS &&
            (device_id == 0x00121000U || device_id == 0x12161077U);
 }
@@ -1810,6 +1816,64 @@ static BOOLEAN test_pci_io_protocol(EFI_SYSTEM_TABLE *SystemTable)
                EFI_SUCCESS &&
            identifier == at_location &&
            identifier != 0 && identifier != 0xffffffffU;
+}
+
+/*
+ * The SCSI adapter on zx1's SCSI seat, the LSI 53c895a by default, has a PCI
+ * I/O controller at that location, and the controller's device path names
+ * the same PCI node.
+ */
+static BOOLEAN test_pci_io_scsi_seat(EFI_SYSTEM_TABLE *SystemTable)
+{
+    EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
+    EFI_HANDLE *handles = NULL;
+    UINTN count = 0;
+    UINTN i;
+    BOOLEAN found = 0;
+
+    if (bs->LocateHandleBuffer(EFI_LOCATE_BY_PROTOCOL, pci_io_guid, NULL,
+                               &count, &handles) != EFI_SUCCESS ||
+        handles == NULL) {
+        return 0;
+    }
+    for (i = 0; i < count && !found; i++) {
+        EFI_PCI_IO_PROTOCOL *pci = NULL;
+        TEST_DEVICE_PATH_NODE *node = NULL;
+        UINTN segment, bus, device, function;
+        UINT32 identifier = 0;
+        UINTN depth;
+
+        if (bs->HandleProtocol(handles[i], pci_io_guid,
+                               (VOID **)&pci) != EFI_SUCCESS || pci == NULL ||
+            pci->GetLocation(pci, &segment, &bus, &device, &function) !=
+                EFI_SUCCESS ||
+            segment != 0 || bus != TEST_ZX1_SCSI_BUS ||
+            device != TEST_ZX1_SCSI_SLOT ||
+            function != 0) {
+            continue;
+        }
+        if (pci->Pci.Read(pci, EfiPciWidthUint32, 0, 1, &identifier) !=
+                EFI_SUCCESS || identifier != 0x00121000U ||
+            bs->HandleProtocol(handles[i], device_path_guid,
+                               (VOID **)&node) != EFI_SUCCESS || node == NULL) {
+            break;
+        }
+        for (depth = 0; depth < 8U && node->Length >= sizeof(*node) &&
+                        !(node->Type == 0x7fU && node->SubType == 0xffU);
+             depth++) {
+            if (node->Type == 0x01U && node->SubType == 0x01U &&
+                node->Length == 6U) {
+                const UINT8 *pci_node = (const UINT8 *)node;
+
+                found = pci_node[4] == 0 && pci_node[5] == TEST_ZX1_SCSI_SLOT;
+                break;
+            }
+            node = (TEST_DEVICE_PATH_NODE *)((UINT8 *)node + node->Length);
+        }
+        break;
+    }
+    (void)bs->FreePool(handles);
+    return found;
 }
 
 static BOOLEAN test_gop_protocol(EFI_SYSTEM_TABLE *SystemTable)
@@ -1998,6 +2062,111 @@ static BOOLEAN aml_named_byte(const UINT8 *Aml, UINTN AmlLength,
     return 0;
 }
 
+/*
+ * Rope 1's root PCI1 produces buses 0x20..0x3F and the I/O and memory
+ * windows its SCSI seat takes, IA64_ZX1_ROPE1_* in ia64_vpc_abi.h.
+ */
+static BOOLEAN test_dsdt_pci1_crs(const TEST_TABLE_CONTEXT *Context)
+{
+    static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
+    static const UINT8 pci1_name[4] = { 'P', 'C', 'I', '1' };
+    const UINT8 *aml = (const UINT8 *)Context->Dsdt + sizeof(TEST_SDT_HEADER);
+    UINTN aml_length = get_u32((const UINT8 *)Context->Dsdt + 4) -
+                       sizeof(TEST_SDT_HEADER);
+    const UINT8 *pci1;
+    const UINT8 *resources;
+    UINTN resource_length;
+    UINTN offset = 0;
+    BOOLEAN bus = 0, io = 0, memory = 0;
+
+    pci1 = find_bytes(aml, aml_length, pci1_name, sizeof(pci1_name), 0);
+    if (pci1 == NULL ||
+        !aml_named_buffer(aml, aml_length, crs_name, (UINTN)(pci1 - aml),
+                          &resources, &resource_length)) {
+        return 0;
+    }
+    while (offset + 3U <= resource_length && (resources[offset] & 0x80U)) {
+        const UINT8 *descriptor = resources + offset;
+        UINTN length = get_u16(descriptor + 1U);
+
+        if (length > resource_length - offset - 3U) {
+            return 0;
+        }
+        if (descriptor[0] == 0x88U && length == 13U && descriptor[3] == 2U &&
+            get_u16(descriptor + 8U) == 0x0020U &&
+            get_u16(descriptor + 10U) == 0x003fU &&
+            get_u16(descriptor + 14U) == 0x0020U) {
+            bus = 1;
+        } else if (descriptor[0] == 0x8aU && length == 43U &&
+                   descriptor[3] == 1U && descriptor[5] == 0x33U &&
+                   get_u64(descriptor + 14U) == 0x00002000U &&
+                   get_u64(descriptor + 22U) == 0x00003fffU &&
+                   get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
+                   get_u64(descriptor + 38U) == 0x00002000U) {
+            io = 1;
+        } else if (descriptor[0] == 0x8aU && length == 43U &&
+                   descriptor[3] == 0U &&
+                   get_u64(descriptor + 14U) == 0xef400000U &&
+                   get_u64(descriptor + 22U) == 0xef7fffffU &&
+                   get_u64(descriptor + 38U) == 0x00400000U) {
+            memory = 1;
+        }
+        offset += 3U + length;
+    }
+    return bus && io && memory;
+}
+
+/*
+ * The AGP root LBA0 produces the legacy VGA ports and ropes 4 and 5's ports,
+ * where the machine puts the graphics I/O BAR (IA64_ZX1_AGP_IO_* in
+ * ia64_vpc_abi.h).
+ */
+static BOOLEAN test_dsdt_lba0_crs(const TEST_TABLE_CONTEXT *Context)
+{
+    static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
+    static const UINT8 lba0_name[4] = { 'L', 'B', 'A', '0' };
+    const UINT8 *aml = (const UINT8 *)Context->Dsdt + sizeof(TEST_SDT_HEADER);
+    UINTN aml_length = get_u32((const UINT8 *)Context->Dsdt + 4) -
+                       sizeof(TEST_SDT_HEADER);
+    const UINT8 *lba0;
+    const UINT8 *resources;
+    UINTN resource_length;
+    UINTN offset = 0;
+    BOOLEAN vga = 0, ports = 0;
+
+    lba0 = find_bytes(aml, aml_length, lba0_name, sizeof(lba0_name), 0);
+    if (lba0 == NULL ||
+        !aml_named_buffer(aml, aml_length, crs_name, (UINTN)(lba0 - aml),
+                          &resources, &resource_length)) {
+        return 0;
+    }
+    while (offset + 3U <= resource_length && (resources[offset] & 0x80U)) {
+        const UINT8 *descriptor = resources + offset;
+        UINTN length = get_u16(descriptor + 1U);
+
+        if (length > resource_length - offset - 3U) {
+            return 0;
+        }
+        if (descriptor[0] == 0x8aU && length == 43U && descriptor[3] == 1U &&
+            descriptor[5] == 0x33U &&
+            get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE) {
+            if (get_u64(descriptor + 14U) == 0x000003b0U &&
+                get_u64(descriptor + 22U) == 0x000003dfU &&
+                get_u64(descriptor + 38U) == 0x00000030U) {
+                vga = 1;
+            } else if (get_u64(descriptor + 14U) == 0x00008000U &&
+                       get_u64(descriptor + 22U) == 0x0000bfffU &&
+                       get_u64(descriptor + 38U) == 0x00004000U) {
+                ports = 1;
+            } else {
+                return 0;
+            }
+        }
+        offset += 3U + length;
+    }
+    return vga && ports;
+}
+
 static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
 {
     static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
@@ -2010,9 +2179,10 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
     UINTN offset = 0;
     BOOLEAN bus = 0;
     BOOLEAN io_a = 0;   /* 0x0000..0x03AF (below the VGA legacy hole)        */
-    BOOLEAN io_b = 0;   /* 0x03E0..0xC2FF (between the VGA and graphics holes) */
-    BOOLEAN io_c = 0;   /* 0xC400..0xFFFF (above the graphics I/O hole)       */
+    BOOLEAN io_b = 0;   /* 0x03E0..0x1FFF (the rest of rope 0's ports)       */
+    BOOLEAN io_c = 0;   /* 0xC000..0xFFFF (ropes 6 and 7's, directed)        */
     BOOLEAN memory = 0;
+    BOOLEAN memory_high = 0;
     BOOLEAN uart_window = 0;
     BOOLEAN end_tag = 0;
 
@@ -2068,44 +2238,53 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
                        get_u64(descriptor + 38U) == 0x000003b0U) {
                 /*
                  * Architectural I/O with a sparse translation (_TTP|_TRS, type
-                 * flags 0x33; _TRA = the memory-mapped port window base), split
-                 * around two holes both behind the Mercury root: the legacy VGA
-                 * ports 0x3B0..0x3DF (the graphics is the VGA owner) and the
-                 * graphics I/O BAR 0xC300..0xC3FF.  The sparse-translation
-                 * shaping (48321d4) that keeps Windows' PnP I/O arbiter from
-                 * rebalancing a BAR past the decodable range is preserved.
+                 * flags 0x33; _TRA = the memory-mapped port window base): rope
+                 * 0's 8 KB less the legacy VGA ports 0x3B0..0x3DF, which belong
+                 * to the Mercury root (the graphics is the VGA owner), and the
+                 * share of ropes 6 and 7.  The sparse-translation shaping
+                 * (48321d4) that keeps Windows' PnP I/O arbiter from rebalancing
+                 * a BAR past the decodable range is preserved.
                  */
                 io_a = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 1U && descriptor[5] == 0x33U &&
                        get_u64(descriptor + 6U) == 0 &&
                        get_u64(descriptor + 14U) == 0x000003e0U &&
-                       get_u64(descriptor + 22U) == 0x0000c2ffU &&
+                       get_u64(descriptor + 22U) == 0x00001fffU &&
                        get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
-                       get_u64(descriptor + 38U) == 0x0000bf20U) {
+                       get_u64(descriptor + 38U) == 0x00001c20U) {
                 io_b = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 1U && descriptor[5] == 0x33U &&
                        get_u64(descriptor + 6U) == 0 &&
-                       get_u64(descriptor + 14U) == 0x0000c400U &&
+                       get_u64(descriptor + 14U) == 0x0000c000U &&
                        get_u64(descriptor + 22U) == 0xffffU &&
                        get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE &&
-                       get_u64(descriptor + 38U) == 0x00003c00U) {
+                       get_u64(descriptor + 38U) == 0x00004000U) {
                 io_c = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 0U &&
                        get_u64(descriptor + 6U) == 0 &&
                        get_u64(descriptor + 14U) == TEST_PCI_MMIO_BASE &&
-                       get_u64(descriptor + 22U) == 0xefffffffU &&
+                       get_u64(descriptor + 22U) == 0xef3fffffU &&
                        get_u64(descriptor + 30U) == 0 &&
-                       get_u64(descriptor + 38U) == 0x02000000U) {
+                       get_u64(descriptor + 38U) == 0x01400000U) {
                 /*
-                 * PCI0's low MMIO producer window (0xEE000000..0xEFFFFFFF): the
-                 * built-in device BARs (LSI/AHCI/USB/NIC) live here.  The legacy
-                 * VGA (0xA0000) / option-ROM (0xC0000) apertures and the high
-                 * MMIO (0xF0000000+) belong to the Mercury root now.
+                 * PCI0's low MMIO producer windows (0xEE000000..0xEFFFFFFF
+                 * less rope 1's 0xEF400000..0xEF7FFFFF): the built-in device
+                 * BARs (AHCI/USB/NIC/audio) live here.  The legacy VGA
+                 * (0xA0000) / option-ROM (0xC0000) apertures and the high
+                 * MMIO (0xF0000000+) belong to the Mercury root.
                  */
                 memory = 1;
+            } else if (descriptor[0] == 0x8aU && length == 43U &&
+                       descriptor[3] == 0U &&
+                       get_u64(descriptor + 6U) == 0 &&
+                       get_u64(descriptor + 14U) == 0xef800000U &&
+                       get_u64(descriptor + 22U) == 0xefffffffU &&
+                       get_u64(descriptor + 30U) == 0 &&
+                       get_u64(descriptor + 38U) == 0x00800000U) {
+                memory_high = 1;
             } else if (descriptor[0] == 0x8aU && length == 43U &&
                        descriptor[3] == 0U && descriptor[4] == 0x0cU &&
                        get_u64(descriptor + 6U) == 0 &&
@@ -2128,12 +2307,14 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
         }
     }
     /*
-     * The root bridge must NOT publish a producer window for the UART: a
-     * sub-page window above 4 GB BSODs Windows XP with STOP 0x50 during PnP
-     * arbitration (dropped in 5a58a91).  UAR0 describes its own registers in
-     * the SSDT instead, so a reappearing DSDT window is a regression.
+     * UAR0 is a child of PCI0, so PCI0 produces the window for its 8 bytes,
+     * as HP's zx1 DSDT does for its serial ports (\CLIB.LGMR); without it
+     * Server 2003 leaves COM1 at code 12.  The window that 5a58a91 dropped
+     * (XP 2600: STOP 0x50) was in the 460gx tables, which XP 2600 reads.
      */
-    return bus && io_a && io_b && io_c && memory && !uart_window && end_tag;
+    return bus && io_a && io_b && io_c && memory && memory_high &&
+           uart_window && end_tag && test_dsdt_pci1_crs(Context) &&
+           test_dsdt_lba0_crs(Context);
 }
 
 static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)
@@ -2609,6 +2790,9 @@ static BOOLEAN test_platform_memory_descriptors(
            memory_range_has_type(map, TEST_NVRAM_BASE, TEST_NVRAM_SIZE,
                                  EfiMemoryMappedIO,
                                  EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) &&
+           memory_range_has_type(map, TEST_PDH_CLOCK_BASE,
+                                 TEST_PDH_CLOCK_SIZE, EfiMemoryMappedIO,
+                                 EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) &&
            memory_range_has_type(map, TEST_ECAM_BASE, TEST_ECAM_SIZE,
                                  EfiMemoryMappedIO,
                                  EFI_MEMORY_UC | EFI_MEMORY_RUNTIME) &&
@@ -2704,6 +2888,79 @@ static BOOLEAN test_sal_state_info_no_log(EFI_SYSTEM_TABLE *SystemTable)
 out:
     put_memory_map(SystemTable, &map);
     return ok;
+}
+
+/*
+ * OS_INIT (SAL spec 245359-007 5): an INIT this processor sends itself goes
+ * through PALE_INIT and SAL_INIT to the handler registered with
+ * SAL_SET_VECTORS, whose return (GR8 = 0, 5.4) resumes this code through
+ * PAL_MC_RESUME.
+ */
+#define TEST_SAL_SET_VECTORS    0x01000000ULL
+#define TEST_SAL_VECTOR_OS_INIT 1ULL
+
+volatile UINT64 test_os_init_count;
+extern UINT8 test_os_init_entry[];
+
+__asm__(
+    ".text\n"
+    ".align 16\n"
+    ".global test_os_init_entry\n"
+    ".proc test_os_init_entry\n"
+    "test_os_init_entry:\n"
+    "    addl r2 = @gprel(test_os_init_count), gp\n"
+    "    ;;\n"
+    "    ld8 r3 = [r2]\n"
+    "    ;;\n"
+    "    adds r3 = 1, r3\n"
+    "    ;;\n"
+    "    st8 [r2] = r3\n"
+    "    mov r9 = r10\n"
+    "    mov r8 = r0\n"
+    "    mov r10 = r0\n"
+    "    mov r22 = r17\n"
+    "    mov b6 = r12\n"
+    "    ;;\n"
+    "    br.sptk.many b6\n"
+    "    ;;\n"
+    ".endp test_os_init_entry\n");
+
+static BOOLEAN test_sal_os_init(EFI_SYSTEM_TABLE *SystemTable)
+{
+    UINT8 *sal = (UINT8 *)find_config_table(SystemTable, sal_guid);
+    volatile UINT64 descriptor[2] __attribute__((aligned(16)));
+    volatile UINT64 *ipi;
+    TEST_SAL_PROC procedure;
+    TEST_SAL_RETURN set;
+    UINT64 gp;
+    UINT64 lid;
+    UINTN spins;
+
+    if (sal == NULL || get_u64(sal + 112U) == 0 || get_u64(sal + 120U) == 0) {
+        return 0;
+    }
+    descriptor[0] = get_u64(sal + 112U);
+    descriptor[1] = get_u64(sal + 120U);
+    procedure = (TEST_SAL_PROC)(UINTN)&descriptor[0];
+    __asm__ volatile ("mov %0 = gp" : "=r"(gp));
+    __asm__ volatile ("mov %0 = cr.lid" : "=r"(lid));
+    set = procedure(TEST_SAL_SET_VECTORS, TEST_SAL_VECTOR_OS_INIT,
+                    (UINTN)test_os_init_entry, gp, 0,
+                    (UINTN)test_os_init_entry, gp, 0);
+    if (set.Status != TEST_SAL_SUCCESS) {
+        return 0;
+    }
+    test_os_init_count = 0;
+    /* Processor interrupt block, delivery mode 101 (SDM Vol. 2 5.8.4.1). */
+    ipi = (volatile UINT64 *)(UINTN)(0xfee00000ULL |
+                                     (((lid >> 24) & 0xffU) << 12) |
+                                     (((lid >> 16) & 0xffU) << 4));
+    *ipi = 5ULL << 8;
+    for (spins = 0; spins < 100000000U && test_os_init_count == 0; spins++) {
+    }
+    (void)procedure(TEST_SAL_SET_VECTORS, TEST_SAL_VECTOR_OS_INIT,
+                    0, 0, 0, 0, 0, 0);
+    return test_os_init_count == 1;
 }
 
 static BOOLEAN test_sal_smbios_tables(EFI_SYSTEM_TABLE *SystemTable,
@@ -2908,6 +3165,9 @@ EFI_STATUS ia64_services_main(EFI_HANDLE ImageHandle,
         ia64_test_check(&context, "pci-io",
                         test_pci_io_protocol(SystemTable), EFI_DEVICE_ERROR,
                         "pci-location-config-read");
+        ia64_test_check(&context, "pci-io-scsi-seat",
+                        test_pci_io_scsi_seat(SystemTable), EFI_DEVICE_ERROR,
+                        "pci-io-scsi-location-path");
         ia64_test_check(&context, "graphics-output",
                         test_gop_protocol(SystemTable), EFI_DEVICE_ERROR,
                         "gop-query-mode");
@@ -2917,6 +3177,9 @@ EFI_STATUS ia64_services_main(EFI_HANDLE ImageHandle,
         ia64_test_check(&context, "sal-state-info-no-log",
                         test_sal_state_info_no_log(SystemTable),
                         EFI_DEVICE_ERROR, "size-empty-clear-contract");
+        ia64_test_check(&context, "sal-os-init",
+                        test_sal_os_init(SystemTable),
+                        EFI_DEVICE_ERROR, "init-resume");
     }
     ia64_test_done(&context);
     return context.Failed == 0 ? EFI_SUCCESS : EFI_DEVICE_ERROR;

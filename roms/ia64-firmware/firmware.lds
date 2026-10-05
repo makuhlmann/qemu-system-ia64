@@ -18,7 +18,6 @@ SECTIONS
     __fw_image_start = .;
 
     .text.boot : {
-        *(.text.pal_buffer)
         *(.text._start)
         *(.text.fit_pal)
         *(.text.flash_entry)
@@ -46,14 +45,15 @@ SECTIONS
      * The firmware IVT, pinned at image base + 0x8000 (naturally 32 KB
      * aligned since the shadow base is 1 MB aligned) so the machine can
      * seed cr.iva as base + IA64_FW_IVT_OFFSET without knowing the link
-     * layout.  Zero-filled: an all-zero bundle is a break instruction, the
-     * historical machine-side IVT fill.  Lives inside the runtime-code
-     * descriptor (handlers execute here).
+     * layout.  entry.S fills the data-reference vectors; the rest is zero,
+     * and an all-zero bundle is a break instruction.  Lives inside the
+     * runtime-code descriptor (handlers execute here).
      */
     . = __fw_link_base + 0x8000;
     .fw_ivt : {
         __fw_ivt = .;
-        QUAD(0);
+        KEEP(*(.fw_ivt))
+        ASSERT(. <= __fw_ivt + 0x8000, "fw_ivt: vectors overflow the IVT");
         . = __fw_ivt + 0x8000;
     }
 
@@ -126,6 +126,16 @@ SECTIONS
     }
 
     _end = .;
+
+    /*
+     * Past the image and its bss, so that the runtime descriptor stays one
+     * run; PAL_COPY_PAL fills it, the binary does not carry it.
+     */
+    . = ALIGN(0x40000);
+    .pal_buffer (NOLOAD) : {
+        *(.pal_buffer)
+    }
+    __fw_pal_buffer_end = .;
 }
 
 /*
@@ -140,6 +150,10 @@ ASSERT(sal_dispatch_block == __fw_link_base + 0x2040,
        "sal_dispatch_block must sit at IA64_FW_SAL_DISPATCH_BLOCK_PA (base+0x2040)")
 ASSERT(__fw_ivt == __fw_link_base + 0x8000,
        "the firmware IVT must sit at image base + IA64_FW_IVT_OFFSET")
-/* The machine reserves IA64_FW_IMAGE_SPAN (4 MiB) for image + bss. */
-ASSERT(_end - __fw_link_base <= 0x400000,
-       "firmware image + bss exceed IA64_FW_IMAGE_SPAN")
+/* The machine reserves IA64_FW_IMAGE_SPAN (4 MiB) for image, bss and PAL. */
+ASSERT(__fw_pal_buffer_end - __fw_link_base <= 0x400000,
+       "firmware image, bss and PAL buffer exceed IA64_FW_IMAGE_SPAN")
+/* IA64_FW_PAL_BUFFER_SIZE, aligned to itself (PAL_COPY_INFO). */
+ASSERT(fw_pal_buffer % 0x40000 == 0 &&
+       __fw_pal_buffer_end - fw_pal_buffer == 0x40000,
+       "the PAL buffer must be one aligned 256 KB block")

@@ -19,7 +19,9 @@
 #define TYPE_LONGSPEAK_RTC "longspeak-rtc"
 OBJECT_DECLARE_SIMPLE_TYPE(LongspeakPDHState, LONGSPEAK_PDH)
 
-#define LONGSPEAK_BMC_TOKEN_BYTES 512
+#define LONGSPEAK_BMC_TOKEN_BYTES 1024
+#define LONGSPEAK_BMC_SEL_RECORDS 1023
+#define LONGSPEAK_BMC_SEL_RECORD  16
 
 /*
  * The nvram= file: the battery-backed part, then the BMC's tokens, which the
@@ -75,9 +77,16 @@ struct LongspeakPDHState {
     /* The two PDH UARTs, FF5E_0000 and FF5E_2000. */
     DeviceState *uart[IA64_PDH_UARTS];
     DeviceState *bt;               /* IPMI BT, FF5B_00E4 */
-    DeviceState *kcs;              /* IPMI KCS, FF5B_0CA2 */
-    /* The BMC's tokens, which both interfaces reach (longspeak_bmc.c). */
+    DeviceState *kcs[3];           /* IPMI KCS1, 2, 3: FF5B_0CA2, 0000, 0062 */
+    /* The BMC's tokens, which every interface reaches (longspeak_bmc.c). */
     uint8_t bmc_tokens[LONGSPEAK_BMC_TOKEN_BYTES];
+    /* The BMC's event log, the same way. */
+    uint8_t bmc_sel[LONGSPEAK_BMC_SEL_RECORDS][LONGSPEAK_BMC_SEL_RECORD];
+    uint16_t bmc_sel_count;
+    uint16_t bmc_sel_reservation;
+    uint32_t bmc_sel_last_add;
+    uint32_t bmc_sel_last_erase;
+    int64_t bmc_sel_time_offset;   /* the log's clock less the machine's */
     DeviceState *rtc;              /* the clock, FF5B_8000 */
 };
 
@@ -87,6 +96,9 @@ void longspeak_pdh_store_seeded(DeviceState *dev);
 /* The BMC's tokens in and out of their area of the nvram= file. */
 void longspeak_bmc_tokens_save(const uint8_t *tokens, uint8_t *area);
 void longspeak_bmc_tokens_load(uint8_t *tokens, const uint8_t *area);
+/* The values the BMC has before the firmware writes any: the system UUID. */
+void longspeak_bmc_tokens_reset(uint8_t *tokens);
+void longspeak_bmc_tokens_init(uint8_t *tokens);
 
 /* sysbus MMIO indexes */
 #define LONGSPEAK_PDH_MMIO_BBSRAM  0

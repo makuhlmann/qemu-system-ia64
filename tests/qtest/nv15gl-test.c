@@ -446,6 +446,177 @@ static void nv15_iifc_data_without_alloc(void)
     qtest_quit(qts);
 }
 
+/*
+ * DMA channels and the RAMFC channel switch.
+ *
+ * NV10-family RAMFC is 0x20 bytes per channel: DMA_PUT, DMA_GET, REF_CNT,
+ * then DMA_INSTANCE in the low half and DMA_DCOUNT in the high half of
+ * +0x0C (Linux nvkm/engine/fifo/nv10.c, nv10_fifo_ramfc).  The 0x40-byte
+ * RAMFC with a semaphore word at +0x2C starts with NV17 (nv17.c).
+ */
+#define NV15_PFIFO_RAMFC    0x00002214U
+#define NV15_PFIFO_PUSH0    0x00003200U
+#define NV15_PFIFO_PULL0    0x00003250U
+#define NV15_PFIFO_MODE     0x00002504U
+
+#define NV15_RAMIN_RAMFC    0x3000U
+#define NV15_RAMFC_CFG      (NV15_RAMIN_RAMFC >> 8)
+#define NV15_RAMFC_STRIDE   0x20U
+#define NV15_RAMIN_PUSH1    0x2600U        /* push-buffer DMA objects */
+#define NV15_RAMIN_PUSH2    0x2700U
+#define NV15_VRAM_PUSH1     0x00100000U
+#define NV15_VRAM_PUSH2     0x00101000U
+
+/* Push-buffer method header: subchannel 0, method 0x014 (REF_CNT), 1 word. */
+#define NV15_PUSH_REF_CNT   ((1U << 18) | (0x014U << 2))
+
+static uint32_t nv_ramfc_off(uint32_t chid, uint32_t reg)
+{
+    return NV15_RAMIN_RAMFC + chid * NV15_RAMFC_STRIDE + reg;
+}
+
+static uint32_t nv_user_r(QTestState *qts, uint32_t chid, uint32_t reg)
+{
+    return qtest_readl(qts, IA64_NV15_MMIO_BASE + NV15_USER_WINDOW +
+                       ((uint64_t)chid << 16) + reg);
+}
+
+static void nv_user_w(QTestState *qts, uint32_t chid, uint32_t reg,
+                      uint32_t val)
+{
+    qtest_writel(qts, IA64_NV15_MMIO_BASE + NV15_USER_WINDOW +
+                 ((uint64_t)chid << 16) + reg, val);
+}
+
+static void nv_make_lin_dma_object(QTestState *qts, uint32_t off,
+                                   uint32_t vram_base)
+{
+    nv_ramin_w(qts, off + 0x0, 0x00002000);
+    nv_ramin_w(qts, off + 0x4, 0);
+    nv_ramin_w(qts, off + 0x8, vram_base);
+}
+
+/*
+ * Channels 1 and 2 are adjacent, so channel 1's +0x2C is channel 2's
+ * DMA_INSTANCE word, and a 0x40 stride would read channel 2's slot for
+ * channel 1.  Channel 2's +0x0C carries a non-zero DCOUNT.  Channel 0 is
+ * not used: it is the current channel after reset, and the first switch
+ * saves its empty CACHE1 state.
+ */
+static void nv15_fifo_dma_channel_switch(void)
+{
+    QTestState *qts = nv15_start();
+    const uint32_t sentinel = 0x5a5a1234U;
+
+    qtest_writel(qts, IA64_NV15_FB_BASE + NV15_VRAM_PUSH1 + 0x0,
+                 NV15_PUSH_REF_CNT);
+    qtest_writel(qts, IA64_NV15_FB_BASE + NV15_VRAM_PUSH1 + 0x4, 0x11111111);
+    qtest_writel(qts, IA64_NV15_FB_BASE + NV15_VRAM_PUSH1 + 0x8,
+                 NV15_PUSH_REF_CNT);
+    qtest_writel(qts, IA64_NV15_FB_BASE + NV15_VRAM_PUSH1 + 0xc, 0x33333333);
+    qtest_writel(qts, IA64_NV15_FB_BASE + NV15_VRAM_PUSH2 + 0x0,
+                 NV15_PUSH_REF_CNT);
+    qtest_writel(qts, IA64_NV15_FB_BASE + NV15_VRAM_PUSH2 + 0x4, 0x22222222);
+
+    nv_make_lin_dma_object(qts, NV15_RAMIN_PUSH1, NV15_VRAM_PUSH1);
+    nv_make_lin_dma_object(qts, NV15_RAMIN_PUSH2, NV15_VRAM_PUSH2);
+
+    for (uint32_t chid = 0; chid < 4; chid++) {
+        for (uint32_t reg = 0; reg < NV15_RAMFC_STRIDE; reg += 4) {
+            nv_ramin_w(qts, nv_ramfc_off(chid, reg), 0);
+        }
+    }
+    nv_ramin_w(qts, nv_ramfc_off(1, 0xc), NV15_RAMIN_PUSH1 >> 4);
+    nv_ramin_w(qts, nv_ramfc_off(2, 0xc),
+               (0x0005U << 16) | (NV15_RAMIN_PUSH2 >> 4));
+    nv_ramin_w(qts, nv_ramfc_off(3, 0xc), sentinel);
+
+    /* The PUSH0, PULL0 and MODE writes start the puller: set them last. */
+    qtest_writel(qts, IA64_NV15_MMIO_BASE + NV15_PFIFO_RAMFC, NV15_RAMFC_CFG);
+    qtest_writel(qts, IA64_NV15_MMIO_BASE + NV15_PFIFO_PUSH0, 1);
+    qtest_writel(qts, IA64_NV15_MMIO_BASE + NV15_PFIFO_PULL0, 1);
+    qtest_writel(qts, IA64_NV15_MMIO_BASE + NV15_PFIFO_MODE,
+                 (1U << 1) | (1U << 2));
+
+    /* Switch 0 -> 1: channel 1's context comes from chid * 0x20. */
+    nv_user_w(qts, 1, 0x40, 0x8);
+    g_assert_cmphex(nv_user_r(qts, 1, 0x44), ==, 0x8);
+    g_assert_cmphex(nv_user_r(qts, 1, 0x48), ==, 0x11111111);
+
+    /* Switch 1 -> 2: the save of channel 1 leaves channel 2's slot intact. */
+    nv_user_w(qts, 2, 0x40, 0x8);
+    g_assert_cmphex(nv_user_r(qts, 2, 0x44), ==, 0x8);
+    g_assert_cmphex(nv_user_r(qts, 2, 0x48), ==, 0x22222222);
+    g_assert_cmphex(nv_ramin_r(qts, nv_ramfc_off(1, 0x4)), ==, 0x8);
+    g_assert_cmphex(nv_ramin_r(qts, nv_ramfc_off(1, 0x8)), ==, 0x11111111);
+    g_assert_cmphex(nv_ramin_r(qts, nv_ramfc_off(1, 0xc)), ==,
+                    NV15_RAMIN_PUSH1 >> 4);
+
+    /* Switch 2 -> 1: the save of channel 2 stays inside its 0x20 bytes. */
+    nv_user_w(qts, 1, 0x40, 0x10);
+    g_assert_cmphex(nv_user_r(qts, 1, 0x44), ==, 0x10);
+    g_assert_cmphex(nv_user_r(qts, 1, 0x48), ==, 0x33333333);
+    g_assert_cmphex(nv_ramin_r(qts, nv_ramfc_off(2, 0x4)), ==, 0x8);
+    g_assert_cmphex(nv_ramin_r(qts, nv_ramfc_off(2, 0x8)), ==, 0x22222222);
+    g_assert_cmphex(nv_ramin_r(qts, nv_ramfc_off(2, 0xc)) & 0xffff, ==,
+                    NV15_RAMIN_PUSH2 >> 4);
+    g_assert_cmphex(nv_ramin_r(qts, nv_ramfc_off(3, 0xc)), ==, sentinel);
+
+    qtest_quit(qts);
+}
+
+/*
+ * A surface object gets its DMA objects on one subchannel and is then bound
+ * on another, as the Windows IA-64 NV4 display driver does (subchannels 1
+ * and 7).  The bind loads the DMA objects again from the object's options
+ * in RAMIN.  If those still read 0, RAMIN 0 acts as a page-table DMA object
+ * with empty entries, and every pixel goes to VRAM page 0.
+ */
+#define NV15_RAMIN_DMA2     0x2800U
+#define NV15_H_DMA2         0xbeef0007U
+
+static void nv15_surf2d_rebind_keeps_dma(void)
+{
+    QTestState *qts = nv15_start();
+    const uint32_t color = 0xff336699U;
+    const uint32_t dst_ofs = 0x00020000U;
+    const uint32_t pitch = 0x0400U;
+
+    nv_engine_reset_ramht(qts);
+    nv_make_gr_object(qts, NV15_RAMIN_SURF, NV_CLASS_SURF2D);
+    nv_make_dma_object(qts, NV15_RAMIN_DMA);
+    nv_make_dma_object(qts, NV15_RAMIN_DMA2);
+    nv_make_gr_object(qts, NV15_RAMIN_RECT, NV_CLASS_RECT);
+    nv_ramht_insert(qts, NV15_H_SURF, 0, NV_ENGINE_GRAPH, NV15_RAMIN_SURF);
+    nv_ramht_insert(qts, NV15_H_DMA,  0, NV_ENGINE_GRAPH, NV15_RAMIN_DMA);
+    nv_ramht_insert(qts, NV15_H_DMA2, 0, NV_ENGINE_GRAPH, NV15_RAMIN_DMA2);
+    nv_ramht_insert(qts, NV15_H_RECT, 0, NV_ENGINE_GRAPH, NV15_RAMIN_RECT);
+
+    nv_method(qts, 0, 1, 0x000, NV15_H_SURF);
+    nv_method(qts, 0, 1, 0x061, NV15_H_DMA2);           /* SetContextDmaSrc */
+    nv_method(qts, 0, 1, 0x062, NV15_H_DMA);            /* SetContextDmaDst */
+    g_assert_cmphex(nv_ramin_r(qts, NV15_RAMIN_SURF + 0x8), ==,
+                    (NV15_RAMIN_DMA >> 4 << 16) | (NV15_RAMIN_DMA2 >> 4));
+
+    nv_method(qts, 0, 7, 0x000, NV15_H_SURF);
+    nv_method(qts, 0, 7, 0x0c0, 0x0a);                  /* A8R8G8B8         */
+    nv_method(qts, 0, 7, 0x0c1, (pitch << 16) | pitch);
+    nv_method(qts, 0, 7, 0x0c3, dst_ofs);
+
+    nv_method(qts, 0, 2, 0x000, NV15_H_RECT);
+    nv_method(qts, 0, 2, 0x0bf, 3);
+    nv_method(qts, 0, 2, 0x0c1, color);
+    nv_method(qts, 0, 2, 0x100, 0);
+    nv_method(qts, 0, 2, 0x101, (1U << 16) | 2);
+
+    g_assert_cmphex(qtest_readl(qts, IA64_NV15_FB_BASE + dst_ofs), ==, color);
+    g_assert_cmphex(qtest_readl(qts, IA64_NV15_FB_BASE + dst_ofs + 4), ==,
+                    color);
+    g_assert_cmphex(qtest_readl(qts, IA64_NV15_FB_BASE), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, IA64_NV15_FB_BASE + 4), ==, 0);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -461,6 +632,10 @@ int main(int argc, char **argv)
         qtest_add_func("/nv15gl/ifc-unknown-format", nv15_ifc_unknown_format);
         qtest_add_func("/nv15gl/iifc-data-without-alloc",
                        nv15_iifc_data_without_alloc);
+        qtest_add_func("/nv15gl/fifo-dma-channel-switch",
+                       nv15_fifo_dma_channel_switch);
+        qtest_add_func("/nv15gl/surf2d-rebind-keeps-dma",
+                       nv15_surf2d_rebind_keeps_dma);
     }
 
     return g_test_run();

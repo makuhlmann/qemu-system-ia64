@@ -262,7 +262,7 @@ static void ifb_ide_class_init(ObjectClass *klass, const void *data)
     pc->config_write = ifb_ide_config_write;
     pc->vendor_id = INTEL_82468GX_IFB_VENDOR_ID;
     pc->device_id = INTEL_82468GX_IFB_IDE_DEVICE_ID;
-    pc->revision = 0;
+    pc->revision = INTEL_82468GX_IFB_REVISION;
     pc->class_id = PCI_CLASS_STORAGE_IDE;
     dc->desc = "Intel 82468GX IDE controller";
     dc->user_creatable = false;

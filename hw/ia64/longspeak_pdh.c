@@ -15,20 +15,24 @@
  *              SAL_A's rendezvous record, SAL_B's first memory stack and RSE
  *              backing store in the rest.  "nvram=" stands in for the battery.
  *   FF48_0000  SRAM, 512 KiB, volatile.
- *   FF5B_0000  the BMC.  The firmware probes an IPMI BT at FF5B_00E4 and
- *              three IPMI KCS, which it calls KCS1 at FF5B_0CA2 (the
- *              standard SMS base), KCS2 at FF5B_0000 and KCS3 at FF5B_0062.
- *              Only BT and KCS1 are modelled; the firmware needs no more.
+ *   FF5B_0000  the BMC: an IPMI BT at FF5B_00E4 and three IPMI KCS, which
+ *              the firmware calls KCS1 at FF5B_0CA2 (the standard SMS base),
+ *              KCS2 at FF5B_0000 and KCS3 at FF5B_0062.  A port that does
+ *              not answer is a "bmc port failure" (event 0x005) and leaves
+ *              its SCRAM BMC record invalid; the vendor DSDT then has no
+ *              IPI0001 at KCS2.
  *   FF5B_8000  the clock, a DS1501/1511-class part.
  *   FF5C_0000  processor presence, bits 3:0 active low (SAL_A FFFE0E60).
  *   FF5C_0018  POST byte (SAL_A writes (id << 4) | step).
+ *   FF5C_0020  the Meson's revision; FF5F_2070 holds the Dillon's.
  *   FF5E_0000  two 16550 UARTs, FF5E_0000 and FF5E_2000 (EFI PDHUART,
  *              PNP0501 in the firmware's device table at FFF8E918).  They
  *              take the second and third -serial chardev.
  *   FF5F_0000  Dillon registers.  0x20 and 0x68 are scratch latches the
  *              processors share (0x68 bits 19:16: SAL_A's rendezvous check-in;
  *              0x20 bits 7:6: boot mode, FFFE0346); 0xB0 + 8 * id is one
- *              semaphore (below); 0x1010 bit 0 selects mx2 modules.
+ *              semaphore (below); 0x1010 reads 0xFF, and SAL_A uses 0 in
+ *              its place.
  *
  * Only these blocks decode.  An offset in a block that is not modelled reads
  * as zero, ignores writes and is reported once per offset and direction under
@@ -190,10 +194,20 @@ static bool longspeak_pdh_do_read(LongspeakPDHBlock *b, hwaddr addr,
             *data = s->post;
             return true;
         }
+        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_MESON_REV)) {
+            *data = longspeak_pdh_reg_read(IA64_PDH_MESON_REV_VALUE, addr,
+                                           size, IA64_PDH_MESON_REV);
+            return true;
+        }
         return false;
     case LONGSPEAK_PDH_DILLON_BLOCK:
         if (longspeak_pdh_file_index(addr, size, &id)) {
             *data = longspeak_pdh_reg_read(s->reg[id], addr, size, id * 8);
+            return true;
+        }
+        if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_REV)) {
+            *data = longspeak_pdh_reg_read(IA64_PDH_DILLON_REV_VALUE, addr,
+                                           size, IA64_PDH_DILLON_REV);
             return true;
         }
         if (longspeak_pdh_semaphore_slot(addr, size, &id)) {
@@ -216,8 +230,12 @@ static bool longspeak_pdh_do_read(LongspeakPDHBlock *b, hwaddr addr,
             return true;
         }
         if (longspeak_pdh_in_reg(addr, size, IA64_PDH_DILLON_MODULE_LAYOUT)) {
-            /* One processor module per socket, no mx2 (SAL_A forces 0). */
-            *data = 0;
+            /*
+             * The rx2600 reads 0xFF (capture 2026-10-03, PDH-5); SAL_A loads
+             * it and then takes 0, one module per socket (FFFE0E96).
+             */
+            *data = longspeak_pdh_reg_read(0xff, addr, size,
+                                           IA64_PDH_DILLON_MODULE_LAYOUT);
             return true;
         }
         return false;
@@ -343,8 +361,8 @@ static const MemoryRegionOps longspeak_pdh_ops = {
 };
 
 /*
- * The board has one BMC on two interfaces, but the IPMI core links a BMC to a
- * single interface, so each one gets its own.
+ * The board has one BMC on four interfaces, but the IPMI core links a BMC to
+ * a single interface, so each one gets its own.
  */
 static DeviceState *longspeak_pdh_bmc_port(LongspeakPDHState *s,
                                            const char *type, const char *name,
@@ -478,6 +496,7 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
     }
     sysbus_init_mmio(sbd, &s->bbsram);
     sysbus_init_mmio(sbd, &s->sram);
+    longspeak_bmc_tokens_reset(s->bmc_tokens);
     if (s->store != NULL) {
         g_autofree uint8_t *file = g_malloc(LONGSPEAK_PDH_STORE_SIZE);
 
@@ -496,6 +515,7 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
         s->store_vmstate =
             qemu_add_vm_change_state_handler(longspeak_pdh_store_vm_state, s);
     }
+    longspeak_bmc_tokens_init(s->bmc_tokens);
     for (i = 0; i < LONGSPEAK_PDH_BLOCKS; i++) {
         LongspeakPDHBlock *b = &s->block[i];
 
@@ -516,8 +536,8 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
 
     /*
      * The UARTs and the BT overlay the log-only background, so an undecoded
-     * offset is still reported.  Their interrupt wiring is unknown; the
-     * firmware polls both.
+     * offset is still reported.  The board wires the UARTs' interrupts to
+     * rope 1's ioa (longspeak.c).
      */
     for (i = 0; i < IA64_PDH_UARTS; i++) {
         LongspeakPDHBlock *b = &s->block[LONGSPEAK_PDH_UART_BLOCK];
@@ -527,6 +547,12 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
         qdev_prop_set_uint32(uart, "baudbase", 115200);
         qdev_prop_set_chr(uart, "chardev", serial_hd(i + 1));
         qdev_prop_set_uint8(uart, "endianness", DEVICE_LITTLE_ENDIAN);
+        /*
+         * The rx2600's UART1, which no firmware touches, reads MCR 0 and
+         * SCR 0xFF (rx2600 capture 2026-10-03, PDH-7).
+         */
+        qdev_prop_set_uint8(uart, "reset-mcr", 0);
+        qdev_prop_set_uint8(uart, "reset-scr", 0xff);
         if (!sysbus_realize_and_unref(SYS_BUS_DEVICE(uart), errp)) {
             return;
         }
@@ -541,10 +567,22 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
     if (s->bt == NULL) {
         return;
     }
-    s->kcs = longspeak_pdh_bmc_port(s, TYPE_IPMI_KCS_MM, "kcs",
-                                    IA64_PDH_BMC_KCS, errp);
-    if (s->kcs == NULL) {
-        return;
+    for (i = 0; i < ARRAY_SIZE(s->kcs); i++) {
+        static const struct {
+            const char *name;
+            hwaddr offset;
+        } kcs[] = {
+            { "kcs", IA64_PDH_BMC_KCS },
+            { "kcs2", IA64_PDH_BMC_KCS2 },
+            { "kcs3", IA64_PDH_BMC_KCS3 },
+        };
+
+        QEMU_BUILD_BUG_ON(ARRAY_SIZE(kcs) != ARRAY_SIZE(s->kcs));
+        s->kcs[i] = longspeak_pdh_bmc_port(s, TYPE_IPMI_KCS_MM, kcs[i].name,
+                                           kcs[i].offset, errp);
+        if (s->kcs[i] == NULL) {
+            return;
+        }
     }
 
     s->rtc = qdev_new(TYPE_LONGSPEAK_RTC);
@@ -604,11 +642,28 @@ static void longspeak_pdh_reset(DeviceState *dev)
 
 static const VMStateDescription vmstate_longspeak_pdh_bmc_tokens = {
     .name = TYPE_LONGSPEAK_PDH "/bmc-tokens",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(bmc_tokens, LongspeakPDHState,
                             LONGSPEAK_BMC_TOKEN_BYTES),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static const VMStateDescription vmstate_longspeak_pdh_bmc_sel = {
+    .name = TYPE_LONGSPEAK_PDH "/bmc-sel",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_2DARRAY(bmc_sel, LongspeakPDHState,
+                              LONGSPEAK_BMC_SEL_RECORDS,
+                              LONGSPEAK_BMC_SEL_RECORD),
+        VMSTATE_UINT16(bmc_sel_count, LongspeakPDHState),
+        VMSTATE_UINT16(bmc_sel_reservation, LongspeakPDHState),
+        VMSTATE_UINT32(bmc_sel_last_add, LongspeakPDHState),
+        VMSTATE_UINT32(bmc_sel_last_erase, LongspeakPDHState),
+        VMSTATE_INT64(bmc_sel_time_offset, LongspeakPDHState),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -628,6 +683,7 @@ static const VMStateDescription vmstate_longspeak_pdh = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_longspeak_pdh_bmc_tokens,
+        &vmstate_longspeak_pdh_bmc_sel,
         NULL
     },
 };

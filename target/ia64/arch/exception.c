@@ -58,6 +58,7 @@ const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX] = {
     [IA64_EXCP_TAKEN_BRANCH]    = 0x5f00,
     [IA64_EXCP_SINGLE_STEP]     = 0x6000,
     [IA64_EXCP_LOWER_PRIV_TRANSFER] = 0x5e00,
+    [IA64_EXCP_DEBUG]           = 0x5900,
 };
 
 G_NORETURN void ia64_raise_exception(CPUIA64State *env, uint32_t exception,
@@ -101,6 +102,104 @@ ia64_raise_disabled_isa_transition(CPUIA64State *env, uint64_t fault_ip,
     env->cr_isr = 4ULL << 4;
     ia64_raise_exception(env, IA64_EXCP_DISABLED_ISA_TRANSITION,
                            fault_ip, 0, fault_slot);
+}
+
+/*
+ * A breakpoint pair: the even register holds the address, the odd one the
+ * enables (bits 63:62), the privilege-level mask (bits 59:56, bit 56 for
+ * level 0) and the address mask (bits 55:0).  Address bits 63:56 have no
+ * mask bits and are always compared (SDM Vol. 2 7.1.1, Table 7-1).
+ */
+#define IA64_DEBUG_MASK_BITS  0x00ffffffffffffffULL
+#define IA64_DEBUG_PLM_SHIFT  56
+#define IA64_IBR_X            (1ULL << 63)
+
+static bool ia64_debug_pair_matches(uint64_t address, uint64_t control,
+                                    unsigned cpl, uint64_t reference,
+                                    uint64_t ignored)
+{
+    uint64_t mask = (control | ~IA64_DEBUG_MASK_BITS) & ~ignored;
+
+    return (control & (1ULL << (IA64_DEBUG_PLM_SHIFT + cpl))) &&
+           ((reference ^ address) & mask) == 0;
+}
+
+/*
+ * Each instruction of a bundle whose address matches an enabled IBR pair
+ * takes an Instruction Debug fault, unless PSR.id holds it off for this one
+ * instruction; IBR.addr{3:0} is not compared (SDM Vol. 2 7.1, 7.1.1).
+ */
+void ia64_check_instruction_debug(CPUIA64State *env, uint64_t ip,
+                                  uint32_t slot)
+{
+    unsigned cpl = ia64_psr_cpl(env->psr);
+    unsigned pair;
+
+    if (!(env->psr & IA64_PSR_DB) || (env->psr & IA64_PSR_ID)) {
+        return;
+    }
+    for (pair = 0; pair < IA64_IBR_PAIRS; pair++) {
+        uint64_t control = env->ibr[pair * 2 + 1];
+
+        if ((control & IA64_IBR_X) &&
+            ia64_debug_pair_matches(env->ibr[pair * 2], control, cpl, ip,
+                                    0xf)) {
+            env->exception_state.fault_addr = ip;
+            env->cr_isr = IA64_ISR_X;
+            ia64_raise_exception(env, IA64_EXCP_DEBUG, ip, 0, slot);
+        }
+    }
+}
+
+#define IA64_DBR_R            (1ULL << 63)
+#define IA64_DBR_W            (1ULL << 62)
+
+/*
+ * A reference of len bytes that is aligned matches on any byte of its datum,
+ * 16 bytes for a 10-byte operand and for cmp8xchg16; an unaligned one only
+ * on a byte it accesses (SDM Vol. 2 7.1.2).  Itanium 2 also takes Data Debug
+ * on any unaligned access across a 16-byte boundary while a pair is enabled
+ * for it, whatever its address (251110-003 12.3, the freedom 7.1.2 gives
+ * for unaligned datums).  ISR.r and ISR.w in access select
+ * the pairs with DBR.r and DBR.w set; pl is the privilege level of the
+ * reference.
+ */
+bool ia64_data_debug_hit(CPUIA64State *env, uint64_t va, uint32_t datum,
+                         uint32_t len, uint64_t access, unsigned pl)
+{
+    uint32_t align = is_power_of_2(len) ? len : datum;
+    bool aligned = (va & (align - 1)) == 0;
+    bool cross16 = !aligned && ia64_env_cpu_class(env)->dbr_cross16 &&
+                   (va & 15) + len > 16;
+    uint64_t start = va;
+    unsigned pair, i;
+
+    if (!(env->psr & IA64_PSR_DB) || (env->psr & IA64_PSR_DD)) {
+        return false;
+    }
+    if (aligned) {
+        start = va & ~(uint64_t)(datum - 1);
+        len = datum;
+    }
+    for (pair = 0; pair < IA64_DBR_PAIRS; pair++) {
+        uint64_t address = env->dbr[pair * 2];
+        uint64_t control = env->dbr[pair * 2 + 1];
+
+        if ((!((access & IA64_ISR_R) && (control & IA64_DBR_R)) &&
+             !((access & IA64_ISR_W) && (control & IA64_DBR_W))) ||
+            !(control & (1ULL << (IA64_DEBUG_PLM_SHIFT + pl)))) {
+            continue;
+        }
+        if (cross16) {
+            return true;
+        }
+        for (i = 0; i < len; i++) {
+            if (ia64_debug_pair_matches(address, control, pl, start + i, 0)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 G_NORETURN void ia64_raise_unaligned(CPUIA64State *env, uint64_t addr,
@@ -229,6 +328,7 @@ static bool ia64_exception_writes_ifa(IA64Exception excp)
     case IA64_EXCP_UNSUPPORTED_DATA_REFERENCE:
     case IA64_EXCP_PAGE_NOT_PRESENT:
     case IA64_EXCP_UNIMPL_DATA_ADDR:
+    case IA64_EXCP_DEBUG:
         return true;
     default:
         return false;
@@ -243,7 +343,8 @@ static bool ia64_exception_writes_ifa(IA64Exception excp)
 static bool ia64_exception_is_completion_trap(IA64Exception excp)
 {
     return excp == IA64_EXCP_TAKEN_BRANCH || excp == IA64_EXCP_SINGLE_STEP ||
-           excp == IA64_EXCP_LOWER_PRIV_TRANSFER || excp == IA64_EXCP_FP_TRAP;
+           excp == IA64_EXCP_LOWER_PRIV_TRANSFER || excp == IA64_EXCP_FP_TRAP ||
+           excp == IA64_EXCP_UNIMPL_INST_ADDR;
 }
 
 static uint64_t ia64_interruption_psr(CPUIA64State *env)
@@ -348,6 +449,7 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     case IA64_EXCP_TAKEN_BRANCH:
     case IA64_EXCP_SINGLE_STEP:
     case IA64_EXCP_LOWER_PRIV_TRANSFER:
+    case IA64_EXCP_DEBUG:
         isr_status = cpu->env.cr_isr;
         break;
     default:
@@ -467,7 +569,6 @@ static bool ia64_exception_uses_psr_ri_slot(IA64Exception excp, uint64_t isr)
     case IA64_EXCP_ALT_ITLB:
     case IA64_EXCP_INST_ACCESS:
     case IA64_EXCP_INST_ACCESS_BIT:
-    case IA64_EXCP_UNIMPL_INST_ADDR:
         return true;
     case IA64_EXCP_PAGE_NOT_PRESENT:
         return isr & IA64_ISR_X;
@@ -501,7 +602,6 @@ static bool ia64_fetch_fault_yields_to_completion_trap(CPUIA64State *env,
     case IA64_EXCP_KEY_PERMISSION:
     case IA64_EXCP_PAGE_NOT_PRESENT:
     case IA64_EXCP_NAT_CONSUMPTION:
-    case IA64_EXCP_UNIMPL_INST_ADDR:
         return true;
     default:
         return false;
@@ -533,6 +633,7 @@ static bool ia64_frame_restore_fault_yields_to_completion_trap(
     case IA64_EXCP_KEY_PERMISSION:
     case IA64_EXCP_DATA_ACCESS:
     case IA64_EXCP_DATA_ACCESS_BIT:
+    case IA64_EXCP_DEBUG:
         return true;
     default:
         return false;
@@ -629,6 +730,7 @@ void ia64_cpu_do_interrupt(CPUState *cs)
         }
         break;
     case IA64_EXCP_UNALIGNED:
+    case IA64_EXCP_DEBUG:
         /* CR.IFA is only written for a collected interruption. */
         fault_addr = cpu->env.exception_state.fault_addr;
         break;
@@ -719,6 +821,26 @@ void ia64_completion_trap_note(CPUIA64State *env, uint64_t iipa,
     qatomic_set(&cs->neg.icount_decr.u16.high, -1);
 }
 
+/*
+ * A taken branch, a taken chk or an rfi to an unimplemented address takes an
+ * Unimplemented Instruction Address trap on that instruction, together with
+ * its other traps (SDM Vol. 2 4.3.3, 5.5.2 step 7, Table 8-3).  The address
+ * shows on the fetch of the target, after the TB exit left the slot of the
+ * instruction in fault_slot.
+ */
+G_NORETURN void ia64_raise_unimplemented_target(CPUIA64State *env,
+                                                uint64_t ip)
+{
+    CPUState *cs = env_cpu(env);
+
+    env->ip = ip;
+    ia64_completion_trap_note(env, env->last_successful_bundle,
+                              env->exception_state.fault_slot,
+                              IA64_ISR_CODE_UI, true);
+    cs->exception_index = IA64_EXCP_NONE;
+    cpu_loop_exit(cs);
+}
+
 static bool ia64_take_completion_trap(CPUState *cs)
 {
     CPUIA64State *env = cpu_env(cs);
@@ -745,7 +867,9 @@ static bool ia64_take_completion_trap(CPUState *cs)
     }
 
     /* Priority order of SDM Vol. 2 Table 5-6; ISR.code keeps every bit. */
-    if (code & IA64_ISR_CODE_LP) {
+    if (code & IA64_ISR_CODE_UI) {
+        excp = IA64_EXCP_UNIMPL_INST_ADDR;
+    } else if (code & IA64_ISR_CODE_LP) {
         excp = IA64_EXCP_LOWER_PRIV_TRANSFER;
     } else if (code & IA64_ISR_CODE_TB) {
         excp = IA64_EXCP_TAKEN_BRANCH;
@@ -767,11 +891,94 @@ static bool ia64_take_completion_trap(CPUState *cs)
     return true;
 }
 
+/*
+ * An INIT is taken at an instruction boundary, whatever PSR.i, and enters
+ * PALE_INIT (SDM Vol. 2 5.8.3.9, 11.4.1) instead of an IVT vector.
+ */
+static void ia64_deliver_init(CPUState *cs)
+{
+    CPUIA64State *env = &ia64_cpu_from_cpu_state(cs)->env;
+    bool ia32 = env->psr & IA64_PSR_IS;
+    uint64_t ipsr = env->psr;
+    uint64_t iip;
+
+    env->exception_state.completion_trap_armed = false;
+    if (ia32 || env->exception_state.ia32_transition_trap) {
+        iip = ia64_ia32_virtual_ip(env);
+        ipsr &= ~IA64_PSR_RI_MASK;
+        if (ia32) {
+            ia64_ia32_abort_sse_instruction(env);
+            ia64_ia32_sync_to_ia64(env);
+        }
+    } else {
+        iip = ia64_ip_bundle_addr(env->ip);
+    }
+    ia64_flush_suppressed_tlb(env);
+    env->exception_state.psr_suppression_before_insn = 0;
+    ia64_tlb_serialize(env, 1, 1);
+    env->rse.rse_cfle = false;
+    ia64_pal_init_event(env, iip, ipsr);
+    cs->halted = 0;
+    env->exception_state.exception = 0;
+    env->exception_state.ia32_trap = false;
+    env->exception_state.ia32_transition_trap = false;
+}
+
+/*
+ * A PMI is taken at an instruction boundary while PSR.ic is 1, whatever
+ * PSR.i, and enters PALE_PMI (SDM Vol. 2 11.5.1): the highest pending vector
+ * first, PAL's 4-15 above SAL's 0-3.  PAL has no PMI work of its own, and
+ * a SAL vector that arrives before SAL registered its handler "will just
+ * return to the interrupted context": neither leaves a trace the
+ * interrupted context can see, since the interruption registers it
+ * overwrites are not readable while PSR.ic is 1.
+ */
+static void ia64_deliver_pmi(CPUState *cs)
+{
+    CPUIA64State *env = &ia64_cpu_from_cpu_state(cs)->env;
+    bool ia32 = env->psr & IA64_PSR_IS;
+    uint64_t ipsr = env->psr;
+    unsigned vector = 31 - clz32(env->pal.pal_pmi_pending);
+    uint64_t iip;
+
+    env->pal.pal_pmi_pending &= ~(1u << vector);
+    if (env->pal.pal_pmi_pending == 0) {
+        cpu_reset_interrupt(cs, IA64_INTERRUPT_PMI);
+    }
+    if (vector >= IA64_PMI_SAL_VECTORS || env->pal.pal_pmi_entry == 0) {
+        return;
+    }
+    env->exception_state.completion_trap_armed = false;
+    if (ia32 || env->exception_state.ia32_transition_trap) {
+        iip = ia64_ia32_virtual_ip(env);
+        ipsr &= ~IA64_PSR_RI_MASK;
+        if (ia32) {
+            ia64_ia32_abort_sse_instruction(env);
+            ia64_ia32_sync_to_ia64(env);
+        }
+    } else {
+        iip = ia64_ip_bundle_addr(env->ip);
+    }
+    ia64_flush_suppressed_tlb(env);
+    env->exception_state.psr_suppression_before_insn = 0;
+    ia64_tlb_serialize(env, 1, 1);
+    ia64_pal_pmi_event(env, iip, ipsr, vector);
+    cs->halted = 0;
+    env->exception_state.exception = 0;
+    env->exception_state.ia32_trap = false;
+    env->exception_state.ia32_transition_trap = false;
+}
+
 bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     IA64CPU *cpu = ia64_cpu_from_cpu_state(cs);
     bool nmi_pending = cpu->env.interrupt.sapic_irr[0] & (1ULL << 2);
-    bool interrupt_enabled = (cpu->env.psr & IA64_PSR_I) || nmi_pending;
+    /*
+     * PSR.i gates NMI too; only TPR and the in-service priority do not mask
+     * it (SDM Vol. 2 rev 1.0 Table 5-7, 11.8.2.3).  In IA-32 code EFLAG.if
+     * and CFLG.if do not gate NMI (Table 3-2, PSR.i).
+     */
+    bool interrupt_enabled = cpu->env.psr & IA64_PSR_I;
     /*
      * While RSE.CFLE is set, instruction execution is stalled until
      * the mandatory RSE loads complete (SDM Vol.2 6.6).  This
@@ -804,6 +1011,23 @@ bool ia64_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     if ((interrupt_request & IA64_INTERRUPT_COMPLETION_TRAP) &&
         ia64_take_completion_trap(cs)) {
         return true;
+    }
+
+    if ((interrupt_request & IA64_INTERRUPT_INIT) &&
+        !(cpu->env.psr & IA64_PSR_MC) && rse_frame_complete) {
+        cpu_reset_interrupt(cs, IA64_INTERRUPT_INIT);
+        ia64_deliver_init(cs);
+        return true;
+    }
+
+    if ((interrupt_request & IA64_INTERRUPT_PMI) &&
+        (cpu->env.psr & IA64_PSR_IC) && rse_frame_complete) {
+        if (cpu->env.pal.pal_pmi_pending == 0) {
+            cpu_reset_interrupt(cs, IA64_INTERRUPT_PMI);
+        } else {
+            ia64_deliver_pmi(cs);
+            return true;
+        }
     }
 
     if ((interrupt_request & CPU_INTERRUPT_HARD) &&

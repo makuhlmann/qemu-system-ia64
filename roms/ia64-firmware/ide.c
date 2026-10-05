@@ -610,15 +610,22 @@ void ide_probe_primary_devices(void)
 }
 
 /*
- * Choose the IDE device to expose as the optical/boot candidate.  Prefer any
- * present ATAPI CD-ROM -- on either channel, master or slave -- so that a data
- * disk on the primary master does not shadow a bootable CD elsewhere on the
+ * Choose the IDE device to expose as the optical/boot candidate.  Prefer an
+ * ATAPI CD-ROM with a medium, then any present ATAPI CD-ROM -- on either
+ * channel, master or slave -- so that neither a data disk nor an empty
+ * optical drive on the primary master shadows a bootable CD elsewhere on the
  * IDE bus; fall back to the first present device for plain fixed-disk boot.
  */
 IDE_DEVICE *ide_pick_boot_device(void)
 {
     UINTN i;
 
+    for (i = 0; i < FW_ARRAY_SIZE(mIdeDevices); i++) {
+        if (mIdeDevices[i].present && mIdeDevices[i].is_atapi &&
+            mIdeDevices[i].media_present) {
+            return &mIdeDevices[i];
+        }
+    }
     for (i = 0; i < FW_ARRAY_SIZE(mIdeDevices); i++) {
         if (mIdeDevices[i].present && mIdeDevices[i].is_atapi) {
             return &mIdeDevices[i];

@@ -16,6 +16,7 @@ from .encoding import (
     IA64_CR_ITM,
     IA64_CR_ITV,
     IA64_LRR_DM_EXTINT,
+    IA64_LRR_IPP,
     IA64_LRR_TM,
     IA64_CR_LRR0,
     IA64_CR_SAPIC_EOI,
@@ -37,9 +38,9 @@ from .encoding import (
     IA64_EXCP_RESERVED_TEMPLATE,
     IA64_EXCP_UNALIGNED,
     IA64_GENERAL_VECTOR,
-    IA64_GENEX_UNIMPL_INST_ADDR,
     IA64_IMPL_PA_BITS,
     IA64_IA32_EXCEPTION_VECTOR,
+    IA64_IA32_INTERRUPT_VECTOR,
     IA64_IA32_INTERCEPT_VECTOR,
     IA64_ISR_EI_SHIFT,
     IA64_ISR_CODE_SS,
@@ -81,8 +82,26 @@ from .encoding import (
     IA64_TAKEN_BRANCH_VECTOR,
     IA64_SINGLE_STEP_VECTOR,
     IA64_UNALIGNED_VECTOR,
+    IA64_DEBUG_VECTOR,
+    IA64_PSR_ID,
+    IA64_PSR_DD,
+    IA64_DCR_DD,
+    IA64_ISR_NA,
+    IA64_ISR_SP,
+    ld8_s,
+    ldfe,
+    xchg,
+    probe_w_fault,
+    lfetch,
+    lfetch_fault,
     IA64_VECTOR_MASKED,
     LOW_VECTOR_TR_PTE,
+    PAL_COPY_BUFFER_SIZE,
+    PAL_COPY_PAL,
+    PAL_COPY_PROC,
+    PAL_COPY_TARGET,
+    PAL_HALT_LIGHT,
+    PAL_PROC_ENTRY,
     add,
     addl,
     adds,
@@ -139,6 +158,8 @@ from .encoding import (
     nop_b,
     nop_i,
     nop_m,
+    or_reg,
+    mov_m_gr_psrl,
     pal_break,
     raw_bundle,
     require_exception,
@@ -156,9 +177,12 @@ from .encoding import (
     tbit_z,
     ld1,
     st2,
+    st4,
+    ld4,
     st8,
     st8_postinc,
     IA64_EXCP_LOWER_PRIV_TRANSFER,
+    IA64_EXCP_UNIMPL_INST_ADDR,
     IA64_EXCP_SINGLE_STEP,
     IA64_EXCP_TAKEN_BRANCH,
     IA64_ISR_CODE_LP,
@@ -322,7 +346,7 @@ test_unimplemented_physical_instruction_traps = require_registers(
         "ip": IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x20,
         "exception": IA64_EXCP_NONE,
         "r8": 0,
-        "r9": IA64_GENEX_UNIMPL_INST_ADDR | IA64_ISR_X,
+        "r9": IA64_ISR_CODE_UI | (2 << IA64_ISR_EI_SHIFT),
     }, entry=0x10)
 
 # A QMP stop freezes QEMU_CLOCK_VIRTUAL (system/cpus.c do_vm_stop:
@@ -455,6 +479,28 @@ def test_itc_reads_at_one_virtual_instant_agree_merced(qemu):
     _require_itc_reads_at_one_virtual_instant_agree(
         qemu, "itc_reads_at_one_virtual_instant_agree_merced", "merced")
 
+def test_sapic_ivr_irr_reads_under_icount(qemu):
+    """IVR and IRR reads pend a reached ITM deadline, so they read the clock.
+
+    Under icount only the last bundle of a TB may read it: the reads must end
+    their TB, else QEMU exits with "Bad icount read".  Each read here has
+    bundles after it that would share its TB.
+    """
+    run_program(qemu, [
+        (0x10, 0x01, mov_m_cr_gr(8, IA64_CR_SAPIC_IVR), nop_i(), nop_i()),
+        (0x20, 0x01, mov_m_cr_gr(9, IA64_CR_SAPIC_IRR0), nop_i(), nop_i()),
+        (0x30, 0x01, mov_m_cr_gr(10, IA64_CR_SAPIC_IRR3), nop_i(), nop_i()),
+        (0x40, 0x01, nop_m(), adds(11, 1, 0), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_cond(0x50, 0x50)),
+    ], entry=0x10, expected={
+        "ip": 0x50,
+        "exception": IA64_EXCP_NONE,
+        "r8": 15,  # the spurious vector
+        "r9": 0,
+        "r10": 0,
+        "r11": 1,
+    }, icount=ITC_ICOUNT, name="sapic_ivr_irr_reads_under_icount")
+
 def test_cloop_zero_st1_timer_interrupts_batched_loop(qemu):
     result = run_program(qemu, [
         (0x10, *movl_mlx(2, 0x8000)),
@@ -491,12 +537,31 @@ def test_cloop_zero_st1_timer_interrupts_batched_loop(qemu):
          nop_i()),
         (0x3010, 0x00, nop_m(), adds(8, 0, 2),
          nop_i()),
-        (0x3020, 0x10, nop_m(), nop_i(),
-         br_cond(0x3020, 0x3020)),
-    ], entry=0x10, terminal_ip=0x3020, timeout=8.0)
+        (0x3020, *movl_mlx(10, 0x8000)),
+        (0x3030, 0x01, nop_m(), cmp_ltu_unc(6, 7, 10, 8),
+         nop_i()),
+        (0x3040, 0x10, nop_m(), nop_i(),
+         br_cond(0x3040, 0x30f0, qp=6)),
+        # A host that stalls the vCPU past the deadline before the loop's
+        # first bundle takes the interrupt with nothing to check: take it
+        # as an OS would and re-arm the timer for the loop.
+        (0x3050, 0x01, mov_m_cr_gr(11, IA64_CR_SAPIC_IVR), nop_i(),
+         nop_i()),
+        (0x3060, 0x02, mov_m_ar_gr(3, 44), nop_i(),
+         nop_i()),
+        (0x3070, 0x01, addl(4, 10 * IA64_ITC_TICKS_PER_MILLISECOND, 3),
+         nop_i(), nop_i()),
+        (0x3080, 0x01, mov_m_gr_cr(4, IA64_CR_ITM), nop_i(),
+         nop_i()),
+        (0x3090, 0x09, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI), srlz_d(),
+         nop_i()),
+        (0x30a0, 0x11, nop_m(), nop_i(), rfi_b()),
+        (0x30f0, 0x10, nop_m(), nop_i(),
+         br_cond(0x30f0, 0x30f0)),
+    ], entry=0x10, terminal_ip=0x30f0, timeout=8.0)
     state = result.state
     advanced = state.gr[8] - 0x8000
-    if (state.ip != 0x3020 or
+    if (state.ip != 0x30f0 or
         state.exception != IA64_EXCP_NONE or
         advanced <= 0 or
         state.gr[9] >= 0x100000000):
@@ -1440,6 +1505,124 @@ test_sapic_same_class_higher_vector_preempts = require_registers(
 def _sparse_port(port):
     return (0x8000000000000000 | 0xffffc000000 |
             ((port >> 2) << 12) | (port & 0xfff))
+
+
+# LRR.ipp = 1 makes a LINT pin active low (SDM Vol. 2 Table 5-14).  The zx1
+# board leaves LINT0 unconnected and low: level-triggered and active low it
+# is asserted and pends its vector, active high it withdraws it.
+test_lrr_active_low_pin_asserted_when_low = require_registers(
+    "lrr_active_low_pin_asserted_when_low", [
+        (0x10, *movl_mlx(3, IA64_LRR_IPP | IA64_LRR_TM | 0x20)),
+        (0x20, 0x01, mov_m_gr_cr(3, IA64_CR_LRR0), nop_i(), nop_i()),
+        (0x30, 0x01, mov_m_cr_gr(8, IA64_CR_SAPIC_IRR0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(3, IA64_LRR_TM | 0x20)),
+        (0x50, 0x01, mov_m_gr_cr(3, IA64_CR_LRR0), nop_i(), nop_i()),
+        (0x60, 0x01, mov_m_cr_gr(9, IA64_CR_SAPIC_IRR0), nop_i(), nop_i()),
+        (0x70, 0x10, nop_m(), nop_i(), br_cond(0x70, 0x70)),
+    ], {
+        "ip": 0x70,
+        "exception": IA64_EXCP_NONE,
+        "r8": 1 << 0x20,
+        "r9": 0,
+    }, entry=0x10)
+
+
+# 460GX: a lowest-priority I/O interrupt goes to the processor with the
+# lowest enabled XTPR, not to the entry's destination (SSDM 3.7).  Each
+# processor's XTP byte store loads its agent's XTPR in the SAC (CBN 00:0
+# C0h-C7h, read-only to configuration writes, 80h = disabled out of reset;
+# SSDM 2.6.1.1).  Processor 0 stores 08h, processor 1 02h; processor 0 aims
+# IRQ 0 (the 8254's counter 0) at itself with delivery mode 001, and
+# processor 1 takes it.  r20 is the vector processor 1 took, r21-r23 the
+# XTPR dwords before and after a configuration write of 0.
+_XTP_BYTE = (1 << 63) | 0xfee00000 + 0x1e0008
+_XTP_PID = (1 << 63) | 0xfec00000
+_XTP_READY = 0x8000
+_XTP_VECTOR = 0x8010
+_XTP_IVA = 0x200000
+_XTP_SAC_XTPRS = 0x80ff00c0
+test_xtpr_redirects_lowest_priority_interrupt = require_registers(
+    "xtpr_redirects_lowest_priority_interrupt", [
+        (0x10, *movl_mlx(2, _XTP_BYTE)),
+        (0x20, 0x01, adds(4, 0x08, 0), nop_i(), nop_i()),
+        (0x30, 0x01, st1_postinc(2, 4, 0), nop_i(), nop_i()),
+        (0x40, *movl_mlx(2, (1 << 63) | 0xfee01000)),
+        (0x50, 0x01, adds(3, 0xf0, 0), nop_i(), nop_i()),
+        (0x60, 0x01, st8(2, 3), nop_i(), nop_i()),  # wake processor 1
+        (0x70, *movl_mlx(4, _XTP_READY)),
+        (0x80, 0x01, ld8(5, 4), nop_i(), nop_i()),
+        (0x90, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 5), nop_i()),
+        (0xa0, 0x10, nop_m(), nop_i(), br_cond(0xa0, 0x80, qp=6)),
+        # PID entry 0: destination 00.00, lowest priority, vector 40h.
+        (0xb0, *movl_mlx(2, _XTP_PID)),
+        (0xc0, 0x01, adds(3, 0x11, 0), adds(8, 0x10, 2), nop_i()),
+        (0xd0, 0x01, st4(2, 3), nop_i(), nop_i()),
+        (0xe0, 0x01, st4(8, 0), nop_i(), nop_i()),
+        (0xf0, 0x01, adds(3, 0x10, 0), nop_i(), nop_i()),
+        (0x100, 0x01, st4(2, 3), nop_i(), nop_i()),
+        (0x110, 0x01, adds(3, 0x140, 0), nop_i(), nop_i()),
+        (0x120, 0x01, st4(8, 3), nop_i(), nop_i()),
+        # 8254 counter 0: mode 0, count 10h; OUT rises at terminal count.
+        (0x130, *movl_mlx(2, _sparse_port(0x43))),
+        (0x140, *movl_mlx(3, _sparse_port(0x40))),
+        (0x150, 0x01, adds(4, 0x30, 0), nop_i(), nop_i()),
+        (0x160, 0x01, st1_postinc(2, 4, 0), nop_i(), nop_i()),
+        (0x170, 0x01, adds(4, 0x10, 0), nop_i(), nop_i()),
+        (0x180, 0x01, st1_postinc(3, 4, 0), nop_i(), nop_i()),
+        (0x190, 0x01, st1_postinc(3, 0, 0), nop_i(), nop_i()),
+        (0x1a0, 0x10, nop_m(), nop_i(), br_cond(0x1a0, 0x1a0)),
+
+        (_XTP_IVA + 0x3000, 0x01, mov_m_cr_gr(16, IA64_CR_SAPIC_IVR),
+         nop_i(), nop_i()),
+        (_XTP_IVA + 0x3010, *movl_mlx(18, _XTP_VECTOR)),
+        (_XTP_IVA + 0x3020, 0x01, st8(18, 16), nop_i(), nop_i()),
+        (_XTP_IVA + 0x3030, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI),
+         nop_i(), nop_i()),
+        (_XTP_IVA + 0x3040, 0x01, srlz_d(), nop_i(), nop_i()),
+        (_XTP_IVA + 0x3050, 0x11, nop_m(), nop_i(), rfi_b()),
+
+        # Processor 1, woken at the image base.
+        (0x100000, *movl_mlx(3, _XTP_IVA)),
+        (0x100010, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+        (0x100020, 0x01, srlz_i(), nop_i(), nop_i()),
+        (0x100030, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_TPR), nop_i(), nop_i()),
+        (0x100040, 0x01, srlz_d(), nop_i(), nop_i()),
+        (0x100050, *movl_mlx(2, _XTP_BYTE)),
+        (0x100060, 0x01, adds(4, 0x02, 0), nop_i(), nop_i()),
+        (0x100070, 0x01, st1_postinc(2, 4, 0), nop_i(), nop_i()),
+        (0x100080, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_I | IA64_PSR_BN)),
+        (0x100090, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0x1000a0, *movl_mlx(4, _XTP_READY)),
+        (0x1000b0, 0x01, adds(5, 1, 0), nop_i(), nop_i()),
+        (0x1000c0, 0x01, st8(4, 5), nop_i(), nop_i()),
+        (0x1000d0, *movl_mlx(8, 0x1000000)),
+        (0x1000e0, 0x02, nop_m(), mov_lc_gr(8), nop_i()),
+        (0x1000f0, *movl_mlx(9, _XTP_VECTOR)),
+        # The wake-up IPI (vector F0h) is taken first.
+        (0x100100, 0x01, ld8(20, 9), nop_i(), nop_i()),
+        (0x100110, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0x40, 20), nop_i()),
+        (0x100120, 0x10, nop_m(), nop_i(),
+         br_cloop(0x100120, 0x100100, qp=7)),
+        (0x100130, *movl_mlx(2, _sparse_port(0xcf8))),
+        (0x100140, *movl_mlx(3, _sparse_port(0xcfc))),
+        (0x100150, *movl_mlx(4, _XTP_SAC_XTPRS)),
+        (0x100160, 0x01, st4(2, 4), nop_i(), nop_i()),
+        (0x100170, 0x01, ld4(21, 3), nop_i(), nop_i()),
+        (0x100180, 0x01, st4(3, 0), nop_i(), nop_i()),
+        (0x100190, 0x01, ld4(22, 3), nop_i(), nop_i()),
+        (0x1001a0, 0x01, adds(4, 4, 4), nop_i(), nop_i()),
+        (0x1001b0, 0x01, st4(2, 4), nop_i(), nop_i()),
+        (0x1001c0, 0x01, ld4(23, 3), nop_i(), nop_i()),
+        (0x1001d0, 0x10, nop_m(), nop_i(), br_cond(0x1001d0, 0x1001d0)),
+    ], {
+        "ip": 0x1001d0,
+        "exception": IA64_EXCP_NONE,
+        "r20": 0x40,
+        "r21": 0x80800208,
+        "r22": 0x80800208,
+        "r23": 0x80808080,
+    }, entry=0x10, cpu="merced", machine="460gx", alat=None, smp="2",
+    state_cpu=1)
 
 
 def lint0_extint_program():
@@ -2661,6 +2844,59 @@ test_ia32_instruction_intercept_records_prefix_and_opcode = \
             "exception": IA64_EXCP_NONE,
         }, entry=0x700, cpu="madison")
 
+# An intercept raised from a helper reports the intercepted instruction, not an
+# earlier one of the same translation block, and keeps the work before it.
+test_ia32_rdmsr_intercept_after_other_instructions = require_registers(
+    "ia32_rdmsr_intercept_after_other_instructions", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, *movl_mlx(8, 0x100)),
+        (0x50, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(),
+         br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex("40 40 0f 32")),
+        (IA64_IA32_INTERCEPT_VECTOR, 0x00,
+         mov_m_cr_gr(20, 19), nop_i(), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x10, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_INTERCEPT_VECTOR + 0x10,
+                 IA64_IA32_INTERCEPT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_IA32_INTERCEPT_VECTOR + 0x10,
+        "r8": 0x102,
+        "r20": 0x102,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+# The same for a data TLB fault on the port access of an IN instruction.
+test_ia32_in_port_tlb_fault_after_other_instructions = require_registers(
+    "ia32_in_port_tlb_fault_after_other_instructions", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, *movl_mlx(8, 0x100)),
+        (0x50, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x60, *movl_mlx(3, 0x10000000)),
+        (0x70, 0x00, mov_m_gr_ar(3, 0), adds(10, 0x70, 0), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex("40 40 ec")),
+        (IA64_ALT_DTLB_VECTOR, 0x00,
+         mov_m_cr_gr(20, 19), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x10,
+                 IA64_ALT_DTLB_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x10,
+        "r8": 0x102,
+        "r20": 0x102,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
 test_ia32_illegal_x87_opcode_intercepts_with_cr0_em = require_registers(
     "ia32_illegal_x87_opcode_intercepts_with_cr0_em", [
         *ia32_environment_bundles(0x700, 0x10),
@@ -2764,6 +3000,42 @@ test_ia32_amd_prefetch_opcode_intercepts = require_registers(
         "r9": 0,
         "r10": 0x0d0f,
         "r11": 0x100,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+test_ia32_int_n_raises_ia32_interrupt = require_registers(
+    "ia32_int_n_raises_ia32_interrupt", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, *movl_mlx(8, 0x100)),
+        (0x50, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(), br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex(
+            "cd 80 "             # int 0x80 (the Linux IA-32 system call)
+            "0f b8 00 03")),     # jmpe 0x300 (must not execute)
+        (0x300, 0x10, nop_m(), nop_i(), br_cond(0x300, 0x300)),
+        (IA64_IA32_EXCEPTION_VECTOR, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_EXCEPTION_VECTOR, IA64_IA32_EXCEPTION_VECTOR)),
+        (IA64_IA32_INTERRUPT_VECTOR, 0x00,
+         mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_IA32_INTERRUPT_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 17), nop_i(), nop_i()),
+        (IA64_IA32_INTERRUPT_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(10, 22), nop_i(), nop_i()),
+        (IA64_IA32_INTERRUPT_VECTOR + 0x30, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_INTERRUPT_VECTOR + 0x30,
+                 IA64_IA32_INTERRUPT_VECTOR + 0x30)),
+    ], {
+        # SDM Vol. 2 sec. 9.2: INT n is a trap on the IA-32 Interrupt
+        # vector with ISR.vector = n; IIP is the next instruction.
+        "ip": IA64_IA32_INTERRUPT_VECTOR + 0x30,
+        "r8": 0x102,
+        "r9": 0x80 << 16,
+        "r10": 0x100,
         "exception": IA64_EXCP_NONE,
     }, entry=0x700, cpu="madison")
 
@@ -5087,30 +5359,49 @@ test_native_taken_branch_trap_skips_not_taken_branch = require_registers(
         "r13": 0,
     }, entry=0x10)
 
-# This model reports an unimplemented instruction address with a fault on
-# the fetch, so the traps of the branch come first and ISR.code has no ui
-# bit (SDM Vol. 2 4.3.3 and the Lower-Privilege Transfer Trap vector notes).
-test_native_taken_branch_to_unimplemented_address_precedes_uia_fault = \
-    require_registers(
-        "native_taken_branch_to_unimplemented_address_precedes_uia_fault", [
-            (0x10, *movl_mlx(4, (1 << IA64_IMPL_PA_BITS) | 0x100)),
-            (0x20, 0x00, nop_m(), mov_br_gr(7, 4), nop_i()),
-            (0x30, *movl_mlx(
-                2, IA64_PSR_IC | IA64_PSR_TB | IA64_PSR_SS | (2 << 41))),
-            (0x40, *movl_mlx(3, 0x80)),
-            *rfi_to_gr(0x50, 2, 3),
-            (0x80, 0x10, nop_m(), nop_i(), br_indirect(7)),
-            *_native_completion_trap_handler(IA64_TAKEN_BRANCH_VECTOR),
-        ], {
-            "ip": IA64_TAKEN_BRANCH_VECTOR + 0x50,
-            "exception": IA64_EXCP_NONE,
-            "fault_code": IA64_EXCP_TAKEN_BRANCH,
-            "r9": 0x80,
-            "r10": (IA64_ISR_CODE_TB | IA64_ISR_CODE_SS |
-                    (2 << IA64_ISR_EI_SHIFT)),
-            "r12": 0,
-            "r13": 0,
-        }, entry=0x10)
+# An Unimplemented Instruction Address trap is a trap of the branch, taken
+# with its other traps on the Lower-Privilege Transfer vector (SDM Vol. 2
+# 4.3.3, Table 5-6, Table 8-3). IIP holds the implemented address bits, as
+# PAL_PROC_GET_FEATURES bit 38 = 0 gives.
+test_native_uia_trap_precedes_taken_branch_and_single_step = require_registers(
+    "native_uia_trap_precedes_taken_branch_and_single_step", [
+        (0x10, *movl_mlx(4, (1 << IA64_IMPL_PA_BITS) | 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 4), nop_i()),
+        (0x30, *movl_mlx(
+            2, IA64_PSR_IC | IA64_PSR_TB | IA64_PSR_SS | (2 << 41))),
+        (0x40, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x50, 2, 3),
+        (0x80, 0x10, nop_m(), nop_i(), br_indirect(7)),
+        *_native_completion_trap_handler(IA64_LOWER_PRIV_TRANSFER_VECTOR),
+    ], {
+        "ip": IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_UNIMPL_INST_ADDR,
+        "r8": 0x100,
+        "r9": 0x80,
+        "r10": (IA64_ISR_CODE_UI | IA64_ISR_CODE_TB | IA64_ISR_CODE_SS |
+                (2 << IA64_ISR_EI_SHIFT)),
+        "r12": 0,
+        "r13": 0,
+    }, entry=0x10)
+
+# An rfi to an unimplemented address takes the trap itself; IPSR.ri is the
+# restored slot.
+test_rfi_to_unimplemented_address_traps_on_rfi = require_registers(
+    "rfi_to_unimplemented_address_traps_on_rfi", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | (1 << 41))),
+        (0x20, *movl_mlx(3, (1 << IA64_IMPL_PA_BITS) | 0x200)),
+        *rfi_to_gr(0x30, 2, 3),
+        *_native_completion_trap_handler(IA64_LOWER_PRIV_TRANSFER_VECTOR),
+    ], {
+        "ip": IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_UNIMPL_INST_ADDR,
+        "r8": 0x200,
+        "r10": IA64_ISR_CODE_UI | (2 << IA64_ISR_EI_SHIFT),
+        "r12": 1,
+        "r13": 0,
+    }, entry=0x10)
 
 # A br.ret that lowers the privilege level with PSR.lp = 1 takes a
 # Lower-Privilege Transfer trap at the target (SDM Vol. 2 7.1, vector 0x5e00).
@@ -5635,6 +5926,9 @@ GROUP = 'interrupt'
 # while CPU 0 takes a Break fault in a loop with PSR.i set: faults, which are
 # delivered without the BQL, and interrupts, which read the IRR under it,
 # interleave on CPU 0 while CPU 1 writes that IRR.  A lost IPI hangs CPU 1.
+# Each round trip needs both vCPU threads on a host CPU, and each poll stops
+# both: beside running guests CPU 1 got through 220 IPIs in 2 s, so the case
+# polls less often and waits far longer than a quiet host needs (under 2 s).
 _IPI_COUNTER = 0x8000
 _IPI_DONE = 0x8008
 _IPI_IVA = 0x200000
@@ -5697,7 +5991,93 @@ test_ipis_during_break_faults_all_arrive = require_registers(
         "exception": IA64_EXCP_NONE,
         "r5": 0,
         "r6": 2001,
-    }, entry=0x10, alat=None, smp="2", state_cpu=1)
+    }, entry=0x10, alat=None, smp="2", state_cpu=1, timeout=60.0,
+    poll_max_s=0.250)
+
+# PSR.i enables NMI (vector 2) like any external interrupt; only TPR and the
+# in-service priority do not mask it (SDM Vol. 2 rev 1.0 Table 5-7).  A
+# self-IPI with delivery mode NMI (100b) pends while PSR.i is 0, with TPR.mmi
+# set, and is taken once PSR.i is 1.  The handler counts entries in r25 and
+# keeps the IVR vector in r24; r20 holds the count while PSR.i was still 0.
+_NMI_IVA = 0x200000
+_NMI_HANDLER = [
+    (_NMI_IVA + 0x3000, 0x01, mov_m_cr_gr(24, IA64_CR_SAPIC_IVR),
+     nop_i(), nop_i()),
+    (_NMI_IVA + 0x3010, 0x01, nop_m(), adds(25, 1, 25), nop_i()),
+    (_NMI_IVA + 0x3020, 0x01, mov_m_gr_cr(0, IA64_CR_SAPIC_EOI),
+     nop_i(), nop_i()),
+    (_NMI_IVA + 0x3030, 0x01, srlz_d(), nop_i(), nop_i()),
+    (_NMI_IVA + 0x3040, 0x11, nop_m(), nop_i(), rfi_b()),
+]
+_NMI_SETUP = [
+    (0x10, *movl_mlx(3, _NMI_IVA)),
+    (0x20, 0x01, mov_m_gr_cr(3, 2), nop_i(), nop_i()),  # cr.iva
+    (0x30, 0x01, srlz_i(), nop_i(), nop_i()),
+    (0x40, *movl_mlx(3, IA64_TPR_MMI)),
+    (0x50, 0x01, mov_m_gr_cr(3, IA64_CR_SAPIC_TPR), nop_i(), nop_i()),
+    (0x60, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_BN)),
+    (0x70, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+    (0x80, *movl_mlx(2, (1 << 63) | 0xfee00000)),  # IPI to id 0, eid 0
+    (0x90, *movl_mlx(3, 0x400)),
+    (0xa0, 0x01, st8(2, 3), nop_i(), nop_i()),
+    (0xb0, 0x01, srlz_d(), nop_i(), nop_i()),
+]
+
+
+def _nmi_spin(ip, count):
+    return [
+        (ip, *movl_mlx(5, count)),
+        (ip + 0x10, 0x01, nop_m(), adds(5, -1, 5), nop_i()),
+        (ip + 0x20, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 5), nop_i()),
+        (ip + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(ip + 0x30, ip + 0x10, qp=7)),
+    ]
+
+
+def _nmi_unmask_tail(ip):
+    return [
+        (ip, 0x01, nop_m(), adds(20, 0, 25), nop_i()),
+        (ip + 0x10, *movl_mlx(19, IA64_PSR_IC | IA64_PSR_BN | IA64_PSR_I)),
+        (ip + 0x20, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        *_nmi_spin(ip + 0x30, 1000),
+        (ip + 0x70, 0x10, nop_m(), nop_i(), br_cond(ip + 0x70, ip + 0x70)),
+    ]
+
+
+test_nmi_waits_for_psr_i = require_registers(
+    "nmi_waits_for_psr_i", [
+        *_NMI_SETUP,
+        *_nmi_spin(0xc0, 200000),
+        *_nmi_unmask_tail(0x100),
+        *_NMI_HANDLER,
+    ], {
+        "ip": 0x170,
+        "exception": IA64_EXCP_NONE,
+        "r20": 0,
+        "r24": 2,
+        "r25": 1,
+    }, entry=0x10)
+
+# PAL_HALT_LIGHT leaves the halt for any interrupt that TPR leaves unmasked,
+# NMI included, whatever PSR.i (SDM Vol. 2 rev 1.0 11.6), and returns to the
+# caller; the NMI then waits for PSR.i as above.
+test_nmi_wakes_pal_halt_light_with_psr_i_clear = require_registers(
+    "nmi_wakes_pal_halt_light_with_psr_i_clear", [
+        *_NMI_SETUP,
+        (0xc0, *movl_mlx(28, PAL_HALT_LIGHT)),
+        (0xd0, 0x10, nop_m(), nop_i(), br_call(0, 0xd0, PAL_PROC_ENTRY)),
+        *_nmi_unmask_tail(0xe0),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+        *_NMI_HANDLER,
+    ], {
+        "ip": 0x150,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r20": 0,
+        "r24": 2,
+        "r25": 1,
+    }, entry=0x10)
 
 # A 4 GiB code segment lets a TB leave out the per-instruction checks
 # (ia64_ia32_tb_fast).  These variants rerun debug and disabled-FP cases
@@ -5935,16 +6315,18 @@ def _ia32_flat_data_case(name, code, vector, expected, dsd=IA32_FLAT_DSD,
                          pre=(), data=()):
     """Enter IA-32 code at 0x9000 by rfi with IPSR = ic, is and psr.
 
-    dtrs maps 4 KiB pages (va, pa) while PSR.ic is still clear; pre holds
-    further IA-64 bundles, or ("movl", gr, value); the handler at vector
-    records IIP, ISR and IFA in r20, r21 and r22.
+    dtrs maps 4 KiB pages (va, pa[, pte_flags]) while PSR.ic is still clear;
+    pre holds further IA-64 bundles, or ("movl", gr, value); the handler at
+    vector records IIP, ISR and IFA in r20, r21 and r22.
     """
     bundles = list(ia32_environment_bundles(0x700, 0x10, csd=csd, dsd=dsd,
                                             ssd=ssd))
     addr = 0x10
-    for slot, (va, pa) in enumerate(dtrs):
+    for slot, (va, pa, *flags) in enumerate(dtrs):
         bundles += dtr_setup_bundles(addr, va, pa, page_shift=12,
-                                     slot=5 + slot)
+                                     slot=5 + slot,
+                                     pte_flags=flags[0] if flags else
+                                     DTR_PTE_WB)
         addr += 0x60
     steps = [("movl", 3, eflags), (0x00, mov_m_gr_ar(3, 24), nop_i(), nop_i())]
     if cflg is not None:
@@ -6142,6 +6524,47 @@ test_ia32_pop_m_destination_checked_against_ds = _ia32_flat_data_case(
     ssd=IA32_TEST_DSD,
     data=[(0xa800, bytes.fromhex("78 56 34 12"))])
 
+# PREFETCHh "does not cause any exceptions (except for code breakpoints)"
+# (SDM rev 2.3 Vol. 4 p.4:580), and the hint NOPs never access their
+# operand: neither faults on an unmapped or a read-only page.  The second
+# case repeats dsound.dll's prefetcht0 [esi+0x80].
+_IA32_HINT_OPERANDS = bytes.fromhex(
+    "0f 18 0d 00 c0 00 00 "      # prefetcht0 [0xc000]
+    "0f 18 05 00 c0 00 00 "      # prefetchnta [0xc000]
+    "0f 1f 05 00 c0 00 00 "      # nop dword [0xc000]
+    "0f 18 8e 80 00 00 00 "      # prefetcht0 [esi+0x80]
+    "0f 0b")                     # ud2
+_IA32_READ_ONLY_PTE = DTR_PTE_WB & ~(7 << 9)
+
+test_ia32_hint_operands_skip_unmapped_page = _ia32_flat_data_case(
+    "ia32_hint_operands_skip_unmapped_page",
+    _IA32_HINT_OPERANDS, IA64_IA32_INTERCEPT_VECTOR,
+    {"r20": IA32_FLAT_CODE + 28},
+    psr=IA64_PSR_DT, pre=[("movl", 14, 0xbf80)])
+
+test_ia32_hint_operands_skip_read_only_page = _ia32_flat_data_case(
+    "ia32_hint_operands_skip_read_only_page",
+    _IA32_HINT_OPERANDS, IA64_IA32_INTERCEPT_VECTOR,
+    {"r20": IA32_FLAT_CODE + 28},
+    psr=IA64_PSR_DT, pre=[("movl", 14, 0xbf80)],
+    dtrs=[(0xc000, 0xc000, _IA32_READ_ONLY_PTE)])
+
+# UD1 and UD0 decode a ModRM operand but never access it: an unmapped one
+# still gives the invalid-opcode intercept, not a TLB fault.
+test_ia32_ud1_unmapped_operand_intercepts = _ia32_flat_data_case(
+    "ia32_ud1_unmapped_operand_intercepts",
+    bytes.fromhex("0f b9 05 00 c0 00 00"),   # ud1 eax,[0xc000]
+    IA64_IA32_INTERCEPT_VECTOR,
+    {"r20": IA32_FLAT_CODE},
+    psr=IA64_PSR_DT)
+
+test_ia32_ud0_unmapped_operand_intercepts = _ia32_flat_data_case(
+    "ia32_ud0_unmapped_operand_intercepts",
+    bytes.fromhex("0f ff 05 00 c0 00 00"),   # ud0 eax,[0xc000]
+    IA64_IA32_INTERCEPT_VECTOR,
+    {"r20": IA32_FLAT_CODE},
+    psr=IA64_PSR_DT)
+
 # PAUSE leaves for the main loop; it must still complete like any other
 # instruction: a PSR.ss trap after it, and PSR.id cleared.
 test_ia32_pause_psr_ss_traps_after_it = require_registers(
@@ -6256,8 +6679,744 @@ test_ia32_fxrstor_unmasked_exception_faults_in_same_tb = \
         (0xa010, bytes.fromhex("00 00 00 00 00 00 00 00 00 1f 00 00")),
         {"r8": 0x105, "r9": 19 << 16})
 
+# INIT (SDM Vol. 2 5.8.4.1, 11.4): a self-IPI with delivery mode 101 enters
+# PALE_INIT, which saves the min-state area registered with
+# PAL_MC_REGISTER_MEM and branches to SALE_ENTRY, which is the image base
+# (0x100000) in this no-firmware entry state.
+_INIT_SAVE = (1 << 63) | 0x200000
+_INIT_PSP = ((1 << 5) | (1 << 7) | (1 << 8) | (1 << 16) | (1 << 17) |
+             (0xfff << 20))
+_INIT_SALE_ENTRY = 0x100000
+_INIT_HANDLER = 0x3000
+
+
+def _init_setup(ic):
+    return [
+        (0x10, 0x00, nop_m(), addl(28, 0x1b, 0), nop_i()),  # REGISTER_MEM
+        (0x20, *movl_mlx(29, _INIT_SAVE)),
+        (0x30, 0x00, nop_m(), addl(30, 0, 0), nop_i()),
+        (0x40, 0x00, nop_m(), addl(31, 0, 0), nop_i()),
+        (0x50, 0x10, nop_m(), nop_i(), br_call(0, 0x50, PAL_PROC_ENTRY)),
+        (0x60, *movl_mlx(1, 0x1111)),
+        (0x70, *movl_mlx(15, 0x2222)),
+        (0x80, *movl_mlx(3, 0x5550)),
+        (0x90, 0x01, mov_m_gr_cr(3, 19), nop_i(), nop_i()),  # cr.iip
+        (0xa0, *movl_mlx(19, IA64_PSR_IC if ic else 0)),
+        (0xb0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xc0, *movl_mlx(2, (1 << 63) | 0xfee00000)),  # IPI to id 0, eid 0
+        (0xd0, *movl_mlx(3, 0x500)),                    # delivery mode INIT
+        (0xe0, 0x01, st8(2, 3), nop_i(), nop_i()),
+    ]
+
+
+_INIT_FIRMWARE = [
+    (_INIT_SALE_ENTRY, 0x10, nop_m(), nop_i(),
+     br_cond(_INIT_SALE_ENTRY, _INIT_HANDLER)),
+    (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+    (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+]
+
+
+def _init_read_save_area(ip, words):
+    bundles = []
+    for register, offset in words:
+        bundles += [
+            (ip, 0x01, nop_m(), adds(21, offset, 17), nop_i()),
+            (ip + 0x10, 0x01, ld8(register, 21), nop_i(), nop_i()),
+        ]
+        ip += 0x20
+    return bundles
+
+
+# With PSR.ic = 0 the INIT is not collected: IIP names the interrupted
+# bundle and XIP keeps what cr.iip held.
+test_init_ipi_enters_pale_init = require_registers(
+    "init_ipi_enters_pale_init", [
+        *_init_setup(ic=False),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+        *_INIT_FIRMWARE,
+        *_init_read_save_area(_INIT_HANDLER, [(22, 0x198), (25, 0x1b0),
+                                              (23, 0x08), (24, 0x78)]),
+        (_INIT_HANDLER + 0x80, 0x10, nop_m(), nop_i(),
+         br_cond(_INIT_HANDLER + 0x80, _INIT_HANDLER + 0x80)),
+    ], {
+        "ip": _INIT_HANDLER + 0x80,
+        "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_MC,
+        "cfm_sof": 0,
+        "r16": _INIT_SAVE + 0x1d0,
+        "r17": _INIT_SAVE,
+        "r18": _INIT_PSP,
+        "r19": 0,
+        "r20": 2,
+        "r22": 0xf0,
+        "r23": 0x1111,
+        "r24": 0x2222,
+        "r25": 0x5550,
+    }, entry=0x10)
+
+# With PSR.ic = 1 the INIT is collected: cr.iip and XIP name the bundle too.
+test_init_with_psr_ic_collects = require_registers(
+    "init_with_psr_ic_collects", [
+        *_init_setup(ic=True),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+        *_INIT_FIRMWARE,
+        *_init_read_save_area(_INIT_HANDLER, [(22, 0x198), (25, 0x1b0)]),
+        (_INIT_HANDLER + 0x40, 0x01, mov_m_cr_gr(26, 19), nop_i(), nop_i()),
+        (_INIT_HANDLER + 0x50, 0x10, nop_m(), nop_i(),
+         br_cond(_INIT_HANDLER + 0x50, _INIT_HANDLER + 0x50)),
+    ], {
+        "ip": _INIT_HANDLER + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_MC,
+        "r20": 2,
+        "r22": 0xf0,
+        "r25": 0xf0,
+        "r26": 0xf0,
+    }, entry=0x10)
+
+# PSR.mc = 1 holds the INIT pending (11.4.1); the rfi that clears it lets
+# the INIT in on the next bundle.
+test_init_waits_for_psr_mc = require_registers(
+    "init_waits_for_psr_mc", [
+        *_init_setup(ic=False)[:5],
+        (0x60, *movl_mlx(3, IA64_PSR_MC)),
+        (0x70, 0x01, mov_m_gr_cr(3, 16), nop_i(), nop_i()),   # cr.ipsr
+        (0x80, *movl_mlx(3, 0x200)),
+        (0x90, 0x01, mov_m_gr_cr(3, 19), nop_i(), nop_i()),   # cr.iip
+        (0xa0, 0x01, mov_m_gr_cr(0, 23), nop_i(), nop_i()),   # cr.ifs
+        (0xb0, 0x11, nop_m(), nop_i(), rfi_b()),
+        (0x200, *movl_mlx(2, (1 << 63) | 0xfee00000)),
+        (0x210, *movl_mlx(3, 0x500)),
+        (0x220, 0x01, st8(2, 3), nop_i(), nop_i()),
+        *_nmi_spin(0x230, 2000),
+        (0x270, 0x01, nop_m(), adds(9, 1, 0), nop_i()),
+        (0x280, 0x01, mov_m_gr_cr(0, 16), nop_i(), nop_i()),
+        (0x290, *movl_mlx(3, 0x300)),
+        (0x2a0, 0x01, mov_m_gr_cr(3, 19), nop_i(), nop_i()),
+        (0x2b0, 0x11, nop_m(), nop_i(), rfi_b()),
+        (0x300, 0x10, nop_m(), nop_i(), br_cond(0x300, 0x300)),
+        *_INIT_FIRMWARE,
+        (_INIT_HANDLER, 0x01, nop_m(), adds(21, 0x198, 17), nop_i()),
+        (_INIT_HANDLER + 0x10, 0x01, ld8(22, 21), nop_i(), nop_i()),
+        (_INIT_HANDLER + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(_INIT_HANDLER + 0x20, _INIT_HANDLER + 0x20)),
+    ], {
+        "ip": _INIT_HANDLER + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "r9": 1,
+        "r20": 2,
+        "r22": 0x300,
+    }, entry=0x10)
+
+# PAL_MC_RESUME returns to the interrupted bundle with the saved registers;
+# ar.ccv is not in the save area, so its handler value survives and ends
+# the spin.
+test_pal_mc_resume_returns_from_init = require_registers(
+    "pal_mc_resume_returns_from_init", [
+        *_init_setup(ic=False),
+        (0xf0, 0x01, mov_m_ar_gr(4, 32), nop_i(), nop_i()),
+        (0x100, 0x01, nop_m(), cmp4_eq_imm(6, 7, 0, 4), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0xf0, qp=6)),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+        *_INIT_FIRMWARE,
+        (_INIT_HANDLER, *movl_mlx(3, 0x77)),
+        (_INIT_HANDLER + 0x10, 0x01, mov_m_gr_ar(3, 32), nop_i(), nop_i()),
+        (_INIT_HANDLER + 0x20, 0x01, nop_m(), adds(1, 0, 0), nop_i()),
+        (_INIT_HANDLER + 0x30, 0x00, nop_m(), addl(28, 0x1a, 0), nop_i()),
+        (_INIT_HANDLER + 0x40, 0x01, nop_m(), adds(29, 0, 0), nop_i()),
+        (_INIT_HANDLER + 0x50, 0x01, nop_m(), adds(30, 0, 17), nop_i()),
+        (_INIT_HANDLER + 0x60, 0x01, nop_m(), adds(31, 0, 0), nop_i()),
+        (_INIT_HANDLER + 0x70, 0x10, nop_m(), nop_i(),
+         br_call(0, _INIT_HANDLER + 0x70, PAL_PROC_ENTRY)),
+        (_INIT_HANDLER + 0x80, 0x10, nop_m(), nop_i(),
+         br_cond(_INIT_HANDLER + 0x80, _INIT_HANDLER + 0x80)),
+    ], {
+        "ip": 0x120,
+        "exception": IA64_EXCP_NONE,
+        "psr": 0,
+        "r1": 0x1111,
+        "r15": 0x2222,
+        "r28": 0x1b,
+        "ar_ccv": 0x77,
+    }, entry=0x10)
+
+# PMI (SDM Vol. 2 5.8.4.2, 11.5): a self-IPI with delivery mode 010 pends a
+# PMI vector.  While PSR.ic is 1, PALE_PMI enters the SALE_PMI entry that
+# PAL_PMI_ENTRYPOINT registered, with the 11.5.2 state in bank 0 and BR0 at
+# PAL's return point: image base + 0x80 in this no-firmware entry state,
+# next to the PAL_PROC stub, and in the copy after PAL_COPY_PAL.
+_PMI_HANDLER = 0x6000
+_PMI_RETURN = 0x100080
+_PMI_MARK = 0x7000
+_PMI_B1 = 0xb1b0
+_PMI_RSC = 3
+_PMI_IFS_IFM = 5
+
+
+def _pmi_setup(sal_entry=_PMI_HANDLER, vector=1, ic=True):
+    return [
+        (0x10, 0x11, nop_m(), nop_i(), bsw1()),
+        (0x20, 0x00, nop_m(), addl(28, 0x1b, 0), nop_i()),  # REGISTER_MEM
+        (0x30, *movl_mlx(29, _INIT_SAVE)),
+        (0x40, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
+        (0x50, 0x10, nop_m(), nop_i(), br_call(0, 0x50, PAL_PROC_ENTRY)),
+        (0x60, 0x00, nop_m(), addl(28, 0x20, 0), nop_i()),  # PMI_ENTRYPOINT
+        (0x70, *movl_mlx(29, sal_entry)),
+        (0x80, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
+        (0x90, 0x10, nop_m(), nop_i(), br_call(0, 0x90, PAL_PROC_ENTRY)),
+        (0xa0, *movl_mlx(3, _PMI_B1)),
+        (0xb0, 0x01, nop_m(), mov_br_gr(1, 3), cmp4_eq_imm(6, 7, 0, 0)),
+        (0xc0, *movl_mlx(3, (1 << 63) | _PMI_IFS_IFM)),
+        (0xd0, 0x01, mov_m_gr_cr(3, 23), nop_i(), nop_i()),     # cr.ifs
+        (0xe0, 0x01, nop_m(), adds(3, _PMI_RSC, 0), adds(24, 0x24, 0)),
+        (0xf0, 0x01, mov_m_gr_ar(3, 16), nop_i(), nop_i()),     # ar.rsc
+        (0x100, *movl_mlx(19, IA64_PSR_IC if ic else 0)),
+        (0x110, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0x120, *movl_mlx(2, (1 << 63) | 0xfee00000)),  # IPI to id 0, eid 0
+        (0x130, *movl_mlx(3, 0x200 | vector)),           # delivery mode PMI
+        (0x140, 0x01, st8(2, 3), nop_i(), nop_i()),
+    ]
+
+
+# After the PMI the main program marks its return and reads what SALE_PMI
+# stored at _PMI_MARK.
+_PMI_MAIN_TAIL = [
+    (0x150, 0x01, nop_m(), adds(10, 0x5a, 0), nop_i()),
+    (0x160, *movl_mlx(2, _PMI_MARK)),
+    (0x170, 0x01, ld8(12, 2), nop_i(), nop_i()),
+    (0x180, 0x10, nop_m(), nop_i(), br_cond(0x180, 0x180)),
+]
+
+_PMI_FIRMWARE = [
+    (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+    (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    (_PMI_RETURN, 0x0a, break_m(0x100008), nop_m(), nop_i()),
+    (_PMI_RETURN + 0x10, 0x10, nop_m(), nop_i(),
+     br_cond(_PMI_RETURN + 0x10, _PMI_RETURN + 0x10)),
+]
+
+# SALE_PMI stores its vector at _PMI_MARK, uses its scratch GR30-31 and
+# branches to BR0 (11.5.3).
+_PMI_STORE_AND_RETURN = [
+    (_PMI_HANDLER, *movl_mlx(30, _PMI_MARK)),
+    (_PMI_HANDLER + 0x10, 0x01, st8(30, 24), adds(31, 0x33, 0), nop_i()),
+    (_PMI_HANDLER + 0x20, 0x10, nop_m(), nop_i(), br_indirect(0)),
+]
+
+test_pmi_ipi_enters_sale_pmi = require_registers(
+    "pmi_ipi_enters_sale_pmi", [
+        *_pmi_setup(),
+        (0x150, 0x10, nop_m(), nop_i(), br_cond(0x150, 0x150)),
+        *_PMI_FIRMWARE,
+        (_PMI_HANDLER, 0x01, mov_m_cr_gr(30, 19), nop_i(), nop_i()),  # iip
+        (_PMI_HANDLER + 0x10, 0x01, mov_m_cr_gr(31, 23), nop_i(), nop_i()),
+        (_PMI_HANDLER + 0x20, 0x10, nop_m(), nop_i(),
+         br_cond(_PMI_HANDLER + 0x20, _PMI_HANDLER + 0x20)),
+    ], {
+        "ip": _PMI_HANDLER + 0x20,
+        "exception": IA64_EXCP_NONE,
+        "psr": 0,
+        "ar_rsc": 0,
+        "b0": _PMI_RETURN,
+        "b1": _PMI_B1,
+        "r24": 1,
+        "r25": _INIT_SAVE,
+        "r26": _PMI_RSC,
+        "r27": 0xa0,
+        "r28": _PMI_B1,
+        "r29": 1 | (1 << 6),
+        "r30": 0x150,
+        "r31": _PMI_IFS_IFM,
+    }, entry=0x10)
+
+# PSR.ic = 0 holds the PMI pending (Table 5-8); the srlz.d that makes
+# PSR.ic = 1 visible lets it in on the next slot of the same bundle.
+test_pmi_waits_for_psr_ic = require_registers(
+    "pmi_waits_for_psr_ic", [
+        *_pmi_setup(ic=False),
+        *_nmi_spin(0x150, 2000),
+        (0x190, 0x01, nop_m(), adds(9, 1, 0), nop_i()),
+        (0x1a0, *movl_mlx(19, IA64_PSR_IC)),
+        (0x1b0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0x1c0, 0x10, nop_m(), nop_i(), br_cond(0x1c0, 0x1c0)),
+        *_PMI_FIRMWARE,
+        (_PMI_HANDLER, 0x01, mov_m_cr_gr(30, 19), nop_i(), nop_i()),  # iip
+        (_PMI_HANDLER + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(_PMI_HANDLER + 0x10, _PMI_HANDLER + 0x10)),
+    ], {
+        "ip": _PMI_HANDLER + 0x10,
+        "exception": IA64_EXCP_NONE,
+        "r9": 1,
+        "r24": 1,
+        "r30": 0x1b0,
+    }, entry=0x10)
+
+# The branch to BR0 puts back RSC, B0, B1 and the predicates from bank 0
+# GR26-29 and resumes from IIP and IPSR, in bank 1 again.
+test_pmi_returns_through_b0 = require_registers(
+    "pmi_returns_through_b0", [
+        *_pmi_setup(vector=2),
+        *_PMI_MAIN_TAIL,
+        *_PMI_FIRMWARE,
+        *_PMI_STORE_AND_RETURN,
+    ], {
+        "ip": 0x180,
+        "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_IC | IA64_PSR_BN,
+        "ar_rsc": _PMI_RSC,
+        "b0": 0xa0,
+        "b1": _PMI_B1,
+        "p6": 1,
+        "r10": 0x5a,
+        "r12": 2,
+        "r24": 0x24,
+    }, entry=0x10)
+
+# Vectors 4-15 are PAL's; PAL has no PMI work and returns at once.
+test_pmi_pal_vector_returns_at_once = require_registers(
+    "pmi_pal_vector_returns_at_once", [
+        *_pmi_setup(vector=5),
+        *_PMI_MAIN_TAIL,
+        *_PMI_FIRMWARE,
+        *_PMI_STORE_AND_RETURN,
+    ], {
+        "ip": 0x180,
+        "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_IC | IA64_PSR_BN,
+        "r10": 0x5a,
+        "r12": 0,
+        "r24": 0x24,
+    }, entry=0x10)
+
+# A SAL vector before SAL registered its handler: PAL returns at once (11.5.1).
+test_pmi_before_sale_pmi_returns_at_once = require_registers(
+    "pmi_before_sale_pmi_returns_at_once", [
+        *_pmi_setup(sal_entry=0),
+        *_PMI_MAIN_TAIL,
+        *_PMI_FIRMWARE,
+        *_PMI_STORE_AND_RETURN,
+    ], {
+        "ip": 0x180,
+        "exception": IA64_EXCP_NONE,
+        "psr": IA64_PSR_IC | IA64_PSR_BN,
+        "r10": 0x5a,
+        "r12": 0,
+        "r24": 0x24,
+    }, entry=0x10)
+
+# PAL_COPY_PAL moves PALE_PMI, and with it the return point in BR0.
+test_pmi_return_moves_with_pal_copy = require_registers(
+    "pmi_return_moves_with_pal_copy", [
+        (0x10, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
+        (0x20, *movl_mlx(28, PAL_COPY_PAL)),
+        (0x30, *movl_mlx(32, PAL_COPY_PAL)),
+        (0x40, *movl_mlx(33, PAL_COPY_TARGET | (1 << 63))),
+        (0x50, *movl_mlx(34, PAL_COPY_BUFFER_SIZE)),
+        (0x60, *movl_mlx(35, 0)),
+        (0x70, 0x10, nop_m(), nop_i(), br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, 0x00, nop_m(), addl(28, 0x20, 0), nop_i()),  # PMI_ENTRYPOINT
+        (0x90, *movl_mlx(29, _PMI_HANDLER)),
+        (0xa0, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
+        (0xb0, 0x10, nop_m(), nop_i(), br_call(0, 0xb0, PAL_PROC_ENTRY)),
+        (0xc0, *movl_mlx(19, IA64_PSR_IC)),
+        (0xd0, 0x08, mov_gr_psr_full(19), srlz_d(), nop_i()),
+        (0xe0, *movl_mlx(2, (1 << 63) | 0xfee00000)),
+        (0xf0, *movl_mlx(3, 0x201)),
+        (0x100, 0x01, st8(2, 3), nop_i(), nop_i()),
+        (0x110, 0x10, nop_m(), nop_i(), br_cond(0x110, 0x110)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+        (_PMI_HANDLER, 0x10, nop_m(), nop_i(),
+         br_cond(_PMI_HANDLER, _PMI_HANDLER)),
+    ], {
+        "ip": _PMI_HANDLER,
+        "exception": IA64_EXCP_NONE,
+        "b0": PAL_COPY_PROC + 0x20,
+        "r24": 1,
+    }, entry=0x10)
+
+# Instruction breakpoints (SDM Vol. 2 7.1, 7.1.1): IBR0 holds the address,
+# IBR1 x (bit 63), the privilege-level mask (bits 59:56) and the address mask
+# (bits 55:0).  The setup arms the pair, sets PSR.ic and PSR.db and branches
+# to the bundle at _IBR_TARGET; IBR.addr{3:0} is not compared.
+_IBR_TARGET = 0x100
+_IBR_X = 1 << 63
+_IBR_PLM0 = 1 << 56
+_IBR_FULL_MASK = 0x00ffffffffffffff
+
+
+def _ibr_program(address, control, target, psr=IA64_PSR_IC | IA64_PSR_DB,
+                 handler=None):
+    bundles = [
+        (0x10, *movl_mlx(2, address)),
+        (0x20, *movl_mlx(3, control)),
+        (0x30, 0x00, nop_m(), adds(4, 0, 0), adds(5, 1, 0)),
+        (0x40, 0x00, mov_ibr_indexed_write(4, 2), nop_i(), nop_i()),
+        (0x50, 0x00, mov_ibr_indexed_write(5, 3), nop_i(), nop_i()),
+        (0x60, *movl_mlx(6, psr)),
+        (0x70, 0x00, mov_m_gr_psrl(6), nop_i(), nop_i()),
+        (0x80, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, _IBR_TARGET)),
+        (_IBR_TARGET, *target),
+        (_IBR_TARGET + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(_IBR_TARGET + 0x10, _IBR_TARGET + 0x10)),
+    ]
+    if handler is None:
+        handler = [
+            (IA64_DEBUG_VECTOR, 0x00, mov_m_cr_gr(14, 20), nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x10, 0x00, mov_m_cr_gr(15, 17),
+             nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x20, 0x00, mov_m_cr_gr(16, 19),
+             nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+             br_cond(IA64_DEBUG_VECTOR + 0x30, IA64_DEBUG_VECTOR + 0x30)),
+        ]
+    return bundles + handler
+
+
+_IBR_TARGET_ADDS = (0x00, nop_m(), adds(20, 1, 20), nop_i())
+
+test_ibr_instruction_debug_fault = require_registers(
+    "ibr_instruction_debug_fault",
+    _ibr_program(_IBR_TARGET | 0xf, _IBR_X | _IBR_PLM0 | _IBR_FULL_MASK,
+                 _IBR_TARGET_ADDS),
+    {"ip": IA64_DEBUG_VECTOR + 0x30, "r14": _IBR_TARGET,
+     "r15": IA64_ISR_X, "r16": _IBR_TARGET, "r20": 0},
+)
+
+# Reported even when the qualifying predicate is false.
+test_ibr_fault_on_false_predicate = require_registers(
+    "ibr_fault_on_false_predicate",
+    _ibr_program(_IBR_TARGET, _IBR_X | _IBR_PLM0 | _IBR_FULL_MASK,
+                 (0x00, nop_m(), adds(20, 1, 20, qp=6), nop_i())),
+    {"ip": IA64_DEBUG_VECTOR + 0x30, "r14": _IBR_TARGET,
+     "r15": IA64_ISR_X, "r20": 0},
+)
+
+# Address bits whose mask bit is 0 are not compared.
+test_ibr_mask_ignores_low_bits = require_registers(
+    "ibr_mask_ignores_low_bits",
+    _ibr_program(_IBR_TARGET | 0xf0,
+                 _IBR_X | _IBR_PLM0 | (_IBR_FULL_MASK & ~0xff),
+                 _IBR_TARGET_ADDS),
+    {"ip": IA64_DEBUG_VECTOR + 0x30, "r14": _IBR_TARGET, "r20": 0},
+)
+
+# No match at a privilege level the mask leaves out, nor with PSR.db clear.
+test_ibr_plm_excludes_cpl = require_registers(
+    "ibr_plm_excludes_cpl",
+    _ibr_program(_IBR_TARGET, _IBR_X | (0xe << 56) | _IBR_FULL_MASK,
+                 _IBR_TARGET_ADDS),
+    {"ip": _IBR_TARGET + 0x10, "r20": 1},
+)
+
+test_ibr_psr_db_clear_no_fault = require_registers(
+    "ibr_psr_db_clear_no_fault",
+    _ibr_program(_IBR_TARGET, _IBR_X | _IBR_PLM0 | _IBR_FULL_MASK,
+                 _IBR_TARGET_ADDS, psr=IA64_PSR_IC),
+    {"ip": _IBR_TARGET + 0x10, "r20": 1},
+)
+
+# Every instruction of the bundle faults in turn; a handler that returns with
+# IPSR.id set lets that one instruction through (SDM Vol. 2 7.1).
+test_ibr_psr_id_passes_one_instruction = require_registers(
+    "ibr_psr_id_passes_one_instruction",
+    _ibr_program(_IBR_TARGET, _IBR_X | _IBR_PLM0 | _IBR_FULL_MASK,
+                 (0x08, adds(20, 1, 20), adds(21, 1, 21), adds(22, 1, 22)),
+                 handler=[
+        (IA64_DEBUG_VECTOR, 0x00, mov_m_cr_gr(16, 16), adds(30, 1, 30),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x10, 0x00, mov_m_cr_gr(15, 17), nop_i(),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x20, *movl_mlx(17, IA64_PSR_ID)),
+        (IA64_DEBUG_VECTOR + 0x30, 0x00, nop_m(), or_reg(16, 16, 17),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x40, 0x00, mov_m_gr_cr(16, 16), nop_i(),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x50, 0x10, nop_m(), nop_i(), rfi_b()),
+    ]),
+    {"ip": _IBR_TARGET + 0x10, "r20": 1, "r21": 1, "r22": 1, "r30": 3,
+     "r15": IA64_ISR_X | (2 << IA64_ISR_EI_SHIFT)},
+)
+
+# Data breakpoints (SDM Vol. 2 7.1.1, 7.1.2): DBR1 holds r (bit 63), w (bit
+# 62), the privilege-level mask and the address mask.  The setup arms the
+# pair, writes DCR, points r8 at data, sets PSR from psr and runs the bundles
+# from _DBR_TARGET.  Data references are physical, so no TLB fault comes
+# first.
+_DBR_TARGET = 0x100
+_DBR_DATA = 0xa000
+_DBR_R = 1 << 63
+_DBR_W = 1 << 62
+_DBR_RW_PLM0 = _DBR_R | _DBR_W | _IBR_PLM0 | _IBR_FULL_MASK
+
+
+def _dbr_program(address, control, targets, psr=IA64_PSR_IC | IA64_PSR_DB,
+                 data=_DBR_DATA, dcr=0, handler=None):
+    bundles = [
+        (0x10, *movl_mlx(2, address)),
+        (0x20, *movl_mlx(3, control)),
+        (0x30, 0x00, nop_m(), adds(4, 0, 0), adds(5, 1, 0)),
+        (0x40, 0x00, mov_dbr_indexed_write(4, 2), nop_i(), nop_i()),
+        (0x50, 0x00, mov_dbr_indexed_write(5, 3), nop_i(), nop_i()),
+        (0x60, *movl_mlx(7, dcr)),
+        (0x70, 0x00, mov_m_gr_cr(7, 0), nop_i(), nop_i()),
+        (0x80, *movl_mlx(8, data)),
+        (0x90, *movl_mlx(6, psr)),
+        (0xa0, 0x00, mov_m_gr_psrl(6), nop_i(), nop_i()),
+        (0xb0, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, _DBR_TARGET)),
+    ]
+    end = _DBR_TARGET + 0x10 * len(targets)
+    bundles += [(_DBR_TARGET + 0x10 * i, *bundle)
+                for i, bundle in enumerate(targets)]
+    bundles.append((end, 0x10, nop_m(), nop_i(), br_cond(end, end)))
+    if handler is None:
+        handler = [
+            (IA64_DEBUG_VECTOR, 0x00, mov_m_cr_gr(14, 20), nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x10, 0x00, mov_m_cr_gr(15, 17),
+             nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x20, 0x00, mov_m_cr_gr(16, 19),
+             nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+             br_cond(IA64_DEBUG_VECTOR + 0x30, IA64_DEBUG_VECTOR + 0x30)),
+        ]
+    return bundles + handler
+
+
+def _dbr_fault(ifa, isr, iip=_DBR_TARGET, **extra):
+    return {"ip": IA64_DEBUG_VECTOR + 0x30, "r14": ifa, "r15": isr,
+            "r16": iip, **extra}
+
+
+def _dbr_no_fault(count, **extra):
+    return {"ip": _DBR_TARGET + 0x10 * count, **extra}
+
+
+def _dbr_body(insn):
+    return (0x00, insn, adds(20, 1, 20), nop_i())
+
+
+test_dbr_load_data_debug_fault = require_registers(
+    "dbr_load_data_debug_fault",
+    _dbr_program(_DBR_DATA, _DBR_R | _IBR_PLM0 | _IBR_FULL_MASK,
+                 [_dbr_body(ld8(9, 8))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R, r20=0),
+)
+
+# DBR.r alone ignores stores and DBR.w alone ignores loads.
+test_dbr_access_kind_selects_enable = require_registers(
+    "dbr_access_kind_selects_enable",
+    _dbr_program(_DBR_DATA, _DBR_R | _IBR_PLM0 | _IBR_FULL_MASK,
+                 [_dbr_body(st8(8, 0))]),
+    _dbr_no_fault(1, r20=1),
+)
+
+test_dbr_store_data_debug_fault = require_registers(
+    "dbr_store_data_debug_fault",
+    _dbr_program(_DBR_DATA, _DBR_W | _IBR_PLM0 | _IBR_FULL_MASK,
+                 [_dbr_body(ld8(9, 8)), _dbr_body(st8(8, 0))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_W, iip=_DBR_TARGET + 0x10, r20=1),
+)
+
+# An aligned reference matches on any byte of its datum, and only there.
+test_dbr_matches_any_byte_of_datum = require_registers(
+    "dbr_matches_any_byte_of_datum",
+    _dbr_program(_DBR_DATA + 5, _DBR_RW_PLM0,
+                 [_dbr_body(ld4(9, 8)), _dbr_body(ld8(9, 8))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R, iip=_DBR_TARGET + 0x10, r20=1),
+)
+
+# Address bits whose mask bit is 0 are not compared.
+test_dbr_mask_ignores_low_bits = require_registers(
+    "dbr_mask_ignores_low_bits",
+    _dbr_program(_DBR_DATA + 0xc0,
+                 _DBR_R | _IBR_PLM0 | (_IBR_FULL_MASK & ~0xff),
+                 [_dbr_body(ld1(9, 8))], data=_DBR_DATA + 0x31),
+    _dbr_fault(_DBR_DATA + 0x31, IA64_ISR_R),
+)
+
+test_dbr_plm_excludes_cpl = require_registers(
+    "dbr_plm_excludes_cpl",
+    _dbr_program(_DBR_DATA, _DBR_R | _DBR_W | (0xe << 56) | _IBR_FULL_MASK,
+                 [_dbr_body(ld8(9, 8))]),
+    _dbr_no_fault(1, r20=1),
+)
+
+test_dbr_false_predicate_no_fault = require_registers(
+    "dbr_false_predicate_no_fault",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0,
+                 [_dbr_body(ld8(9, 8, qp=6))]),
+    _dbr_no_fault(1, r20=1),
+)
+
+# Data Debug outranks Unaligned Data Reference (SDM Vol. 2 Table 5-6); an
+# unaligned reference matches on the bytes it accesses, here its last one.
+test_dbr_precedes_unaligned_reference = require_registers(
+    "dbr_precedes_unaligned_reference",
+    _dbr_program(_DBR_DATA + 8, _DBR_RW_PLM0, [_dbr_body(ld8(9, 8))],
+                 psr=IA64_PSR_IC | IA64_PSR_DB | IA64_PSR_AC,
+                 data=_DBR_DATA + 1),
+    _dbr_fault(_DBR_DATA + 1, IA64_ISR_R),
+)
+
+# An unaligned 10-byte ldfe does not match on the unaccessed rest of the
+# 16 bytes it would take aligned.
+test_dbr_unaligned_ldfe_ignores_slot_padding = require_registers(
+    "dbr_unaligned_ldfe_ignores_slot_padding",
+    _dbr_program(_DBR_DATA + 12, _DBR_RW_PLM0, [_dbr_body(ldfe(6, 8))],
+                 data=_DBR_DATA + 1),
+    _dbr_no_fault(1, r20=1),
+)
+
+test_dbr_aligned_ldfe_matches_slot_padding = require_registers(
+    "dbr_aligned_ldfe_matches_slot_padding",
+    _dbr_program(_DBR_DATA + 12, _DBR_RW_PLM0, [_dbr_body(ldfe(6, 8))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R),
+)
+
+# Itanium 2 takes Data Debug on any access across 16 bytes while a pair is
+# enabled for it, whatever the address (251110-003 12.3); Merced compares
+# the address. Without a Data Debug fault, both take Unaligned Data
+# Reference for this ld2.
+_DBR_CROSS16_BODY = [_dbr_body(ld2(9, 8))]
+_DBR_UNALIGNED_SPIN = [
+    (IA64_UNALIGNED_VECTOR, 0x10, nop_m(), nop_i(),
+     br_cond(IA64_UNALIGNED_VECTOR, IA64_UNALIGNED_VECTOR)),
+]
+
+
+def _dbr_cross16_program(control):
+    return _dbr_program(_DBR_DATA + 0x100, control, _DBR_CROSS16_BODY,
+                        data=_DBR_DATA + 0xf) + _DBR_UNALIGNED_SPIN
+
+
+test_dbr_madison_cross16_ignores_address = require_registers(
+    "dbr_madison_cross16_ignores_address",
+    _dbr_cross16_program(_DBR_R | _IBR_PLM0 | _IBR_FULL_MASK),
+    _dbr_fault(_DBR_DATA + 0xf, IA64_ISR_R), cpu="madison",
+)
+
+test_dbr_madison_cross16_needs_enabled_pair = require_registers(
+    "dbr_madison_cross16_needs_enabled_pair",
+    _dbr_cross16_program(_DBR_W | _IBR_PLM0 | _IBR_FULL_MASK),
+    {"ip": IA64_UNALIGNED_VECTOR, "r20": 0}, cpu="madison",
+)
+
+test_dbr_merced_cross16_compares_address = require_registers(
+    "dbr_merced_cross16_compares_address",
+    _dbr_cross16_program(_DBR_R | _IBR_PLM0 | _IBR_FULL_MASK),
+    {"ip": IA64_UNALIGNED_VECTOR, "r20": 0}, cpu="merced",
+)
+
+test_dbr_semaphore_reports_read_and_write = require_registers(
+    "dbr_semaphore_reports_read_and_write",
+    _dbr_program(_DBR_DATA, _DBR_W | _IBR_PLM0 | _IBR_FULL_MASK,
+                 [_dbr_body(xchg(3, 9, 8, 0))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R | IA64_ISR_W),
+)
+
+# A handler that returns with IPSR.dd set lets the one load through.
+test_dbr_psr_dd_passes_one_instruction = require_registers(
+    "dbr_psr_dd_passes_one_instruction",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0,
+                 [_dbr_body(ld8(9, 8)), _dbr_body(ld8(9, 8))],
+                 handler=[
+        (IA64_DEBUG_VECTOR, 0x00, mov_m_cr_gr(16, 16), adds(30, 1, 30),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x10, *movl_mlx(17, IA64_PSR_DD)),
+        (IA64_DEBUG_VECTOR + 0x20, 0x00, nop_m(), or_reg(16, 16, 17),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x30, 0x00, mov_m_gr_cr(16, 16), nop_i(),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x40, 0x10, nop_m(), nop_i(), rfi_b()),
+    ]),
+    _dbr_no_fault(2, r20=2, r30=2),
+)
+
+# A speculative load takes the fault with ISR.sp unless DCR.dd defers it.
+test_dbr_speculative_load_fault = require_registers(
+    "dbr_speculative_load_fault",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0, [_dbr_body(ld8_s(9, 8))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R | IA64_ISR_SP),
+)
+
+# DCR.dd defers only while PSR.it and ITLB.ed are both 1 (SDM Vol. 2
+# Table 5-4); this program runs with PSR.it = 0.
+test_dbr_speculative_load_dcr_dd_needs_psr_it = require_registers(
+    "dbr_speculative_load_dcr_dd_needs_psr_it",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0, [_dbr_body(ld8_s(9, 8))],
+                 dcr=IA64_DCR_DD),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R | IA64_ISR_SP),
+)
+
+# probe.fault and lfetch.fault report as non-access instructions 5 and 4;
+# the non-faulting lfetch reports nothing (SDM Vol. 2 7.1.2).
+test_dbr_probe_fault_non_access = require_registers(
+    "dbr_probe_fault_non_access",
+    _dbr_program(_DBR_DATA, _DBR_W | _IBR_PLM0 | _IBR_FULL_MASK,
+                 [_dbr_body(probe_w_fault(8, 0))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_NA | IA64_ISR_W | 5),
+)
+
+test_dbr_lfetch_fault_non_access = require_registers(
+    "dbr_lfetch_fault_non_access",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0,
+                 [_dbr_body(lfetch(8)), _dbr_body(lfetch_fault(8))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_NA | IA64_ISR_R | 4,
+               iip=_DBR_TARGET + 0x10, r20=1),
+)
+
+test_dbr_psr_db_clear_no_fault = require_registers(
+    "dbr_psr_db_clear_no_fault",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0, [_dbr_body(ld8(9, 8))],
+                 psr=IA64_PSR_IC),
+    _dbr_no_fault(1, r20=1),
+)
+
 CASE_NAMES = (
+    'ibr_instruction_debug_fault',
+    'ibr_fault_on_false_predicate',
+    'ibr_mask_ignores_low_bits',
+    'ibr_plm_excludes_cpl',
+    'ibr_psr_db_clear_no_fault',
+    'ibr_psr_id_passes_one_instruction',
+    'dbr_load_data_debug_fault',
+    'dbr_access_kind_selects_enable',
+    'dbr_store_data_debug_fault',
+    'dbr_matches_any_byte_of_datum',
+    'dbr_mask_ignores_low_bits',
+    'dbr_plm_excludes_cpl',
+    'dbr_false_predicate_no_fault',
+    'dbr_precedes_unaligned_reference',
+    'dbr_unaligned_ldfe_ignores_slot_padding',
+    'dbr_aligned_ldfe_matches_slot_padding',
+    'dbr_madison_cross16_ignores_address',
+    'dbr_madison_cross16_needs_enabled_pair',
+    'dbr_merced_cross16_compares_address',
+    'dbr_semaphore_reports_read_and_write',
+    'dbr_psr_dd_passes_one_instruction',
+    'dbr_speculative_load_fault',
+    'dbr_speculative_load_dcr_dd_needs_psr_it',
+    'dbr_probe_fault_non_access',
+    'dbr_lfetch_fault_non_access',
+    'dbr_psr_db_clear_no_fault',
+    'lrr_active_low_pin_asserted_when_low',
+    'xtpr_redirects_lowest_priority_interrupt',
+    'pmi_ipi_enters_sale_pmi',
+    'pmi_waits_for_psr_ic',
+    'pmi_returns_through_b0',
+    'pmi_pal_vector_returns_at_once',
+    'pmi_before_sale_pmi_returns_at_once',
+    'pmi_return_moves_with_pal_copy',
+    'init_ipi_enters_pale_init',
+    'init_with_psr_ic_collects',
+    'init_waits_for_psr_mc',
+    'pal_mc_resume_returns_from_init',
     'ipis_during_break_faults_all_arrive',
+    'nmi_waits_for_psr_i',
+    'nmi_wakes_pal_halt_light_with_psr_i_clear',
 
     'ar_itc_advances_in_guest_loop',
     'armed_itm_match_pends_before_past_itm_write',
@@ -6278,7 +7437,8 @@ CASE_NAMES = (
     'native_single_step_not_taken_on_rfi',
     'native_single_step_traps_predicated_off_instruction',
     'native_taken_branch_precedes_single_step',
-    'native_taken_branch_to_unimplemented_address_precedes_uia_fault',
+    'native_uia_trap_precedes_taken_branch_and_single_step',
+    'rfi_to_unimplemented_address_traps_on_rfi',
     'native_taken_branch_trap_skips_not_taken_branch',
     'break_preserves_ifa_and_records_iim_isr',
     'cloop_zero_st1_timer_interrupts_batched_loop',
@@ -6357,6 +7517,10 @@ CASE_NAMES = (
     'ia32_flat_pop_m_probes_destination_first',
     'ia32_flat_rmw_reports_write_miss',
     'ia32_pop_m_destination_checked_against_ds',
+    'ia32_hint_operands_skip_unmapped_page',
+    'ia32_hint_operands_skip_read_only_page',
+    'ia32_ud1_unmapped_operand_intercepts',
+    'ia32_ud0_unmapped_operand_intercepts',
     'ia32_pause_psr_ss_traps_after_it',
     'ia32_pause_clears_psr_id',
     'ia32_flat_movaps_store_tlb_miss_precedes_alignment',
@@ -6372,6 +7536,9 @@ CASE_NAMES = (
     'ia32_high_iobase_read_triggers_data_breakpoint',
     'ia32_ibr_precedes_start_page_instruction_tlb_fault',
     'ia32_int3_clears_rf_and_psr_id_after_completion',
+    'ia32_int_n_raises_ia32_interrupt',
+    'ia32_rdmsr_intercept_after_other_instructions',
+    'ia32_in_port_tlb_fault_after_other_instructions',
     'ia32_illegal_x87_opcode_intercepts_with_cr0_em',
     'ia32_amd_prefetch_opcode_intercepts',
     'ia32_instruction_intercept_records_prefix_and_opcode',
@@ -6463,6 +7630,7 @@ CASE_NAMES = (
     'itc_read_storm_keeps_virtual_time_rate_merced',
     'itc_reads_at_one_virtual_instant_agree',
     'itc_reads_at_one_virtual_instant_agree_merced',
+    'sapic_ivr_irr_reads_under_icount',
 )
 
 CASE_METADATA = {
@@ -6479,6 +7647,8 @@ CASE_METADATA = {
         required_features=frozenset({"icount"})),
     'itc_reads_at_one_virtual_instant_agree_merced': CaseMetadata(
         required_features=frozenset({"icount", "cpu-model:merced"})),
+    'sapic_ivr_irr_reads_under_icount': CaseMetadata(
+        required_features=frozenset({"icount"})),
     'masked_itv_discards_due_timer': CaseMetadata(nonterminal_effect_loop=True),
     'masking_itv_preserves_pended_timer_irr': CaseMetadata(nonterminal_effect_loop=True),
     'past_itm_does_not_fire': CaseMetadata(nonterminal_effect_loop=True),

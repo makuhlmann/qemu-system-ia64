@@ -26,10 +26,11 @@
 
 DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
 {
+    // SLP_TYP 5, as in HP's DSDT on the rx2600.
     Name (_S5, Package (0x04)
     {
-        0x00,
-        0x00,
+        0x05,
+        0x05,
         0x00,
         0x00
     })
@@ -84,29 +85,41 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     // bus 0x10, so PCI0 no longer claims the whole 0..0xFF range.
                     WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
                         PosDecode, 0, 0, 0x000F, 0, 0x0010)
-                    // I/O with two holes, both behind the Mercury root: the
-                    // legacy VGA ports 0x3B0..0x3DF (the graphics adapter is the
-                    // VGA owner, so its root must decode the legacy VGA I/O as
-                    // well as the 0xA0000 aperture -- splitting them across roots
-                    // makes the VGA arbiter fail the device with Code 10) and the
-                    // graphics I/O BAR at 0xC300..0xC3FF.  PCI0 must not claim
-                    // either.
+                    // The mio gives each rope 8 KB of port space by port bits
+                    // 15:13 (mio ERS 2.4.1): rope 0 has 0x0000..0x1FFF, less
+                    // the legacy VGA ports 0x3B0..0x3DF, which the VGA route
+                    // sends to the graphics rope (its root must decode them
+                    // with the 0xA0000 aperture, or the VGA arbiter fails the
+                    // device with Code 10).  The mio's one directed range
+                    // gives rope 0 the share of ropes 6 and 7, which carry no
+                    // device here, 0xC000..0xFFFF (mio ERS 2.5.4).
                     QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
                         EntireRange, 0, 0, 0x000003AF, 0xFFFFC000000,
                         0x000003B0, , , , TypeTranslation, SparseTranslation)
                     QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                        EntireRange, 0, 0x000003E0, 0x0000C2FF, 0xFFFFC000000,
-                        0x0000BF20, , , , TypeTranslation, SparseTranslation)
+                        EntireRange, 0, 0x000003E0, 0x00001FFF, 0xFFFFC000000,
+                        0x00001C20, , , , TypeTranslation, SparseTranslation)
                     QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                        EntireRange, 0, 0x0000C400, 0x0000FFFF, 0xFFFFC000000,
-                        0x00003C00, , , , TypeTranslation, SparseTranslation)
-                    // Low MMIO: PCI0 device BARs (LSI/AHCI/USB/NIC) at 0xEE0xxxxx.
-                    // The VGA legacy (0xA0000) / option-ROM (0xC0000) apertures
-                    // and the high MMIO (0xF0000000+) belong to the Mercury root
-                    // now that the graphics adapter moved there.
+                        EntireRange, 0, 0x0000C000, 0x0000FFFF, 0xFFFFC000000,
+                        0x00004000, , , , TypeTranslation, SparseTranslation)
+                    // Low MMIO: PCI0 device BARs (AHCI/USB/NIC/audio) at
+                    // 0xEE000000..0xEFFFFFFF, less rope 1's 0xEF400000..0xEF7FFFFF
+                    // (PCI1).  The VGA legacy (0xA0000) / option-ROM (0xC0000)
+                    // apertures and the high MMIO (0xF0000000+) belong to the
+                    // Mercury root.
                     QWordMemory (ResourceProducer, PosDecode, MinFixed,
                         MaxFixed, NonCacheable, ReadWrite,
-                        0, 0xEE000000, 0xEFFFFFFF, 0, 0x02000000)
+                        0, 0xEE000000, 0xEF3FFFFF, 0, 0x01400000)
+                    QWordMemory (ResourceProducer, PosDecode, MinFixed,
+                        MaxFixed, NonCacheable, ReadWrite,
+                        0, 0xEF800000, 0xEFFFFFFF, 0, 0x00800000)
+                    // The 8 bytes of UAR0 (IA64_UART_BASE), as the vendor
+                    // firmware's \CLIB.LGMR adds its serial ports' registers
+                    // to the owning root's _CRS.  Without a window the root's
+                    // arbiter has no range for UAR0 (Windows: code 12).
+                    QWordMemory (ResourceProducer, PosDecode, MinFixed,
+                        MaxFixed, NonCacheable, ReadWrite,
+                        0, 0x00000047F0000000, 0x00000047F0000007, 0, 8)
                 })
                 Name (_PRT, Package ()
                 {
@@ -143,6 +156,60 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     Package () { 0x0006FFFF, 1, 0x00, 19 },
                     Package () { 0x0006FFFF, 2, 0x00, 16 },
                     Package () { 0x0006FFFF, 3, 0x00, 17 }
+                })
+            }
+
+            // Rope 1's ioa root, bus 0x20 as on the rx2600, which carries its
+            // core I/O SCSI at device 1 and its gigabit LAN at device 2 there.
+            // _UID is the bus number, the root our firmware's storage device
+            // paths name.  Keep the windows in lockstep with IA64_ZX1_ROPE1_*
+            // in ia64_vpc_abi.h, and the _PRT with longspeak_rope1_intx in
+            // hw/ia64/longspeak.c: a slot's pins reach the ioa's pins, whose
+            // bit 0 picks GSI 22 or 23.
+            Device (PCI1)
+            {
+                Name (_HID, "PNP0A03")
+                Name (_CID, "PNP0A03")
+                Name (_SEG, Zero)
+                Name (_BBN, 0x20)
+                Name (_UID, 0x20)
+                Name (_CCA, One)
+                Name (_CRS, ResourceTemplate ()
+                {
+                    WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
+                        PosDecode, 0, 0x0020, 0x003F, 0, 0x0020)
+                    // Rope 1's 8 KB of port space (mio ERS 2.4.1).
+                    QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                        EntireRange, 0, 0x00002000, 0x00003FFF, 0xFFFFC000000,
+                        0x00002000, , , , TypeTranslation, SparseTranslation)
+                    QWordMemory (ResourceProducer, PosDecode, MinFixed,
+                        MaxFixed, NonCacheable, ReadWrite,
+                        0, 0xEF400000, 0xEF7FFFFF, 0, 0x00400000)
+                })
+                Name (_PRT, Package ()
+                {
+                    Package () { 0x0000FFFF, 0, 0x00, 22 },
+                    Package () { 0x0000FFFF, 1, 0x00, 23 },
+                    Package () { 0x0000FFFF, 2, 0x00, 22 },
+                    Package () { 0x0000FFFF, 3, 0x00, 23 },
+                    // The SCSI's two functions: INTA, INTB on pins 0 and 1.
+                    Package () { 0x0001FFFF, 0, 0x00, 22 },
+                    Package () { 0x0001FFFF, 1, 0x00, 23 },
+                    Package () { 0x0001FFFF, 2, 0x00, 22 },
+                    Package () { 0x0001FFFF, 3, 0x00, 23 },
+                    // The gigabit LAN seat: every pin on pin 2.
+                    Package () { 0x0002FFFF, 0, 0x00, 22 },
+                    Package () { 0x0002FFFF, 1, 0x00, 22 },
+                    Package () { 0x0002FFFF, 2, 0x00, 22 },
+                    Package () { 0x0002FFFF, 3, 0x00, 22 },
+                    Package () { 0x0003FFFF, 0, 0x00, 23 },
+                    Package () { 0x0003FFFF, 1, 0x00, 22 },
+                    Package () { 0x0003FFFF, 2, 0x00, 23 },
+                    Package () { 0x0003FFFF, 3, 0x00, 22 },
+                    Package () { 0x0004FFFF, 0, 0x00, 22 },
+                    Package () { 0x0004FFFF, 1, 0x00, 23 },
+                    Package () { 0x0004FFFF, 2, 0x00, 22 },
+                    Package () { 0x0004FFFF, 3, 0x00, 23 }
                 })
             }
 
@@ -184,11 +251,12 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
                         EntireRange, 0, 0x000003B0, 0x000003DF, 0xFFFFC000000,
                         0x00000030, , , , TypeTranslation, SparseTranslation)
-                    // The graphics I/O BAR (the 0xC300..0xC3FF hole punched out
-                    // of PCI0's I/O above).
+                    // The port space of ropes 4 and 5: the AGP ioa is a
+                    // double-wide rope 4 (mio ERS 2.4.1), and the graphics
+                    // I/O BAR sits at its start (IA64_ZX1_AGP_IO_BASE).
                     QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                        EntireRange, 0, 0x0000C300, 0x0000C3FF, 0xFFFFC000000,
-                        0x00000100, , , , TypeTranslation, SparseTranslation)
+                        EntireRange, 0, 0x00008000, 0x0000BFFF, 0xFFFFC000000,
+                        0x00004000, , , , TypeTranslation, SparseTranslation)
                     // Legacy VGA aperture + option-ROM/VBIOS window: real zx1
                     // forwards VGA (and its VBE extension) cycles to the AGP rope.
                     DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,

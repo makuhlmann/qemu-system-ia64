@@ -21,13 +21,16 @@ extern char __fw_image_start[];
 #define PCI_OHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define PCI_AHCI_MMIO_BAR             (IA64_PCI_MMIO_BASE + 0x00020000ULL)
 /*
- * The SCSI host bus adapter lives on the first WXB expander root, so its BAR
- * comes out of that root's 32 MiB aperture (see dsdt-pci-root.asl).
+ * The SCSI host bus adapter lives on the first WXB expander root on the
+ * i2000, so its BAR comes out of that root's 32 MiB aperture (see
+ * dsdt-pci-root.asl), and on rope 1's root on zx1, out of that root's window.
  */
 #define PCI_LSI_MMIO_BAR              (IA64_PCI_MMIO_BASE + 0x0c000000ULL)
+#define PCI_ZX1_LSI_MMIO_BAR          IA64_ZX1_ROPE1_MMIO_BASE
 #define PCI_VGA_FB_BAR                (IA64_PCI_MMIO_BASE + 0x02000000ULL)
 #define PCI_VGA_MMIO_BAR              (IA64_PCI_MMIO_BASE + 0x07000000ULL)
 #define PCI_VGA_ATI_ID                0x50461002U
+#define PCI_VGA_ATI_GL_ID             0x52461002U
 #define PCI_VGA_MACH64_ID             0x47521002U
 #define PCI_VGA_STD_ID                0x11111234U
 #define PCI_VGA_ATI_FB_SIZE           0x04000000ULL
@@ -69,6 +72,7 @@ extern UINT64 mAcpiRegionBase;
 #define ACPI_FADT_FLAG_WBINVD        (1U << 0)
 #define ACPI_FADT_FLAG_PWR_BUTTON    (1U << 4)
 #define ACPI_FADT_FLAG_SLP_BUTTON    (1U << 5)
+#define ACPI_FADT_FLAG_TMR_VAL_EXT   (1U << 8)
 #define ACPI_FADT_FLAG_RESET_REG_SUP (1U << 10)
 #define ACPI_FADT_FLAG_SW_CPU_SLP    (1U << 13)
 #define VGA_MODE_TEXT_WIDTH  640U
@@ -179,11 +183,10 @@ extern UINT64 mAcpiRegionBase;
 #define FW_LOW_ANCHOR_SIZE       0x0000000000002000ULL
 #define FW_LOW_RUNTIME_IMAGE_BASE 0x0000000008010000ULL
 /*
- * Low (sub-aperture) DRAM ends at the PCI/MMIO aperture: it runs contiguously
- * from 0 to here, matching real 460GX, and any RAM beyond it is remapped above
- * 4 GiB.  There is no sub-4 GiB DRAM island above the aperture.
+ * Low DRAM ends at the 460GX's variable gap (the AGP aperture, then the PCI
+ * windows); any RAM beyond it is remapped above 4 GiB.
  */
-#define FW_LOW_RAM_LIMIT  IA64_PCI_MMIO_BASE
+#define FW_LOW_RAM_LIMIT  IA64_460GX_LOW_RAM_END
 #define FW_HIGH_RAM_AFTER_PCI_BASE (IA64_PCI_MMIO_BASE + IA64_PCI_MMIO_SIZE)
 /* Shared with the machine model via hw/ia64/ia64_vpc_abi.h. */
 #define FW_LOCAL_SAPIC_BASE IA64_LOCAL_SAPIC_BASE

@@ -12,6 +12,8 @@ import sys
 FW_LOAD_BASE = 0x00100000
 FW_RECLAIM_BASE = 0x00800000
 RUNTIME_ALIGNMENT = 0x2000
+PAL_BUFFER_SIZE = 0x40000
+FW_IMAGE_SPAN = 0x400000
 
 
 def command(argv: list[str]) -> str:
@@ -60,7 +62,8 @@ def run_checks(binary: str, elf: str):
 
     sym = symbols(elf)
     required = ("__fw_image_start", "_start", "_end", "__gp", "fw_pal_buffer",
-                "__runtime_code_start", "__runtime_data_start")
+                "__fw_pal_buffer_end", "__runtime_code_start",
+                "__runtime_data_start")
     missing = [name for name in required if name not in sym]
     if missing:
         raise RuntimeError("missing ABI linker symbols: " + ", ".join(missing))
@@ -87,14 +90,17 @@ def run_checks(binary: str, elf: str):
         raise RuntimeError("entry does not establish the linked IA-64 GP")
     yield "entry address and GP handoff are valid"
 
-    # PAL_COPY_PAL copies PAL into the image's first, page-aligned page.
-    if sym["fw_pal_buffer"] != sym["__fw_image_start"] or \
-            sym["fw_pal_buffer"] & 0xfff or \
-            sym["_start"] < sym["fw_pal_buffer"] + 0x1000:
-        raise RuntimeError("PAL buffer is not the image's first page")
+    # PAL_COPY_PAL copies PAL into a 256 KB block past the bss, which the
+    # flat binary does not carry.
+    if sym["fw_pal_buffer"] < sym["_end"] or \
+            sym["fw_pal_buffer"] % PAL_BUFFER_SIZE or \
+            sym["__fw_pal_buffer_end"] != sym["fw_pal_buffer"] + \
+            PAL_BUFFER_SIZE or \
+            sym["__fw_pal_buffer_end"] - FW_LOAD_BASE > FW_IMAGE_SPAN:
+        raise RuntimeError("PAL buffer is not an aligned block past the bss")
     if sym["__runtime_code_start"] % RUNTIME_ALIGNMENT or \
             sym["__runtime_data_start"] % RUNTIME_ALIGNMENT or \
-            not (sym["fw_pal_buffer"] < sym["__runtime_code_start"] <=
+            not (sym["_start"] < sym["__runtime_code_start"] <=
                  sym["__runtime_data_start"] < sym["_end"]):
         raise RuntimeError("runtime section boundary/alignment is invalid")
     yield "PAL and runtime boundaries are valid"

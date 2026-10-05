@@ -13,6 +13,17 @@
 #include "qom/object.h"
 
 #define TYPE_IA64_LBA "ia64-zx1-lba"
+
+/*
+ * The power-up configuration an ioa latches (ERS 3.2.1) as BUS_MODE shows it
+ * (ERS 3.2.2), for the kinds of rope the rx2600 has: its ropes 0, 2 and 6
+ * read 0460h, rope 1 04E0h, rope 3 7CE0h and the AGP rope 4 0081h.  Bit 10
+ * (and on rope 3 bits 12:11) is reserved and reads 1 there.
+ */
+#define IA64_LBA_STRAPS_PCI33  0x0460U   /* single rope, 3.3 V */
+#define IA64_LBA_STRAPS_PCI66  0x04e0U   /* the same with M66EN */
+#define IA64_LBA_STRAPS_PCIX   0x7ce0U   /* PCI-X 133, the rx2600's rope 3 */
+#define IA64_LBA_STRAPS_AGP    0x0081U   /* AGP, dual rope, 1.5 V, M66EN */
 OBJECT_DECLARE_SIMPLE_TYPE(IA64LBAState, IA64_LBA)
 
 struct IA64LBAState {
@@ -23,6 +34,7 @@ struct IA64LBAState {
     MemoryRegion iosapic_mr;       /* the ioa's own I/O SAPIC, at 0x800 */
     DeviceState *iosapic;
     uint64_t csr_base;             /* fixed chipset MMIO base (IA64_LBA_CSR_BASE) */
+    uint32_t straps;               /* BUS_MODE's read-only bits */
     PCIBus *config_bus;            /* bus CONFIG_ADDRESS/DATA cycles on */
 
     /* Writable Mercury CSR registers (reset values in ia64_lba_reset). */
@@ -30,6 +42,10 @@ struct IA64LBAState {
     uint32_t bus_number;           /* BUS_NUMBER (0x58) secondary|subordinate */
     uint32_t agp_command;          /* AGP_COMMAND (0x68) */
     uint32_t arbitration_mask;     /* ARBITRATION_MASK (0x80) */
+    uint64_t pci_command;          /* FUNCTION_ID bits 47:32 */
+    uint64_t line_latency;         /* FUNCTION_CLASS bits 47:32 */
+    uint32_t arbitration_mode;     /* ARBITRATION_MODE (0x90) */
+    uint32_t mt_latency;           /* MULTI-TRANSACTION LATENCY TIMER (0x98) */
     uint32_t status_control;       /* STATUS_CONTROL / SIC (0x108) */
     uint64_t lmmio_base, lmmio_mask;    /* LMMIO decode  (0x200/0x208) */
     uint64_t gmmio_base, gmmio_mask;    /* GMMIO decode  (0x210/0x218) */

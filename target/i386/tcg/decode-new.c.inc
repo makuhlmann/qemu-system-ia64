@@ -1442,14 +1442,19 @@ static const X86OpEntry opcodes_0F[256] = {
      */
     [0x0f] = X86_OP_ENTRY3(3dnow,       P,q, Q,q, I,b,        cpuid(3DNOW)),
 
-    [0x18] = X86_OP_ENTRY1(NOP,  nop,v),  /* prefetch/reserved NOP */
-    [0x19] = X86_OP_ENTRY1(NOP,  nop,v),  /* reserved NOP */
+    /*
+     * The hint NOPs never touch their memory operand, and a prefetch "does
+     * not cause any exceptions (except for code breakpoints)" (Itanium SDM
+     * rev 2.3, Vol. 4 p.4:580), so no address is formed or checked.
+     */
+    [0x18] = X86_OP_ENTRY1(NOP,  nop,v, nolea),  /* prefetch/reserved NOP */
+    [0x19] = X86_OP_ENTRY1(NOP,  nop,v, nolea),  /* reserved NOP */
     [0x1a] = X86_OP_ENTRY1(multi0F, nop,v, nolea),  /* unconverted MPX */
     [0x1b] = X86_OP_ENTRY1(multi0F, nop,v, nolea),  /* unconverted MPX */
-    [0x1c] = X86_OP_ENTRY1(NOP,  nop,v),  /* reserved NOP */
-    [0x1d] = X86_OP_ENTRY1(NOP,  nop,v),  /* reserved NOP */
-    [0x1e] = X86_OP_ENTRY1(NOP,  nop,v),  /* reserved NOP */
-    [0x1f] = X86_OP_ENTRY1(NOP,  nop,v),  /* NOP/reserved NOP */
+    [0x1c] = X86_OP_ENTRY1(NOP,  nop,v, nolea),  /* reserved NOP */
+    [0x1d] = X86_OP_ENTRY1(NOP,  nop,v, nolea),  /* reserved NOP */
+    [0x1e] = X86_OP_ENTRY1(NOP,  nop,v, nolea),  /* reserved NOP */
+    [0x1f] = X86_OP_ENTRY1(NOP,  nop,v, nolea),  /* NOP/reserved NOP */
 
     [0x28] = X86_OP_ENTRY3(MOVDQ,      V,x,  None,None, W,x, vex1 p_00_66), /* MOVAPS */
     [0x29] = X86_OP_ENTRY3(MOVDQ,      W,x,  None,None, V,x, vex1 p_00_66), /* MOVAPS */
@@ -1529,8 +1534,11 @@ static const X86OpEntry opcodes_0F[256] = {
     [0xaf] = X86_OP_ENTRY3(IMUL3,  G,v, E,v, 2op,v, sextT0),
 
     [0xb8] = X86_OP_GROUP0(0FB8),
-    /* decoded as modrm, which is visible as a difference between page fault and #UD */
-    [0xb9] = X86_OP_ENTRYr(UD,     nop,v),                        /* UD1 */
+    /*
+     * decoded as modrm, which is visible as a difference between page fault
+     * and #UD; the operand itself is never accessed
+     */
+    [0xb9] = X86_OP_ENTRYr(UD,     nop,v, nolea),                 /* UD1 */
     [0xba] = X86_OP_GROUP2(group8, E,v, I,b),
     [0xbb] = X86_OP_ENTRY2(BTC,    E,v, G,v,             btEvGv),
     [0xbc] = X86_OP_GROUP0(0FBC),
@@ -1573,7 +1581,7 @@ static const X86OpEntry opcodes_0F[256] = {
     [0xfc] = X86_OP_ENTRY3(PADDB,  V,x, H,x, W,x,  vex4 mmx avx2_256 p_00_66),
     [0xfd] = X86_OP_ENTRY3(PADDW,  V,x, H,x, W,x,  vex4 mmx avx2_256 p_00_66),
     [0xfe] = X86_OP_ENTRY3(PADDD,  V,x, H,x, W,x,  vex4 mmx avx2_256 p_00_66),
-    [0xff] = X86_OP_ENTRYr(UD,     nop,v),                        /* UD0 */
+    [0xff] = X86_OP_ENTRYr(UD,     nop,v, nolea),                 /* UD0 */
 };
 
 static void decode_0F(DisasContext *s, CPUX86State *env, X86OpEntry *entry, uint8_t *b)

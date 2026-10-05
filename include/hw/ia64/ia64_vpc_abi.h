@@ -51,9 +51,9 @@
 #define IA64_FW_QUIRK_LOW_ANCHOR           (1ULL << 2) /* 8K reserve at 128 MB */
 #define IA64_FW_QUIRK_ANCHOR_VERSION_SNIFF (1ULL << 3) /* drop anchor for >=5.2.3790 loaders */
 #define IA64_FW_QUIRK_SCRATCH_2G           (1ULL << 4) /* 1 MiB reserve at 2 GiB */
-#define IA64_FW_QUIRK_PAL_8K_PAGE          (1ULL << 5) /* whole-8K EfiPalCode page */
+/* Bit 5 was pal-8k-page: the EfiPalCode descriptor is 256 KB now. */
 #define IA64_FW_QUIRK_ACPI_LOW_ISLAND      (1ULL << 6) /* ACPI tables at 8 MB */
-#define IA64_FW_QUIRK_ALL                  0x7fULL
+#define IA64_FW_QUIRK_ALL                  0x5fULL
 
 /*
  * CPU-private physical memory used before and after ExitBootServices().
@@ -67,7 +67,8 @@
  * 2 MiB CPU-assist region (per-CPU SAL re-entry slots, debug contexts and
  * stacks, initial RSE backing stores, and the boot memory stacks) sits at
  * [low_ram_end - 2 MiB, low_ram_end), where low_ram_end is installed RAM
- * clamped to the PCI aperture and rounded down to IA64_FW_LOW_RAM_ALIGN.
+ * clamped to the top of the board's DRAM run at 0 (the PCI aperture on the
+ * 460GX, the end of Memory0 on zx1) and rounded down to IA64_FW_LOW_RAM_ALIGN.
  * Low DRAM below it stays conventional (the firmware's efi_init_memory_map
  * keeps only the loader-contract boundaries described there), so OS loaders
  * that map their working set with large translation registers (Server 2003
@@ -133,6 +134,23 @@
     (IA64_FW_LOW_RAM_MIN - IA64_FW_CPU_ASSIST_SIZE + IA64_FW_AP_RELEASE_OFFSET)
 #define IA64_FW_AP_RELEASE_VECTOR      0xf0
 
+/*
+ * One min-state save area per processor id, which every processor registers
+ * with PAL_MC_REGISTER_MEM (SAL spec 245359-007 5.1; SDM Vol. 2 11.3.2.4:
+ * 4 KB, 512-byte aligned).  PAL writes the first 0x1d0 bytes; SAL owns the
+ * rest of the first 1 KB and keeps there the physical entry of its SAL_INIT
+ * (read by SALE_ENTRY) and whether the OS runs on the processor.  The areas
+ * are uncacheable, 16 KB away from any other data, and reported to the OS as
+ * EfiMemoryMappedIO (SAL spec 3.3.2): the guard is part of that range.
+ */
+#define IA64_FW_MINSTATE_OFFSET        0x0000000000050000ULL
+#define IA64_FW_MINSTATE_SIZE          0x0000000000001000ULL
+#define IA64_FW_MINSTATE_GUARD         0x0000000000004000ULL
+#define IA64_FW_MINSTATE_END_OFFSET \
+    (IA64_FW_MINSTATE_OFFSET + IA64_VPC_MAX_CPUS * IA64_FW_MINSTATE_SIZE)
+#define IA64_FW_MINSTATE_OS_OWNED_OFF  0x3e8
+#define IA64_FW_MINSTATE_SAL_INIT_OFF  0x3f0
+
 #define IA64_FW_CPU_STACK_SIZE         0x0000000000020000ULL
 #define IA64_FW_BOOT_STACK_SIZE \
     (IA64_VPC_MAX_CPUS * IA64_FW_CPU_STACK_SIZE)
@@ -142,10 +160,10 @@
 
 /*
  * RAM-top firmware image shadow (55e553d).  The machine loads the
- * firmware binary at IA64_FW_IMAGE_BASE_FOR(ram_size) - 1 MB aligned, sized
- * for the image plus bss with headroom (the linker asserts the real span
- * fits) - applies the image's self-relocation fixup table for the delta from
- * the 1 MB link base.  Above the image
+ * firmware binary at IA64_FW_IMAGE_BASE_FOR(ram_size, low_top) - 1 MB
+ * aligned, sized for the image plus bss with headroom (the linker asserts the
+ * real span fits) - applies the image's self-relocation fixup table for the
+ * delta from the 1 MB link base.  Above the image
  * sit the ACPI staging region and the CPU-assist region, ending exactly at
  * the end of installed low RAM, mirroring how real 460GX/E8870 firmware
  * shadows itself near the top of memory.
@@ -164,11 +182,12 @@
 #define IA64_FW_SAL_RUNTIME_RETURN_OFF 0x2020
 #define IA64_FW_SAL_DISPATCH_BLOCK_OFF 0x2040
 /*
- * The first page of the image is the buffer PAL copies itself into
- * (PAL_COPY_PAL, SAL 3.2.3 step 9); the firmware publishes the copy as the
- * SAL system table's PAL_PROC.
+ * The buffer PAL copies itself into (PAL_COPY_PAL, SAL 3.2.3 step 9), past
+ * the image's bss.  It is the alignment every vendor PAL_COPY_INFO asks for,
+ * and also the most the SDM allows (Vol. 2 PAL_COPY_INFO); the rx2600's
+ * EfiPalCode descriptor is 256 KB too (capture 2026-10-03, memmap).
  */
-#define IA64_FW_PAL_BUFFER_SIZE        0x1000
+#define IA64_FW_PAL_BUFFER_SIZE        0x40000
 /* The low part of the image a firmware context reaches identity-mapped. */
 #define IA64_FW_IDENTITY_WINDOW_SIZE   IA64_U64(0x0000000000100000)
 
@@ -202,16 +221,20 @@
 #define IA64_FW_REGISTRATION_ASSIST_OFF     0x38
 #define IA64_FW_ACPI_REGION_SIZE      IA64_U64(0x0000000000020000)
 
-/* low_ram_end for an installed RAM size, as both QEMU and the firmware see it. */
-#define IA64_FW_LOW_RAM_END(ram_size) \
-    ((((ram_size) < IA64_PCI_MMIO_BASE ? (ram_size) : IA64_PCI_MMIO_BASE)) & \
+/*
+ * low_ram_end for an installed RAM size, as both QEMU and the firmware see it;
+ * low_top is where the board's DRAM run at 0 ends when RAM fills it
+ * (IA64_460GX_LOW_RAM_END on the 460GX, IA64_ZX1_MEMORY0_END on zx1).
+ */
+#define IA64_FW_LOW_RAM_END(ram_size, low_top) \
+    ((((ram_size) < (low_top) ? (ram_size) : (low_top))) & \
      ~(IA64_FW_LOW_RAM_ALIGN - 1ULL))
-#define IA64_FW_CPU_ASSIST_BASE_FOR(ram_size) \
-    (IA64_FW_LOW_RAM_END(ram_size) - IA64_FW_CPU_ASSIST_SIZE)
+#define IA64_FW_CPU_ASSIST_BASE_FOR(ram_size, low_top) \
+    (IA64_FW_LOW_RAM_END(ram_size, low_top) - IA64_FW_CPU_ASSIST_SIZE)
 /* 4 MB aligned: the SST names a truthful 4 MB ITR(0) over the shadow. */
-#define IA64_FW_IMAGE_BASE_FOR(ram_size) \
-    ((IA64_FW_CPU_ASSIST_BASE_FOR(ram_size) - IA64_FW_ACPI_REGION_SIZE - \
-      IA64_FW_IMAGE_SPAN) & ~IA64_U64(0xfffff))
+#define IA64_FW_IMAGE_BASE_FOR(ram_size, low_top) \
+    ((IA64_FW_CPU_ASSIST_BASE_FOR(ram_size, low_top) - \
+      IA64_FW_ACPI_REGION_SIZE - IA64_FW_IMAGE_SPAN) & ~IA64_U64(0xfffff))
 
 #ifndef __ASSEMBLER__
 /*
@@ -237,6 +260,19 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  */
 #define IA64_PCI_MMIO_BASE            IA64_U64(0x00000000ee000000)
 #define IA64_PCI_MMIO_SIZE            IA64_U64(0x0000000010000000)
+
+/*
+ * The 460GX's variable gap also holds the GXB's AGP aperture, below the PCI
+ * windows (SSDM 7.2.1, the reserved-gap case): 256 MB, on a 256 MB boundary
+ * because AGP_BASE bits 27:12 are hardwired (7.1), and clear of DRAM and PCI
+ * space (7.2.3).  The DRAM band at 0 ends where the gap starts; the gap plus
+ * the fixed 32 MB is then 768 MB, a multiple of 64 MB as 4.1.3.1 requires.
+ */
+#define IA64_460GX_AGP_APERTURE_BASE  IA64_U64(0x00000000d0000000)
+/* The GXB's GART SRAM window (SSDM 7.1.2, p.4-3). */
+#define IA64_460GX_GART_SRAM_BASE     IA64_U64(0x00000000fe200000)
+#define IA64_460GX_AGP_APERTURE_SIZE  IA64_U64(0x0000000010000000)
+#define IA64_460GX_LOW_RAM_END        IA64_460GX_AGP_APERTURE_BASE
 
 /*
  * IA-64 legacy I/O port block and PCI config space.  (Deviation from real
@@ -308,28 +344,34 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 /* Module Info (mio ERS register 3): module 0x000a, functions 0, 1, 8, 9, 10. */
 #define IA64_SBA_MODULE_INFO          IA64_U64(0x000000000703000a)
 /*
+ * FUNC_ID of function 0, the "Root Bridge" 1229, and of function 8, the
+ * memory controller 122B.  The vendor shell's "info chiprev" takes the device
+ * from bits 31:16 (FFEEA8C0 reads FED0_8000) and the revision as the largest
+ * FCLASS low byte of functions 0, 1, 8, 9 and 10 (FFEEA810).  rx2600 capture
+ * 2026-10-03, MIO-1; function 8's vendor half is HP's, as in the others.
+ */
+#define IA64_SBA_FUNC0_ID             IA64_U64(0x000000001229103c)
+#define IA64_SBA_MC_FUNC_ID           IA64_U64(0x00000000122b103c)
+/*
  * The zx1 SBA "safe IOVA space": the 1 GiB window at 1 GiB the IOC advertises
- * through IBASE/IMASK and that the OS's sba_iommu allocates IOVAs from.  On the
- * zx1 machine this range is a DRAM HOLE -- the machine shifts the RAM that would
- * sit here up past the window, exactly as real zx1 keeps a "Virtual I/O" hole so
- * the IOVA window never overlaps memory.  Without the hole, Linux sba_iommu's
- * ALLOW_IOV_BYPASS path (which DMAs to a buffer's raw physical address) can put
- * a >1 GiB buffer inside the enabled window and have the IOC mis-translate it.
- *
- * The hole is only carved when installed RAM exceeds the PCI aperture
- * (IA64_PCI_MMIO_BASE), i.e. when there is already RAM displaced above 4 GiB and
- * the low band fills to the aperture regardless of the hole (see the gate in
- * hw/ia64/longspeak.c and fw_zx1_iova_hole_active() in the firmware).  Carving it
- * for a smaller guest would move the top of low RAM -- and the firmware image,
- * CPU-assist region and SRAT/SMBIOS ranges pinned near it -- which needs a
- * hole-aware low_ram_end the firmware does not yet compute.
- * hw/ia64/longspeak.c (RAM map), roms/ia64-firmware/efi_memmap.c (EFI map)
- * and platform.c (high-RAM ranges) carve this hole in lockstep.
+ * through IBASE/IMASK and that the OS's sba_iommu allocates IOVAs from.  The
+ * mio maps no memory there (mio ERS 2.1, "The I/O Virtual Region").
  */
 #define IA64_SBA_IOVA_BASE            IA64_U64(0x0000000040000000)
 #define IA64_SBA_IOVA_SIZE            IA64_U64(0x0000000040000000) /* 1 GiB */
 #define IA64_SBA_IOVA_END \
     (IA64_SBA_IOVA_BASE + IA64_SBA_IOVA_SIZE)
+/*
+ * zx1 mio DRAM (mio ERS 2.1, Figure 3).  Memory0 runs from 0 to the I/O
+ * virtual region at 1 GiB.  The DRAM that would sit from there to 4 GiB is
+ * Memory1, at 0x40_4000_0000; Memory2 starts at 4 GiB and ends below Memory1.
+ * Memory1 is used only once Memory0 is full, and Memory2 once Memory1 is full.
+ */
+#define IA64_ZX1_MEMORY0_END          IA64_SBA_IOVA_BASE
+#define IA64_ZX1_MEMORY1_BASE         IA64_U64(0x0000004040000000)
+#define IA64_ZX1_MEMORY1_SIZE         IA64_U64(0x00000000c0000000) /* 3 GiB */
+#define IA64_ZX1_MEMORY2_BASE         IA64_U64(0x0000000100000000)
+#define IA64_ZX1_MEMORY2_END          IA64_U64(0x0000004000000000)
 /*
  * The zx1 LBA (Local Bus Adapter / Mercury I/O adapter) config block.  Linux
  * hp-agp (drivers/char/agp/hp-agp.c) finds it via the ACPI HWP0003 device's
@@ -371,6 +413,37 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  * chipset profile creates it; keep in lockstep with LBA0 in dsdt-pci-root-zx1.asl.
  */
 #define IA64_MERCURY_BUS              0x10
+/*
+ * The mio hands I/O port space to the ropes by port bits 15:13, 8 KB a rope,
+ * and a double-wide rope gets both ropes' share (mio ERS 2.4.1, 2.5.4); the
+ * rx2600's own roots read so (rx2600 capture 2026-10-04, `/proc/ioports`:
+ * bus 20h at 2000h, the AGP bus 80h at 8000h-BFFFh).
+ */
+#define IA64_ZX1_ROPE_IO_SIZE         0x00002000U
+
+/*
+ * The AGP ioa is a double-wide rope 4 (B1), so the I/O ports of ropes 4 and
+ * 5 are its own; the graphics I/O BAR sits at their start, as the rx2600's
+ * card at 80:00.0 does.  Keep in lockstep with LBA0 in dsdt-pci-root-zx1.asl.
+ */
+#define IA64_ZX1_AGP_IO_BASE          (4U * IA64_ZX1_ROPE_IO_SIZE)
+#define IA64_ZX1_AGP_IO_SIZE          (2U * IA64_ZX1_ROPE_IO_SIZE)
+/*
+ * Rope 1's ioa carries a bus of its own, numbered 0x20 as on the rx2600
+ * (its SCRAM gives rope 1 buses 20h-3Fh; rx2600 capture 2026-10-03, DEV-3),
+ * with the core I/O SCSI at device 1 and the gigabit LAN at device 2.  Under
+ * our firmware the root owns this I/O and memory window, cut out of PCI0's,
+ * and its INTx reaches the platform inputs from IA64_ZX1_ROPE1_GSI_BASE.
+ * The SCSI's ports are where the rx2600 has its function 0's.  Keep in
+ * lockstep with PCI1 in dsdt-pci-root-zx1.asl.
+ */
+#define IA64_ZX1_ROPE1_BUS            0x20
+#define IA64_ZX1_ROPE1_IO_BASE        (1U * IA64_ZX1_ROPE_IO_SIZE)
+#define IA64_ZX1_ROPE1_IO_SIZE        IA64_ZX1_ROPE_IO_SIZE
+#define IA64_ZX1_SCSI_IO_BASE         (IA64_ZX1_ROPE1_IO_BASE + 0x100U)
+#define IA64_ZX1_ROPE1_MMIO_BASE      IA64_U64(0x00000000ef400000)
+#define IA64_ZX1_ROPE1_MMIO_SIZE      IA64_U64(0x0000000000400000)
+#define IA64_ZX1_ROPE1_GSI_BASE       22
 
 /*
  * 460GX expander roots.  The i2000 reaches its PCI buses through expander
@@ -426,6 +499,18 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 /* The Cirrus Logic CS4281 on the i2000's I/O board. */
 #define IA64_460GX_AUDIO_SLOT         0x04
 #define IA64_MERCURY_VGA_SLOT        0x00
+/*
+ * zx1's storage seats: the SCSI adapter at device 1 of rope 1's bus, where
+ * the rx2600 carries its 53C1030, and the opt-in AHCI at device 4 of PCI0.
+ * The i2000 keeps the AHCI at device 1 of its compatibility bus.
+ */
+#define IA64_ZX1_SCSI_BUS             IA64_ZX1_ROPE1_BUS
+#define IA64_ZX1_SCSI_SLOT            0x01
+/* PCI0's core I/O: USB at device 1, IDE at 2 and the LAN at 3 (DEV-4). */
+#define IA64_ZX1_USB_SLOT             0x01
+#define IA64_ZX1_IDE_SLOT             0x02
+#define IA64_ZX1_AHCI_SLOT            0x04
+#define IA64_460GX_AHCI_SLOT          0x01
 /* 16 MiB PAL/SAL firmware address space below 4 GiB. */
 #define IA64_FW_ADDRESS_SPACE_BASE    IA64_U64(0x00000000ff000000)
 #define IA64_FW_ADDRESS_SPACE_SIZE    IA64_U64(0x0000000001000000)
@@ -464,7 +549,29 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_RTC                  0x8000U   /* the PDH clock */
 #define IA64_PDH_RTC_REGS             0x0014U
 #define IA64_PDH_RTC_RAM              256U
-#define IA64_PDH_BMC_KCS              0x0ca2U   /* data, then status */
+/*
+ * The firmware's KCS1 (the SPMI one), KCS2 (the one the vendor DSDT gives the
+ * OS as IPI0001) and KCS3: data, then status.  It counts BT and the three as
+ * its BMC ports 1 to 4 (FFF446A0).
+ */
+#define IA64_PDH_BMC_KCS              0x0ca2U
+#define IA64_PDH_BMC_KCS2             0x0000U
+#define IA64_PDH_BMC_KCS3             0x0062U
+/*
+ * Get Device ID of the rx2600's BMC (rx2600 captures 2026-10-03 and
+ * 2026-10-04, BMC-1): device 32h, revision 1 with device SDRs (bit 7),
+ * firmware 1.53, IPMI 1.0, the version BCD with the major digit in bits 3:0
+ * (IPMI v2.0 table 20-2), every additional device support bit up to the
+ * event generator, manufacturer 0Bh (HP), product 8201h.
+ */
+#define IA64_PDH_BMC_DEVICE_ID        0x32U
+#define IA64_PDH_BMC_DEVICE_REV       0x81U
+#define IA64_PDH_BMC_FW_MAJOR         0x01U
+#define IA64_PDH_BMC_FW_MINOR         0x53U
+#define IA64_PDH_BMC_IPMI_VERSION     0x01U
+#define IA64_PDH_BMC_DEVICE_SUPPORT   0x3fU
+#define IA64_PDH_BMC_MANUFACTURER     0x00000bU
+#define IA64_PDH_BMC_IPMI_PRODUCT     0x8201U
 /* The board id the firmware picks its DIMM slot table with (FFF62880). */
 #define IA64_PDH_BMC_PRODUCT_ID       257U
 #define IA64_PDH_BMC_PRODUCT_ID_OFFSET 115U  /* in the FRU product area */
@@ -486,6 +593,16 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 /* Offsets in the presence block and in the Dillon register block. */
 #define IA64_PDH_PRESENCE             0x0000U   /* bits 3:0, active low */
 #define IA64_PDH_POST                 0x0018U
+/*
+ * The revisions of the board's two PDH parts, as "info chiprev" prints them
+ * ("Other Bridge"): the Meson in the presence block reads 7 and the Dillon
+ * reads 2, both with 16-bit loads (FFF449C0, FFF44940).  rx2600 capture
+ * 2026-10-03, PDH-2 and PDH-5.
+ */
+#define IA64_PDH_MESON_REV            0x0020U
+#define IA64_PDH_MESON_REV_VALUE      7U
+#define IA64_PDH_DILLON_REV           0x2070U
+#define IA64_PDH_DILLON_REV_VALUE     2U
 #define IA64_PDH_DILLON_SCRATCH0      0x0020U   /* bits 7:6: boot mode */
 #define IA64_PDH_DILLON_REGS          19U       /* 8-byte, 0x00-0x90 */
 #define IA64_PDH_DILLON_STATUS        0x0028U   /* + 8 * processor index */
@@ -497,7 +614,7 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_PDH_DILLON_CONTROL       0x1000U   /* bits 3:1 carry a command */
 #define IA64_PDH_DILLON_COMMAND       0x0eU     /* the command field */
 #define IA64_PDH_DILLON_RESET         0x06U     /* the one that reboots */
-#define IA64_PDH_DILLON_MODULE_LAYOUT 0x1010U   /* bit 0: mx2 modules */
+#define IA64_PDH_DILLON_MODULE_LAYOUT 0x1010U   /* reads 0xFF, SAL_A uses 0 */
 #define IA64_PDH_DILLON_SCRATCH1      0x1038U   /* written 0 and 2 */
 #define IA64_PDH_DILLON_MISC          0x31c0U   /* last of the tested file */
 /*
@@ -541,6 +658,17 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_460GX_RESET_CONTROL_VALUE 0x06U
 #define IA64_460GX_SCI_GSI            49
 /*
+ * The IFB's SMI registers after the ACPI block (SSDM 11.2.8): Global Control
+ * with SMI_EN, EOS and APMC_EN, and Global Status with APM_STS (write 1 to
+ * clear).  Its SMI# is the processors' PMI pin, which SALE_PMI serves.
+ */
+#define IA64_460GX_ACPI_GLBCTL_OFFSET 0x0000001aU
+#define IA64_460GX_ACPI_GLBSTS_OFFSET 0x0000001cU
+#define IA64_460GX_GLBCTL_SMI_EN      0x0001U
+#define IA64_460GX_GLBCTL_EOS         0x0008U
+#define IA64_460GX_GLBCTL_APMC_EN     0x0400U
+#define IA64_460GX_GLBSTS_APM_STS     0x0008U
+/*
  * The board's Super I/O UARTs (LPC47B27x LDN 4 and 5): COM1 at 3F8h on ISA
  * IRQ 4 is the console, COM2 at 2F8h on IRQ 3 the debug port when one is
  * configured.  Both ports are what kdcom's fixed table expects.
@@ -559,7 +687,7 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  *
  *   0x0000-0x950F  the EFI variable store ("IVARSTOR")
  *   0xF000-0xF01F  the time zone record ("IRT64OFT"; the clock itself is
- *                  the CMOS RTC)
+ *                  the board's: the CMOS RTC, or the PDH clock on zx1)
  *   0xF800-0xF82F  this record ("IA64DFLT")
  *
  * and the machine writes it from its options before the firmware runs, as

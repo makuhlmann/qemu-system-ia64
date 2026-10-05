@@ -26,8 +26,6 @@
 #include "migration/vmstate.h"
 #include "ui/console.h"
 
-enum { VGA_MODE, EXT_MODE };
-
 static const GraphicHwOps *mach64_vga_hw_ops;
 static GraphicHwOps mach64_hw_ops;
 
@@ -181,7 +179,7 @@ void mach64_2d_set_dirty(Mach64VGAState *s, uint32_t base, int x, int y,
  * driving the VGACommonState VBE machinery, exactly as hw/display/ati.c does.
  * When the extended display enable is clear we fall back to the VGA core.
  */
-static void mach64_switch_mode(Mach64VGAState *s)
+static void mach64_apply_mode(Mach64VGAState *s)
 {
     VGACommonState *vga = &s->vga;
 
@@ -274,6 +272,13 @@ static void mach64_switch_mode(Mach64VGAState *s)
     M64_TRACE("  -> EXT_MODE %dx%d bpp=%d pitch_px=%d offs=%#x start=%#x "
               "off_ok=%d vbe_size=%#x", h, v, bpp, pitch_px, offs,
               vga->vbe_start_addr, off_ok, vga->vbe_size);
+}
+
+/* The overlay shows in the extended display mode only. */
+static void mach64_switch_mode(Mach64VGAState *s)
+{
+    mach64_apply_mode(s);
+    mach64_update_shadow(s);
 }
 
 /* ---- hardware cursor ---- */
@@ -431,6 +436,43 @@ static void mach64_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
     }
 }
 
+/*
+ * The VGA core calls these for a shadow surface only, which the guest cursor
+ * and the overlay request through force_shadow.  The cursor sits above the
+ * overlay.
+ */
+static void mach64_display_invalidate(VGACommonState *vga)
+{
+    Mach64VGAState *s = container_of(vga, Mach64VGAState, vga);
+
+    mach64_ovl_invalidate(s);
+    if (s->cursor_guest_mode) {
+        mach64_cursor_invalidate(vga);
+    }
+}
+
+static void mach64_display_draw_line(VGACommonState *vga, uint8_t *d,
+                                     int scr_y)
+{
+    Mach64VGAState *s = container_of(vga, Mach64VGAState, vga);
+
+    mach64_ovl_draw_line(s, d, scr_y);
+    if (s->cursor_guest_mode) {
+        mach64_cursor_draw_line(vga, d, scr_y);
+    }
+}
+
+void mach64_update_shadow(Mach64VGAState *s)
+{
+    bool shadow = (s->cursor_guest_mode && mach64_cursor_enabled(s)) ||
+                  mach64_ovl_active(s);
+
+    if (s->vga.force_shadow != shadow) {
+        s->vga.force_shadow = shadow;
+        graphic_hw_invalidate(s->vga.con);
+    }
+}
+
 /* ---- DAC palette access via the MMIO DAC_REGS byte window ---- */
 
 static void mach64_dac_write(Mach64VGAState *s, unsigned byte, uint8_t val)
@@ -473,51 +515,98 @@ static uint8_t mach64_dac_read(Mach64VGAState *s, unsigned byte)
     return v;
 }
 
-/* Synthetic current scanline, so drivers polling CRTC_VLINE make progress. */
-static uint32_t mach64_crtc_vline(Mach64VGAState *s)
+#define MACH64_FRAME_NS (NANOSECONDS_PER_SECOND / 60)
+
+/* Total and displayed lines of the synthetic raster. */
+static void mach64_raster(Mach64VGAState *s, int *lines, int *vdisp)
 {
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     unsigned total = s->regs[CRTC_V_TOTAL_DISP] & 0x7ff;
+    unsigned vd = (s->regs[CRTC_V_TOTAL_DISP] & CRTC_V_DISP) >> 16;
+
     /*
      * The CRTC free-runs: it generates raster timing (and therefore a toggling
      * vblank status) whenever the chip is powered, even before software programs
      * a custom mode.  When CRTC_V_TOTAL is still zero (unprogrammed, or reset
-     * mid-init) fall back to a standard 525-line frame so the scanline counter
-     * keeps cycling; otherwise the count would be pinned at 0 and the vblank
-     * status could never toggle, hanging any driver that waits on it.
+     * mid-init) fall back to a standard 525-line frame with 480 active lines so
+     * the scanline counter keeps cycling; otherwise the count would be pinned at
+     * 0 and the vblank status could never toggle, hanging any driver that waits
+     * on it.
      */
-    int lines = total ? (int)total + 1 : 525;
-    int64_t frame_ns = NANOSECONDS_PER_SECOND / 60;
+    *lines = total ? (int)total + 1 : 525;
+    *vdisp = vd ? (int)vd + 1 : 480;
+}
 
-    return (now % frame_ns) * lines / frame_ns;
+/* Synthetic current scanline, so drivers polling CRTC_VLINE make progress. */
+static uint32_t mach64_crtc_vline(Mach64VGAState *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int lines, vdisp;
+
+    mach64_raster(s, &lines, &vdisp);
+    return (now % MACH64_FRAME_NS) * lines / MACH64_FRAME_NS;
 }
 
 /* True while the synthetic raster is in the vertical-blank region. */
 static bool mach64_in_vblank(Mach64VGAState *s)
 {
-    unsigned vd = (s->regs[CRTC_V_TOTAL_DISP] & CRTC_V_DISP) >> 16;
-    /* Match the crtc_vline free-run default: 480 active lines when unprogrammed. */
-    int vdisp = vd ? (int)vd + 1 : 480;
+    int lines, vdisp;
 
+    mach64_raster(s, &lines, &vdisp);
     return (int)mach64_crtc_vline(s) >= vdisp;
 }
 
+/* The next time after now at which mach64_in_vblank() turns true. */
+static int64_t mach64_next_vblank_start(Mach64VGAState *s, int64_t now)
+{
+    int64_t start = now - now % MACH64_FRAME_NS;
+    int lines, vdisp;
+
+    mach64_raster(s, &lines, &vdisp);
+    if (vdisp < lines) {
+        start += DIV_ROUND_UP((int64_t)vdisp * MACH64_FRAME_NS, lines);
+    }
+    if (start <= now) {
+        start += MACH64_FRAME_NS;
+    }
+    return start;
+}
+
+/* Each _INT_EN bit enables the _INT status bit above it (RRG pp. 4-51..4-53). */
 static void mach64_update_irq(Mach64VGAState *s)
 {
     uint32_t ic = s->regs[CRTC_INT_CNTL];
-    bool level = ((ic & CRTC_VBLANK_INT) && (ic & CRTC_VBLANK_INT_EN)) ||
-                 ((ic & CRTC_VLINE_INT) && (ic & CRTC_VLINE_INT_EN));
 
-    pci_set_irq(&s->dev, level);
+    pci_set_irq(&s->dev, !!(ic & ((ic & CRTC_INT_ENS) << 1)));
 }
 
+/* The start of the vertical blank, as CRTC_VBLANK reports it. */
 static void mach64_vblank_timer(void *opaque)
 {
     Mach64VGAState *s = opaque;
+    uint32_t status = CRTC_VBLANK_INT;
 
-    timer_mod(&s->vblank_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-              NANOSECONDS_PER_SECOND / 60);
-    s->regs[CRTC_INT_CNTL] |= CRTC_VBLANK_INT;
+    timer_mod(&s->vblank_timer,
+              mach64_next_vblank_start(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)));
+    /*
+     * VBLANK_BIT2 is VBLANK, or with HW_DEBUG.SEL_VBLANK_DBL_BUF the double
+     * buffer of CRTC_OFFSET, which takes a pending offset now (RAGE XL RRG
+     * p. 4-30, CRTC_OFF_PITCH).  Its status bit has no enable and drives no
+     * interrupt.  ati2drad's vsync flip acknowledges bit 31 and waits for it
+     * to come back: without it the flip status never reads done.
+     *
+     * The XL has one CRTC, so CRTC2_VBLANK_INT (bit 13) stays 0 (RRG
+     * p. 4-52, "NOT supported").  ati2drad waits for bit 13 as well only
+     * when IOCTL_VIDEO_SET_CURRENT_MODE returns a controller mask that
+     * holds the second controller; on the XL its flips acknowledge bit 31
+     * alone.
+     */
+    if (!(s->regs[HW_DEBUG] & HW_DEBUG_SEL_VBLANK_DBL_BUF) ||
+        (s->regs[CRTC_OFF_PITCH] & CRTC_OFFSET_LOCK)) {
+        status |= CRTC_VBLANK_BIT2_INT;
+    }
+    s->regs[CRTC_OFF_PITCH] &= ~CRTC_OFFSET_LOCK;
+    status |= mach64_ovl_vblank(s);
+    s->regs[CRTC_INT_CNTL] |= status;
     mach64_update_irq(s);
 }
 
@@ -688,14 +777,38 @@ static void mach64_ddc_access(Mach64VGAState *s, unsigned byte, uint32_t data)
 }
 
 /*
- * I2C_CNTL_0 (reg 0x0F) hardware-I2C engine status.  ati2mpad issues a CRT-DDC
- * transfer and then polls the low-byte status field for I2C_CNTL_DONE.  The
- * modelled engine has no latency, so every transfer is already complete: report
- * DONE with the rest of the status field (NACK/HALT/FULL) clear.
+ * One byte through the hardware I2C engine, started by a write to byte 1 of
+ * I2C_CNTL_0: START sends I2C_CNTL_1's data byte as the address, RECEIVE
+ * reads a byte into it, else the byte is written; STOP ends the transfer.
+ * The engine has no latency.  Nothing on the board answers on its pins, so
+ * an address gets NACK and a read gets the pulled-up FFh; ati2mpad's
+ * expander probe (0x70, 0x78, 0x76) then finds no multimedia chips.
  */
-static uint32_t mach64_i2c0_readback(uint32_t val)
+static void mach64_i2c_engine(Mach64VGAState *s)
 {
-    return (val & ~I2C_CNTL_STAT) | I2C_CNTL_DONE;
+    uint32_t cntl = s->regs[I2C_CNTL_0];
+    uint8_t data = s->regs[I2C_CNTL_1] & I2C_DATA_PORT;
+    bool nack = false;
+
+    if (cntl & I2C_CNTL_START) {
+        if (s->amc_active) {
+            i2c_end_transfer(s->amc_bus);
+        }
+        nack = i2c_start_transfer(s->amc_bus, data >> 1, data & 1);
+        s->amc_active = !nack;
+    } else if (cntl & I2C_CNTL_RECEIVE) {
+        data = s->amc_active ? i2c_recv(s->amc_bus) : 0xff;
+        s->regs[I2C_CNTL_1] = (s->regs[I2C_CNTL_1] & ~I2C_DATA_PORT) | data;
+    } else {
+        nack = !s->amc_active || i2c_send(s->amc_bus, data);
+    }
+    if ((cntl & I2C_CNTL_STOP) && s->amc_active) {
+        i2c_end_transfer(s->amc_bus);
+        s->amc_active = false;
+    }
+    cntl &= ~(I2C_CNTL_STAT | I2C_CNTL_START | I2C_CNTL_STOP | I2C_CNTL_GO |
+              I2C_CNTL_RECEIVE);
+    s->regs[I2C_CNTL_0] = cntl | I2C_CNTL_DONE | (nack ? I2C_CNTL_NACK : 0);
 }
 
 /* Diagnostic wrapper: log the VBE/scanout state each render (MACH64_TRACE=1). */
@@ -870,8 +983,10 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
     uint32_t val;
 
     if (reg >= MACH64_NREGS) {
-        mach64_trace_access('r', reg, 0);
-        return 0; /* Block 1 (overlay/scaler): not modelled yet */
+        val = 0;
+        mach64_ovl_read(s, reg, &val);
+        mach64_trace_access('r', reg, val);
+        return size < 4 ? (val >> (byte * 8)) & ((1u << (size * 8)) - 1) : val;
     }
 
     switch (reg) {
@@ -894,9 +1009,12 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
         val |= s->regs[reg] & CRTC_VLINE;   /* keep the programmed compare value */
         break;
     case CRTC_INT_CNTL:
-        val = s->regs[reg] & ~CRTC_VBLANK;
+        val = s->regs[reg] & ~CRTC_INT_LIVE;
         if (mach64_in_vblank(s)) {
-            val |= CRTC_VBLANK;             /* live vblank status bit */
+            val |= CRTC_VBLANK;
+        }
+        if (mach64_crtc_vline(s) & 1) {
+            val |= CRTC_VLINE_SYNC;
         }
         break;
     case CLOCK_CNTL: {
@@ -927,10 +1045,6 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
     case LCD_DATA:
         /* LCD register 7 is the DDC I2C GPIO; other indices are plain latches. */
         val = (s->lcd_index == MACH64_LCD_DDC_INDEX) ? s->ddc_gpio : s->regs[reg];
-        break;
-    case I2C_CNTL_0:
-        /* CRT DDC bit-bang: patch bit4 with the live wired-AND SDA level. */
-        val = mach64_i2c0_readback(s->regs[reg]);
         break;
     case DAC_REGS:
         if (size == 1) {
@@ -1055,7 +1169,8 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
 
     if (reg >= MACH64_NREGS) {
         mach64_trace_access('w', reg, data);
-        return; /* Block 1 (overlay/scaler): not modelled yet */
+        mach64_ovl_write(s, reg, byte, size, data);
+        return;
     }
 
     /* Host-data stream: any of HOST_DATA0..F feeds the active blit. */
@@ -1098,17 +1213,43 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         mach64_reg_store(s, reg, byte, size, data);
         mach64_gui_traj_split(s, s->regs[reg]);
         return;
-    case CRTC_INT_CNTL:
+    case CRTC_OFF_PITCH: {
         /*
-         * Plain R/W: the hardware sets the _INT status bits on the event (the
-         * vblank timer ORs CRTC_VBLANK_INT in); the driver's ISR clears them by
-         * reading the register and writing it back with the bit cleared (a
-         * read-modify-write to 0), not write-1-to-ack.  Store the value as
-         * written and re-evaluate the interrupt line.
+         * CRTC_OFFSET_LOCK reads 1 from a write of CRTC_OFFSET until the next
+         * vertical blank uses the offset, unless HW_DEBUG.BLOCK_DBL_BUF turns
+         * the double buffer off (RRG CRTC_OFF_PITCH, HW_DEBUG).  The display
+         * takes the new offset at once.
          */
-        s->regs[reg] = data;
+        uint32_t lock = s->regs[reg] & CRTC_OFFSET_LOCK;
+
+        mach64_reg_store(s, reg, byte, size, data);
+        if (byte < 3 && !(s->regs[HW_DEBUG] & HW_DEBUG_BLOCK_DBL_BUF)) {
+            lock = CRTC_OFFSET_LOCK;
+        }
+        s->regs[reg] = (s->regs[reg] & ~CRTC_OFFSET_LOCK) | lock;
+        mach64_switch_mode(s);
+        return;
+    }
+    case CRTC_INT_CNTL: {
+        /*
+         * Writing 1 to an _INT status bit clears it ("to clear interrupt,
+         * write '1'", RAGE XL RRG pp. 4-51..4-53, which also asks for the ack
+         * and the enable in two separate writes); writing 0 keeps it.  The
+         * X driver acks so (atilock.c, CRTC_INT_ACKS), and ati2drad's vsync
+         * flip ORs bit 31 into its write-back.  An ISR that writes the value
+         * back with the status bits at 0, as under the forced interrupt line
+         * of 31f3af06, leaves the sources it did not handle pending.
+         */
+        uint32_t lanes = size >= 4 ? UINT32_MAX :
+                         ((1u << (size * 8)) - 1) << (byte * 8);
+        uint32_t written = ((uint32_t)data << (byte * 8)) & lanes;
+        uint32_t v = s->regs[reg];
+
+        v = (v & ~(lanes & CRTC_INT_ENS)) | (written & CRTC_INT_ENS);
+        s->regs[reg] = v & ~(written & CRTC_INT_ACKS);
         mach64_update_irq(s);
         return;
+    }
     case DP_SET_GUI_ENGINE:
         mach64_dp_set_gui_engine(s, data);
         return;
@@ -1127,6 +1268,13 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
     mach64_reg_store(s, reg, byte, size, data);
 
     switch (reg) {
+    case I2C_CNTL_0:
+        if (byte <= 1 && byte + size > 1 &&
+            (s->regs[reg] & (I2C_CNTL_START | I2C_CNTL_STOP | I2C_CNTL_GO |
+                             I2C_CNTL_RECEIVE))) {
+            mach64_i2c_engine(s);
+        }
+        break;
     case CLOCK_CNTL:
         /*
          * Indirect PLL write: when PLL_WR_EN is set, byte 2 is committed to the
@@ -1143,7 +1291,6 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
     case CRTC_GEN_CNTL:
     case CRTC_H_TOTAL_DISP:
     case CRTC_V_TOTAL_DISP:
-    case CRTC_OFF_PITCH:
     case DAC_CNTL:
         mach64_switch_mode(s);
         break;
@@ -1151,7 +1298,7 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         bool en = mach64_cursor_enabled(s);
 
         if (s->cursor_guest_mode) {
-            s->vga.force_shadow = en;
+            mach64_update_shadow(s);
             graphic_hw_invalidate(s->vga.con);
         } else if (en) {
             mach64_cursor_define(s);
@@ -1304,11 +1451,12 @@ static int mach64_post_load(void *opaque, int version_id)
     s->mode = (s->regs[CRTC_GEN_CNTL] & CRTC_EXT_DISP_EN) ? EXT_MODE : VGA_MODE;
     s->vga.graphic_mode = -1;
     if (s->cursor_guest_mode) {
-        s->vga.force_shadow = mach64_cursor_enabled(s);
         s->cursor_size = UINT16_MAX;
     } else if (mach64_cursor_enabled(s)) {
         mach64_cursor_define(s);
     }
+    s->ovl_drawn_y0 = -1;
+    mach64_update_shadow(s);
     mach64_update_irq(s);
     mach64_vga_aper_update(s);
     graphic_hw_invalidate(s->vga.con);
@@ -1330,7 +1478,7 @@ static const VMStateDescription vmstate_mach64_host_data = {
 
 static const VMStateDescription vmstate_mach64_vga = {
     .name = "mach64-vga",
-    .version_id = 1,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = mach64_post_load,
     .fields = (const VMStateField[]) {
@@ -1353,6 +1501,10 @@ static const VMStateDescription vmstate_mach64_vga = {
         VMSTATE_UINT8(ddc_buf, Mach64VGAState),
         VMSTATE_UINT8(ddc_read_nacked, Mach64VGAState),
         VMSTATE_INT16(ddc_addr, Mach64VGAState),
+        VMSTATE_BOOL_V(amc_active, Mach64VGAState, 2),
+        VMSTATE_UINT32_ARRAY_V(regs1, Mach64VGAState, MACH64_NREGS1, 3),
+        VMSTATE_UINT32_ARRAY_V(ovl, Mach64VGAState, MACH64_NREGS1, 3),
+        VMSTATE_BOOL_V(ovl_locked, Mach64VGAState, 3),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -1398,10 +1550,8 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
     mach64_hw_ops = *vga->hw_ops;
     mach64_hw_ops.gfx_update = mach64_gfx_update;
     vga->con = graphic_console_init(DEVICE(s), 0, &mach64_hw_ops, vga);
-    if (s->cursor_guest_mode) {
-        vga->cursor_invalidate = mach64_cursor_invalidate;
-        vga->cursor_draw_line = mach64_cursor_draw_line;
-    }
+    vga->cursor_invalidate = mach64_display_invalidate;
+    vga->cursor_draw_line = mach64_display_draw_line;
 
     /*
      * Paged VGA aperture, disabled until CFG_MEM_VGA_AP_EN turns it on.  It
@@ -1442,11 +1592,12 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
 
     dev->config[PCI_INTERRUPT_PIN] = 1;
     timer_init_ns(&s->vblank_timer, QEMU_CLOCK_VIRTUAL, mach64_vblank_timer, s);
-    timer_mod(&s->vblank_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-              NANOSECONDS_PER_SECOND / 60);
+    timer_mod(&s->vblank_timer,
+              mach64_next_vblank_start(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)));
 
     /* DDC/EDID: an i2c-ddc slave at 0x50 driven by the LCD-reg-7 bit-bang. */
     s->ddc_bus = i2c_init_bus(DEVICE(s), "mach64.ddc");
+    s->amc_bus = i2c_init_bus(DEVICE(s), "mach64.amc");
     i2c_slave_set_address(I2C_SLAVE(&s->i2cddc), 0x50);
     qdev_realize(DEVICE(&s->i2cddc), BUS(s->ddc_bus), &error_abort);
     s->ddc_scl = 1;
@@ -1461,6 +1612,7 @@ static void mach64_vga_reset(DeviceState *dev)
 
     memset(s->regs, 0, sizeof(s->regs));
     memset(&s->host_data, 0, sizeof(s->host_data));
+    mach64_ovl_reset(s);
     s->mode = VGA_MODE;
     s->cursor_size = 0;
     s->cursor_offset = 0;
@@ -1476,11 +1628,13 @@ static void mach64_vga_reset(DeviceState *dev)
     s->ddc_buf = 0;
     s->ddc_read_nacked = 0;
     s->ddc_addr = -1;
+    s->amc_active = false;
     /* Engine out of reset on 264xT parts. */
     s->regs[GEN_TEST_CNTL] = GEN_GUI_RESETB;
     s->regs[CONFIG_CNTL] = CFG_MEM_AP_SIZE_2X8M;   /* read-only, RRG 0_37 */
     mach64_update_irq(s);
     mach64_vga_aper_update(s);
+    mach64_update_shadow(s);
 
     /*
      * Seed the internal PLL with divider values a real video-BIOS POST would

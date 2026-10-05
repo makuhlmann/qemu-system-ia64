@@ -511,6 +511,7 @@ struct NV15State {
     bool fifo_wait_notify;
     bool fifo_wait_flip;
     bool fifo_wait_acquire;
+    bool fifo_dma_instance0_logged;
     uint32_t fifo_intr;
     uint32_t fifo_intr_en;
     uint32_t fifo_ramht;

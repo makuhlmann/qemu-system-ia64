@@ -27,6 +27,7 @@ IA64_EXCP_VIRTUALIZATION = 33
 IA64_EXCP_TAKEN_BRANCH = 37
 IA64_EXCP_SINGLE_STEP = 38
 IA64_EXCP_LOWER_PRIV_TRANSFER = 39
+IA64_EXCP_DEBUG = 40
 IA64_ISR_X = 1 << 32
 IA64_ISR_W = 1 << 33
 IA64_ISR_R = 1 << 34
@@ -59,6 +60,7 @@ IA64_DCR_DM = 1 << 8
 IA64_DCR_DK = 1 << 10
 IA64_DCR_DX = 1 << 11
 IA64_DCR_DA = 1 << 13
+IA64_DCR_DD = 1 << 14
 IA64_PSR_BE = 1 << 1
 IA64_PSR_UP = 1 << 2
 IA64_PSR_AC = 1 << 3
@@ -75,6 +77,8 @@ IA64_PSR_PP = 1 << 21
 IA64_PSR_DI = 1 << 22
 IA64_PSR_SI = 1 << 23
 IA64_PSR_DB = 1 << 24
+IA64_PSR_ID = 1 << 37
+IA64_PSR_DD = 1 << 39
 IA64_PSR_LP = 1 << 25
 IA64_PSR_TB = 1 << 26
 IA64_PSR_RT = 1 << 27
@@ -92,10 +96,12 @@ IA64_CR_ITM = 1
 IA64_CR_SAPIC_IVR = 65
 IA64_CR_SAPIC_TPR = 66
 IA64_CR_SAPIC_EOI = 67
+IA64_CR_PMV = 73
 IA64_CR_SAPIC_IRR0 = 68
 IA64_CR_SAPIC_IRR3 = 71
 IA64_CR_ITV = 72
 IA64_CR_LRR0 = 80
+IA64_LRR_IPP = 1 << 13
 IA64_LRR_TM = 1 << 15
 IA64_LRR_DM_EXTINT = 7 << 8
 IA64_TPR_MMI = 1 << 16
@@ -103,6 +109,7 @@ IA64_VECTOR_MASKED = 1 << 16
 IA64_RSC_PL3 = 3 << 2
 IA64_RSC_BE = 1 << 4
 IA64_BREAK_VECTOR = 0x2c00
+IA64_ITLB_VECTOR = 0x0400
 IA64_DTLB_VECTOR = 0x0800
 IA64_ALT_ITLB_VECTOR = 0x0c00
 IA64_ALT_DTLB_VECTOR = 0x1000
@@ -119,6 +126,7 @@ IA64_DATA_ACCESS_VECTOR = 0x5300
 IA64_GENERAL_VECTOR = 0x5400
 IA64_DISABLED_FP_VECTOR = 0x5500
 IA64_NAT_CONSUMPTION_VECTOR = 0x5600
+IA64_DEBUG_VECTOR = 0x5900
 IA64_UNALIGNED_VECTOR = 0x5a00
 IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR = 0x5b00
 IA64_FP_FAULT_VECTOR = 0x5c00
@@ -236,7 +244,7 @@ IA64_MERCED_IMPL_KEY_BITS = 21
 IA64_MERCED_ITR_COUNT = 8
 IA64_MERCED_DTR_COUNT = 48
 IA64_MERCED_UNIQUE_TCS = 3
-PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_IMPL_PA_BITS << 1) |
+PAL_VM_SUMMARY_INFO_1_MERCED = (1 | (IA64_MERCED_IMPL_PA_BITS << 1) |
                                 (IA64_MERCED_IMPL_KEY_BITS << 8) |
                                 ((IA64_PKR_COUNT - 1) << 16) |
                                 (8 << 24) |
@@ -247,10 +255,11 @@ PAL_VM_SUMMARY_INFO_2_MERCED = (IA64_MERCED_IMPL_VA_MSB |
                                 (IA64_MERCED_IMPL_RID_BITS << 8))
 PAL_RATIO_16_1 = (16 << 32) | 1
 PAL_RATIO_16_3 = (16 << 32) | 3
-PAL_RATIO_4_1 = (4 << 32) | 1
-PAL_RATIO_4_3 = (4 << 32) | 3
-PAL_RATIO_8_1 = (8 << 32) | 1
 PAL_RATIO_2_1 = (2 << 32) | 1
+PAL_RATIO_16_2 = (16 << 32) | 2
+PAL_RATIO_13_2 = (13 << 32) | 2
+PAL_RATIO_1_1 = (1 << 32) | 1
+PAL_RATIO_12_2 = (12 << 32) | 2
 # WB(0), UC(4), UCE(5) and WC(6) are all implemented by both supported
 # generations (251110-003 sec 12.1; 245320-002 ch. 4 for Merced's WC buffer);
 # NaTPage(7) is architected (SDM Vol. 2 Table 4-11).
@@ -284,12 +293,13 @@ PAL_CACHE_INFO_DATA_HINTS = (0x09 << 48) | (0x0b << 56)
 
 # --- Merced cache and TC geometry -------------------------------------------
 # L1I/L1D 16 KB 4-way 32 B lines; L2 unified 96 KB 6-way 64 B write-back;
-# L3 unified 4 MB 4-way 64 B (245473-002 sec 4.1-4.4, 248701-002 sec 2.5.4).
+# L3 unified 2 MB 4-way 64 B, the i2000 part (245473-002 sec 4.1-4.4,
+# 248701-002 sec 2.5.4, HP i2000 Owner's Guide sec 11.1.3).
 # Integer load latencies: L1 2, L2 6, L3 21 (245473-002 sec 4.1, 4.3, 4.4).
 PAL_CACHE_INFO_MERCED_L0_I_1 = ((4 << 8) | (5 << 16) |
                                 (5 << 24) | (0xff << 32) | (1 << 40))
 PAL_CACHE_INFO_MERCED_L0_I_2 = (16384 | (12 << 32) | (12 << 40) |
-                                (IA64_IMPL_PA_BITS - 1 << 48))
+                                (IA64_MERCED_IMPL_PA_BITS - 1 << 48))
 PAL_CACHE_INFO_MERCED_L0_D_1 = ((4 << 8) | (5 << 16) |
                                 (5 << 24) | (1 << 32) | (2 << 40) |
                                 PAL_CACHE_INFO_DATA_HINTS)
@@ -297,12 +307,12 @@ PAL_CACHE_INFO_MERCED_L1_U_1 = (1 | (1 << 1) | (6 << 8) | (6 << 16) |
                                 (6 << 24) | (1 << 32) | (6 << 40) |
                                 PAL_CACHE_INFO_DATA_HINTS)
 PAL_CACHE_INFO_MERCED_L1_U_2 = (96 * 1024 | (14 << 32) | (14 << 40) |
-                                (IA64_IMPL_PA_BITS - 1 << 48))
+                                (IA64_MERCED_IMPL_PA_BITS - 1 << 48))
 PAL_CACHE_INFO_MERCED_L2_U_1 = (1 | (1 << 1) | (4 << 8) | (6 << 16) |
                                 (6 << 24) | (1 << 32) | (21 << 40) |
                                 PAL_CACHE_INFO_DATA_HINTS)
-PAL_CACHE_INFO_MERCED_L2_U_2 = (4 * 1024 * 1024 | (20 << 32) | (20 << 40) |
-                                (IA64_IMPL_PA_BITS - 1 << 48))
+PAL_CACHE_INFO_MERCED_L2_U_2 = (2 * 1024 * 1024 | (19 << 32) | (19 << 40) |
+                                (IA64_MERCED_IMPL_PA_BITS - 1 << 48))
 # ITLB 64 entries holding the instruction TRs; DTLB1 32 entries holding none;
 # DTLB2 96 entries holding the data TRs (248701-002 sec 2.5.6).  All levels
 # hold every architected page size (245473-002 sec 4.7).
@@ -338,9 +348,10 @@ PAL_VIRTUAL_RR = (1 << 8) | PAL_VIRTUAL_ITIR
 PAL_VIRTUAL_CODE_PTE = 0x0010000004000661
 PAL_VIRTUAL_PROC_PTE = 0x0010000000100661
 PAL_VIRTUAL_PSR = (1 << 13) | (1 << 36)
-PAL_COPY_BUFFER_SIZE = 0x1000
-PAL_COPY_BUFFER_ALIGN = 0x1000
-PAL_COPY_TARGET = 0x4000
+PAL_COPY_BUFFER_SIZE = 0x3e000
+PAL_COPY_BUFFER_ALIGN = 0x40000
+PAL_COPY_TARGET = 0x40000
+PAL_COPY_PROC = PAL_COPY_TARGET + 0x8010
 PAL_AR_IMPLEMENTED_LOW = 0x000011117f2f00ff
 PAL_AR_IMPLEMENTED_HIGH = 0x7
 PAL_CR_IMPLEMENTED_LOW = 0x0000000003fb0107
@@ -383,6 +394,7 @@ __all__ = (
     'IA64_EXCP_TAKEN_BRANCH',
     'IA64_EXCP_SINGLE_STEP',
     'IA64_EXCP_LOWER_PRIV_TRANSFER',
+    'IA64_EXCP_DEBUG',
     'IA64_ISR_X',
     'IA64_ISR_W',
     'IA64_ISR_R',
@@ -415,6 +427,7 @@ __all__ = (
     'IA64_DCR_DK',
     'IA64_DCR_DX',
     'IA64_DCR_DA',
+    'IA64_DCR_DD',
     'IA64_PSR_BE',
     'IA64_PSR_UP',
     'IA64_PSR_AC',
@@ -431,6 +444,8 @@ __all__ = (
     'IA64_PSR_DI',
     'IA64_PSR_SI',
     'IA64_PSR_DB',
+    'IA64_PSR_ID',
+    'IA64_PSR_DD',
     'IA64_PSR_LP',
     'IA64_PSR_TB',
     'IA64_PSR_RT',
@@ -448,10 +463,12 @@ __all__ = (
     'IA64_CR_SAPIC_IVR',
     'IA64_CR_SAPIC_TPR',
     'IA64_CR_SAPIC_EOI',
+    'IA64_CR_PMV',
     'IA64_CR_SAPIC_IRR0',
     'IA64_CR_SAPIC_IRR3',
     'IA64_CR_ITV',
     'IA64_CR_LRR0',
+    'IA64_LRR_IPP',
     'IA64_LRR_TM',
     'IA64_LRR_DM_EXTINT',
     'IA64_TPR_MMI',
@@ -459,6 +476,7 @@ __all__ = (
     'IA64_RSC_PL3',
     'IA64_RSC_BE',
     'IA64_BREAK_VECTOR',
+    'IA64_ITLB_VECTOR',
     'IA64_DTLB_VECTOR',
     'IA64_ALT_DTLB_VECTOR',
     'IA64_ALT_ITLB_VECTOR',
@@ -475,6 +493,7 @@ __all__ = (
     'IA64_GENERAL_VECTOR',
     'IA64_DISABLED_FP_VECTOR',
     'IA64_NAT_CONSUMPTION_VECTOR',
+    'IA64_DEBUG_VECTOR',
     'IA64_UNALIGNED_VECTOR',
     'IA64_UNSUPPORTED_DATA_REFERENCE_VECTOR',
     'IA64_FP_FAULT_VECTOR',
@@ -567,9 +586,10 @@ __all__ = (
     'IA64_MERCED_DTR_COUNT',
     'PAL_RATIO_16_1',
     'PAL_RATIO_16_3',
-    'PAL_RATIO_4_1',
-    'PAL_RATIO_4_3',
-    'PAL_RATIO_8_1',
+    'PAL_RATIO_16_2',
+    'PAL_RATIO_13_2',
+    'PAL_RATIO_1_1',
+    'PAL_RATIO_12_2',
     'PAL_RATIO_2_1',
     'PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE',
     'PAL_CACHE_INFO_DATA_HINTS',
@@ -620,6 +640,7 @@ __all__ = (
     'PAL_COPY_BUFFER_SIZE',
     'PAL_COPY_BUFFER_ALIGN',
     'PAL_COPY_TARGET',
+    'PAL_COPY_PROC',
     'PAL_AR_IMPLEMENTED_LOW',
     'PAL_AR_IMPLEMENTED_HIGH',
     'PAL_CR_IMPLEMENTED_LOW',

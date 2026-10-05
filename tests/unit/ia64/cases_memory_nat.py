@@ -23,6 +23,7 @@ from .encoding import (
     IA64_GENERAL_VECTOR,
     IA64_GENEX_UNIMPL_DATA_ADDR,
     IA64_IMPL_PA_BITS,
+    IA64_MERCED_IMPL_PA_BITS,
     IA64_ISR_CODE_REG_NAT,
     IA64_ISR_ED,
     IA64_ISR_EI_SHIFT,
@@ -1457,6 +1458,30 @@ test_unimplemented_physical_load_faults = require_registers(
         "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R,
         "r10": 1 << IA64_IMPL_PA_BITS,
     }, entry=0x10)
+
+# 245320-002 sec 3.2: Merced implements 44 physical address bits.
+test_unimplemented_physical_load_faults_merced = require_registers(
+    "unimplemented_physical_load_faults_merced", [
+        (0x10, *movl_mlx(3, 1 << IA64_MERCED_IMPL_PA_BITS)),
+        (0x20, *movl_mlx(19, IA64_PSR_IC)),
+        (0x30, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
+        (0x40, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x50, 0x00, ld8(4, 3), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR, 0x00, mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x10, 0x00, mov_m_cr_gr(9, 17),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x20, 0x00, mov_m_cr_gr(10, 20),
+         nop_i(), nop_i()),
+        (IA64_GENERAL_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_GENERAL_VECTOR + 0x30,
+                 IA64_GENERAL_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_GENERAL_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x50,
+        "r9": IA64_GENEX_UNIMPL_DATA_ADDR | IA64_ISR_R,
+        "r10": 1 << IA64_MERCED_IMPL_PA_BITS,
+    }, entry=0x10, cpu="merced")
 
 # 245320-002 sec 3.2: Merced implements 54 virtual address bits, so
 # VA{60:51} must sign-extend VA{50}.  A region-0 address with bit 51 set and
@@ -3116,16 +3141,11 @@ test_br_ctop_long_speculative_load_pipeline = require_registers(
         "r8": 129, "r20": HIGH_TR_BASE + 0x8418}, entry=0x10)
 
 GROUP = 'memory-nat'
-# A control-speculative load whose page has no ED bit and that runs with
-# instruction translation off (PSR.it == 0, as the OS loaders and early kernel
-# do) must still defer a deferrable TLB fault when the matching DCR mask bit is
-# set: DCR-based deferral is independent of PSR.it and of the code page's ED
-# bit.  Without this, XP's SETUPLDR/NTOSKRNL ld.s over a NaTVal pointer faults
-# instead of deferring, cascading into a break loop.  The pre-existing
-# speculative_load_defers_psr_ed case sets PSR.it and ED as well, so it did not
-# exercise the DCR-only path.
-test_speculative_load_defers_via_dcr_without_ed = require_registers(
-    "speculative_load_defers_via_dcr_without_ed", [
+# With PSR.it = 0, as an OS loader runs, the DCR bit does not defer an ld.s
+# fault (SDM Vol. 2 Table 5-4): the Alternate Data TLB fault reaches its
+# vector with ISR.sp, for the handler to defer in software.
+test_speculative_load_dcr_needs_psr_it = require_registers(
+    "speculative_load_dcr_needs_psr_it", [
         (0x10, *movl_mlx(20, IA64_DCR_DM)),
         (0x20, 0x00, mov_m_gr_cr(20, 0), nop_i(), nop_i()),
         (0x30, *movl_mlx(2, 0xa000000100020000)),
@@ -3133,11 +3153,15 @@ test_speculative_load_defers_via_dcr_without_ed = require_registers(
         (0x50, 0x00, mov_gr_psr_full(19), nop_i(), nop_i()),
         (0x60, 0x00, srlz_d(), nop_i(), nop_i()),
         (0x70, 0x00, ld8_s(4, 2), nop_i(), nop_i()),
-        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+        (IA64_ALT_DTLB_VECTOR, 0x00, mov_m_cr_gr(31, 17),
+         nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x10,
+                 IA64_ALT_DTLB_VECTOR + 0x10)),
     ], {
-        "ip": 0x80,
+        "ip": IA64_ALT_DTLB_VECTOR + 0x10,
         "exception": IA64_EXCP_NONE,
-        "r4_nat": 1,
+        "r31": IA64_ISR_R | IA64_ISR_SP,
     }, entry=0x10)
 
 
@@ -3532,7 +3556,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'semaphore_ops_invalidate_advanced_loads',
     'simd_helper_nat_propagates',
     'speculative_load_defers_nat_base',
-    'speculative_load_defers_via_dcr_without_ed',
+    'speculative_load_dcr_needs_psr_it',
     'speculative_load_defers_psr_ed',
     'speculative_load_handler_psr_ed_defers_retry',
     'speculative_load_no_recovery_tlb_miss_faults',
@@ -3586,6 +3610,7 @@ CASE_NAMES = tuple(_SPEC_NAT_SWEEP_NAMES) + (
     'tnat_nz_or_decode',
     'tnat_unc_same_pred_pred_false_illegal',
     'unimplemented_physical_load_faults',
+    'unimplemented_physical_load_faults_merced',
     'unimplemented_virtual_load_faults_merced',
     'unimplemented_virtual_load_translates_madison',
     'unimplemented_physical_precludes_unaligned',

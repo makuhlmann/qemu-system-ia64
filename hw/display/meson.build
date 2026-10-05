@@ -62,7 +62,7 @@ system_ss.add(when: 'CONFIG_ARTIST', if_true: files('artist.c'))
 
 system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_3d.c', 'ati_dbg.c'), pixman])
 
-system_ss.add(when: 'CONFIG_MACH64_VGA', if_true: files('mach64.c', 'mach64_2d.c'))
+system_ss.add(when: 'CONFIG_MACH64_VGA', if_true: files('mach64.c', 'mach64_2d.c', 'mach64_overlay.c'))
 
 system_ss.add(when: 'CONFIG_NV15_VGA', if_true: files('geforce.c', 'geforce_2d.c', 'geforce_3d.c'))
 

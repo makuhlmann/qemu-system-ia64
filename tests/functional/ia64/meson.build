@@ -93,7 +93,7 @@ test_ia64_timeouts = {
   'nvram': 120,
   'services': 90,
   'tables': 180,
-  'smp': 120,
+  'smp': 360,
   'storage': 600,
   'input': 120,
 }

@@ -711,9 +711,15 @@ static void cmd_request_sense(IDEState *s, uint8_t *buf)
     buf[7] = 10;
     buf[12] = s->asc;
 
-    if (s->sense_key == UNIT_ATTENTION) {
-        s->sense_key = NO_SENSE;
-    }
+    /*
+     * Sense data is kept only until a REQUEST SENSE retrieves it; with none
+     * left the drive reports NO SENSE (SFF-8020i 10.8.20).  A condition that
+     * persists, such as an empty tray, is reported again by the next command
+     * that checks for it.  The EFI 1.10.14.61 IDE driver in the HP rx2600
+     * firmware fetches sense data until it reads NO SENSE, with no limit.
+     */
+    s->sense_key = NO_SENSE;
+    s->asc = 0;
 
     ide_atapi_cmd_reply(s, 18, max_len);
 }
@@ -1315,11 +1321,23 @@ static const struct AtapiCmd {
     /* [1] handler detects and reports not ready condition itself */
 };
 
+/*
+ * A drive works on a packet behind BSY for longer than a host takes to arm
+ * its bus master after the packet: Windows' atapi.sys arms it right after the
+ * last packet word and clears its interrupt bit as it does (WSRV03
+ * drivers/storage/ide/atapi/atapi.c:2826-2833, pciidex/bm.c:589-591).  The
+ * emulated host can take any time to get there, so a DMA packet waits for the
+ * bus master start; without one the drive answers after 10 ms.  A command
+ * that failed inside the packet write lost its interrupt to that clear, and
+ * on a native PCI channel the line then stayed asserted with no driver
+ * claiming it.
+ */
+#define ATAPI_DMA_PACKET_TIMEOUT_NS (10 * SCALE_MS)
+
+static void ide_atapi_cmd_exec(IDEState *s);
+
 void ide_atapi_cmd(IDEState *s)
 {
-    uint8_t *buf = s->io_buffer;
-    const struct AtapiCmd *cmd = &atapi_cmd_table[s->io_buffer[0]];
-
     /*
      * The packet has just been delivered; a device raises BSY while it
      * processes it (ATA/ATAPI-5 packet command protocol), and the vendor
@@ -1329,6 +1347,37 @@ void ide_atapi_cmd(IDEState *s)
     if (s->bus->bsy_after_cmd) {
         s->bsy_latched = true;
     }
+
+    /* AHCI moves the packet itself and expects the command to run now. */
+    if (!s->atapi_dma || s->bus->dma->ops->pio_transfer) {
+        ide_atapi_cmd_exec(s);
+        return;
+    }
+    s->status |= BUSY_STAT;
+    timer_mod(s->atapi_packet_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+              ATAPI_DMA_PACKET_TIMEOUT_NS);
+}
+
+void ide_atapi_packet_timer_cb(void *opaque)
+{
+    IDEState *s = opaque;
+
+    s->status &= ~BUSY_STAT;
+    ide_atapi_cmd_exec(s);
+}
+
+void ide_atapi_bus_master_started(IDEState *s)
+{
+    if (timer_pending(s->atapi_packet_timer)) {
+        timer_del(s->atapi_packet_timer);
+        ide_atapi_packet_timer_cb(s);
+    }
+}
+
+static void ide_atapi_cmd_exec(IDEState *s)
+{
+    uint8_t *buf = s->io_buffer;
+    const struct AtapiCmd *cmd = &atapi_cmd_table[s->io_buffer[0]];
 
     trace_ide_atapi_cmd(s, s->io_buffer[0]);
 
@@ -1347,6 +1396,15 @@ void ide_atapi_cmd(IDEState *s)
     if (s->sense_key == UNIT_ATTENTION && !(cmd->flags & ALLOW_UA)) {
         ide_atapi_cmd_check_status(s);
         return;
+    }
+    /*
+     * Any other command loses the sense data of the last one (SFF-8020i
+     * 10.8.20, 10.8.20.4); a unit attention stays until REQUEST SENSE
+     * reports it, and INQUIRY does not clear it (10.6).
+     */
+    if (buf[0] != GPCMD_REQUEST_SENSE && s->sense_key != UNIT_ATTENTION) {
+        s->sense_key = NO_SENSE;
+        s->asc = 0;
     }
     /*
      * When a CD gets changed, we have to report an ejected state and

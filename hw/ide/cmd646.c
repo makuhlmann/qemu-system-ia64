@@ -52,6 +52,26 @@
 #define UDIDETCR0            0x73
 #define UDIDETCR1            0x7B
 
+/* CMD649 (PCI-649 Product Specification, Rev. 1.2, chapter 6) */
+#define SUBCONF              0x4F
+#define   SUBCONF_SUBSYS_WE  0x01
+#define   SUBCONF_JP7        0x02
+#define   SUBCONF_CLASS_WE   0x04
+#define CFR_JP1_NATIVE       0x40
+#define CMDTIM               0x52
+#define ARTTIM0              0x53
+#define BRST                 0x59
+#define CMD649_PM_CAP        0x60
+#define CMD649_BM_FIRST      0x70
+#define CMD649_BM_LAST       0x7F
+#define BMIDECSR             0x79
+#define CMD649_SUBSYS_SHADOW 0x8C
+
+static bool cmd646_is_649(PCIDevice *pd)
+{
+    return pci_get_word(pd->config + PCI_DEVICE_ID) == PCI_DEVICE_ID_CMD_649;
+}
+
 static void cmd646_update_irq(PCIDevice *pd);
 
 static void cmd646_update_dma_interrupts(PCIDevice *pd)
@@ -102,7 +122,12 @@ static uint64_t bmdma_read(void *opaque, hwaddr addr,
         val = bm->cmd;
         break;
     case 1:
-        val = pci_dev->config[MRDMODE];
+        /* Base Address #4 + 09h is BMIDECSR on the CMD649 (6.8). */
+        if (cmd646_is_649(pci_dev) && bm == &bm->pci_dev->bmdma[1]) {
+            val = pci_dev->config[BMIDECSR];
+        } else {
+            val = pci_dev->config[MRDMODE];
+        }
         break;
     case 2:
         val = bm->status;
@@ -139,8 +164,17 @@ static void bmdma_write(void *opaque, hwaddr addr,
         bmdma_cmd_writeb(bm, val);
         break;
     case 1:
-        pci_dev->config[MRDMODE] =
-            (pci_dev->config[MRDMODE] & ~0x30) | (val & 0x30);
+        if (cmd646_is_649(pci_dev) && bm == &bm->pci_dev->bmdma[1]) {
+            pci_dev->config[BMIDECSR] = (pci_dev->config[BMIDECSR] & 0x0f) |
+                                        (val & 0xf0);
+            break;
+        }
+        {
+            uint8_t wm = cmd646_is_649(pci_dev) ? 0xf0 : 0x30;
+
+            pci_dev->config[MRDMODE] =
+                (pci_dev->config[MRDMODE] & ~wm) | (val & wm);
+        }
         cmd646_update_dma_interrupts(pci_dev);
         cmd646_update_irq(pci_dev);
         break;
@@ -219,6 +253,31 @@ static void cmd646_set_irq(void *opaque, int channel, int level)
     cmd646_update_irq(pd);
 }
 
+/* The CMD649's reset values (6.1-6.10); the timings are kept, not applied. */
+static void cmd649_reset_regs(PCIDevice *pd)
+{
+    PCIIDEState *d = PCI_IDE(pd);
+    uint8_t *c = pd->config;
+
+    pci_set_word(c + PCI_SUBSYSTEM_VENDOR_ID, PCI_VENDOR_ID_CMD);
+    pci_set_word(c + PCI_SUBSYSTEM_ID, PCI_DEVICE_ID_CMD_649);
+    memcpy(c + CMD649_SUBSYS_SHADOW, c + PCI_SUBSYSTEM_VENDOR_ID, 4);
+    c[SUBCONF] = SUBCONF_JP7;
+    c[CFR] = CFR_JP1_NATIVE;
+    c[CNTRL] = 0xe0 | CNTRL_EN_CH0 | (d->secondary ? CNTRL_EN_CH1 : 0);
+    memset(c + CMDTIM, 0, 0x5c - CMDTIM);
+    c[ARTTIM0] = 0x80;
+    c[ARTTIM0 + 2] = 0x80;
+    c[ARTTIM23] = 0x8c;
+    c[BRST] = 0x40;
+    c[MRDMODE] = 0;
+    c[UDIDETCR0] = 0xf0;
+    c[UDIDETCR1] = 0xf0;
+    /* Write FIFO threshold 1/2; no 80-conductor cable (rx2600, 00:02.0). */
+    c[BMIDECSR] = 0x80;
+    pci_set_word(c + CMD649_PM_CAP + PCI_PM_CTRL, 0x6000);
+}
+
 static void cmd646_reset(DeviceState *dev)
 {
     PCIIDEState *d = PCI_IDE(dev);
@@ -227,12 +286,85 @@ static void cmd646_reset(DeviceState *dev)
     for (i = 0; i < 2; i++) {
         ide_bus_reset(&d->bus[i]);
     }
+    if (cmd646_is_649(PCI_DEVICE(dev))) {
+        cmd649_reset_regs(PCI_DEVICE(dev));
+    }
+}
+
+/* The CMD649 decodes its bus master registers at 70h-7Fh too (6.8-6.10). */
+static uint8_t cmd649_bm_config_byte(PCIDevice *pd, uint32_t addr)
+{
+    BMDMAState *bm = &PCI_IDE(pd)->bmdma[(addr - CMD649_BM_FIRST) >> 3];
+    unsigned int off = addr & 7;
+
+    switch (off) {
+    case 0:
+        return bm->cmd;
+    case 2:
+        return bm->status;
+    case 1:
+    case 3:
+        return pd->config[addr];
+    default:
+        return bm->addr >> ((off - 4) * 8);
+    }
+}
+
+static void cmd649_config_write(PCIDevice *pd, uint32_t addr, uint32_t val,
+                                int len)
+{
+    int i;
+
+    for (i = 0; i < len; i++) {
+        uint32_t a = addr + i;
+        uint8_t v = val >> (i * 8);
+
+        if (a >= PCI_SUBSYSTEM_VENDOR_ID && a < PCI_SUBSYSTEM_VENDOR_ID + 4) {
+            /* Writable only with SUBCONF bit 0; 8Ch-8Fh mirror them. */
+            if (pd->config[SUBCONF] & SUBCONF_SUBSYS_WE) {
+                pd->config[a] = v;
+                pd->config[a - PCI_SUBSYSTEM_VENDOR_ID +
+                           CMD649_SUBSYS_SHADOW] = v;
+            }
+        } else if (a >= CMD649_SUBSYS_SHADOW && a < CMD649_SUBSYS_SHADOW + 4) {
+            pd->config[a - CMD649_SUBSYS_SHADOW + PCI_SUBSYSTEM_VENDOR_ID] =
+                pd->config[a];
+        } else if (a >= CMD649_BM_FIRST && a <= CMD649_BM_LAST) {
+            BMDMAState *bm = &PCI_IDE(pd)->bmdma[(a - CMD649_BM_FIRST) >> 3];
+            unsigned int off = a & 7;
+
+            if (off == 0) {
+                bmdma_cmd_writeb(bm, v);
+            } else if (off == 2) {
+                bmdma_status_writeb(bm, v);
+            } else if (off >= 4) {
+                unsigned int shift = (off - 4) * 8;
+
+                bm->addr = ((bm->addr & ~(0xffu << shift)) |
+                            ((uint32_t)v << shift)) & ~3u;
+            }
+        }
+    }
 }
 
 static uint32_t cmd646_pci_config_read(PCIDevice *d,
                                        uint32_t address, int len)
 {
-    return pci_default_read_config(d, address, len);
+    uint32_t val = pci_default_read_config(d, address, len);
+    int i;
+
+    if (!cmd646_is_649(d)) {
+        return val;
+    }
+    for (i = 0; i < len; i++) {
+        uint32_t a = address + i;
+
+        if (a >= CMD649_BM_FIRST && a <= CMD649_BM_LAST) {
+            val &= ~(0xffu << (i * 8));
+            val |= (uint32_t)cmd649_bm_config_byte(d, a) << (i * 8);
+        }
+    }
+    return val;
 }
 
 static void cmd646_pci_config_write(PCIDevice *d, uint32_t addr, uint32_t val,
@@ -241,6 +373,9 @@ static void cmd646_pci_config_write(PCIDevice *d, uint32_t addr, uint32_t val,
     uint32_t i;
 
     pci_default_write_config(d, addr, val, l);
+    if (cmd646_is_649(d)) {
+        cmd649_config_write(d, addr, val, l);
+    }
 
     for (i = addr; i < addr + l; i++) {
         switch (i) {
@@ -255,6 +390,56 @@ static void cmd646_pci_config_write(PCIDevice *d, uint32_t addr, uint32_t val,
     }
 
     cmd646_update_irq(d);
+}
+
+/*
+ * PCI-649 chapter 6: Min_Gnt 02h, Max_Lat 04h, a power management capability
+ * at 60h (D1, D2, DSI; Data Register F0h at scale 11b) and writable timing
+ * registers.  The programming interface stays 8Fh: the model has no
+ * compatibility mode.
+ */
+static bool cmd649_init(PCIDevice *dev, Error **errp)
+{
+    uint8_t *c = dev->config;
+    int i;
+
+    c[PCI_MIN_GNT] = 0x02;
+    c[PCI_MAX_LAT] = 0x04;
+    pci_set_word(c + PCI_STATUS, pci_get_word(c + PCI_STATUS) |
+                 PCI_STATUS_FAST_BACK | PCI_STATUS_DEVSEL_MEDIUM);
+    /*
+     * The rx2600 reads cache line size 00h after its firmware wrote 20h, and
+     * the latency timer Linux set.  Reserved registers read 0 and ignore
+     * writes (chapter 1, PCI Configuration Space).
+     */
+    dev->wmask[PCI_CACHE_LINE_SIZE] = 0;
+    dev->wmask[PCI_LATENCY_TIMER] = 0xff;
+    memset(dev->wmask + PCI_CONFIG_HEADER_SIZE, 0,
+           PCI_CONFIG_SPACE_SIZE - PCI_CONFIG_HEADER_SIZE);
+    if (pci_pm_init(dev, CMD649_PM_CAP, errp) < 0) {
+        return false;
+    }
+    pci_set_word(c + CMD649_PM_CAP + PCI_PM_PMC, 0x0622);
+    pci_set_word(dev->wmask + CMD649_PM_CAP + PCI_PM_CTRL,
+                 PCI_PM_CTRL_STATE_MASK | PCI_PM_CTRL_DATA_SEL_MASK);
+    c[CMD649_PM_CAP + PCI_PM_DATA_REGISTER] = 0xf0;
+
+    dev->wmask[SUBCONF] = SUBCONF_SUBSYS_WE | SUBCONF_CLASS_WE;
+    dev->wmask[CNTRL] = 0xcc;
+    for (i = CMDTIM; i < 0x5c; i++) {
+        dev->wmask[i] = 0xff;
+    }
+    dev->wmask[ARTTIM0] = 0xc0;
+    dev->wmask[ARTTIM0 + 2] = 0xc0;
+    dev->wmask[ARTTIM23] = 0xcc;
+    dev->wmask[0x5a] = 0;
+    dev->wmask[MRDMODE] = 0xf0;
+    dev->wmask[UDIDETCR0] = 0xff;
+    dev->wmask[UDIDETCR1] = 0xff;
+    dev->wmask[BMIDECSR] = 0xf0;
+    memset(dev->wmask + CMD649_SUBSYS_SHADOW, 0xff, 4);
+    cmd649_reset_regs(dev);
+    return true;
 }
 
 /* CMD646 PCI IDE controller */
@@ -311,6 +496,10 @@ static void pci_cmd646_ide_realize(PCIDevice *dev, Error **errp)
         bmdma_init(&d->bus[i], &d->bmdma[i], d);
         ide_bus_register_restart_cb(&d->bus[i]);
     }
+
+    if (cmd646_is_649(dev) && !cmd649_init(dev, errp)) {
+        return;
+    }
 }
 
 static void pci_cmd646_ide_exitfn(PCIDevice *dev)
@@ -353,9 +542,31 @@ static const TypeInfo cmd646_ide_info = {
     .class_init    = cmd646_ide_class_init,
 };
 
+/*
+ * The HP rx2600's core I/O IDE is a CMD649, revision 02h (Rev C) with both
+ * channels native (programming interface 8Fh, rx2600 capture 2026-10-04,
+ * 00:02.0), subsystem 1095:0649.
+ */
+static void cmd649_ide_class_init(ObjectClass *klass, const void *data)
+{
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+
+    k->device_id = PCI_DEVICE_ID_CMD_649;
+    k->revision = 0x02;
+    k->subsystem_vendor_id = PCI_VENDOR_ID_CMD;
+    k->subsystem_id = PCI_DEVICE_ID_CMD_649;
+}
+
+static const TypeInfo cmd649_ide_info = {
+    .name          = "cmd649-ide",
+    .parent        = "cmd646-ide",
+    .class_init    = cmd649_ide_class_init,
+};
+
 static void cmd646_ide_register_types(void)
 {
     type_register_static(&cmd646_ide_info);
+    type_register_static(&cmd649_ide_info);
 }
 
 type_init(cmd646_ide_register_types)

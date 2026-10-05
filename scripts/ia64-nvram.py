@@ -4,7 +4,8 @@
 SPDX-License-Identifier: GPL-2.0-or-later
 
 `nvram=` names a different part on each board: the firmware flash on 460gx,
-the PDH battery-backed SRAM on zx1, followed there by the BMC's tokens.  A file
+followed there by the RTC's battery-backed RAM, and the PDH battery-backed
+SRAM on zx1, followed there by the BMC's tokens.  A file
 written for one is refused by the other, so a store that was kept on zx1
 before the move has to be converted.
 """
@@ -37,6 +38,10 @@ OWN_STORE_SIZE = 0x10000
 OWN_STORE_MAGIC = b"IVARSTOR"
 # In a flash image the same store sits at FFF90000, and the image ends at 4 GiB.
 FLASH_STORE_FROM_END = 0x100000000 - 0xFFF90000
+# QEMU adds the 460gx RTC battery area to a flash image: a tag, then the
+# standard and the extended bank of the south bridge's RTC RAM.
+RTC_BATTERY_SIZE = 512
+RTC_BATTERY_TAG = b"IFB-RTC1"
 # A flash image names its firmware interface table in the reset pointer block.
 FLASH_FIT_FROM_END = 0x30
 FLASH_PTR_ADDR_MASK = 0x00000000FFFFFFFF
@@ -45,6 +50,14 @@ FLASH_PTR_ADDR_MASK = 0x00000000FFFFFFFF
 def read(path):
     with open(path, "rb") as f:
         return f.read()
+
+
+def split_battery(image):
+    """A 460gx file as (flash image, RTC battery area or None)."""
+    flash = image[:-RTC_BATTERY_SIZE]
+    if len(image) > RTC_BATTERY_SIZE and is_flash_image(flash):
+        return flash, image[-RTC_BATTERY_SIZE:]
+    return image, None
 
 
 def own_store_in_flash(image):
@@ -90,7 +103,7 @@ def own_store(image):
         if store[:8] == OWN_STORE_MAGIC:
             return store
         return None
-    return own_store_in_flash(image)
+    return own_store_in_flash(split_battery(image)[0])
 
 
 def describe(path):
@@ -115,11 +128,18 @@ def describe(path):
     elif len(image) == OWN_STORE_SIZE and image[:8] == OWN_STORE_MAGIC:
         lines.append("  project firmware variable store (the 64 KiB form)")
         lines.append("  convert it before it is used on zx1")
-    elif is_flash_image(image):
+    elif is_flash_image(split_battery(image)[0]):
+        flash, battery = split_battery(image)
         lines.append("  firmware flash image: 460gx `nvram=`")
-        if own_store_in_flash(image) is not None:
+        if own_store_in_flash(flash) is not None:
             lines.append("  holds project firmware variables; convert them "
                          "before they are used on zx1")
+        if battery is None:
+            lines.append("  RTC battery: none yet, QEMU adds a new one")
+        elif battery[:8] == RTC_BATTERY_TAG:
+            lines.append("  RTC battery: kept")
+        else:
+            lines.append("  RTC battery: new, not written yet")
     elif not image or set(image) <= {0x00, 0xFF}:
         lines.append("  blank; either board accepts it")
     else:

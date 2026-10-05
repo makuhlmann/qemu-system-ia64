@@ -137,6 +137,7 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
               qatomic_read(&cpu->env.nat[1])) == 0 ?
              IA64_TB_FLAG_NAT_CLEAR : 0;
     flags |= (psr & IA64_PSR_DFL) ? IA64_TB_FLAG_PSR_DFL : 0;
+    flags |= (psr & IA64_PSR_DB) ? IA64_TB_FLAG_PSR_DB : 0;
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,
@@ -457,6 +458,10 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             if (probe) {
                 return false;
             }
+            if (is_ifetch && !(cpu->env.psr & IA64_PSR_IS)) {
+                ia64_raise_unimplemented_target(
+                    &cpu->env, ia64_pa_canonicalize(&cpu->env, addr));
+            }
             excp = is_ifetch ? IA64_EXCP_UNIMPL_INST_ADDR :
                    IA64_EXCP_UNIMPL_DATA_ADDR;
             if (is_ifetch) {
@@ -487,6 +492,10 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     if (virt_translation_enabled && !ia64_va_is_implemented(&cpu->env, addr)) {
         if (probe) {
             return false;
+        }
+        if (is_ifetch && !(cpu->env.psr & IA64_PSR_IS)) {
+            ia64_raise_unimplemented_target(
+                &cpu->env, ia64_va_canonicalize(&cpu->env, addr));
         }
         excp = is_ifetch ? IA64_EXCP_UNIMPL_INST_ADDR :
                IA64_EXCP_UNIMPL_DATA_ADDR;
@@ -830,13 +839,7 @@ static void ia64_cpu_apply_boot_info(IA64CPU *cpu)
     CPUIA64State *env = &cpu->env;
     const IA64BootInfo *info = &cpu->boot_info;
 
-    /*
-     * A board without a PAL_RESET return address makes the RESET call only
-     * (ia64_base.c: the vendor 460GX firmware's recovery-check pass does not
-     * run under emulation).
-     */
-    bool reset_call = cpu->sale_reset_call ||
-                      cpu->boot_info.raw_pal_reset_return == 0;
+    bool reset_call = cpu->sale_reset_call;
 
     cpu->sale_reset_call = false;
     if (!cpu->boot_info_valid || !cpu->boot_info_pending) {
@@ -972,17 +975,6 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
      */
     cpu->env.cr[IA64_CR_LRR0] = 1ULL << 16;
     cpu->env.cr[IA64_CR_LRR1] = 1ULL << 16;
-    /*
-     * Bound of the persistent region-7 KSEG physical alias (see
-     * ia64_sal_boot_identity_pa_type()): the kernel reaches KSEG0 structures
-     * through region-7 VA = PA + IA64_FW_REGION7_DIRECTMAP_BASE.  Clamp the
-     * window to the fixed KSEG0 span (IA64_FW_REGION7_DIRECTMAP_SIZE) and to
-     * backed RAM, whichever is smaller: a window that grows with RAM would
-     * shadow kernel system space and corrupt large-memory guests.
-     */
-    cpu->env.mmu.region7_directmap_limit = IA64_FW_REGION7_DIRECTMAP_BASE +
-        MIN(current_machine ? current_machine->ram_size : 0,
-            IA64_FW_REGION7_DIRECTMAP_SIZE);
     cpu->env.alat_state.alat_full = cpu->alat_full;
     cpu->env.fp.fr[IA64_FR_ONE_INDEX] = IA64_FR_ONE;
     cpu->env.pr[IA64_PR_TRUE] = 1;
@@ -990,6 +982,9 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
     cpu->env.ar_rsc = 0;
     /* CFM.sof = 96 and the rest 0, BOF at GR32 (SDM Vol 2 6.12). */
     cpu->env.cfm_sof = IA64_STACKED_GR_COUNT;
+    for (int i = 0; i < IA64_RR_COUNT; i++) {
+        cpu->env.rr[i] = icc->pal->rr_reset;
+    }
     cpu->env.ar_fpsr = IA64_FPSR_DEFAULT;
     cpu->env.cr_iva = 0;
     cpu->env.instruction_group_start = true;
@@ -1011,10 +1006,17 @@ static void ia64_cpu_reset_hold(Object *obj, ResetType type)
             cpu->env.pmc[i] = icc->pmu->pmc[i].reset;
         }
     }
+    ia64_pmu_reset(&cpu->env);
     cpu->env.pal.pal_proc_copy_valid = false;
     cpu->env.pal.pal_proc_copy_addr = 0;
     cpu->env.pal.pal_interrupt_block_addr = IA64_LOCAL_SAPIC_PA;
     cpu->env.pal.pal_io_block_addr = icc->pal->io_block_pa;
+    cpu->env.pal.proc_feature_status[0] = icc->pal->proc_features.status;
+    for (int i = 0; i < IA64_PAL_IMPL_FEATURE_SETS; i++) {
+        cpu->env.pal.proc_feature_status[1 + i] =
+            icc->pal->impl_features[i].status;
+    }
+    cpu->env.pal.bus_feature_status = icc->pal->bus_features.status;
     /*
      * The no-firmware entry state stands in for a firmware that has
      * registered, on every reset; a firmware entry leaves this zero.
@@ -1070,6 +1072,7 @@ static void ia64_cpu_realize(DeviceState *dev, Error **errp)
     }
 
     cpu->itm_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ia64_itm_timer_cb, cpu);
+    cpu->pmu_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ia64_pmu_timer_cb, cpu);
 
     qemu_init_vcpu(cs);
     cpu_reset(cs);
@@ -1146,7 +1149,8 @@ static const TCGCPUOps ia64_tcg_ops = {
  * (245320-003 sec 5.9) and Itanium 2 (251110-003 sec 5.4.2) implement the
  * t1, nt1, nt2 and nta locality hints.  Loads encode t1, nt1 and nta (bits
  * 0, 1 and 3 of Table 11-69; nt2 is an lfetch hint), stores t1 and nta (bits
- * 0 and 3 of Table 11-68).  Instruction caches report no hints.
+ * 0 and 3 of Table 11-68).  Instruction caches report no hints.  The
+ * madison profile has the vectors that the rx2600 reports instead.
  */
 #define IA64_PAL_CACHE_LOAD_HINTS_T1_NT1_NTA  0x0b
 #define IA64_PAL_CACHE_STORE_HINTS_T1_NTA     0x09
@@ -1159,7 +1163,9 @@ static const TCGCPUOps ia64_tcg_ops = {
  * a 32-entry fully associative L1 ITLB and L1 DTLB that "directly support
  * only a 4KB-page size", over a 128-entry fully associative L2 ITLB and
  * L2 DTLB, each of which may hold up to 64 translation registers and holds
- * every architected page size.  Four unique TCs across two levels.
+ * every architected page size.  Four unique TCs across two levels.  The
+ * rx2600's Madison PAL reports every page size for the L1 TCs and no
+ * preferred-page-size optimization (the IA64_PAL_TC_MADISON pair).
  */
 #define IA64_PAL_TC_ITANIUM2_L1 \
     { .num_entries = 32, .num_ways = 32, .num_sets = 1, \
@@ -1168,62 +1174,165 @@ static const TCGCPUOps ia64_tcg_ops = {
     { .num_entries = 128, .num_ways = 128, .num_sets = 1, \
       .preferred_page_size_optimized = true, .reduced_by_trs = true, \
       .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK }
+#define IA64_PAL_TC_MADISON_L1 \
+    { .num_entries = 32, .num_ways = 32, .num_sets = 1, \
+      .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK }
+#define IA64_PAL_TC_MADISON_L2 \
+    { .num_entries = 128, .num_ways = 128, .num_sets = 1, \
+      .reduced_by_trs = true, .page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK }
+
+/*
+ * A PAL_HALT_INFO power state: typical power in mW, entry and exit latency
+ * in cycles.  The model's placeholder states are 1 W and 1 cycle.
+ */
+#define IA64_PAL_POWER_STATE(coherent, mw, entry, exit) \
+    (IA64_PAL_HALT_IMPLEMENTED | ((coherent) ? IA64_PAL_HALT_COHERENT : 0) | \
+     ((uint64_t)(mw) << 32) | ((uint64_t)(entry) << 16) | (exit))
+#define IA64_PAL_HALT_INFO_PLACEHOLDER \
+    { IA64_PAL_POWER_STATE(true, 1000, 1, 1), \
+      IA64_PAL_POWER_STATE(false, 1000, 1, 1) }
+
+/* PAL_REGISTER_INFO request 2: DCR, ITM, IVA, PTA and the interruption CRs. */
+#define IA64_PAL_CR_IMPLEMENTED_LOW 0x0000000003fb0107ULL
 
 static const IA64PalProfile ia64_pal_profile_madison = {
-    .freq_base_hz = 100000000ULL,
+    /*
+     * The input clock is the 200 MHz system bus clock (251110-003 6.10), and
+     * the core runs at 13/2 of it, the rx2600's 1.3 GHz part (capture
+     * 2026-10-03, CPU-6: PAL_FREQ_RATIOS 13/2, 1/1, 13/2; the 3 MB L3 below
+     * is that part's); PAL_FREQ_RATIOS relates every rate to the input clock.
+     */
+    .freq_base_hz = 200000000ULL,
     .io_block_pa = IA64_PAL_IO_BLOCK_ITANIUM2,
-    /* Set 16 exists and holds no feature this model implements. */
-    .impl_feature_sets = 1U << 0,
-    .proc_ratio_num = 16, .proc_ratio_den = 1,   /* 1.6 GHz */
-    .bus_ratio_num = 4,   .bus_ratio_den = 1,     /* 400 MHz */
-    .itc_ratio_num = 16,  .itc_ratio_den = 1,     /* ITC at the core clock */
+    /*
+     * PAL_PROC_GET_FEATURES and PAL_BUS_GET_FEATURES of the rx2600 (capture
+     * 2026-10-03, CPU-15 and CPU-16): set 0, sets 16 and 17, -2 for every
+     * set above; the statuses as the vendor firmware leaves them.
+     */
+    .impl_feature_sets = (1U << 0) | (1U << 1),
+    .proc_features = { .avail = 0x1180c60000000000ULL,
+                       .status = 0x0000060000000000ULL,
+                       .control = 0x1180c00000000000ULL },
+    .impl_features = {
+        [0] = { .avail = 0xef, .status = 0xc8, .control = 0xef },
+        [1] = { .avail = 0x7, .status = 0x0, .control = 0x7 },
+    },
+    .feature_set_beyond_invalid = true,
+    .bus_features = { .avail = 0xbdf0000060000000ULL,
+                      .status = 0x0000000040000000ULL,
+                      .control = 0xbdb0000040000000ULL },
+    .proc_ratio_num = 13, .proc_ratio_den = 2,   /* 1.3 GHz */
+    .bus_ratio_num = 1,   .bus_ratio_den = 1,     /* 200 MHz */
+    .itc_ratio_num = 13,  .itc_ratio_den = 2,     /* ITC at the core clock */
     .has_post_merced_pal = true,
-    .pal_vendor = 1,
-    .pal_a_model = 2, .pal_a_revision = 0x23,
-    .pal_b_model = 2, .pal_b_revision = 0x23,
+    /*
+     * The rx2600's Madison (capture 2026-10-03, CPU-4): vendor 0xFF, PAL_A
+     * 5.37 and PAL_B 5.65, as in the FIT, and a minimum of 5.00 for both.
+     * Its PAL has no PAL_BRAND_INFO, and PAL_PREFETCH_VISIBILITY answers that
+     * remote processors need no call.
+     */
+    .pal_vendor = 0xff,
+    .pal_a_model = 5, .pal_a_revision = 0x37,
+    .pal_b_model = 5, .pal_b_revision = 0x65,
+    .pal_min_a_model = 5, .pal_min_a_revision = 0x00,
+    .pal_min_b_model = 5, .pal_min_b_revision = 0x00,
+    .prefetch_vis_not_needed = true,
     .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 4,
+    /*
+     * PAL_CACHE_INFO and PAL_CACHE_PROT_INFO of the rx2600 (capture
+     * 2026-10-03, CPU-9 and CPU-10): a 128-byte fc stride and an alias
+     * boundary of 4 KB on every level; L1D parity, L2 and L3 data ECC.
+     */
     .cache = {
         [0] = {
             [0] = { .size = 16 * KiB, .associativity = 4, .line_shift = 6,
-                    .stride_shift = 6, .store_latency = 0xff,
-                    .load_latency = 1, .tag_lsb = 12 },
+                    .stride_shift = 7, .attribute = 3, .store_latency = 0xff,
+                    .load_latency = 1, .tag_lsb = 12, .alias_boundary = 12,
+                    .load_hints = 0x01,
+                    .protection = { 0x08000000, 0x40000000 } },
             [1] = { .size = 16 * KiB, .associativity = 4, .line_shift = 6,
-                    .stride_shift = 6, .store_latency = 1,
-                    .load_latency = 1, .tag_lsb = 12,
-                    IA64_PAL_CACHE_DATA_HINTS },
+                    .stride_shift = 7, .store_latency = 3,
+                    .load_latency = 1, .tag_lsb = 12, .alias_boundary = 12,
+                    .load_hints = 0x01,
+                    .protection = { 0x04800040, 0x441c4c26 } },
         },
         /* Unified L2: reported on the data/unified type only. */
         [1] = {
             [1] = { .size = 256 * KiB, .associativity = 8, .line_shift = 7,
-                    .stride_shift = 7, .attribute = 1, .store_latency = 1,
-                    .load_latency = 5, .tag_lsb = 15, .unified = true,
-                    IA64_PAL_CACHE_DATA_HINTS },
+                    .stride_shift = 7, .attribute = 1, .store_latency = 7,
+                    .load_latency = 5, .tag_lsb = 15, .alias_boundary = 12,
+                    .unified = true, .store_hints = 0x02, .load_hints = 0x08,
+                    .protection = { 0x0c700020, 0x481c4f23 } },
         },
         [2] = {
-            /* L3 load latency: 251110-003 Table 2-5 (12 is McKinley's). */
             [1] = { .size = 3 * MiB, .associativity = 12, .line_shift = 7,
-                    .stride_shift = 7, .attribute = 1, .store_latency = 1,
-                    .load_latency = 14, .tag_lsb = 18, .unified = true,
-                    IA64_PAL_CACHE_DATA_HINTS },
+                    .stride_shift = 7, .attribute = 1, .store_latency = 7,
+                    .load_latency = 14, .tag_lsb = 18, .alias_boundary = 12,
+                    .unified = true, .store_hints = 0x02, .load_hints = 0x02,
+                    .protection = { 0x0c500080, 0x4c7c5220 } },
         },
     },
+    /*
+     * PAL_VM_SUMMARY, PAL_VM_INFO and PAL_VM_TR_READ of the rx2600 (capture
+     * 2026-10-03, CPU-7, CPU-8 and CPU-24): hash_tag_id 2; the L1 TCs
+     * report every page size and the L2 TCs no preferred-page-size
+     * optimization; TR reads mark no ITR field and the DTR access rights
+     * not valid.
+     */
     .tc_levels = 2,
     .unique_tcs = 4,
     .tc = {
-        [0] = { IA64_PAL_TC_ITANIUM2_L1, IA64_PAL_TC_ITANIUM2_L1 },
-        [1] = { IA64_PAL_TC_ITANIUM2_L2, IA64_PAL_TC_ITANIUM2_L2 },
+        [0] = { IA64_PAL_TC_MADISON_L1, IA64_PAL_TC_MADISON_L1 },
+        [1] = { IA64_PAL_TC_MADISON_L2, IA64_PAL_TC_MADISON_L2 },
     },
-    /* 251110-003 Table 10-28 */
-    .perf_counter_width = 48,
+    .hash_tag_id = 2,
+    .tr_read_fixed_valid = true,
+    .tr_read_valid = { 0x0, 0xe },
+    /*
+     * PAL_PERF_MON_INFO and PAL_REGISTER_INFO of the rx2600 (capture
+     * 2026-10-03, CPU-12 and CPU-14): 47-bit counters (251110-003 Table
+     * 10-7) and PMC0-15; CR9 is implemented.
+     */
+    .perf_counter_width = 47,
+    .perf_pmc_mask = 0xffff,
     .perf_retired_mask = 0xf0,
+    .cr_implemented_low = 0x0000000003fb0307ULL,
+    /*
+     * PAL_HALT_INFO of the rx2600 (capture 2026-10-03, CPU-19): states 0
+     * (PAL_HALT_LIGHT) and 2, both coherent at 35 W; no state 1.
+     */
+    .halt_info = {
+        [0] = IA64_PAL_POWER_STATE(true, 35000, 9000, 8700),
+        [2] = IA64_PAL_POWER_STATE(true, 35000, 14000, 8700),
+    },
+    /*
+     * RID 0 with 4 KB pages: rr1-7 at the rx2600's EFI shell, where the
+     * vendor firmware has written only rr0 (capture 2026-10-03, CPU-25).
+     */
+    .rr_reset = 0x30,
+    /* PAL_MEM_FOR_TEST of the rx2600 (capture 2026-10-03, CPU-20). */
+    .test_bytes_needed = 6 * MiB,
+    .test_alignment = 8 * MiB,
+    /* The HP Madison PAL_B 5.65 (capture 2026-10-04, CPU-20). */
+    .copy_bytes = 0x3e000,
+    .copy_ia32_bytes = 0x4c000,
+    /*
+     * The rx2600's answers 0xFFF61020 under the vendor SAL, which has
+     * registered a min-state area (capture 2026-10-03, CPU-21).
+     */
+    .mc_error_info_corrected_psp = true,
 };
 
 static const IA64PalProfile ia64_pal_profile_montecito = {
     .freq_base_hz = 100000000ULL,
     .io_block_pa = IA64_PAL_IO_BLOCK_ITANIUM2,
     .impl_feature_sets = 1U << 2,                  /* set 18 */
+    /* Feature set 18, bit 18: Hyper-Threading is implemented. */
+    .impl_features = {
+        [2] = { .avail = 1ULL << 18, .status = 1ULL << 18 },
+    },
     .proc_ratio_num = 16, .proc_ratio_den = 1,    /* 1.6 GHz */
     .bus_ratio_num = 16,  .bus_ratio_den = 3,      /* 533.33 MHz */
     .itc_ratio_num = 16,  .itc_ratio_den = 1,      /* ITC at the core clock */
@@ -1231,6 +1340,7 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
     .pal_vendor = 1,
     .pal_a_model = 2, .pal_a_revision = 0x23,
     .pal_b_model = 2, .pal_b_revision = 0x23,
+    .has_brand_info = true,
     .memory_attributes = IA64_PAL_MEM_ATTRIB_WB_UC_UCE_WC_NATPAGE,
     .cache_levels = 3,
     .unique_caches = 5,
@@ -1265,13 +1375,22 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
         [0] = { IA64_PAL_TC_ITANIUM2_L1, IA64_PAL_TC_ITANIUM2_L1 },
         [1] = { IA64_PAL_TC_ITANIUM2_L2, IA64_PAL_TC_ITANIUM2_L2 },
     },
+    .hash_tag_id = 8,
     .perf_counter_width = 48,
+    .perf_pmc_mask = 0x3fff,
     .perf_retired_mask = 0xf0,
+    .cr_implemented_low = IA64_PAL_CR_IMPLEMENTED_LOW,
+    .halt_info = IA64_PAL_HALT_INFO_PLACEHOLDER,
+    .test_alignment = 1,
+    /* No Montecito PAL_B was at hand: the Madison one's. */
+    .copy_bytes = 0x3e000,
+    .copy_ia32_bytes = 0x4c000,
 };
 
 /*
- * Original Itanium (Merced), 800 MHz / 133 MHz bus / 4 MB L3 SKU (249634-002
- * datasheet; CPUID table 249720-009).  brl is not implemented
+ * Original Itanium (Merced), 800 MHz / 133 MHz bus / 2 MB L3 SKU, the i2000
+ * part (249634-002 datasheet; HP i2000 Owner's Guide §11.1.3; CPUID table
+ * 249720-009).  brl is not implemented
  * (cpuid_features = 0) and the post-Merced PAL procedures are absent
  * (245318-001/-002 §11.8).
  *
@@ -1281,10 +1400,10 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
  *        2-cycle integer load latency
  *   L2   96 KB, 6-way, 64 B lines, write-back, write-allocate,
  *        6-cycle integer load latency
- *   L3   4 MB,  4-way, 64 B lines, 21-cycle integer load latency
+ *   L3   2 MB,  4-way, 64 B lines, 21-cycle integer load latency
  * tag_lsb is the first tag bit above the index and offset: 128 sets of 32 B
- * for the 16 KB caches (12), 256 sets of 64 B for L2 (14), 16384 sets of 64 B
- * for L3 (20).
+ * for the 16 KB caches (12), 256 sets of 64 B for L2 (14), 8192 sets of 64 B
+ * for L3 (19).
  *
  * Translation caches, 248701-002 sec 2.5.6: a single-level 64-entry fully
  * associative ITLB holding the instruction TRs, and a two-level data TLB --
@@ -1294,13 +1413,16 @@ static const IA64PalProfile ia64_pal_profile_montecito = {
  * there is no second instruction level.
  */
 static const IA64PalProfile ia64_pal_profile_merced = {
-    .freq_base_hz = 100000000ULL,
+    /*
+     * The input clock is the 133 MHz system bus clock (249634-002 2.4.2), and
+     * the core runs at 12/2 of it, the bus-to-core setting 2/12 of 248701-002
+     * Table 5-4.  The ITC counts processor clocks (245473-002).
+     */
+    .freq_base_hz = 133333333ULL,
     .io_block_pa = IA64_PAL_IO_BLOCK_MERCED,
-    .proc_ratio_num = 8,  .proc_ratio_den = 1,     /* 800 MHz */
-    .bus_ratio_num = 4,   .bus_ratio_den = 3,       /* 133.33 MHz */
-    .itc_ratio_num = 8,   .itc_ratio_den = 1,       /* ITC at the core clock
-                                                     * (245473-002: the ITC counts
-                                                     * processor clocks) */
+    .proc_ratio_num = 12, .proc_ratio_den = 2,     /* 800 MHz */
+    .bus_ratio_num = 1,   .bus_ratio_den = 1,       /* 133.33 MHz */
+    .itc_ratio_num = 12,  .itc_ratio_den = 2,       /* ITC at the core clock */
     .has_post_merced_pal = false,
     /*
      * PAL 8.8.30, the C2 stepping's firmware version (249720-009 revision
@@ -1337,9 +1459,9 @@ static const IA64PalProfile ia64_pal_profile_merced = {
                     IA64_PAL_CACHE_DATA_HINTS },
         },
         [2] = {
-            [1] = { .size = 4 * MiB, .associativity = 4, .line_shift = 6,
+            [1] = { .size = 2 * MiB, .associativity = 4, .line_shift = 6,
                     .stride_shift = 6, .attribute = 1, .store_latency = 1,
-                    .load_latency = 21, .tag_lsb = 20, .unified = true,
+                    .load_latency = 21, .tag_lsb = 19, .unified = true,
                     IA64_PAL_CACHE_DATA_HINTS },
         },
     },
@@ -1363,9 +1485,22 @@ static const IA64PalProfile ia64_pal_profile_merced = {
                     .page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK },
         },
     },
+    .hash_tag_id = 8,
     /* 245320-003 Table 6-24 */
     .perf_counter_width = 32,
-    .perf_retired_mask = 0x10,
+    .perf_pmc_mask = 0x3fff,
+    /*
+     * The table's retired mask of 10h (PMC4 only) is PAL erratum 29 of
+     * 249720-009; PAL 8.8.30, the version this profile reports, has it fixed
+     * and gives PMC4 and PMC5.
+     */
+    .perf_retired_mask = 0x30,
+    .cr_implemented_low = IA64_PAL_CR_IMPLEMENTED_LOW,
+    .halt_info = IA64_PAL_HALT_INFO_PLACEHOLDER,
+    .test_alignment = 1,
+    /* The PAL_B of the i2000's bios130.BIN. */
+    .copy_bytes = 0x3a800,
+    .copy_ia32_bytes = 0x44000,
 };
 
 static const Property ia64_cpu_properties[] = {
@@ -1373,11 +1508,12 @@ static const Property ia64_cpu_properties[] = {
 };
 
 /*
- * Madison's IA-32 cache descriptors.  The L3 descriptor reports 3 MB even on
- * larger-cache parts, matching hardware erratum 6.  EDX is architecturally
- * reserved for this implementation.
+ * The IA-32 engine of the rx2600's Madison (1.3 GHz, 3 MB, B1), under Linux
+ * and Windows alike (rx2600 capture 2026-10-03, CPU-3): CPUID(1) EAX
+ * 0x00100F15 with PAE in the feature word, and these leaf-2 descriptors.
  */
-#define IA64_MADISON_IA32_CPUID_LEAF2 { 0x7e776701, 0x0000008d, 0, 0x80000000 }
+#define IA64_MADISON_IA32_CPUID_VERSION 0x00100f15
+#define IA64_MADISON_IA32_CPUID_LEAF2 { 0x77aca801, 0, 0x0000a4a0, 0x008d7e67 }
 
 static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
 {
@@ -1408,10 +1544,12 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
      */
     icc->cpuid_version = 0x000000001f010504ULL;
     icc->cpuid_features = IA64_CPUID4_LB;
-    icc->ia32_cpuid_version = 0x00000673;
+    icc->ia32_cpuid_version = IA64_MADISON_IA32_CPUID_VERSION;
     memcpy(icc->ia32_cpuid_leaf2,
            (const uint32_t[4])IA64_MADISON_IA32_CPUID_LEAF2,
            sizeof(icc->ia32_cpuid_leaf2));
+    icc->ia32_cpuid_pae = true;
+    icc->ia32_cpuid_high_leaf_repeats = true;
     icc->itr_count = 64;
     icc->dtr_count = 64;
     icc->insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK;
@@ -1426,6 +1564,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     icc->is_montecito = false;
     icc->unaligned_windows = true;
     icc->unaligned_uc_exempt = false;
+    icc->dbr_cross16 = false;
     icc->pal = &ia64_pal_profile_madison;
 }
 
@@ -1434,6 +1573,8 @@ typedef struct IA64CPUModelDef {
     uint64_t cpuid_features;
     uint32_t ia32_cpuid_version;
     uint32_t ia32_cpuid_leaf2[4];
+    bool ia32_cpuid_pae;
+    bool ia32_cpuid_high_leaf_repeats;
     uint8_t itr_count;
     uint8_t dtr_count;
     uint64_t insertable_page_mask;
@@ -1449,6 +1590,7 @@ typedef struct IA64CPUModelDef {
     bool unaligned_windows;
     uint8_t unaligned_int_block;
     bool unaligned_uc_exempt;
+    bool dbr_cross16;
     const IA64PalProfile *pal;
     const IA64PmuLayout *pmu;
 } IA64CPUModelDef;
@@ -1463,6 +1605,8 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->ia32_cpuid_version = model->ia32_cpuid_version;
     memcpy(icc->ia32_cpuid_leaf2, model->ia32_cpuid_leaf2,
            sizeof(icc->ia32_cpuid_leaf2));
+    icc->ia32_cpuid_pae = model->ia32_cpuid_pae;
+    icc->ia32_cpuid_high_leaf_repeats = model->ia32_cpuid_high_leaf_repeats;
     icc->itr_count = model->itr_count;
     icc->dtr_count = model->dtr_count;
     icc->insertable_page_mask = model->insertable_page_mask;
@@ -1478,6 +1622,7 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->unaligned_windows = model->unaligned_windows;
     icc->unaligned_int_block = model->unaligned_int_block;
     icc->unaligned_uc_exempt = model->unaligned_uc_exempt;
+    icc->dbr_cross16 = model->dbr_cross16;
     icc->pal = model->pal;
     icc->pmu = model->pmu;
 }
@@ -1522,6 +1667,9 @@ static const IA64PmuLayout ia64_pmu_layout_merced = {
         [16] = { .mask = 0xf },                         /* Figure 6-24 */
         [17] = { .mask = 0xe007fffffffffffdULL, IA64_MERCED_PMU_ADDR_SEXT },
     },
+    /* Figures 6-12 and 6-13: 32-bit counters, es in bits 14:8. */
+    .count_bits = 32,
+    .es_mask = 0x7f,
 };
 
 /*
@@ -1534,16 +1682,22 @@ static const IA64PmuLayout ia64_pmu_layout_merced = {
 static const IA64PmuLayout ia64_pmu_layout_madison = {
     /*
      * Reset values, 251110-003 §10.3.11 and PMC4.enable (§10.3.1: set at
-     * reset); the rest is undefined.
+     * reset); the rest is undefined.  PAL writes all ones to PMC8 and PMC9,
+     * which on the rx2600 read back without bits 31:30, and PMC9 without
+     * ig_ad and inv either; its PMC14 reads 0xdb6 in all four 16-bit lanes
+     * (capture 2026-10-03, CPU-26).
      */
     .pmc = {
         [0] = { .mask = 0xf1 },
         [4] = { .mask = UINT64_MAX, .reset = 1ULL << 23 },
         [5 ... 7] = { .mask = UINT64_MAX },
-        [8 ... 9] = { .mask = UINT64_MAX, .reset = UINT64_MAX },
+        [8] = { .mask = 0xffffffff3fffffffULL,
+                .reset = 0xffffffff3fffffffULL },
+        [9] = { .mask = 0xffffffff3ffffffcULL,
+                .reset = 0xffffffff3ffffffcULL },
         [10 ... 12] = { .mask = UINT64_MAX },
         [13] = { .mask = UINT64_MAX, .reset = 0x2078fefefefeULL },
-        [14] = { .mask = UINT64_MAX, .reset = 0xdb6 },
+        [14] = { .mask = UINT64_MAX, .reset = 0x0db60db60db60db6ULL },
         [15] = { .mask = UINT64_MAX, .reset = 0xfffffff0 },
     },
     .pmd = {
@@ -1552,6 +1706,14 @@ static const IA64PmuLayout ia64_pmu_layout_madison = {
                       .sext_mask = 0xffff000000000000ULL, .sext_bit = 47 },
         [8 ... 17] = { .mask = UINT64_MAX },
     },
+    /*
+     * Table 10-7: the count is bits 46:0 and bit 47 records the carry;
+     * Figure 10-11: es in bits 15:8, PMC4.enable in bit 23.
+     */
+    .count_bits = 47,
+    .overflow_bit = true,
+    .es_mask = 0xff,
+    .pmc4_enable = 1ULL << 23,
 };
 
 /*
@@ -1569,9 +1731,10 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
      * own ld.s deferral is DCR-gated -- the behaviour of an sd=0 processor.
      */
     .cpuid_features = IA64_CPUID4_LB,
-    /* P6-class IA-32 engine identity: family 6, model 7, stepping 3. */
-    .ia32_cpuid_version = 0x00000673,
+    .ia32_cpuid_version = IA64_MADISON_IA32_CPUID_VERSION,
     .ia32_cpuid_leaf2 = IA64_MADISON_IA32_CPUID_LEAF2,
+    .ia32_cpuid_pae = true,
+    .ia32_cpuid_high_leaf_repeats = true,
     .itr_count = 64,
     .dtr_count = 64,
     .insertable_page_mask = IA64_INSERTABLE_PAGE_SIZE_MASK,
@@ -1584,6 +1747,7 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .has_native_ia32 = true,
     .has_virtualization = false,
     .unaligned_windows = true,
+    .dbr_cross16 = true,
     .pal = &ia64_pal_profile_madison,
     .pmu = &ia64_pmu_layout_madison,
 };
@@ -1616,7 +1780,7 @@ static const IA64CPUModelDef ia64_cpu_model_montecito = {
 };
 
 /*
- * Original Itanium ("Merced"), 800 MHz / 4 MB L3, C2 stepping.  Family 0x07,
+ * Original Itanium ("Merced"), 800 MHz / 2 MB L3, C2 stepping.  Family 0x07,
  * model 0, revision 8, CPUID[4] is the last register (249720-009 spec update).
  * cpuid_features = 0: brl is not implemented (CPUID[4].lb = 0, 245319-002 brl
  * page), which is what Windows' KF_BRL check expects on Merced.  Asymmetric TR
@@ -1634,28 +1798,16 @@ static const IA64CPUModelDef ia64_cpu_model_merced = {
      */
     .ia32_cpuid_version = 0x00000708,
     /*
-     * 245320-003 §8.4 Table 8-2; <L2> in EBX is 0x89, the 4 MB cache of
+     * 245320-003 §8.4 Table 8-2; <L2> in EBX is 0x88, the 2 MB cache of
      * this model's PAL_CACHE_INFO.
      */
-    .ia32_cpuid_leaf2 = { 0x00151001, 0x0000891a, 0x009b9690, 0x80000000 },
+    .ia32_cpuid_leaf2 = { 0x00151001, 0x0000881a, 0x009b9690, 0x80000000 },
     .itr_count = 8,
     .dtr_count = 48,
     .insertable_page_mask = IA64_MERCED_INSERTABLE_PAGE_SIZE_MASK,
     .purgeable_page_mask = IA64_MERCED_PURGEABLE_PAGE_SIZE_MASK,
-    /*
-     * Merced implements 44 physical address bits (245320-002 sec 3.2), but
-     * this machine cannot yet be described inside a 44-bit physical space:
-     * ia64-vpc places the PCI I/O port window at 0x8000_1000_0000 and the
-     * PAL I/O block at 0x8000_0C00_0000, both of which set bit 47.
-     * Narrowing impl_pa_bits makes the firmware's own UART and I/O accesses
-     * take Unimplemented Data Address faults before the loader ever runs.
-     * Relocating those windows is a machine-wide change -- hw/ia64, the
-     * firmware and the ACPI _CRS all describe them -- so until that lands
-     * the physical width stays at what this platform needs.  The virtual
-     * width, region-ID width and key width do not depend on the platform
-     * layout and are Merced's.
-     */
-    .impl_pa_bits = IA64_IMPL_PA_BITS,
+    /* 245320-002 sec 3.2: 44 physical and 54 (51 + 3) virtual bits. */
+    .impl_pa_bits = IA64_MERCED_IMPL_PA_BITS,
     .impl_va_msb = IA64_MERCED_IMPL_VA_MSB,
     .impl_rid_bits = IA64_MERCED_IMPL_RID_BITS,
     .impl_key_bits = IA64_MERCED_IMPL_KEY_BITS,

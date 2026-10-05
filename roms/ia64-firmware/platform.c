@@ -19,6 +19,7 @@
 #include "fw-platform-layout.h"
 #include "linker-symbols.h"
 #include "fw-platform-handoff.h"
+#include "fw-sal-init.h"
 
 typedef struct {
     UINT64 Status;
@@ -48,7 +49,10 @@ typedef struct {
 #define SAL_PHYSICAL_ID_INFO        0x01000013ULL
 #define SAL_UPDATE_PAL              0x01000020ULL
 #define SAL_FREQ_BASE_PLATFORM      0
+#define SAL_FREQ_BASE_ITC           1
+#define SAL_FREQ_BASE_RTC           2
 #define PLATFORM_BASE_FREQUENCY     100000000ULL
+#define FW_PAL_FREQ_BASE            0x00d
 #define SAL_UPDATE_PAL_WRITE_FAILURE ((UINT64)-10)
 
 #define SAL_VECTOR_OS_MCA           0
@@ -179,11 +183,28 @@ BOOLEAN fw_acpi_sci_override(UINT32 *Gsi, UINT16 *Flags)
 }
 
 /*
- * The vendor firmware's chipset-init pokes for the IFB's ACPI block, in its
- * order (bios130.BIN 0x2c7a80): ACPI Enable off, ACPI Base A00h, ACPI Enable
- * on.  The block's SCI_EN stays clear: the OS raises it through the SMI
- * command port, as on the real board.
+ * The GART SRAM is optional and no pin reports it (Datasheet p.2-12), so it
+ * is found by writing an entry and reading it back, as the vendor firmware
+ * does (`sal_b` 4B6750).  A board without it gets AGPSIZ bit 4 (SRAM I/O
+ * off) and no aperture: "The GXB will fully work when there is no SRAM"
+ * (SSDM 7.1.1).
  */
+static BOOLEAN fw_platform_gart_sram_present(void)
+{
+    UINT64 base = IA64_460GX_GART_SRAM_BASE;
+    volatile UINT32 *entry;     /* an SRAM cell on the GXB, not DRAM */
+    BOOLEAN present;
+
+    if (fw_data_translation_enabled()) {
+        base |= IA64_REGION6_BASE;
+    }
+    entry = (volatile UINT32 *)(UINTN)base;     /* each access reaches it */
+    *entry = 0x5a5a5aU;
+    present = (*entry & 0xffffffU) == 0x5a5a5aU;
+    *entry = 0;
+    return present;
+}
+
 /*
  * Give the 460GX's expander ports their bus numbers, as POST does before it
  * scans them: each port claims configuration cycles for the bus range
@@ -192,7 +213,9 @@ BOOLEAN fw_acpi_sci_override(UINT32 *Gsi, UINT16 *Flags)
  * the two WXBs, 14h the GXB.  Port 10h is the compatibility bus, bus 0
  * whatever its pair says.  The numbers are the ones this firmware's DSDT
  * reports for the roots; the chipset's PCIS windows stay unprogrammed so
- * the DRAM band keeps the layout the memory map describes.
+ * the DRAM band keeps the layout the memory map describes.  Then the GXB's
+ * function 1 gets its AGP aperture, 256 MB from BAPBASE, in the variable
+ * gap below the PCI windows (SSDM 7.2.1).
  */
 void fw_platform_init_expander_ports(void)
 {
@@ -215,10 +238,69 @@ void fw_platform_init_expander_ports(void)
         pci_config_write_value(0, IA64_460GX_CBN_BUS, ports[i].Device, 0,
                                0x49, 1, ports[i].Bus);
     }
+    if (!fw_platform_gart_sram_present()) {
+        pci_config_write_value(0, IA64_460GX_CBN_BUS, 0x14, 1, 0xa2, 1, 0x10);
+        return;
+    }
+    pci_config_write_value(0, IA64_460GX_CBN_BUS, 0x14, 1, 0xa2, 1, 0x09);
+    pci_config_write_value(0, IA64_460GX_CBN_BUS, 0x14, 1, 0x98, 4,
+                           (UINT32)IA64_460GX_AGP_APERTURE_BASE);
+    pci_config_write_value(0, IA64_460GX_CBN_BUS, 0x14, 1, 0x9c, 4,
+                           IA64_460GX_AGP_APERTURE_BASE >> 32);
 }
 
+/*
+ * The legacy I/O block, uncacheable, for SALE_PMI's physical accesses to the
+ * IFB; 0 on a board whose PMI pin has no source.
+ */
+UINT64 mFwSalPmiIoBase;
+
+/*
+ * The board's LPC47B27x comes out of reset with every logical device
+ * inactive (datasheet Table 20-1).  Program it as the vendor's chipset-init
+ * script does (bios130.BIN 0x2c85a0, 0x2c8bd0): 16-bit address
+ * qualification (CR24 = 44h), the runtime block at 800h, UART1 at 3F8h on
+ * IRQ 4 and the keyboard on IRQ 1.  The mouse IRQ (72h) is 12, which our
+ * ACPI tables report; the vendor script leaves it clear.
+ */
+#define FW_SIO_CONFIG_PORT 0x2e
+#define FW_SIO_ENTER_KEY   0x55
+#define FW_SIO_EXIT_KEY    0xaa
+
+static void fw_platform_init_super_io(void)
+{
+    static const UINT8 writes[][2] = {
+        { 0x24, 0x44 },
+        { 0x07, 0x0a }, { 0x60, 0x08 }, { 0x61, 0x00 }, { 0x30, 0x01 },
+        { 0x07, 0x04 }, { 0x60, IA64_460GX_COM1_IO_BASE >> 8 },
+        { 0x61, IA64_460GX_COM1_IO_BASE & 0xff },
+        { 0x70, IA64_460GX_COM1_IRQ }, { 0x30, 0x01 },
+        { 0x07, 0x07 }, { 0x70, 0x01 }, { 0x72, 0x0c }, { 0x30, 0x01 },
+    };
+    volatile UINT8 *index =
+        (volatile UINT8 *)(UINTN)(LEGACY_IO_BASE + FW_SIO_CONFIG_PORT);
+    volatile UINT8 *data = index + 1;
+    UINTN i;
+
+    *index = FW_SIO_ENTER_KEY;
+    for (i = 0; i < FW_ARRAY_SIZE(writes); i++) {
+        *index = writes[i][0];
+        *data = writes[i][1];
+    }
+    *index = FW_SIO_EXIT_KEY;
+}
+
+/*
+ * The vendor firmware's chipset-init pokes for the IFB's ACPI block, in its
+ * order (bios130.BIN 0x2c7a80): ACPI Enable off, ACPI Base A00h, ACPI Enable
+ * on.  Then the APMC SMI its SAL_B enables (run-time 0x3FF17CE0: APMC_EN,
+ * then SMI_EN): the block's SCI_EN stays clear until the OS writes
+ * ACPI_ENABLE to the SMI command port and SALE_PMI sets it.
+ */
 void fw_platform_init_south_bridge(void)
 {
+    volatile UINT16 *glbctl;
+
     if (!fw_platform_is_460gx()) {
         return;
     }
@@ -229,6 +311,13 @@ void fw_platform_init_south_bridge(void)
                            IA64_460GX_ACPI_PM_IO_BASE);
     pci_config_write_value(0, 0, IA64_460GX_IFB_SLOT,
                            IA64_460GX_IFB_LPC_FUNCTION, 0x44, 1, 1);
+    mFwSalPmiIoBase = (1ULL << 63) | LEGACY_IO_BASE;
+    glbctl = (volatile UINT16 *)(UINTN)(LEGACY_IO_BASE +
+                                        IA64_460GX_ACPI_PM_IO_BASE +
+                                        IA64_460GX_ACPI_GLBCTL_OFFSET);
+    *glbctl |= IA64_460GX_GLBCTL_APMC_EN;
+    *glbctl |= IA64_460GX_GLBCTL_SMI_EN;
+    fw_platform_init_super_io();
 }
 
 /*
@@ -327,9 +416,8 @@ BOOLEAN fw_debug_port_io_port(UINT64 *Port)
 void fw_platform_set_probed(UINT64 RamSize, UINT64 Chipset)
 {
     mGuestRamSize = RamSize & ~0xfffULL;
-    mGuestLowRamEnd = mGuestRamSize > FW_LOW_RAM_LIMIT ? FW_LOW_RAM_LIMIT
-                                                       : mGuestRamSize;
     mChipsetProbed = Chipset;
+    mGuestLowRamEnd = fw_guest_low_ram_end();
 }
 
 
@@ -385,8 +473,9 @@ UINT16 fw_handoff_boot_timeout(void)
 
 UINT64 fw_guest_low_ram_end(void)
 {
-    return mGuestRamSize > FW_LOW_RAM_LIMIT ? FW_LOW_RAM_LIMIT
-                                            : mGuestRamSize;
+    UINT64 top = fw_platform_is_zx1() ? IA64_ZX1_MEMORY0_END : FW_LOW_RAM_LIMIT;
+
+    return mGuestRamSize > top ? top : mGuestRamSize;
 }
 
 UINT64 fw_guest_ram_size(void)
@@ -426,28 +515,30 @@ void fw_init_guest_high_ram_ranges(UINT64 RamSize)
         mGuestHighRam[i].End = 0;
     }
 
+    remaining = RamSize > mGuestLowRamEnd ? RamSize - mGuestLowRamEnd : 0;
+    if (fw_platform_is_zx1()) {
+        /*
+         * The mio fills Memory1 at 0x40_4000_0000 before Memory2 at 4 GiB
+         * (mio ERS 2.1); the ranges are listed in address order.  Keep in
+         * lockstep with longspeak_map_low_ram() in hw/ia64/longspeak.c.
+         */
+        UINT64 memory1 = remaining < IA64_ZX1_MEMORY1_SIZE
+                         ? remaining : IA64_ZX1_MEMORY1_SIZE;
+        UINT64 memory2 = remaining - memory1;
+
+        fw_add_guest_high_ram_range(IA64_ZX1_MEMORY2_BASE,
+                                    IA64_ZX1_MEMORY2_END, &memory2);
+        fw_add_guest_high_ram_range(IA64_ZX1_MEMORY1_BASE,
+                                    IA64_ZX1_MEMORY1_BASE +
+                                    IA64_ZX1_MEMORY1_SIZE, &memory1);
+        return;
+    }
     /*
      * Match real 460GX: low DRAM is contiguous from 0 to the PCI/MMIO aperture
      * (mGuestLowRamEnd), and anything displaced by the top-of-memory gap is
      * remapped ABOVE 4 GiB.  There is no sub-4 GiB DRAM island above the
      * aperture.
-     *
-     * The zx1 machine additionally carves the 1 GiB SBA "safe IOVA space" hole
-     * out of the low band (fw_zx1_iova_hole_active(): zx1 with RAM past the
-     * aperture), so its low band holds IA64_SBA_IOVA_SIZE fewer bytes and that
-     * much more DRAM is displaced above 4 GiB.  In that regime mGuestLowRamEnd
-     * is the aperture, so subtracting the hole size is exact.  (Keep this in
-     * lockstep with ia64_vpc_map_ram() in hw/ia64/ia64_base.c and
-     * efi_add_low_ram_band() above.)
      */
-    {
-        UINT64 low_band = mGuestLowRamEnd;
-
-        if (fw_zx1_iova_hole_active()) {
-            low_band -= IA64_SBA_IOVA_SIZE;
-        }
-        remaining = RamSize > low_band ? RamSize - low_band : 0;
-    }
     fw_add_guest_high_ram_range(FW_FIRMWARE_ADDRESS_SPACE_END,
                                 ~0ULL, &remaining);
 }
@@ -548,6 +639,16 @@ UINT64 fw_pal_stacked_call_at(UINT64 Entry, UINT64 Index, UINT64 Arg1,
 #define FW_PAL_COPY_PAL  0x100
 
 /*
+ * The platform clock of SAL_FREQ_BASE is the processor's input clock, to
+ * which PAL_FREQ_RATIOS relates the processor and the ITC (SDM Vol. 2
+ * PAL_FREQ_RATIOS).  The machine clocks the processor with the input clock
+ * of its model, and the model's PAL_FREQ_BASE returns that clock; a PAL that
+ * answers -1 (no output clock, SDM Vol. 2 PAL_FREQ_BASE) leaves 100 MHz.
+ */
+UINT64 mFwPlatformBaseFrequency = PLATFORM_BASE_FREQUENCY;
+UINT64 mFwItcFrequency;
+
+/*
  * PAL_PROC in RAM: PAL's copy of itself in the image's first page, what
  * every PAL call of this firmware and the SAL system table use.
  */
@@ -587,6 +688,89 @@ BOOLEAN fw_platform_install_pal(UINT64 Processor, UINT64 ResetPalProc)
         mFwPalProc = buffer + results[0];
     }
     return 1;
+}
+
+void fw_init_platform_base_frequency(void)
+{
+    UINT64 results[3];
+
+    if (fw_pal_call_at(mFwPalProc, FW_PAL_FREQ_BASE, 0, 0, 0, results) == 0 &&
+        results[0] != 0) {
+        mFwPlatformBaseFrequency = results[0];
+    }
+}
+
+FW_SAL_INIT_BLOCK mFwSalInit;
+extern UINT8 fw_sal_init[];
+extern UINT8 fw_sal_pmi[];
+
+#define FW_PAL_MC_REGISTER_MEM 0x01b
+#define FW_PAL_PMI_ENTRYPOINT  0x020
+
+_Static_assert(IA64_FW_AP_RELEASE_OFFSET + IA64_FW_AP_RELEASE_SIZE +
+               IA64_FW_MINSTATE_GUARD <= IA64_FW_MINSTATE_OFFSET &&
+               IA64_FW_MINSTATE_END_OFFSET + IA64_FW_MINSTATE_GUARD <=
+               IA64_FW_DEBUG_STACK_OFFSET,
+               "min-state areas too close to other data");
+
+static UINT64 fw_own_processor_id(void)
+{
+    UINT64 lid;
+
+    __asm__ volatile ("mov %0 = cr.lid;;" : "=r"(lid) : : "memory");
+    return (lid >> 24) & 0xff;
+}
+
+/* Physical and uncached, as SAL must access the area (SAL spec 3.3.2). */
+static volatile UINT64 *fw_minstate_area(UINT64 ProcessorId)
+{
+    return (volatile UINT64 *)(UINTN)((mCpuAssistBase +
+                                       IA64_FW_MINSTATE_OFFSET +
+                                       ProcessorId * IA64_FW_MINSTATE_SIZE) |
+                                      (1ULL << 63));
+}
+
+/*
+ * SAL spec 245359-007 5.1: every processor registers a min-state save area
+ * with PAL for PALE_INIT, uncacheable (SDM Vol. 2 11.3.2.4).  OsOwned is
+ * clear while the processor waits in SAL boot rendezvous, where an INIT
+ * returns at once.
+ */
+void fw_platform_register_minstate(BOOLEAN OsOwned)
+{
+    UINT64 id = fw_own_processor_id();
+    volatile UINT64 *area;
+    UINTN i;
+
+    if (id >= IA64_VPC_MAX_CPUS) {
+        return;
+    }
+    area = fw_minstate_area(id);
+    for (i = 0; i < 1024 / 8; i++) {
+        area[i] = 0;
+    }
+    area[IA64_FW_MINSTATE_SAL_INIT_OFF / 8] = (UINTN)fw_sal_init;
+    area[IA64_FW_MINSTATE_OS_OWNED_OFF / 8] = OsOwned;
+    /* SAL_INIT resumes a rendezvous processor before the SAL tables exist. */
+    mFwSalInit.PalProc = mFwPalProc;
+    (void)fw_pal_call_at(mFwPalProc, FW_PAL_MC_REGISTER_MEM,
+                         (UINTN)area, 0, 0, NULL);
+}
+
+/* SALE_PMI, on every processor (SAL spec 245359-007 3.2.3 step 12, 6.2). */
+void fw_platform_register_pmi(void)
+{
+    (void)fw_pal_call_at(mFwPalProc, FW_PAL_PMI_ENTRYPOINT,
+                         (UINTN)fw_sal_pmi, 0, 0, NULL);
+}
+
+static void fw_platform_set_os_owned(BOOLEAN OsOwned)
+{
+    UINT64 id = fw_own_processor_id();
+
+    if (id < IA64_VPC_MAX_CPUS) {
+        fw_minstate_area(id)[IA64_FW_MINSTATE_OS_OWNED_OFF / 8] = OsOwned;
+    }
 }
 
 BOOLEAN fw_platform_register_processor(UINT64 ResetPalProc)
@@ -658,7 +842,7 @@ static void fw_platform_rendezvous_processors(void)
 
     /* The shadow's reset entry; its first page is PAL's buffer. */
     release[0] = (UINT64)(UINTN)_start;
-    release[1] = mGuestRamSize;
+    release[1] = mGuestLowRamEnd;
     for (id = 0; id < FW_MAX_CPUS; id++) {
         if (id != own_id) {
             volatile UINT64 *ipi = (volatile UINT64 *)(UINTN)
@@ -861,22 +1045,6 @@ BOOLEAN fw_platform_is_460gx(void)
     return family == IA64_CPUID3_FAMILY_MERCED;
 }
 
-/*
- * True when the SBA "safe IOVA space" DRAM hole is carved for this boot: the
- * zx1 machine, with installed RAM past the PCI aperture so there is already
- * displaced above-4-GiB RAM and the low band fills to the aperture regardless.
- * Only in that regime does the hole leave mGuestLowRamEnd and the firmware's
- * aperture-relative self-placement untouched, keeping the QEMU RAM map and the
- * firmware EFI/high-RAM ranges trivially consistent.  A guest at or below the
- * aperture uses the contiguous 460gx-identical layout (no hole).  Keep the
- * predicate identical to the `remaining > IA64_LOW_RAM_LIMIT` gate in
- * ia64_vpc_map_ram().
- */
-BOOLEAN fw_zx1_iova_hole_active(void)
-{
-    return fw_platform_is_zx1() && fw_guest_ram_size() > FW_LOW_RAM_LIMIT;
-}
-
 UINT16 fw_sal_revision(void)
 {
     UINT64 family = (fw_read_cpuid3() >> IA64_CPUID3_FAMILY_SHIFT) &
@@ -977,12 +1145,25 @@ sal_set_vectors(UINT64 VectorType, UINT64 PhysAddr1, UINT64 Gp1,
     entry->Gp2 = Gp2;
     entry->HandlerLen2 = LengthCs2;
     entry->Valid = 1;
+    if (VectorType == SAL_VECTOR_OS_INIT) {
+        mFwSalInit.Valid = 0;
+        __asm__ volatile ("mf;;" : : : "memory");
+        mFwSalInit.MonarchEntry = PhysAddr1;
+        mFwSalInit.MonarchGp = Gp1;
+        mFwSalInit.MonarchLengthCs = LengthCs1;
+        mFwSalInit.SlaveEntry = PhysAddr2;
+        mFwSalInit.SlaveGp = Gp2;
+        mFwSalInit.SlaveLengthCs = LengthCs2;
+        __asm__ volatile ("mf;;" : : : "memory");
+        mFwSalInit.Valid = PhysAddr1 != 0;
+    }
     return sal_return(SAL_STATUS_SUCCESS, 0, 0, 0);
 }
 
 BOOLEAN __attribute__((noinline)) sal_set_vectors_selftest(void)
 {
     SAL_VECTOR_REGISTRATION saved[SAL_VECTOR_COUNT];
+    FW_SAL_INIT_BLOCK saved_init = mFwSalInit;
     SAL_RETURN_VALUE mca_valid;
     SAL_RETURN_VALUE bad_secondary;
     SAL_RETURN_VALUE bad_type;
@@ -1026,6 +1207,7 @@ BOOLEAN __attribute__((noinline)) sal_set_vectors_selftest(void)
     for (i = 0; i < SAL_VECTOR_COUNT; i++) {
         mSalVectors[i] = saved[i];
     }
+    mFwSalInit = saved_init;
 
     return ok;
 }
@@ -1308,12 +1490,24 @@ BOOLEAN __attribute__((noinline)) sal_mc_set_params_selftest(void)
     return ok;
 }
 
+/*
+ * The interval timer and RTC clocks and the drifts are optional (SAL spec,
+ * SAL_FREQ_BASE).  The rx2600 answers 200 MHz +/-100 ppm, 1.3 GHz (the ITC)
+ * +/-100 ppm and 32768 Hz +/-23 ppm (capture 2026-10-03, SAL-7); no document
+ * gives the i2000's answers, so 460gx gives the platform clock alone.
+ */
+#define ZX1_CLOCK_DRIFT_PPM 100
+#define ZX1_RTC_FREQUENCY   32768
+#define ZX1_RTC_DRIFT_PPM   23
+
 static SAL_RETURN_VALUE __attribute__((noinline))
 sal_freq_base(UINT64 ClockType, UINT64 Reserved1, UINT64 Reserved2,
               UINT64 Reserved3, UINT64 Reserved4, UINT64 Reserved5,
               UINT64 Reserved6)
 {
-    if (ClockType > 2 ||
+    BOOLEAN zx1 = fw_platform_is_zx1();
+
+    if (ClockType > SAL_FREQ_BASE_RTC ||
         !sal_reserved_args_are_zero(Reserved1, Reserved2, Reserved3,
                                     Reserved4, Reserved5, Reserved6)) {
         return sal_return(SAL_STATUS_INVALID_ARGUMENT, (UINT64)-1,
@@ -1321,11 +1515,18 @@ sal_freq_base(UINT64 ClockType, UINT64 Reserved1, UINT64 Reserved2,
     }
 
     if (ClockType == SAL_FREQ_BASE_PLATFORM) {
-        return sal_return(SAL_STATUS_SUCCESS, PLATFORM_BASE_FREQUENCY,
-                          (UINT64)-1, 0);
+        return sal_return(SAL_STATUS_SUCCESS, mFwPlatformBaseFrequency,
+                          zx1 ? ZX1_CLOCK_DRIFT_PPM : (UINT64)-1, 0);
     }
-
-    return sal_return(SAL_STATUS_SUCCESS, (UINT64)-1, (UINT64)-1, 0);
+    if (!zx1 || (ClockType == SAL_FREQ_BASE_ITC && mFwItcFrequency == 0)) {
+        return sal_return(SAL_STATUS_SUCCESS, (UINT64)-1, (UINT64)-1, 0);
+    }
+    if (ClockType == SAL_FREQ_BASE_ITC) {
+        return sal_return(SAL_STATUS_SUCCESS, mFwItcFrequency,
+                          ZX1_CLOCK_DRIFT_PPM, 0);
+    }
+    return sal_return(SAL_STATUS_SUCCESS, ZX1_RTC_FREQUENCY,
+                      ZX1_RTC_DRIFT_PPM, 0);
 }
 
 BOOLEAN __attribute__((noinline)) sal_freq_base_selftest(void)
@@ -1335,16 +1536,19 @@ BOOLEAN __attribute__((noinline)) sal_freq_base_selftest(void)
     SAL_RETURN_VALUE invalid_type;
     SAL_RETURN_VALUE invalid_reserved;
 
+    BOOLEAN zx1 = fw_platform_is_zx1();
+
     platform = sal_freq_base(0, 0, 0, 0, 0, 0, 0);
-    optional = sal_freq_base(1, 0, 0, 0, 0, 0, 0);
+    optional = sal_freq_base(2, 0, 0, 0, 0, 0, 0);
     invalid_type = sal_freq_base(3, 0, 0, 0, 0, 0, 0);
     invalid_reserved = sal_freq_base(0, 0, 0, 1, 0, 0, 0);
 
     return platform.Status == SAL_STATUS_SUCCESS &&
-           platform.Value0 == PLATFORM_BASE_FREQUENCY &&
-           platform.Value1 == (UINT64)-1 &&
+           platform.Value0 == mFwPlatformBaseFrequency &&
+           platform.Value1 == (zx1 ? ZX1_CLOCK_DRIFT_PPM : (UINT64)-1) &&
            optional.Status == SAL_STATUS_SUCCESS &&
-           optional.Value0 == (UINT64)-1 && optional.Value1 == (UINT64)-1 &&
+           optional.Value0 == (zx1 ? ZX1_RTC_FREQUENCY : (UINT64)-1) &&
+           optional.Value1 == (zx1 ? ZX1_RTC_DRIFT_PPM : (UINT64)-1) &&
            invalid_type.Status == SAL_STATUS_INVALID_ARGUMENT &&
            invalid_reserved.Status == SAL_STATUS_INVALID_ARGUMENT;
 }
@@ -1871,8 +2075,9 @@ BOOLEAN __attribute__((noinline)) sal_proc_dispatch_selftest(void)
 
     return sal_runtime_state_valid() &&
            masked.Status == SAL_STATUS_SUCCESS &&
-           masked.Value0 == PLATFORM_BASE_FREQUENCY &&
-           masked.Value1 == (UINT64)-1 &&
+           masked.Value0 == mFwPlatformBaseFrequency &&
+           masked.Value1 == (fw_platform_is_zx1() ? ZX1_CLOCK_DRIFT_PPM :
+                                                    (UINT64)-1) &&
            masked.Value2 == 0 &&
            unimplemented.Status == SAL_STATUS_NOT_IMPLEMENTED &&
            unimplemented.Value0 == 0 &&
@@ -2306,8 +2511,10 @@ static void fw_ap_rendezvous(void)
     saved_psr = fw_read_psr();
     saved_rsc = fw_read_rsc();
     prepare_sal_loader_handoff();
+    fw_platform_set_os_owned(1);
     fw_call_ap_rendezvous(descriptor, sal_loader_psr_low(),
                           saved_psr, saved_rsc);
+    fw_platform_set_os_owned(0);
 }
 
 void firmware_ap_main(UINT64 ProcessorId, UINT64 ResetPalProc)
@@ -2322,6 +2529,8 @@ void firmware_ap_main(UINT64 ProcessorId, UINT64 ResetPalProc)
     }
     fw_platform_install_pal(1, ResetPalProc);
     fw_platform_register_processor(ResetPalProc);
+    fw_platform_register_minstate(0);
+    fw_platform_register_pmi();
     fw_ap_rendezvous();
     for (;;) {
         /* TPR is scratch on return from OS_BOOT_RENDEZ. */

@@ -32,10 +32,12 @@
 
 DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
 {
+    // SLP_TYP 4 is S4/S5 on the IFB and 0 is ON (460GX SSDM 11.2.7.3); the
+    // i2000 firmware's DSDT gives 4 as well.
     Name (_S5, Package (0x04)
     {
-        0x00,
-        0x00,
+        0x04,
+        0x04,
         0x00,
         0x00
     })

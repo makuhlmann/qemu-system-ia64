@@ -2727,8 +2727,6 @@ static void ipmi_sim_realize(DeviceState *dev, Error **errp)
     QTAILQ_INIT(&ibs->rcvbufs);
 
     ibs->bmc_global_enables = (1 << IPMI_BMC_EVENT_LOG_BIT);
-    ibs->device_id = 0x20;
-    ibs->ipmi_version = 0x02; /* IPMI 2.0 */
     ibs->restart_cause = 0;
     for (i = 0; i < 4; i++) {
         ibs->sel.last_addition[i] = 0xff;

@@ -14,3 +14,8 @@ void helper_pal_reset_return(CPUIA64State *env)
 {
     ia64_cpu_pal_reset_return(env);
 }
+
+void helper_pal_pmi_return(CPUIA64State *env, uint64_t ip)
+{
+    ia64_pal_pmi_return(env, ip);
+}

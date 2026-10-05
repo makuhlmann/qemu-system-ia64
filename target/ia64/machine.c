@@ -192,7 +192,8 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
         env->firmware.sal_entry = base + IA64_FW_SAL_RUNTIME_ENTRY_OFF;
         env->firmware.sal_return = base + IA64_FW_SAL_RUNTIME_RETURN_OFF;
         env->firmware.sal_block = base + IA64_FW_SAL_DISPATCH_BLOCK_OFF;
-        env->firmware.assist_base = IA64_FW_CPU_ASSIST_BASE_FOR(ram);
+        env->firmware.assist_base =
+            IA64_FW_CPU_ASSIST_BASE_FOR(ram, IA64_PCI_MMIO_BASE);
     }
     if (version_id < 6) {
         /*
@@ -237,7 +238,7 @@ static int ia64_cpu_post_load(void *opaque, int version_id)
 
 const VMStateDescription vmstate_ia64_cpu = {
     .name = "cpu",
-    .version_id = 7,
+    .version_id = 11,
     .minimum_version_id = 1,
     .pre_save = ia64_cpu_pre_save,
     .post_load = ia64_cpu_post_load,
@@ -303,7 +304,7 @@ const VMStateDescription vmstate_ia64_cpu = {
         VMSTATE_UINT16(env.mmu.tlb_inst_replace, IA64CPU),
         VMSTATE_UINT16(env.mmu.pending_purge_data_count, IA64CPU),
         VMSTATE_UINT16(env.mmu.pending_purge_inst_count, IA64CPU),
-        VMSTATE_UINT64(env.mmu.region7_directmap_limit, IA64CPU),
+        VMSTATE_UNUSED(8),
         VMSTATE_UINT64_V(env.firmware.image_base, IA64CPU, 2),
         VMSTATE_UINT64_V(env.firmware.image_size, IA64CPU, 5),
         VMSTATE_UINT64_V(env.firmware.ivt, IA64CPU, 5),
@@ -325,15 +326,25 @@ const VMStateDescription vmstate_ia64_cpu = {
         VMSTATE_BOOL(env.interrupt.itm_armed, IA64CPU),
         VMSTATE_BOOL(env.interrupt.itm_last_match_valid, IA64CPU),
         VMSTATE_TIMER_PTR(itm_timer, IA64CPU),
+        VMSTATE_INT64_V(env.pmu.sync_ns, IA64CPU, 10),
+        VMSTATE_UINT8_V(env.pmu.configured, IA64CPU, 10),
+        VMSTATE_UINT8_V(env.pmu.counting, IA64CPU, 10),
+        VMSTATE_TIMER_PTR_V(pmu_timer, IA64CPU, 10),
 
         /* PAL, SAL bridge, RSE, ALAT and floating-point state. */
         VMSTATE_BOOL(env.pal.pal_mc_expected, IA64CPU),
         VMSTATE_UINT64(env.pal.pal_mc_save_addr, IA64CPU),
+        VMSTATE_BOOL_V(env.pal.pal_mc_event_active, IA64CPU, 8),
         VMSTATE_UINT64(env.pal.pal_pmi_entry, IA64CPU),
+        VMSTATE_UINT16_V(env.pal.pal_pmi_pending, IA64CPU, 9),
+        VMSTATE_BOOL_V(env.pal.pal_pmi_pin, IA64CPU, 9),
         VMSTATE_BOOL(env.pal.pal_proc_copy_valid, IA64CPU),
         VMSTATE_UINT64(env.pal.pal_proc_copy_addr, IA64CPU),
         VMSTATE_UINT64(env.pal.pal_interrupt_block_addr, IA64CPU),
         VMSTATE_UINT64(env.pal.pal_io_block_addr, IA64CPU),
+        VMSTATE_UINT64_ARRAY_V(env.pal.proc_feature_status, IA64CPU,
+                               1 + IA64_PAL_IMPL_FEATURE_SETS, 11),
+        VMSTATE_UINT64_V(env.pal.bus_feature_status, IA64CPU, 11),
 
         VMSTATE_STRUCT(env.sal_bridge.rse, IA64CPU, 1,
                        vmstate_ia64_firmware_debug_rse,

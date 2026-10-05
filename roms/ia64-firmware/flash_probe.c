@@ -15,8 +15,8 @@
  * Memory Card's I2C pass-through (SSDM 5.5.1; the protocol the vendor
  * firmware uses, see hw/ia64/ia64_460gx.c).  The zx1 mio ERS
  * publishes no memory-sizing register, so there DRAM is sized by presence
- * probing at 64 MB steps, refined to 1 MB -- below the PCI aperture, where
- * the band may carry the SBA IOVA hole, and again from 4 GB up.
+ * probing at 64 MB steps, refined to 1 MB, through the mio's three DRAM
+ * regions in the order it fills them (mio ERS 2.1).
  */
 
 #include "fw-base.h"
@@ -157,9 +157,7 @@ static UINT64 probe_band(UINT64 base, UINT64 limit, BOOLEAN stop_at_gap)
 
 /*
  * Installed DRAM is what the low band holds plus what sits above 4 GB; the
- * low band may carry a hole (the zx1 SBA IOVA space), so its count can be
- * short of the aperture while DRAM still fills up to it -- the chunk just
- * below the aperture says whether there is more above 4 GB.
+ * chunk just below the aperture says whether there is more above 4 GB.
  */
 static UINT64 probe_ram_generic(void)
 {
@@ -171,6 +169,22 @@ static UINT64 probe_ram_generic(void)
     return low + probe_band(PROBE_HIGH, PROBE_HIGH_LIMIT, 1);
 }
 
+/* Memory0 up to 1 GB, then Memory1 at 0x40_4000_0000, then Memory2 at 4 GB. */
+static UINT64 probe_ram_zx1(void)
+{
+    UINT64 ram = PROBE_START + probe_band(PROBE_START, IA64_ZX1_MEMORY0_END, 0);
+
+    if (ram < IA64_ZX1_MEMORY0_END) {
+        return ram;
+    }
+    ram += probe_band(IA64_ZX1_MEMORY1_BASE,
+                      IA64_ZX1_MEMORY1_BASE + IA64_ZX1_MEMORY1_SIZE, 1);
+    if (ram < IA64_ZX1_MEMORY0_END + IA64_ZX1_MEMORY1_SIZE) {
+        return ram;
+    }
+    return ram + probe_band(IA64_ZX1_MEMORY2_BASE, IA64_ZX1_MEMORY2_END, 1);
+}
+
 /* Returns installed DRAM in bytes; *Chipset receives the core chipset. */
 UINT64 fw_flash_probe(UINT64 *Chipset)
 {
@@ -178,7 +192,8 @@ UINT64 fw_flash_probe(UINT64 *Chipset)
     UINT64 ram;
 
     *Chipset = chipset;
-    ram = chipset == CHIPSET_460GX ? probe_ram_460gx() : 0;
+    ram = chipset == CHIPSET_460GX ? probe_ram_460gx() :
+          chipset == CHIPSET_ZX1 ? probe_ram_zx1() : 0;
     if (ram < IA64_FW_LOW_RAM_MIN) {
         ram = probe_ram_generic();
     }

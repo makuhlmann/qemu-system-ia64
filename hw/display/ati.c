@@ -44,6 +44,7 @@ static const struct {
     uint16_t dev_id;
 } ati_model_aliases[] = {
     { "rage128p", PCI_DEVICE_ID_ATI_RAGE128_PF },
+    { "rage128gl", PCI_DEVICE_ID_ATI_RAGE128_RF },
     { "rv100", PCI_DEVICE_ID_ATI_RADEON_QY },
 };
 
@@ -1109,7 +1110,7 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
     case BIOS_0_SCRATCH ... BUS_CNTL - 1:
     {
         int i = (addr - BIOS_0_SCRATCH) / 4;
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF && i > 3) {
+        if (ati_is_rage128(s) && i > 3) {
             break;
         }
         val = ati_reg_read_offs(s->regs.bios_scratch[i],
@@ -1121,7 +1122,7 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     case GEN_INT_STATUS:
         val = s->regs.gen_int_status;
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_rage128(s)) {
             /*
              * GUI_IDLE_INT_STAT (bit 19) is a level-ish engine-idle status:
              * it powers up set - the only GEN_INT_STATUS bit that does - and
@@ -1206,7 +1207,7 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         val = 5;
         break;
     case MEM_SDRAM_MODE_REG:
-        if (s->dev_id != PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (!ati_is_rage128(s)) {
             val = BIT(28) | BIT(20);
         }
         break;
@@ -1280,7 +1281,7 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     case DST_PITCH:
         val = s->regs.dst_pitch;
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_rage128(s)) {
             val |= s->regs.dst_tile << 16;
         }
         break;
@@ -1316,7 +1317,7 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     case SRC_PITCH:
         val = s->regs.src_pitch;
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_rage128(s)) {
             val |= s->regs.src_tile << 16;
         }
         break;
@@ -1346,7 +1347,7 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     case DEFAULT_OFFSET:
         val = s->regs.default_offset;
-        if (s->dev_id != PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (!ati_is_rage128(s)) {
             val >>= 10;
             val |= s->regs.default_pitch << 16;
             val |= s->regs.default_tile << 30;
@@ -1508,7 +1509,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
     case BIOS_0_SCRATCH ... BUS_CNTL - 1:
     {
         int i = (addr - BIOS_0_SCRATCH) / 4;
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF && i > 3) {
+        if (ati_is_rage128(s) && i > 3) {
             break;
         }
         ati_reg_write_offs(&s->regs.bios_scratch[i],
@@ -1525,7 +1526,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         }
         break;
     case GEN_INT_STATUS:
-        data &= (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF ?
+        data &= (ati_is_rage128(s) ?
                  0x000f040fUL : 0xfc080effUL);
         s->regs.gen_int_status &= ~data;
         ati_vga_update_irq(s);
@@ -1584,12 +1585,12 @@ static void ati_mm_write(void *opaque, hwaddr addr,
      * the enable bits are changed or output bits changed while enabled.
      */
     case GPIO_VGA_DDC ... GPIO_VGA_DDC + 3:
-        if (s->dev_id != PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (!ati_is_rage128(s)) {
             /* FIXME: Maybe add a property to select VGA or DVI port? */
         }
         break;
     case GPIO_DVI_DDC ... GPIO_DVI_DDC + 3:
-        if (s->dev_id != PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (!ati_is_rage128(s)) {
             ati_reg_write_offs(&s->regs.gpio_dvi_ddc,
                                addr - GPIO_DVI_DDC, data, size);
             if ((addr <= GPIO_DVI_DDC + 2 && addr + size > GPIO_DVI_DDC + 2) ||
@@ -1601,7 +1602,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         break;
     case GPIO_MONID ... GPIO_MONID + 3:
         /* FIXME What does Radeon have here? */
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_rage128(s)) {
             /* Rage128p accesses DDC via MONID(1-2) with additional mask bit */
             ati_reg_write_offs(&s->regs.gpio_monid,
                                addr - GPIO_MONID, data, size);
@@ -1754,7 +1755,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         break;
     case DST_PITCH:
             s->regs.dst_pitch = data & 0x3fff;
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_rage128(s)) {
             s->regs.dst_tile = (data >> 16) & 1;
         }
         break;
@@ -1783,7 +1784,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         s->regs.dst_y = data & 0x3fff;
         break;
     case SRC_PITCH_OFFSET:
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_rage128(s)) {
             s->regs.src_offset = (data & 0x1fffff) << 5;
             s->regs.src_pitch = (data & 0x7fe00000) >> 21;
             s->regs.src_tile = data >> 31;
@@ -1794,7 +1795,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         }
         break;
     case DST_PITCH_OFFSET:
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_rage128(s)) {
             s->regs.dst_offset = (data & 0x1fffff) << 5;
             s->regs.dst_pitch = (data & 0x7fe00000) >> 21;
             s->regs.dst_tile = data >> 31;
@@ -1881,7 +1882,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         break;
     case SRC_PITCH:
             s->regs.src_pitch = data & 0x3fff;
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_rage128(s)) {
             s->regs.src_tile = (data >> 16) & 1;
         }
         break;
@@ -1938,7 +1939,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         s->regs.dp_write_mask = data;
         break;
     case DEFAULT_OFFSET:
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_rage128(s)) {
             s->regs.default_offset = data & 0xfffffff0;
         } else {
             /* Radeon has DEFAULT_PITCH_OFFSET here like DST_PITCH_OFFSET */
@@ -1948,7 +1949,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         }
         break;
     case DEFAULT_PITCH:
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_rage128(s)) {
             s->regs.default_pitch = data & 0x3fff;
             s->regs.default_tile = (data >> 16) & 1;
         }
@@ -2337,10 +2338,10 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
                         "using default rage128p");
         }
     }
-    if (s->dev_id != PCI_DEVICE_ID_ATI_RAGE128_PF &&
+    if (!ati_is_rage128(s) &&
         s->dev_id != PCI_DEVICE_ID_ATI_RADEON_QY) {
         error_setg(errp, "Unknown ATI VGA device id, "
-                   "only 0x5046 and 0x5159 are supported");
+                   "only 0x5046, 0x5246 and 0x5159 are supported");
         return;
     }
     pci_set_word(dev->config + PCI_DEVICE_ID, s->dev_id);
@@ -2382,7 +2383,7 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
      * window (which we do not emulate.)
      */
     if (!s->linear_aper_sz) {
-        if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
+        if (ati_is_rage128(s)) {
             s->linear_aper_sz = ATI_RAGE128_LINEAR_APER_SIZE;
         } else {
             s->linear_aper_sz = ATI_R100_LINEAR_APER_SIZE;
@@ -2409,23 +2410,48 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
     timer_init_ns(&s->vblank_timer, QEMU_CLOCK_VIRTUAL, ati_vga_vblank_irq, s);
 
     /*
+     * The Rage 128 GL's power management block at 5Ch, the end of its
+     * capability list: PMI 1.0, D1 but no D2, no PME# (RRG-G04100-C
+     * PMI_PMC_REG, p.3-44), and only POWER_STATE writable (p.4-8).
+     */
+    if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_RF) {
+        if (pci_pm_init(dev, 0x5c, errp) < 0) {
+            return;
+        }
+        pci_set_word(dev->config + 0x5c + PCI_PM_PMC, PCI_PM_CAP_D1 | 1);
+        pci_set_word(dev->wmask + 0x5c + PCI_PM_CTRL, PCI_PM_CTRL_STATE_MASK);
+    }
+
+    /*
      * Optional PCI AGP capability, at the Rage 128's real offset 0x50.  Two
      * guests key on it: Linux sba_iommu scans every PCI device for an AGP
      * capability and, finding one, reserves half its IOVA space as the AGP GART
      * (and writes the handshake cookie hp-agp looks for); and the r128 DRM will
      * negotiate AGP mode against it.  Off by default -- on the zx1 machine the
      * Rage 128 reaches memory through the SBA in PCI-GART mode, which needs no
-     * AGP capability; the ia64 machine only sets this when its agp option opts
-     * into the hp-agp AGP path.
+     * AGP capability; the ia64 machines set this when their agp option is on.
+     * The GL is AGP 1.0 with 1x and 2x (RRG-G04100-C p.4-8, 4-22), the Pro
+     * AGP 2.0 with 4x and a read-only SBA_EN (RRG-G04500-C CAPABILITIES_ID,
+     * AGP_STATUS, AGP_COMMAND); both have sideband and 32 requests.
      */
     if (s->agp) {
-        if (pci_add_capability(dev, PCI_CAP_ID_AGP, 0x50, 8, errp) < 0) {
+        bool gl = s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_RF;
+        int agp = pci_add_capability(dev, PCI_CAP_ID_AGP, 0x50,
+                                     PCI_AGP_SIZEOF, errp);
+
+        if (agp < 0) {
             return;
         }
-        /* AGP 2.0, 1x/2x/4x, so the OS negotiates a rate. */
-        pci_set_long(dev->config +
-                     pci_find_capability(dev, PCI_CAP_ID_AGP) + PCI_AGP_STATUS,
-                     0x1f000207);
+        dev->config[agp + PCI_AGP_VERSION] = gl ? 0x10 : 0x20;
+        pci_set_long(dev->config + agp + PCI_AGP_STATUS,
+                     (0x1fu << 24) | PCI_AGP_STATUS_SBA |
+                     (gl ? 0 : PCI_AGP_STATUS_RATE4) |
+                     PCI_AGP_STATUS_RATE2 | PCI_AGP_STATUS_RATE1);
+        pci_set_long(dev->config + agp + PCI_AGP_COMMAND, PCI_AGP_COMMAND_SBA);
+        pci_set_long(dev->wmask + agp + PCI_AGP_COMMAND,
+                     PCI_AGP_COMMAND_RQ_MASK | PCI_AGP_COMMAND_AGP |
+                     PCI_AGP_COMMAND_RATE2 | PCI_AGP_COMMAND_RATE1 |
+                     (gl ? PCI_AGP_COMMAND_SBA : PCI_AGP_COMMAND_RATE4));
     }
 }
 

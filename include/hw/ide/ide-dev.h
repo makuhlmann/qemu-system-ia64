@@ -125,6 +125,7 @@ struct IDEState {
     int32_t cur_io_buffer_len;
     uint8_t end_transfer_fn_idx;
     QEMUTimer *sector_write_timer; /* only used for win2k install hack */
+    QEMUTimer *atapi_packet_timer;
     uint32_t irq_count; /* counts IRQs when using win2k install hack */
     /* CF-ATA extended error */
     uint8_t ext_error;

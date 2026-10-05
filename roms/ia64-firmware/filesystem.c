@@ -1099,13 +1099,13 @@ FW_PCI_ROOT_BRIDGE_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciRootBridgeDevicePa
 FW_PCI_CONTROLLER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciIdeDevicePath =
     FW_PCI_CONTROLLER_DEVICE_PATH_INIT(0);
 FW_PCI_CONTROLLER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciAhciDevicePath =
-    FW_PCI_CONTROLLER_DEVICE_PATH_INIT(1);
+    FW_PCI_CONTROLLER_DEVICE_PATH_INIT(IA64_460GX_AHCI_SLOT);
 FW_PCI_CONTROLLER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciOhciDevicePath =
     FW_PCI_CONTROLLER_DEVICE_PATH_INIT(2);
 FW_PCI_CONTROLLER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciUhciDevicePath =
     FW_PCI_CONTROLLER_DEVICE_PATH_INIT(3);
 FW_PCI_CONTROLLER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mPciLsiDevicePath =
-    FW_PCI_CONTROLLER_DEVICE_PATH_INIT(4);
+    FW_PCI_CONTROLLER_DEVICE_PATH_INIT(IA64_ZX1_SCSI_SLOT);
 
 FW_BLOCK_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mBlockDevicePath = {
     .Acpi = {
@@ -1430,20 +1430,23 @@ FW_OPTICAL_SETUP_LOADER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mOpticalSetupLoad
 /*
  * Where a storage controller sits, as an EFI device path pair: the ACPI _UID
  * of the PCI root that carries it, and its device number.  IDE and AHCI are
- * on the compatibility bus.  The SCSI HBA is on device 4 of that bus on zx1,
- * but on the i2000 it lives at device 0 of the first WXB expander root
- * (ACPI _UID IA64_460GX_WXB0_BUS), which is where the board carries its
- * QLogic adapter.
+ * on the compatibility bus.  The SCSI HBA lives at device 1 of rope 1's root
+ * on zx1 (ACPI _UID IA64_ZX1_SCSI_BUS), where the rx2600 carries its LSI,
+ * and at device 0 of the first WXB expander root (ACPI _UID
+ * IA64_460GX_WXB0_BUS) on the i2000, where the board carries its QLogic
+ * adapter.  The machine places them by the same ia64_vpc_abi.h seats.
  */
 static UINT8 fw_storage_pci_device(const FW_STORAGE_DEVICE *Device)
 {
     if (Device != NULL && Device->Kind == FW_STORAGE_IDE) {
-        return 0;
+        return fw_platform_is_zx1() ? IA64_ZX1_IDE_SLOT : 0;
     }
     if (Device != NULL && Device->Kind == FW_STORAGE_AHCI) {
-        return 1;
+        return fw_platform_is_zx1() ? IA64_ZX1_AHCI_SLOT :
+                                      IA64_460GX_AHCI_SLOT;
     }
-    return fw_platform_is_zx1() ? 4 : IA64_460GX_WXB0_SCSI_SLOT;
+    return fw_platform_is_zx1() ? IA64_ZX1_SCSI_SLOT :
+                                  IA64_460GX_WXB0_SCSI_SLOT;
 }
 
 static UINT32 fw_storage_pci_root_uid(const FW_STORAGE_DEVICE *Device)
@@ -1452,7 +1455,7 @@ static UINT32 fw_storage_pci_root_uid(const FW_STORAGE_DEVICE *Device)
                            Device->Kind == FW_STORAGE_AHCI)) {
         return 0;
     }
-    return fw_platform_is_zx1() ? 0 : IA64_460GX_WXB0_BUS;
+    return fw_platform_is_zx1() ? IA64_ZX1_SCSI_BUS : IA64_460GX_WXB0_BUS;
 }
 
 static void fw_set_storage_path_node(FW_ATAPI_DEVICE_PATH_NODE *Node,
@@ -1469,7 +1472,7 @@ static void fw_set_storage_path_node(FW_ATAPI_DEVICE_PATH_NODE *Node,
     if (Device != NULL && Device->Kind == FW_STORAGE_IDE &&
         Device->Ide != NULL) {
         Node->Header.SubType = 0x01; /* ATAPI */
-        Node->PrimarySecondary = 0;
+        Node->PrimarySecondary = Device->Ide->channel;
         Node->SlaveMaster = Device->Ide->unit;
         return;
     }
@@ -1498,7 +1501,7 @@ static BOOLEAN fw_storage_path_node_matches(
 
     if (Device->Kind == FW_STORAGE_IDE && Device->Ide != NULL) {
         return Node->Header.SubType == 0x01 &&
-               Node->PrimarySecondary == 0 &&
+               Node->PrimarySecondary == Device->Ide->channel &&
                Node->SlaveMaster == Device->Ide->unit &&
                Node->Lun == 0;
     }

@@ -44,10 +44,12 @@ from .encoding import (
     PAL_COPY_BUFFER_SIZE,
     PAL_COPY_INFO,
     PAL_COPY_PAL,
+    PAL_COPY_PROC,
     PAL_COPY_TARGET,
     PAL_CR_IMPLEMENTED_HIGH,
     PAL_CR_IMPLEMENTED_LOW,
     PAL_CR_READ_SIDE_EFFECT_HIGH,
+    UINT64_MAX,
     PAL_DEBUG_INFO,
     PAL_FIXED_ADDR,
     PAL_FREQ_BASE,
@@ -99,11 +101,11 @@ from .encoding import (
     PAL_PTCE_INFO,
     PAL_PURGE_PAGE_SIZE_MASK,
     PAL_RATIO_16_1,
-    PAL_RATIO_4_3,
-    PAL_RATIO_8_1,
     PAL_RATIO_16_3,
     PAL_RATIO_2_1,
-    PAL_RATIO_4_1,
+    PAL_RATIO_13_2,
+    PAL_RATIO_1_1,
+    PAL_RATIO_12_2,
     PAL_REGISTER_INFO,
     PAL_RSE_INFO,
     PAL_SELF_TEST_STATE_TESTED,
@@ -232,8 +234,8 @@ test_pal_halt_light_stops_at_pal_continuation = require_registers(
         "r31": 0,
     }, entry=0x10)
 
-test_pal_halt_wakes_on_due_itm = require_registers(
-    "pal_halt_wakes_on_due_itm", [
+def _pal_halt_wakes_on_due_itm_program(state):
+    return [
         (0x10, 0x00, adds(3, 0xef, 0), nop_i(),
          nop_i()),
         (0x20, 0x00, mov_m_gr_cr(3, IA64_CR_ITV), nop_i(),
@@ -254,7 +256,7 @@ test_pal_halt_wakes_on_due_itm = require_registers(
         (0x90, 0x10, nop_m(), nop_i(),
          br_cond(0x90, 0x40, qp=7)),
         (0xa0, *movl_mlx(28, PAL_HALT)),
-        (0xb0, 0x00, nop_m(), addl(29, 1, 0), addl(30, 0, 0)),
+        (0xb0, 0x00, nop_m(), addl(29, state, 0), addl(30, 0, 0)),
         (0xc0, *movl_mlx(19, (1 << 13) | (1 << 14))),
         (0xd0, 0x10, mov_gr_psr_full(19), addl(31, 0, 0),
          br_call(0, 0xd0, PAL_PROC_ENTRY)),
@@ -268,13 +270,29 @@ test_pal_halt_wakes_on_due_itm = require_registers(
          br_cond(0x3000, 0x3010)),
         (0x3010, 0x10, nop_m(), nop_i(),
          br_cond(0x3010, 0x3010)),
-    ], {
+    ]
+
+
+test_pal_halt_wakes_on_due_itm = require_registers(
+    "pal_halt_wakes_on_due_itm", _pal_halt_wakes_on_due_itm_program(1), {
         "ip": 0x3010,
         "exception": IA64_EXCP_NONE,
         "r8": 0,
         "r9": 0,
         "r31": 0x5a,
     }, entry=0x10)
+
+# The rx2600's Madison has power state 2 and no state 1 (capture
+# 2026-10-03, CPU-19).
+test_pal_halt_state2_wakes_on_due_itm_madison = require_registers(
+    "pal_halt_state2_wakes_on_due_itm_madison",
+    _pal_halt_wakes_on_due_itm_program(2), {
+        "ip": 0x3010,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0,
+        "r9": 0,
+        "r31": 0x5a,
+    }, entry=0x10, cpu="madison")
 
 # PAL_HALT and PAL_HALT_LIGHT read the virtual clock.  Under -icount that is
 # only allowed in the last instruction of a TB, and the break bundle of the
@@ -423,21 +441,66 @@ test_pal_cache_info_l2_unified = require_registers(
      "r9": PAL_CACHE_INFO_L2_U_1, "r10": PAL_CACHE_INFO_L2_U_2,
      "r11": 0}, entry=0x10)
 
-# Madison L3: 12-way, 128-byte lines, load latency at least 14 cycles
-# (251110-003 Table 2-5; 12 cycles is the McKinley value).
+# The madison PAL_CACHE_INFO and PAL_CACHE_PROT_INFO words are the rx2600's
+# (capture 2026-10-03, CPU-9 and CPU-10).
+def _pal_cache_call(index, level, cache_type):
+    return pal_call_program(index, [(29, level), (30, cache_type), (31, 0)])
+
+
+test_pal_cache_info_madison_l0_instruction = require_registers(
+    "pal_cache_info_madison_l0_instruction",
+    _pal_cache_call(PAL_CACHE_INFO, 0, 1),
+    {"ip": 0x60, "r8": 0, "r9": 0x010001ff07060406,
+     "r10": 0x00310c0c00004000, "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_cache_info_madison_l0_data = require_registers(
+    "pal_cache_info_madison_l0_data",
+    _pal_cache_call(PAL_CACHE_INFO, 0, 2),
+    {"ip": 0x60, "r8": 0, "r9": 0x0100010307060400,
+     "r10": 0x00310c0c00004000, "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_cache_info_madison_l1_unified = require_registers(
+    "pal_cache_info_madison_l1_unified",
+    _pal_cache_call(PAL_CACHE_INFO, 1, 2),
+    {"ip": 0x60, "r8": 0, "r9": 0x0802050707070803,
+     "r10": 0x00310f0c00040000, "r11": 0}, entry=0x10, cpu="madison")
+
 test_pal_cache_info_l2_unified_madison = require_registers(
     "pal_cache_info_l2_unified_madison",
-    pal_call_program(PAL_CACHE_INFO, [(29, 2), (30, 2), (31, 0)]),
-    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0,
-     "r9": (1 | (1 << 1) | (12 << 8) | (7 << 16) | (7 << 24) | (1 << 32) |
-            (14 << 40) | PAL_CACHE_INFO_DATA_HINTS)},
+    _pal_cache_call(PAL_CACHE_INFO, 2, 2),
+    {"ip": 0x60, "r28": PAL_CACHE_INFO, "r8": 0, "r9": 0x02020e0707070c03,
+     "r10": 0x0031120c00300000, "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_cache_prot_info_madison_l0_instruction = require_registers(
+    "pal_cache_prot_info_madison_l0_instruction",
+    _pal_cache_call(PAL_CACHE_PROT_INFO, 0, 1),
+    {"ip": 0x60, "r8": 0, "r9": 0x4000000008000000, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_cache_prot_info_madison_l0_data = require_registers(
+    "pal_cache_prot_info_madison_l0_data",
+    _pal_cache_call(PAL_CACHE_PROT_INFO, 0, 2),
+    {"ip": 0x60, "r8": 0, "r9": 0x441c4c2604800040, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_cache_prot_info_madison_l1_unified = require_registers(
+    "pal_cache_prot_info_madison_l1_unified",
+    _pal_cache_call(PAL_CACHE_PROT_INFO, 1, 2),
+    {"ip": 0x60, "r8": 0, "r9": 0x481c4f230c700020, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_cache_prot_info_madison_l2_unified = require_registers(
+    "pal_cache_prot_info_madison_l2_unified",
+    _pal_cache_call(PAL_CACHE_PROT_INFO, 2, 2),
+    {"ip": 0x60, "r8": 0, "r9": 0x4c7c52200c500080, "r10": 0, "r11": 0},
     entry=0x10, cpu="madison")
 
 
 # config_info_1{63:48}: the load and store hint vectors (SDM Vol. 2 Tables
-# 11-68 and 11-69).  Data and unified caches report the t1/nt1/nta loads and
-# t1/nta stores that 245320-003 sec 5.9 and 251110-003 sec 5.4.2 list;
-# instruction caches report none.
+# 11-68 and 11-69).  Without hardware values, data and unified caches report
+# the t1/nt1/nta loads and t1/nta stores that 245320-003 sec 5.9 and
+# 251110-003 sec 5.4.2 list, and instruction caches report none.  The
+# rx2600's Madison reports its own vectors per level (capture 2026-10-03).
 def _pal_cache_info_hints_program(level, cache_type):
     return [
         (0x10, 0x00, nop_m(), addl(28, PAL_CACHE_INFO, 0), nop_i()),
@@ -454,19 +517,17 @@ def _pal_cache_info_hints_program(level, cache_type):
 test_pal_cache_info_hints_madison_l1_data = require_registers(
     "pal_cache_info_hints_madison_l1_data",
     _pal_cache_info_hints_program(0, 2),
-    {"ip": 0x60, "r8": 0, "r12": PAL_CACHE_INFO_DATA_HINTS >> 48},
-    entry=0x10, cpu="madison")
+    {"ip": 0x60, "r8": 0, "r12": 0x0100}, entry=0x10, cpu="madison")
 
 test_pal_cache_info_hints_madison_l2_unified = require_registers(
     "pal_cache_info_hints_madison_l2_unified",
     _pal_cache_info_hints_program(1, 2),
-    {"ip": 0x60, "r8": 0, "r12": PAL_CACHE_INFO_DATA_HINTS >> 48},
-    entry=0x10, cpu="madison")
+    {"ip": 0x60, "r8": 0, "r12": 0x0802}, entry=0x10, cpu="madison")
 
 test_pal_cache_info_hints_madison_l1_instruction = require_registers(
     "pal_cache_info_hints_madison_l1_instruction",
     _pal_cache_info_hints_program(0, 1),
-    {"ip": 0x60, "r8": 0, "r12": 0}, entry=0x10, cpu="madison")
+    {"ip": 0x60, "r8": 0, "r12": 0x0100}, entry=0x10, cpu="madison")
 
 test_pal_cache_info_hints_merced_l1_instruction = require_registers(
     "pal_cache_info_hints_merced_l1_instruction",
@@ -504,11 +565,18 @@ test_pal_freq_ratios = require_registers("pal_freq_ratios",
     "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_16_3,
     "r11": PAL_RATIO_16_1}, entry=0x10)
 
+# The zx1 Itanium 2: a 200 MHz input clock, which is the bus clock, and the
+# core and the ITC at 13/2 of it, as on the rx2600 (capture 2026-10-03).
 test_pal_freq_ratios_madison = require_registers(
     "pal_freq_ratios_madison", pal_call_program(PAL_FREQ_RATIOS),
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
-     "r9": PAL_RATIO_16_1, "r10": PAL_RATIO_4_1,
-     "r11": PAL_RATIO_16_1}, entry=0x10, cpu="madison")
+     "r9": PAL_RATIO_13_2, "r10": PAL_RATIO_1_1,
+     "r11": PAL_RATIO_13_2}, entry=0x10, cpu="madison")
+
+test_pal_freq_base_madison = require_registers(
+    "pal_freq_base_madison", pal_call_program(PAL_FREQ_BASE),
+    {"ip": 0x30, "r28": PAL_FREQ_BASE, "r8": 0,
+     "r9": 200000000, "r10": 0, "r11": 0}, entry=0x10, cpu="madison")
 
 # Regression: a PAL procedure returns its status in GR8; on hardware that
 # register write clears the NaT bit.  r8-r11 are PAL *output* registers, so a
@@ -535,19 +603,18 @@ test_pal_call_clears_return_reg_nat = require_registers(
     }, entry=0x10)
 
 # --- Merced (original Itanium) model-differentiated PAL responses ----------
-# 800 MHz core / 133.33 MHz bus (249634-002 datasheet); the ITC counts
-# processor clocks, so its ratio is the processor ratio (245473-002).
+# 800 MHz core at 12/2 of the 133.33 MHz bus clock (249634-002 2.4.2,
+# 248701-002 Table 5-4); the ITC counts processor clocks (245473-002).
 test_pal_freq_ratios_merced = require_registers(
     "pal_freq_ratios_merced", pal_call_program(PAL_FREQ_RATIOS),
     {"ip": 0x30, "r28": PAL_FREQ_RATIOS, "r8": 0,
-     "r9": PAL_RATIO_8_1, "r10": PAL_RATIO_4_3,
-     "r11": PAL_RATIO_8_1}, entry=0x10, cpu="merced")
+     "r9": PAL_RATIO_12_2, "r10": PAL_RATIO_1_1,
+     "r11": PAL_RATIO_12_2}, entry=0x10, cpu="merced")
 
-# PAL_FREQ_BASE base clock is the same 100 MHz for merced.
 test_pal_freq_base_merced = require_registers(
     "pal_freq_base_merced", pal_call_program(PAL_FREQ_BASE),
     {"ip": 0x30, "r28": PAL_FREQ_BASE, "r8": 0,
-     "r9": 100000000, "r10": 0, "r11": 0}, entry=0x10, cpu="merced")
+     "r9": 133333333, "r10": 0, "r11": 0}, entry=0x10, cpu="merced")
 
 # PAL_VM_SUMMARY reports the asymmetric 8 ITR / 48 DTR file.
 test_pal_vm_summary_merced = require_registers(
@@ -586,9 +653,9 @@ test_pal_vm_tr_read_merced_dtr_limit = require_registers(
     entry=0x10, cpu="merced")
 
 # Merced cache hierarchy: 16 KB 4-way 32 B L1I/L1D, 96 KB 6-way 64 B unified
-# write-back L2, 4 MB 4-way 64 B unified L3 (245473-002 sec 4.1-4.4,
-# 248701-002 sec 2.5.4).  The unified levels are reported on the data type
-# only; the instruction type is an invalid argument there.
+# write-back L2, 2 MB 4-way 64 B unified L3 as in the i2000 (245473-002 sec
+# 4.1-4.4, 248701-002 sec 2.5.4).  The unified levels are reported on the
+# data type only; the instruction type is an invalid argument there.
 test_pal_cache_info_merced_l0_i = require_registers(
     "pal_cache_info_merced_l0_i",
     pal_call_program(PAL_CACHE_INFO, [(29, 0), (30, 1), (31, 0)]),
@@ -670,14 +737,23 @@ test_pal_version_merced = require_registers(
      "r9": PAL_VERSION_VALUE_MERCED, "r10": PAL_VERSION_VALUE_MERCED},
     entry=0x10, cpu="merced")
 
-# Procedures that post-date Merced return NOT_IMPLEMENTED on the merced model.
-test_pal_prefetch_vis_merced_unimplemented = require_registers(
-    "pal_prefetch_vis_merced_unimplemented",
+# PAL_PREFETCH_VISIBILITY is required in the 2000 editions too, but with
+# trans_type still reserved (245318-001 p.11-97, 245318-002 p.11-94).
+test_pal_prefetch_vis_merced = require_registers(
+    "pal_prefetch_vis_merced",
     pal_call_program(PAL_PREFETCH_VIS),
     {"ip": 0x30, "r28": PAL_PREFETCH_VIS,
-     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+     "r8": 0, "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="merced")
 
+test_pal_prefetch_vis_merced_trans_type_reserved = require_registers(
+    "pal_prefetch_vis_merced_trans_type_reserved",
+    pal_call_program(PAL_PREFETCH_VIS, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_PREFETCH_VIS,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+# Procedures that post-date Merced return NOT_IMPLEMENTED on the merced model.
 test_pal_cache_shared_info_merced_unimplemented = require_registers(
     "pal_cache_shared_info_merced_unimplemented",
     pal_call_program(PAL_CACHE_SHARED_INFO, [(29, 0), (30, 1), (31, 0)]),
@@ -691,6 +767,27 @@ test_pal_brand_info_merced_unimplemented = require_registers(
     {"ip": 0x80, "r28": PAL_BRAND_INFO,
      "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="merced")
+
+# The rx2600's Madison PAL (capture 2026-10-03, CPU-4): minimum 5.00 and
+# current PAL_A 5.37, PAL_B 5.65, vendor 0xFF; no PAL_BRAND_INFO; and
+# PAL_PREFETCH_VISIBILITY answers that remote processors need no call.
+test_pal_version_madison = require_registers("pal_version_madison",
+    pal_call_program(PAL_VERSION),
+    {"ip": 0x30, "r28": PAL_VERSION, "r8": 0,
+     "r9": 0x00000500ff000500, "r10": 0x00000537ff000565, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_brand_info_madison_unimplemented = require_registers(
+    "pal_brand_info_madison_unimplemented",
+    pal_stacked_call_program(PAL_BRAND_INFO, [0, 0x4000, 0]),
+    {"ip": 0x80, "r28": PAL_BRAND_INFO,
+     "r8": (-1 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_prefetch_vis_madison = require_registers("pal_prefetch_vis_madison",
+    pal_call_program(PAL_PREFETCH_VIS),
+    {"ip": 0x30, "r28": PAL_PREFETCH_VIS, "r8": 1, "r9": 0, "r10": 0,
+     "r11": 0}, entry=0x10, cpu="madison")
 
 # logical_to_physical is already montecito-only; confirm merced too is
 # NOT_IMPLEMENTED (mirrors pal_logical_to_physical_madison_unimplemented).
@@ -851,6 +948,84 @@ test_pal_vm_tr_read_misaligned_buffer = require_registers(
     {"ip": 0x80, "r28": PAL_VM_TR_READ,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
+
+# The madison PAL_VM_SUMMARY, PAL_VM_INFO and PAL_VM_TR_READ answers are the
+# rx2600's (capture 2026-10-03, CPU-7, CPU-8 and CPU-24).
+test_pal_vm_summary_madison = require_registers(
+    "pal_vm_summary_madison", pal_call_program(PAL_VM_SUMMARY),
+    {"ip": 0x30, "r8": 0, "r9": 0x02043f3f020f1865, "r10": 0x183c,
+     "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_vm_info_madison_l0_instruction = require_registers(
+    "pal_vm_info_madison_l0_instruction",
+    pal_call_program(PAL_VM_INFO, [(29, 0), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x202001, "r10": 0x155557000, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_vm_info_madison_l0_data = require_registers(
+    "pal_vm_info_madison_l0_data",
+    pal_call_program(PAL_VM_INFO, [(29, 0), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x202001, "r10": 0x155557000, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_vm_info_madison_l1_instruction = require_registers(
+    "pal_vm_info_madison_l1_instruction",
+    pal_call_program(PAL_VM_INFO, [(29, 1), (30, 1), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x400808001, "r10": 0x155557000, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_vm_info_madison_l1_data = require_registers(
+    "pal_vm_info_madison_l1_data",
+    pal_call_program(PAL_VM_INFO, [(29, 1), (30, 2), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x400808001, "r10": 0x155557000, "r11": 0},
+    entry=0x10, cpu="madison")
+
+
+def _pal_vm_tr_read_program(tr_type, insert):
+    return [
+        (0x10, *movl_mlx(18, PAL_TR_TEST_PTE)),
+        (0x20, 0x00, nop_m(), addl(19, PAL_TR_TEST_IFA & ~0xfff, 0),
+         nop_i()),
+        (0x30, 0x00, nop_m(), addl(7, PAL_TR_TEST_ITIR, 0), addl(5, 5, 0)),
+        (0x40, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0x50, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x60, 0x00, insert(5, 18), nop_i(), nop_i()),
+        (0x70, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
+        (0x80, *movl_mlx(28, PAL_VM_TR_READ)),
+        (0x90, *movl_mlx(32, PAL_VM_TR_READ)),
+        (0xa0, 0x00, nop_m(), addl(33, 5, 0), addl(34, tr_type, 0)),
+        (0xb0, 0x00, nop_m(), addl(35, 0x2000, 0), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_call(0, 0xc0, PAL_PROC_ENTRY)),
+        (0xd0, 0x00, nop_m(), addl(2, 0x2000, 0), nop_i()),
+        (0xe0, 0x00, ld8(20, 2), adds(2, 8, 2), nop_i()),
+        (0xf0, 0x00, ld8(21, 2), adds(2, 8, 2), nop_i()),
+        (0x100, 0x00, ld8(22, 2), adds(2, 8, 2), nop_i()),
+        (0x110, 0x00, ld8(23, 2), nop_i(), nop_i()),
+        (0x120, 0x10, nop_m(), nop_i(), br_cond(0x120, 0x120)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ]
+
+
+# An ITR reads back with no field valid and ar, pl, d and ma as 0; a DTR with
+# pl, d and ma valid and ar as 0.  Neither RR word holds the page size.
+test_pal_vm_tr_read_madison_itr = require_registers(
+    "pal_vm_tr_read_madison_itr", _pal_vm_tr_read_program(0, itr_i),
+    {"ip": 0x120, "r8": 0, "r9": 0, "r10": 0, "r11": 0,
+     "r20": PAL_TR_TEST_PTE & ~0xfdc, "r21": PAL_TR_TEST_ITIR,
+     "r22": PAL_TR_TEST_IFA, "r23": 0}, entry=0x10, cpu="madison")
+
+test_pal_vm_tr_read_madison_dtr = require_registers(
+    "pal_vm_tr_read_madison_dtr", _pal_vm_tr_read_program(1, itr_d),
+    {"ip": 0x120, "r8": 0, "r9": 0xe, "r10": 0, "r11": 0,
+     "r20": PAL_TR_TEST_PTE & ~0xe00, "r21": PAL_TR_TEST_ITIR,
+     "r22": PAL_TR_TEST_IFA, "r23": 0}, entry=0x10, cpu="madison")
+
+test_pal_vm_tr_read_madison_empty = require_registers(
+    "pal_vm_tr_read_madison_empty",
+    pal_stacked_call_program(PAL_VM_TR_READ, [4, 1, 0x2000]),
+    {"ip": 0x80, "r8": 0, "r9": 0xe, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
 
 test_pal_proc_entry_virtual_itr = require_registers(
     "pal_proc_entry_virtual_itr", [
@@ -1067,20 +1242,85 @@ test_pal_proc_get_features_montecito_beyond_max = require_registers(
      "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+# The rx2600's feature sets (capture 2026-10-03, CPU-15 and CPU-16): set 0,
+# sets 16 and 17, and -2 above them.  The HP zx1 firmware stops its boot
+# when set 16 fails.
 test_pal_proc_get_features_madison_beyond_max = require_registers(
     "pal_proc_get_features_madison_beyond_max",
-    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 17), (31, 0)]),
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 18), (31, 0)]),
     {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES,
-     "r8": (-8 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10, cpu="madison")
 
-# Itanium 2 implements set 16 and no feature in it; the HP zx1 firmware stops
-# its boot when the call fails.
+test_pal_proc_get_features_madison_set0 = require_registers(
+    "pal_proc_get_features_madison_set0",
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x1180c60000000000,
+     "r10": 0x0000060000000000, "r11": 0x1180c00000000000},
+    entry=0x10, cpu="madison")
+
 test_pal_proc_get_features_madison_set16 = require_registers(
     "pal_proc_get_features_madison_set16",
     pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 16), (31, 0)]),
     {"ip": 0x60, "r28": PAL_PROC_GET_FEATURES, "r8": 0,
-     "r9": 0, "r10": 0, "r11": 0}, entry=0x10, cpu="madison")
+     "r9": 0xef, "r10": 0xc8, "r11": 0xef}, entry=0x10, cpu="madison")
+
+test_pal_proc_get_features_madison_set17 = require_registers(
+    "pal_proc_get_features_madison_set17",
+    pal_call_program(PAL_PROC_GET_FEATURES, [(29, 0), (30, 17), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x7, "r10": 0, "r11": 0x7},
+    entry=0x10, cpu="madison")
+
+test_pal_bus_get_features_madison = require_registers(
+    "pal_bus_get_features_madison", pal_call_program(PAL_BUS_GET_FEATURES),
+    {"ip": 0x30, "r8": 0, "r9": 0xbdf0000060000000,
+     "r10": 0x0000000040000000, "r11": 0xbdb0000040000000},
+    entry=0x10, cpu="madison")
+
+
+# A SET call, then the GET call that reads the state back.
+def _pal_set_get_features_program(set_index, get_index, select, feature_set):
+    return [
+        (0x10, *movl_mlx(29, select)),
+        (0x20, 0x00, nop_m(), addl(28, set_index, 0),
+         addl(30, feature_set, 0)),
+        (0x30, 0x00, nop_m(), addl(31, 0, 0), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, PAL_PROC_ENTRY)),
+        (0x50, 0x00, nop_m(), addl(28, get_index, 0), addl(29, 0, 0)),
+        (0x60, 0x00, nop_m(), addl(30, feature_set, 0), addl(31, 0, 0)),
+        (0x70, 0x10, nop_m(), nop_i(), br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ]
+
+
+# Only the controllable bits take a new value: bit 60 (CMCI promotion) does,
+# bit 61 (not implemented) and the read-only bits 42 and 41 keep theirs.
+test_pal_proc_set_features_madison_controllable = require_registers(
+    "pal_proc_set_features_madison_controllable",
+    _pal_set_get_features_program(PAL_PROC_SET_FEATURES,
+                                  PAL_PROC_GET_FEATURES,
+                                  (1 << 60) | (1 << 61), 0),
+    {"ip": 0x80, "r8": 0, "r9": 0x1180c60000000000,
+     "r10": 0x1000060000000000, "r11": 0x1180c00000000000},
+    entry=0x10, cpu="madison")
+
+test_pal_proc_set_features_madison_set16_readback = require_registers(
+    "pal_proc_set_features_madison_set16_readback",
+    _pal_set_get_features_program(PAL_PROC_SET_FEATURES,
+                                  PAL_PROC_GET_FEATURES, 0x13, 16),
+    {"ip": 0x80, "r8": 0, "r9": 0xef, "r10": 0x03, "r11": 0xef},
+    entry=0x10, cpu="madison")
+
+test_pal_bus_set_features_madison = require_registers(
+    "pal_bus_set_features_madison",
+    _pal_set_get_features_program(PAL_BUS_SET_FEATURES,
+                                  PAL_BUS_GET_FEATURES,
+                                  0xffffffffffffffff, 0),
+    {"ip": 0x80, "r8": 0, "r9": 0xbdf0000060000000,
+     "r10": 0xbdb0000040000000, "r11": 0xbdb0000040000000},
+    entry=0x10, cpu="madison")
 
 test_pal_proc_get_features_merced_beyond_max = require_registers(
     "pal_proc_get_features_merced_beyond_max",
@@ -1192,12 +1432,11 @@ test_pal_brand_info_bus = require_registers(
     {"ip": 0x80, "r28": PAL_BRAND_INFO, "r8": 0,
      "r9": 533333333, "r10": 0, "r11": 0}, entry=0x10)
 
-# No IBR/DBR matching is implemented, so no breakpoint register pairs are
-# advertised.  See the comment on pal_debug_info() in arch/pal.c.
+# Four IBR and four DBR pairs, as on the real processors (SDM Vol. 2 7.1.1).
 test_pal_debug_info = require_registers("pal_debug_info",
     pal_call_program(PAL_DEBUG_INFO),
     {"ip": 0x30, "r28": PAL_DEBUG_INFO, "r8": 0,
-     "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+     "r9": 4, "r10": 4, "r11": 0}, entry=0x10)
 
 test_pal_debug_info_reserved_arg = require_registers(
     "pal_debug_info_reserved_arg",
@@ -1213,11 +1452,17 @@ test_pal_register_info_application_implemented = require_registers(
      "r9": PAL_AR_IMPLEMENTED_LOW, "r10": PAL_AR_IMPLEMENTED_HIGH,
      "r11": 0}, entry=0x10)
 
+# Requests 1 and 3 mark every unimplemented register: reading one faults,
+# and the HP zx1 SAL's INIT handler reads every control register whose
+# request-3 bit is clear.  The ignored ARs 48-63 and 112-127 read as 0
+# without a fault.
 test_pal_register_info_application_side_effects = require_registers(
     "pal_register_info_application_side_effects",
     pal_call_program(PAL_REGISTER_INFO, [(29, 1), (30, 0), (31, 0)]),
     {"ip": 0x60, "r28": PAL_REGISTER_INFO, "r8": 0,
-     "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
+     "r9": ~PAL_AR_IMPLEMENTED_LOW & 0x0000ffffffffffff,
+     "r10": ~PAL_AR_IMPLEMENTED_HIGH & 0x0000ffffffffffff, "r11": 0},
+    entry=0x10)
 
 test_pal_register_info_control_implemented = require_registers(
     "pal_register_info_control_implemented",
@@ -1230,8 +1475,32 @@ test_pal_register_info_control_side_effects = require_registers(
     "pal_register_info_control_side_effects",
     pal_call_program(PAL_REGISTER_INFO, [(29, 3), (30, 0), (31, 0)]),
     {"ip": 0x60, "r28": PAL_REGISTER_INFO, "r8": 0,
-     "r9": 0, "r10": PAL_CR_READ_SIDE_EFFECT_HIGH, "r11": 0},
+     "r9": ~PAL_CR_IMPLEMENTED_LOW & UINT64_MAX,
+     "r10": (~PAL_CR_IMPLEMENTED_HIGH & UINT64_MAX) |
+            PAL_CR_READ_SIDE_EFFECT_HIGH, "r11": 0},
     entry=0x10)
+
+# The rx2600's answers to the four requests (capture 2026-10-03, CPU-12).
+def _pal_register_info_madison(name, request, low, high):
+    return require_registers(
+        name,
+        pal_call_program(PAL_REGISTER_INFO, [(29, request), (30, 0), (31, 0)]),
+        {"ip": 0x60, "r8": 0, "r9": low, "r10": high, "r11": 0},
+        entry=0x10, cpu="madison")
+
+
+test_pal_register_info_madison_ar_implemented = _pal_register_info_madison(
+    "pal_register_info_madison_ar_implemented", 0,
+    0x000011117f2f00ff, 0x7)
+test_pal_register_info_madison_ar_side_effects = _pal_register_info_madison(
+    "pal_register_info_madison_ar_side_effects", 1,
+    0x0000eeee80d0ff00, 0x0000fffffffffff8)
+test_pal_register_info_madison_cr_implemented = _pal_register_info_madison(
+    "pal_register_info_madison_cr_implemented", 2,
+    0x0000000003fb0307, 0x307ff)
+test_pal_register_info_madison_cr_side_effects = _pal_register_info_madison(
+    "pal_register_info_madison_cr_side_effects", 3,
+    0xfffffffffc04fcf8, 0xfffffffffffcf802)
 
 test_pal_register_info_invalid_request = require_registers(
     "pal_register_info_invalid_request",
@@ -1247,7 +1516,8 @@ test_pal_register_info_reserved_arg = require_registers(
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
-def _pal_perf_mon_info_case(name, info, retired_mask, cpu=None):
+def _pal_perf_mon_info_case(name, info, retired_mask, cpu=None,
+                            pmc_mask=0x3fff):
     return require_registers(name, [
         (0x10, *movl_mlx(29, PAL_PERF_BUFFER)),
         (0x20, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
@@ -1265,16 +1535,22 @@ def _pal_perf_mon_info_case(name, info, retired_mask, cpu=None):
         (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
     ], {"ip": 0xc0, "r28": PAL_PERF_MON_INFO, "r8": 0,
         "r9": info, "r10": 0, "r11": 0,
-        "r20": 0x3fff, "r21": 0, "r22": 0x3ffff, "r23": 0,
+        "r20": pmc_mask, "r21": 0, "r22": 0x3ffff, "r23": 0,
         "r24": 0xf0, "r25": retired_mask},
         entry=0x10, cpu=cpu)
 
 test_pal_perf_mon_info = _pal_perf_mon_info_case(
     "pal_perf_mon_info", 0x08123004, 0xf0)
 
-# 245320-003 Table 6-24: 32-bit counters; only PMD4 counts retired instructions.
+# 245320-003 Table 6-24: 32-bit counters.  Its retired mask of 10h is erratum
+# 29 of 249720-009, fixed in PAL 8.8.30: PMD4 and PMD5 count them.
 test_pal_perf_mon_info_merced = _pal_perf_mon_info_case(
-    "pal_perf_mon_info_merced", 0x08122004, 0x10, cpu="merced")
+    "pal_perf_mon_info_merced", 0x08122004, 0x30, cpu="merced")
+
+# The rx2600: 47-bit counters and PMC0-15 (capture 2026-10-03, CPU-14).
+test_pal_perf_mon_info_madison = _pal_perf_mon_info_case(
+    "pal_perf_mon_info_madison", 0x08122f04, 0xf0, cpu="madison",
+    pmc_mask=0xffff)
 
 test_pal_perf_mon_info_bad_buffer = require_registers(
     "pal_perf_mon_info_bad_buffer",
@@ -1370,15 +1646,24 @@ def _sale_two_call_bundles():
     return bundles
 
 
-def _sale_flash_image():
+def _sale_flash_image(indirect=False):
     image = bytearray(b"\xff" * SALE_FLASH_SIZE)
     fit = 0x100
     image[fit:fit + 8] = b"_FIT_   "
     struct.pack_into("<Q", image, fit + 8, 0x0100000000000001)
-    low, high = _enc.bundle_words(
-        *_enc.brl_cond_mlx(SALE_ENTRY_ADDR, SALE_CODE))
-    struct.pack_into("<QQ", image, SALE_ENTRY_ADDR - SALE_FLASH_BASE,
-                     low, high)
+    if indirect:
+        # Merced has no brl: it takes an Illegal Operation fault (SDM Vol 2
+        # Part 2 7.4, Long Branch).
+        entry = [_enc.movl_mlx(2, SALE_CODE),
+                 (0x01, _enc.nop_m(), _enc.mov_br_gr(6, 2), _enc.nop_i()),
+                 (0x11, _enc.nop_m(), _enc.nop_i(), _enc.br_indirect(6))]
+    else:
+        entry = [_enc.brl_cond_mlx(SALE_ENTRY_ADDR, SALE_CODE)]
+    for i, bundle in enumerate(entry):
+        low, high = _enc.bundle_words(*bundle)
+        struct.pack_into("<QQ", image,
+                         SALE_ENTRY_ADDR - SALE_FLASH_BASE + 16 * i,
+                         low, high)
     struct.pack_into("<Q", image, SALE_FLASH_SIZE - 32,
                      (1 << 63) | (SALE_FLASH_BASE + fit))
     struct.pack_into("<Q", image, SALE_FLASH_SIZE - 24,
@@ -1410,6 +1695,30 @@ test_sale_entry_two_calls = IA64Case(
     bundles=tuple(tuple(b) for b in _sale_two_call_bundles()),
     expected=dict(SALE_TWO_CALL_EXPECTED),
     metadata=CaseMetadata(required_features=frozenset({"alat:full"})),
+)
+
+
+# The sdv board makes the same two calls (G21): its firmware's recovery check
+# reads the J29 lines from the south bridge's GPIO block.
+def _sale_entry_two_calls_sdv(qemu):
+    with tempfile.TemporaryDirectory(prefix="ia64-sale-") as tmpdir:
+        flash = os.path.join(tmpdir, "flash.bin")
+        with open(flash, "wb") as f:
+            f.write(_sale_flash_image(indirect=True))
+        _enc.run_program(qemu, _sale_two_call_bundles(),
+                         entry=None,
+                         expected=SALE_TWO_CALL_EXPECTED,
+                         name="sale_entry_two_calls_sdv",
+                         machine="460gx", cpu="merced",
+                         extra_args=("-bios", flash))
+
+
+test_sale_entry_two_calls_sdv = IA64Case(
+    name="sale_entry_two_calls_sdv", runner=_sale_entry_two_calls_sdv,
+    bundles=tuple(tuple(b) for b in _sale_two_call_bundles()),
+    expected=dict(SALE_TWO_CALL_EXPECTED),
+    metadata=CaseMetadata(required_features=frozenset(
+        {"alat:full", "machine:460gx", "cpu-model:merced"})),
 )
 
 test_pal_fixed_addr_reserved_arg = require_registers(
@@ -1496,31 +1805,38 @@ test_pal_mc_clear_log = require_registers("pal_mc_clear_log",
     {"ip": 0x60, "r28": PAL_MC_CLEAR_LOG, "r8": 0,
      "r9": 0, "r10": 0, "r11": 0}, entry=0x10)
 
-test_pal_copy_info = require_registers("pal_copy_info",
-    pal_call_program(PAL_COPY_INFO, [(29, 0), (30, 0), (31, 0)]),
-    {"ip": 0x60, "r28": PAL_COPY_INFO, "r8": 0,
-     "r9": PAL_COPY_BUFFER_SIZE, "r10": PAL_COPY_BUFFER_ALIGN, "r11": 0},
-    entry=0x10)
+# PAL_COPY_INFO as the vendor PAL_Bs answer it: the rx2600's Madison PAL
+# (capture 2026-10-04, CPU-20) and the i2000's Merced PAL (bios130.BIN).
+# platform_info has num_procs in bits 63:32 and num_iopics in bits 31:0.
+def _pal_copy_info_case(name, args, status, size, align, cpu=None):
+    return require_registers(name,
+        pal_call_program(PAL_COPY_INFO,
+                         [(29, args[0]), (30, args[1]), (31, args[2])]),
+        {"ip": 0x60, "r28": PAL_COPY_INFO, "r8": status & UINT64_MAX,
+         "r9": size, "r10": align, "r11": 0},
+        entry=0x10, cpu=cpu)
 
-test_pal_copy_info_bad_type = require_registers("pal_copy_info_bad_type",
-    pal_call_program(PAL_COPY_INFO, [(29, 2), (30, 0), (31, 0)]),
-    {"ip": 0x60, "r28": PAL_COPY_INFO,
-     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
-    entry=0x10)
-
-test_pal_copy_info_ia32_unsupported = require_registers(
-    "pal_copy_info_ia32_unsupported",
-    pal_call_program(PAL_COPY_INFO, [(29, 1), (30, 1), (31, 0)]),
-    {"ip": 0x60, "r28": PAL_COPY_INFO,
-     "r8": (-3 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
-    entry=0x10)
-
-test_pal_copy_info_platform_for_ia64 = require_registers(
-    "pal_copy_info_platform_for_ia64",
-    pal_call_program(PAL_COPY_INFO, [(29, 0), (30, 1), (31, 0)]),
-    {"ip": 0x60, "r28": PAL_COPY_INFO,
-     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
-    entry=0x10)
+test_pal_copy_info = _pal_copy_info_case(
+    "pal_copy_info", (0, 0, 0), 0, PAL_COPY_BUFFER_SIZE,
+    PAL_COPY_BUFFER_ALIGN)
+test_pal_copy_info_merced = _pal_copy_info_case(
+    "pal_copy_info_merced", (0, 0, 0), 0, 0x3a800, PAL_COPY_BUFFER_ALIGN,
+    cpu="merced")
+test_pal_copy_info_bad_type = _pal_copy_info_case(
+    "pal_copy_info_bad_type", (2, 0, 0), -2, 0, 0)
+test_pal_copy_info_platform_for_ia64 = _pal_copy_info_case(
+    "pal_copy_info_platform_for_ia64", (0, 1, 0), -2, 0, 0)
+test_pal_copy_info_mca_state_for_ia64 = _pal_copy_info_case(
+    "pal_copy_info_mca_state_for_ia64", (0, 0, 0x400), -2, 0, 0)
+test_pal_copy_info_ia32 = _pal_copy_info_case(
+    "pal_copy_info_ia32", (1, (2 << 32) | 1, 0), 0, 0x8d000,
+    PAL_COPY_BUFFER_ALIGN)
+test_pal_copy_info_ia32_mca_state = _pal_copy_info_case(
+    "pal_copy_info_ia32_mca_state", (1, (2 << 32) | 6, 0x400), 0, 0x92800,
+    PAL_COPY_BUFFER_ALIGN)
+test_pal_copy_info_ia32_merced = _pal_copy_info_case(
+    "pal_copy_info_ia32_merced", (1, (2 << 32) | 1, 0), 0, 0x85000,
+    PAL_COPY_BUFFER_ALIGN, cpu="merced")
 
 # PAL_FIRMWARE_REGISTER (hw/ia64/ia64_vpc_abi.h): the project firmware's
 # registration with the PAL emulation.  A record without the magic -- any
@@ -1593,7 +1909,7 @@ test_pal_copy_pal_entry_callable = require_registers(
         (0x80, *movl_mlx(28, PAL_VERSION)),
         (0x90, 0x00, nop_m(), addl(29, 0, 0), addl(30, 0, 0)),
         (0xa0, 0x10, nop_m(), addl(31, 0, 0),
-         br_call(0, 0xa0, PAL_COPY_TARGET)),
+         br_call(0, 0xa0, PAL_COPY_PROC)),
         (0xb0, 0x10, nop_m(), nop_i(),
          br_cond(0xb0, 0xb0)),
         (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
@@ -1617,14 +1933,14 @@ test_pal_copy_pal_ap_entry_callable = require_registers(
         (0x80, *movl_mlx(28, PAL_VERSION)),
         (0x90, 0x00, nop_m(), addl(29, 0, 0), addl(30, 0, 0)),
         (0xa0, 0x10, nop_m(), addl(31, 0, 0),
-         br_call(0, 0xa0, PAL_COPY_TARGET)),
+         br_call(0, 0xa0, PAL_COPY_PROC)),
         (0xb0, 0x10, nop_m(), nop_i(),
          br_cond(0xb0, 0xb0)),
         (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
         (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(),
          br_ret(0)),
-        (PAL_COPY_TARGET, 0x0a, pal_break(), nop_m(), nop_i()),
-        (PAL_COPY_TARGET + 0x10, 0x10, nop_m(), nop_i(),
+        (PAL_COPY_PROC, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_COPY_PROC + 0x10, 0x10, nop_m(), nop_i(),
          br_ret(0)),
     ],
     {"ip": 0xb0, "r28": PAL_VERSION, "r8": 0,
@@ -1654,7 +1970,7 @@ test_pal_copy_pal_entry_callable_on_other_cpu = require_registers(
         (0x100000, *movl_mlx(28, PAL_VERSION)),
         (0x100010, 0x00, nop_m(), addl(29, 0, 0), addl(30, 0, 0)),
         (0x100020, 0x10, nop_m(), addl(31, 0, 0),
-         br_call(0, 0x100020, PAL_COPY_TARGET)),
+         br_call(0, 0x100020, PAL_COPY_PROC)),
         (0x100030, 0x10, nop_m(), nop_i(),
          br_cond(0x100030, 0x100030)),
         (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
@@ -1688,13 +2004,13 @@ test_pal_copy_pal_relocated_entry_plain_branch = require_registers(
         # Invoke PAL_VERSION at the relocated entry via a plain branch: b1 is
         # the entry, b0 is the return (0xd0); no frame is pushed.
         (0x70, *movl_mlx(28, PAL_VERSION)),
-        (0x80, *movl_mlx(7, PAL_COPY_TARGET)),
+        (0x80, *movl_mlx(7, PAL_COPY_PROC)),
         (0x90, 0x00, nop_m(), mov_b_gr(1, 7), nop_i()),
         (0xa0, *movl_mlx(7, 0xd0)),
         (0xb0, 0x00, nop_m(), mov_b_gr(0, 7), nop_i()),
         (0xc0, 0x10, nop_m(), nop_i(), br_indirect(1)),
         # Read the relocated return bundle back and check it is br.many.
-        (0xd0, *movl_mlx(5, PAL_COPY_TARGET + 0x10)),
+        (0xd0, *movl_mlx(5, PAL_COPY_PROC + 0x10)),
         (0xe0, 0x00, ld8(6, 5), nop_i(), nop_i()),
         (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
         (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
@@ -1719,6 +2035,58 @@ test_pal_copy_pal_bad_alignment = require_registers(
     {"ip": 0x80, "r28": PAL_COPY_PAL,
      "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
+
+# The copy is 256 KB aligned, PAL_PROC is 0x8010 into it, and the target
+# must lie in the implemented physical space (Madison 50 bits, Merced 44).
+test_pal_copy_pal_proc_offset = require_registers(
+    "pal_copy_pal_proc_offset",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [PAL_COPY_TARGET, PAL_COPY_BUFFER_SIZE, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": 0, "r9": PAL_COPY_PROC - PAL_COPY_TARGET, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_copy_pal_bad_256k_alignment = require_registers(
+    "pal_copy_pal_bad_256k_alignment",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [PAL_COPY_TARGET + 0x1000,
+                              PAL_COPY_BUFFER_SIZE, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_copy_pal_negative_alloc = require_registers(
+    "pal_copy_pal_negative_alloc",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [PAL_COPY_TARGET, 1 << 63, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_copy_pal_unimplemented_target = require_registers(
+    "pal_copy_pal_unimplemented_target",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [(1 << 50) | PAL_COPY_TARGET,
+                              PAL_COPY_BUFFER_SIZE, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10)
+
+test_pal_copy_pal_unimplemented_target_merced = require_registers(
+    "pal_copy_pal_unimplemented_target_merced",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [(1 << 44) | PAL_COPY_TARGET, 0x3a800, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_copy_pal_merced_size = require_registers(
+    "pal_copy_pal_merced_size",
+    pal_stacked_call_program(PAL_COPY_PAL,
+                             [PAL_COPY_TARGET, 0x3a800, 1]),
+    {"ip": 0x80, "r28": PAL_COPY_PAL,
+     "r8": 0, "r9": PAL_COPY_PROC - PAL_COPY_TARGET, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
 
 test_pal_copy_pal_bad_processor = require_registers(
     "pal_copy_pal_bad_processor",
@@ -1747,6 +2115,33 @@ test_pal_halt_info = require_registers("pal_halt_info", [
     "r9": 0, "r10": 0, "r11": 0,
     "r20": PAL_HALT_LIGHT_INFO, "r21": PAL_HALT_STATE1_INFO, "r22": 0},
     entry=0x10)
+
+# The rx2600's power states (capture 2026-10-03, CPU-19): 0 and 2, coherent,
+# 35 W, entry 9000 and 14000 cycles, exit 8700; state 1 is not implemented.
+test_pal_halt_info_madison = require_registers("pal_halt_info_madison", [
+    (0x10, 0x00, nop_m(), alloc(2, 4, 0, 0, 0), nop_i()),
+    (0x20, *movl_mlx(28, PAL_HALT_INFO)),
+    (0x30, *movl_mlx(32, PAL_HALT_INFO)),
+    (0x40, *movl_mlx(33, PAL_HALT_INFO_BUFFER)),
+    (0x50, *movl_mlx(34, 0)),
+    (0x60, *movl_mlx(35, 0)),
+    (0x70, 0x10, nop_m(), nop_i(), br_call(0, 0x70, PAL_PROC_ENTRY)),
+    (0x80, *movl_mlx(2, PAL_HALT_INFO_BUFFER)),
+    (0x90, 0x00, ld8(20, 2), adds(2, 8, 2), nop_i()),
+    (0xa0, 0x00, ld8(21, 2), adds(2, 8, 2), nop_i()),
+    (0xb0, 0x00, ld8(22, 2), nop_i(), nop_i()),
+    (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, 0xc0)),
+    (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+    (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+], {"ip": 0xc0, "r8": 0, "r9": 0, "r10": 0, "r11": 0,
+    "r20": 0x300088b8232821fc, "r21": 0, "r22": 0x300088b836b021fc},
+    entry=0x10, cpu="madison")
+
+test_pal_halt_state1_invalid_madison = require_registers(
+    "pal_halt_state1_invalid_madison",
+    pal_call_program(PAL_HALT, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0,
+     "r11": 0}, entry=0x10, cpu="madison")
 
 test_pal_halt_invalid_state = require_registers("pal_halt_invalid_state",
     pal_call_program(PAL_HALT, [(29, 0), (30, 0), (31, 0)]),
@@ -1831,6 +2226,43 @@ test_pal_mc_error_info_structure_empty = require_registers(
     {"ip": 0x60, "r28": PAL_MC_ERROR_INFO,
      "r8": (-6 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
+
+# info_index 1 on Madison: the processor state parameter of a corrected event
+# with every state group valid, also with no machine check, and mn once a
+# min-state area is registered (rx2600 capture 2026-10-03, CPU-21: 0xFFF61020
+# under the vendor SAL).  Merced has no such evidence and keeps -6.
+test_pal_mc_error_info_psp_madison = require_registers(
+    "pal_mc_error_info_psp_madison",
+    pal_call_program(PAL_MC_ERROR_INFO, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_MC_ERROR_INFO,
+     "r8": 0, "r9": 0xfff61000, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_mc_error_info_psp_merced = require_registers(
+    "pal_mc_error_info_psp_merced",
+    pal_call_program(PAL_MC_ERROR_INFO, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_MC_ERROR_INFO,
+     "r8": (-6 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_mc_error_info_psp_registered = require_registers(
+    "pal_mc_error_info_psp_registered",
+    [
+        (0x10, *movl_mlx(29, 0x2000)),
+        (0x20, 0x00, nop_m(), addl(28, PAL_MC_REGISTER_MEM, 0),
+         addl(30, 0, 0)),
+        (0x30, 0x00, nop_m(), addl(31, 0, 0), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, PAL_PROC_ENTRY)),
+        (0x50, 0x00, nop_m(), addl(28, PAL_MC_ERROR_INFO, 0), addl(29, 1, 0)),
+        (0x60, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
+        (0x70, 0x10, nop_m(), nop_i(), br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ],
+    {"ip": 0x80, "r28": PAL_MC_ERROR_INFO,
+     "r8": 0, "r9": 0xfff61020, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
 
 test_pal_mc_error_info_bad_index = require_registers(
     "pal_mc_error_info_bad_index",
@@ -1917,6 +2349,33 @@ test_pal_mem_for_test = require_registers("pal_mem_for_test",
     {"ip": 0x60, "r28": PAL_MEM_FOR_TEST, "r8": 0,
      "r9": 0, "r10": 1, "r11": 0}, entry=0x10)
 
+# The rx2600's PAL_TEST_PROC needs 6 MiB, aligned to 8 MiB (capture
+# 2026-10-03, CPU-20), and refuses a smaller or misaligned buffer (SDM
+# Vol. 2 PAL_TEST_PROC).
+test_pal_mem_for_test_madison = require_registers(
+    "pal_mem_for_test_madison",
+    pal_call_program(PAL_MEM_FOR_TEST, [(29, 0), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r8": 0, "r9": 0x600000, "r10": 0x800000, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_test_proc_madison = require_registers(
+    "pal_test_proc_madison",
+    pal_stacked_call_program(PAL_TEST_PROC, [0x800000, 0x600000, 1]),
+    {"ip": 0x80, "r8": 0, "r9": PAL_SELF_TEST_STATE_TESTED, "r10": 0,
+     "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_test_proc_madison_small_buffer = require_registers(
+    "pal_test_proc_madison_small_buffer",
+    pal_stacked_call_program(PAL_TEST_PROC, [0x800000, 0x5ff000, 1]),
+    {"ip": 0x80, "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0,
+     "r11": 0}, entry=0x10, cpu="madison")
+
+test_pal_test_proc_madison_misaligned = require_registers(
+    "pal_test_proc_madison_misaligned",
+    pal_stacked_call_program(PAL_TEST_PROC, [0x400000, 0x600000, 1]),
+    {"ip": 0x80, "r8": (-2 & 0xffffffffffffffff), "r9": 0, "r10": 0,
+     "r11": 0}, entry=0x10, cpu="madison")
+
 test_pal_test_proc_healthy = require_registers("pal_test_proc_healthy",
     pal_stacked_call_program(PAL_TEST_PROC, [0x2000, 0, 1]),
     {"ip": 0x80, "r28": PAL_TEST_PROC, "r8": 0,
@@ -1970,7 +2429,14 @@ CASE_NAMES = (
     'pal_cache_info_l1_data',
     'pal_cache_info_l1_instruction',
     'pal_cache_info_l2_unified',
+    'pal_cache_info_madison_l0_instruction',
+    'pal_cache_info_madison_l0_data',
+    'pal_cache_info_madison_l1_unified',
     'pal_cache_info_l2_unified_madison',
+    'pal_cache_prot_info_madison_l0_instruction',
+    'pal_cache_prot_info_madison_l0_data',
+    'pal_cache_prot_info_madison_l1_unified',
+    'pal_cache_prot_info_madison_l2_unified',
     'pal_cache_info_hints_madison_l1_data',
     'pal_cache_info_hints_madison_l2_unified',
     'pal_cache_info_hints_madison_l1_instruction',
@@ -1989,11 +2455,21 @@ CASE_NAMES = (
     'pal_cache_shared_info_sibling_thread',
     'pal_copy_info',
     'pal_copy_info_bad_type',
-    'pal_copy_info_ia32_unsupported',
+    'pal_copy_info_ia32',
+    'pal_copy_info_ia32_mca_state',
+    'pal_copy_info_ia32_merced',
+    'pal_copy_info_mca_state_for_ia64',
+    'pal_copy_info_merced',
     'pal_copy_info_platform_for_ia64',
+    'pal_copy_pal_bad_256k_alignment',
     'pal_copy_pal_bad_alignment',
     'pal_copy_pal_bad_alloc',
     'pal_copy_pal_bad_processor',
+    'pal_copy_pal_merced_size',
+    'pal_copy_pal_negative_alloc',
+    'pal_copy_pal_proc_offset',
+    'pal_copy_pal_unimplemented_target',
+    'pal_copy_pal_unimplemented_target_merced',
     'pal_copy_pal_ap_entry_callable',
     'pal_copy_pal_entry_callable_on_other_cpu',
     'pal_copy_pal_entry_callable',
@@ -2011,9 +2487,18 @@ CASE_NAMES = (
     'pal_freq_ratios',
     'pal_call_clears_return_reg_nat',
     'pal_freq_ratios_madison',
+    'pal_freq_base_madison',
     'pal_freq_ratios_merced',
     'pal_freq_base_merced',
     'pal_vm_summary_merced',
+    'pal_vm_summary_madison',
+    'pal_vm_info_madison_l0_instruction',
+    'pal_vm_info_madison_l0_data',
+    'pal_vm_info_madison_l1_instruction',
+    'pal_vm_info_madison_l1_data',
+    'pal_vm_tr_read_madison_itr',
+    'pal_vm_tr_read_madison_dtr',
+    'pal_vm_tr_read_madison_empty',
     'pal_cache_info_merced_l0_i',
     'pal_cache_info_merced_l0_d',
     'pal_cache_info_merced_l1_unified',
@@ -2028,9 +2513,13 @@ CASE_NAMES = (
     'pal_vm_tr_read_merced_itr_bound',
     'pal_vm_tr_read_merced_dtr_bound',
     'pal_vm_tr_read_merced_dtr_limit',
-    'pal_prefetch_vis_merced_unimplemented',
+    'pal_prefetch_vis_merced',
+    'pal_prefetch_vis_merced_trans_type_reserved',
     'pal_cache_shared_info_merced_unimplemented',
     'pal_brand_info_merced_unimplemented',
+    'pal_version_madison',
+    'pal_brand_info_madison_unimplemented',
+    'pal_prefetch_vis_madison',
     'pal_logical_to_physical_merced_unimplemented',
     'pal_freq_ratios_reserved_arg',
     'pal_halt_info',
@@ -2042,6 +2531,9 @@ CASE_NAMES = (
     'pal_halt_light_wakes_on_due_itm',
     'pal_halt_reserved_arg',
     'pal_halt_wakes_on_due_itm',
+    'pal_halt_state2_wakes_on_due_itm_madison',
+    'pal_halt_info_madison',
+    'pal_halt_state1_invalid_madison',
     'pal_halt_wakes_on_due_itm_icount',
     'pal_logical_to_physical_current',
     'pal_logical_to_physical_multicore_thread',
@@ -2056,6 +2548,9 @@ CASE_NAMES = (
     'pal_mc_error_info_bad_index',
     'pal_mc_error_info_bad_level',
     'pal_mc_error_info_map_empty',
+    'pal_mc_error_info_psp_madison',
+    'pal_mc_error_info_psp_merced',
+    'pal_mc_error_info_psp_registered',
     'pal_mc_error_info_structure_empty',
     'pal_mc_expected',
     'pal_mc_register_mem',
@@ -2070,7 +2565,16 @@ CASE_NAMES = (
     'pal_mem_attrib_natpage_merced',
     'pal_mem_attrib_reserved_arg',
     'pal_mem_for_test',
+    'pal_mem_for_test_madison',
+    'pal_test_proc_madison',
+    'pal_test_proc_madison_small_buffer',
+    'pal_test_proc_madison_misaligned',
     'pal_perf_mon_info',
+    'pal_perf_mon_info_madison',
+    'pal_register_info_madison_ar_implemented',
+    'pal_register_info_madison_ar_side_effects',
+    'pal_register_info_madison_cr_implemented',
+    'pal_register_info_madison_cr_side_effects',
     'pal_perf_mon_info_merced',
     'pal_perf_mon_info_bad_buffer',
     'pal_perf_mon_info_reserved_arg',
@@ -2092,6 +2596,12 @@ CASE_NAMES = (
     'pal_proc_get_features',
     'pal_proc_get_features_madison_beyond_max',
     'pal_proc_get_features_madison_set16',
+    'pal_proc_get_features_madison_set0',
+    'pal_proc_get_features_madison_set17',
+    'pal_bus_get_features_madison',
+    'pal_proc_set_features_madison_controllable',
+    'pal_proc_set_features_madison_set16_readback',
+    'pal_bus_set_features_madison',
     'pal_proc_get_features_merced_beyond_max',
     'pal_proc_get_features_montecito_beyond_max',
     'pal_proc_get_features_montecito_next_set',
@@ -2135,6 +2645,7 @@ CASE_NAMES = (
     'pal_vm_tr_read_misaligned_buffer',
     'pal_vm_tr_read_rejects_first_non_tr',
     'sale_entry_two_calls',
+    'sale_entry_two_calls_sdv',
 )
 
 CASE_METADATA = {

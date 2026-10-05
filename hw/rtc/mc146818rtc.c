@@ -65,7 +65,7 @@
 
 #define RTC_ISA_BASE 0x70
 
-static void rtc_set_time(MC146818RtcState *s);
+static bool rtc_set_time(MC146818RtcState *s);
 static void rtc_update_time(MC146818RtcState *s);
 static void rtc_set_cmos(MC146818RtcState *s, const struct tm *tm);
 static inline int rtc_from_bcd(MC146818RtcState *s, int a);
@@ -444,9 +444,12 @@ static void cmos_ioport_write(void *opaque, hwaddr addr,
             check_update_timer(s);
             break;
         case RTC_IBM_PS2_CENTURY_BYTE:
-            s->cmos_index = RTC_CENTURY;
-            /* fall through */
         case RTC_CENTURY:
+            if (!s->century_register) {
+                s->cmos_data[s->cmos_index] = data;
+                break;
+            }
+            s->cmos_index = RTC_CENTURY;
             /* fall through */
         case RTC_SECONDS:
         case RTC_MINUTES:
@@ -455,11 +458,28 @@ static void cmos_ioport_write(void *opaque, hwaddr addr,
         case RTC_DAY_OF_MONTH:
         case RTC_MONTH:
         case RTC_YEAR:
-            s->cmos_data[s->cmos_index] = data;
             /* if in set mode, do not update the time */
             if (rtc_running(s)) {
-                rtc_set_time(s);
+                int64_t phase;
+
+                /*
+                 * A write moves the calendar, not the divider chain: only
+                 * DV2-DV0 reset the 22 stages whose 1 Hz output starts each
+                 * update cycle (MC146818 datasheet, "Divider Stages" and
+                 * "Update Cycle"), so the bytes not written keep counting and
+                 * the next update stays on its schedule.  The HP i2000
+                 * firmware rewrites the century byte inside every EFI
+                 * GetTime, and its callers poll GetTime many times a second.
+                 */
+                rtc_update_time(s);
+                phase = get_guest_rtc_ns(s) % NANOSECONDS_PER_SECOND;
+                s->cmos_data[s->cmos_index] = data;
+                if (rtc_set_time(s)) {
+                    s->offset = phase;
+                }
                 check_update_timer(s);
+            } else {
+                s->cmos_data[s->cmos_index] = data;
             }
             break;
         case RTC_REG_A:
@@ -634,12 +654,13 @@ static void rtc_get_time(MC146818RtcState *s, struct tm *tm)
     tm->tm_wday = rtc_from_bcd(s, s->cmos_data[RTC_DAY_OF_WEEK]) - 1;
     tm->tm_mday = rtc_from_bcd(s, s->cmos_data[RTC_DAY_OF_MONTH]);
     tm->tm_mon = rtc_from_bcd(s, s->cmos_data[RTC_MONTH]) - 1;
-    tm->tm_year =
-        rtc_from_bcd(s, s->cmos_data[RTC_YEAR]) + s->base_year +
-        rtc_from_bcd(s, s->cmos_data[RTC_CENTURY]) * 100 - 1900;
+    tm->tm_year = rtc_from_bcd(s, s->cmos_data[RTC_YEAR]) + s->base_year - 1900;
+    if (s->century_register) {
+        tm->tm_year += rtc_from_bcd(s, s->cmos_data[RTC_CENTURY]) * 100;
+    }
 }
 
-static void rtc_set_time(MC146818RtcState *s)
+static bool rtc_set_time(MC146818RtcState *s)
 {
     struct tm tm = {};
     time_t base;
@@ -650,20 +671,18 @@ static void rtc_set_time(MC146818RtcState *s)
     /*
      * A calendar the nanosecond clock cannot hold (|base| * 1e9 past
      * INT64) must not become the base time: it wraps get_guest_rtc_ns()
-     * and the clock reads back as garbage and stops.  The HP i2000 firmware
-     * gets here from its century write-probe -- it stores 00 in CMOS 32h
-     * (year 0026) and reads it back before restoring 20h -- inside every
-     * EFI GetTime; on the real part the century byte is plain RAM and the
-     * time keeps running, so leave the base time alone for such a write.
+     * and the clock reads back as garbage and stops.  A century byte of 00
+     * (year 0026) is such a calendar; leave the base time alone for it.
      */
     if (base < -(INT64_MAX / NANOSECONDS_PER_SECOND) ||
         base > INT64_MAX / NANOSECONDS_PER_SECOND) {
-        return;
+        return false;
     }
     s->base_rtc = base;
     s->last_update = qemu_clock_get_ns(rtc_clock);
 
     qapi_event_send_rtc_change(qemu_timedate_diff(&tm), qom_path);
+    return true;
 }
 
 static void rtc_set_cmos(MC146818RtcState *s, const struct tm *tm)
@@ -687,7 +706,9 @@ static void rtc_set_cmos(MC146818RtcState *s, const struct tm *tm)
     s->cmos_data[RTC_MONTH] = rtc_to_bcd(s, tm->tm_mon + 1);
     year = tm->tm_year + 1900 - s->base_year;
     s->cmos_data[RTC_YEAR] = rtc_to_bcd(s, year % 100);
-    s->cmos_data[RTC_CENTURY] = rtc_to_bcd(s, year / 100);
+    if (s->century_register) {
+        s->cmos_data[RTC_CENTURY] = rtc_to_bcd(s, year / 100);
+    }
 }
 
 static void rtc_update_time(MC146818RtcState *s)
@@ -742,9 +763,12 @@ static uint64_t cmos_ioport_read(void *opaque, hwaddr addr,
     } else {
         switch(s->cmos_index) {
         case RTC_IBM_PS2_CENTURY_BYTE:
-            s->cmos_index = RTC_CENTURY;
-            /* fall through */
         case RTC_CENTURY:
+            if (!s->century_register) {
+                ret = s->cmos_data[s->cmos_index];
+                break;
+            }
+            s->cmos_index = RTC_CENTURY;
             /* fall through */
         case RTC_SECONDS:
         case RTC_MINUTES:
@@ -821,6 +845,13 @@ static void rtc_set_date_from_host(ISADevice *dev)
 
     /* set the CMOS date */
     rtc_set_cmos(s, &tm);
+    /*
+     * Without a century register the clock starts as if firmware had set
+     * it, so the century that firmware keeps in RAM starts with it.
+     */
+    if (!s->century_register) {
+        s->cmos_data[RTC_CENTURY] = rtc_to_bcd(s, (tm.tm_year + 1900) / 100);
+    }
 }
 
 static int rtc_pre_save(void *opaque)
@@ -953,7 +984,7 @@ static void rtc_realizefn(DeviceState *dev, Error **errp)
      * (at least until 2079...) for base_year = 1980, but will be set
      * correctly for base_year = 2000.
      */
-    if (s->base_year == 2000) {
+    if (s->base_year == 2000 && s->century_register) {
         s->base_year = 0;
     }
 
@@ -1024,6 +1055,12 @@ MC146818RtcState *mc146818_rtc_init(ISABus *bus, int base_year,
 
 static const Property mc146818rtc_properties[] = {
     DEFINE_PROP_INT32("base_year", MC146818RtcState, base_year, 1980),
+    /*
+     * Off: 32h and 37h are user RAM and the year has two digits, counted
+     * from base_year, as on an MC146818 itself.
+     */
+    DEFINE_PROP_BOOL("century-register", MC146818RtcState, century_register,
+                     true),
     DEFINE_PROP_UINT16("iobase", MC146818RtcState, io_base, RTC_ISA_BASE),
     DEFINE_PROP_UINT8("irq", MC146818RtcState, isairq, RTC_ISA_IRQ),
     DEFINE_PROP_LOSTTICKPOLICY("lost_tick_policy", MC146818RtcState,
