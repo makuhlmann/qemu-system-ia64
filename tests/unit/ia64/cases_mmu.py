@@ -23,6 +23,7 @@ from .encoding import (
     IA64_DCR_DK,
     IA64_DCR_DM,
     IA64_DTLB_VECTOR,
+    IA64_ITLB_VECTOR,
     IA64_EXCP_ALT_DTLB,
     IA64_EXCP_DATA_ACCESS,
     IA64_EXCP_DATA_KEY_MISS,
@@ -5507,6 +5508,115 @@ test_tak_vhpt_access_ignores_dbr_read_match = require_registers(
         "r31": 5 << 8,
     }, entry=0x10)
 
+def _short_vhpt_dbr_dtlb_handler():
+    return [
+        (IA64_DTLB_VECTOR, 0x00, mov_m_cr_gr(29, 17), nop_i(), nop_i()),
+        (IA64_DTLB_VECTOR + 0x10, 0x00, mov_m_cr_gr(30, 20),
+         nop_i(), nop_i()),
+        (IA64_DTLB_VECTOR + 0x20, 0x00, mov_m_cr_gr(31, 25),
+         nop_i(), nop_i()),
+        (IA64_DTLB_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+         br_cond(IA64_DTLB_VECTOR + 0x30, IA64_DTLB_VECTOR + 0x30)),
+    ]
+
+
+def _short_vhpt_dbr_load(psr):
+    return [
+        (0x150, *movl_mlx(24, psr)),
+        (0x160, 0x00, mov_gr_psr_full(24), nop_i(), nop_i()),
+        (0x170, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x180, 0x00, ld8(28, 2), nop_i(), nop_i()),
+        (0x190, 0x10, nop_m(), nop_i(), br_cond(0x190, 0x190)),
+    ]
+
+
+_SHORT_VHPT_DBR_DTLB_MISS = {
+    "ip": IA64_DTLB_VECTOR + 0x30,
+    "exception": IA64_EXCP_NONE,
+    "r29": IA64_ISR_R,
+    "r30": 0xa000000000000430,
+    "r31": 0xbffc000000000000,
+}
+
+# A walker read that matches a DBR.r pair aborts the walk to the TLB Miss
+# fault (SDM Vol. 2 4.1.7, 7.1.1 DBR.r); the walker reads at PL0.
+test_short_vhpt_dbr_read_match_aborts_to_dtlb_miss = require_registers(
+    "short_vhpt_dbr_read_match_aborts_to_dtlb_miss",
+    _short_vhpt_dbr_setup(0x0010000004000661) +
+    _short_vhpt_dbr_load(IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_DB) +
+    _short_vhpt_dbr_dtlb_handler(),
+    _SHORT_VHPT_DBR_DTLB_MISS, entry=0x10)
+
+# The abort comes before the entry is read, so a not-present entry does not
+# give Page Not Present.
+test_short_vhpt_dbr_read_match_precedes_not_present = require_registers(
+    "short_vhpt_dbr_read_match_precedes_not_present",
+    _short_vhpt_dbr_setup(0x0010000004000660) +
+    _short_vhpt_dbr_load(IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_DB) +
+    _short_vhpt_dbr_dtlb_handler(),
+    _SHORT_VHPT_DBR_DTLB_MISS, entry=0x10)
+
+test_short_vhpt_dbr_needs_psr_db = require_registers(
+    "short_vhpt_dbr_needs_psr_db",
+    _short_vhpt_dbr_setup(0x0010000004000661) +
+    _short_vhpt_dbr_load(IA64_PSR_IC | IA64_PSR_DT) +
+    _short_vhpt_dbr_dtlb_handler(),
+    {"ip": 0x190, "exception": IA64_EXCP_NONE, "r28": 0}, entry=0x10)
+
+# An instruction fetch at CPL 3 walks at PL0 too: a PL0-only pair aborts it.
+test_short_vhpt_dbr_read_match_aborts_to_itlb_miss = require_registers(
+    "short_vhpt_dbr_read_match_aborts_to_itlb_miss", [
+        (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
+        (0x20, *movl_mlx(17, 0xa000000000000000)),
+        (0x30, *movl_mlx(18, 0x539)),
+        (0x40, *movl_mlx(19, 0xbffc000000000000)),
+        (0x50, *movl_mlx(20, 0x0010000004009661)),
+        (0x60, *movl_mlx(21, 0x00100000050007e1)),
+        (0x70, *movl_mlx(22, 0x4008000)),
+        (0x80, *movl_mlx(23, LOW_VECTOR_TR_PTE)),
+        (0x90, 0x00, st8(22, 21), nop_i(), nop_i()),
+        (0xa0, 0x00, mov_m_gr_cr(16, 8), adds(7, 0x38, 0), nop_i()),
+        (0xb0, 0x00, mov_rr_write(18, 17), nop_i(), nop_i()),
+        (0xc0, 0x00, mov_m_gr_cr(19, 20), nop_i(), nop_i()),
+        (0xd0, 0x00, mov_m_gr_cr(7, 21), adds(5, 5, 0), nop_i()),
+        (0xe0, 0x00, itr_d(5, 20), nop_i(), nop_i()),
+        (0xf0, 0x00, adds(7, 16 << 2, 0), adds(5, 6, 0), nop_i()),
+        (0x100, 0x00, mov_m_gr_cr(7, 21), nop_i(), nop_i()),
+        (0x110, 0x00, mov_m_gr_cr(0, 20), nop_i(), nop_i()),
+        (0x120, 0x00, itr_i(5, 23), nop_i(), nop_i()),
+        (0x130, 0x00, nop_m(), adds(24, 0, 0), nop_i()),
+        (0x140, *movl_mlx(25, 0xbffc000000000000)),
+        (0x150, 0x00, mov_dbr_indexed_write(24, 25), nop_i(), nop_i()),
+        (0x160, 0x00, nop_m(), adds(24, 1, 0), nop_i()),
+        (0x170, *movl_mlx(25, 0x81ffffffffffffff)),
+        (0x180, 0x00, mov_dbr_indexed_write(24, 25), nop_i(), nop_i()),
+        (0x190, *movl_mlx(2, 0xa000000000000430)),
+        (0x1a0, *movl_mlx(
+            19, IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_IT | IA64_PSR_DB |
+            IA64_PSR_CPL3)),
+        (0x1b0, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0x1c0, 0x00, srlz_d(), nop_i(), nop_i()),
+        *rfi_to_gr(0x1d0, 19, 2),
+        (0x4000000 + IA64_ITLB_VECTOR, 0x00,
+         mov_m_cr_gr(28, 19), nop_i(), nop_i()),
+        (0x4000000 + IA64_ITLB_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(29, 20), nop_i(), nop_i()),
+        (0x4000000 + IA64_ITLB_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(30, 25), nop_i(), nop_i()),
+        (0x4000000 + IA64_ITLB_VECTOR + 0x30, 0x00,
+         mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+        (0x4000000 + IA64_ITLB_VECTOR + 0x40, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_ITLB_VECTOR + 0x40, IA64_ITLB_VECTOR + 0x40)),
+    ], {
+        "ip": IA64_ITLB_VECTOR + 0x40,
+        "exception": IA64_EXCP_NONE,
+        "r28": 0xa000000000000430,
+        "r29": 0xa000000000000430,
+        "r30": 0xbffc000000000000,
+        "r31": IA64_ISR_X,
+    }, entry=0x10)
+
 test_speculative_load_walks_short_vhpt_with_ic_clear = require_registers(
     "speculative_load_walks_short_vhpt_with_ic_clear", [
         (0x10, *movl_mlx(16, 0x1ffc0000000000c9)),
@@ -7822,6 +7932,10 @@ CASE_NAMES = (
     'tak_unimplemented_va_does_not_alias_short_vhpt',
     'tak_uses_short_vhpt_walk',
     'tak_vhpt_access_ignores_dbr_read_match',
+    'short_vhpt_dbr_read_match_aborts_to_dtlb_miss',
+    'short_vhpt_dbr_read_match_precedes_not_present',
+    'short_vhpt_dbr_needs_psr_db',
+    'short_vhpt_dbr_read_match_aborts_to_itlb_miss',
     'thash_same_reg_unimplemented_va_sets_nat',
     'thash_uses_pta_with_walker_disabled',
     'tpa_dt_disabled_miss_raises_alt_dtlb',

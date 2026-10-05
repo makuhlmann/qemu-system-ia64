@@ -1391,8 +1391,9 @@ bool ia64_translate_data_access(CPUIA64State *env, uint64_t va,
 }
 
 static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
-                                 bool is_ifetch, bool is_rse, uint64_t *pte,
-                                 uint64_t *entry_va, uint8_t *page_shift);
+                                 bool is_ifetch, bool is_rse, bool walker,
+                                 uint64_t *pte, uint64_t *entry_va,
+                                 uint8_t *page_shift);
 
 /*
  * The ED bit of the code page the CPU is currently executing from.
@@ -1431,8 +1432,8 @@ static bool ia64_code_tlb_ed_lookup(CPUIA64State *env, bool *known)
         return (entry->pte & IA64_PTE_ED) != 0;
     }
 
-    if (ia64_vhpt_lookup_pte(env, env->ip, true, false, &pte, &entry_va,
-                             NULL)) {
+    if (ia64_vhpt_lookup_pte(env, env->ip, true, false, false, &pte,
+                             &entry_va, NULL)) {
         return (pte & IA64_PTE_ED) != 0;
     }
 
@@ -2025,6 +2026,13 @@ uint64_t ia64_mmu_advanced_load_allowed(CPUIA64State *env, uint64_t va)
     return ia64_exec_advanced_load_allowed(env, va, mmu_idx);
 }
 
+static bool ia64_vhpt_walk_entry(CPUIA64State *env, uint64_t va, uint32_t rid,
+                                 bool is_ifetch, bool is_rse,
+                                 uint8_t access_level, bool tak,
+                                 uint64_t *pa, uint8_t *perm, uint64_t *pte,
+                                 uint32_t *access_key,
+                                 const IA64TlbEntry **installed_entry);
+
 uint64_t ia64_mmu_tak(CPUIA64State *env, uint64_t va)
 {
     uint32_t rid;
@@ -2049,9 +2057,9 @@ uint64_t ia64_mmu_tak(CPUIA64State *env, uint64_t va)
     }
 
     if ((env->psr & IA64_PSR_DT) &&
-        ia64_vhpt_walk_full(env, va, rid, false, false,
-                            ia64_psr_cpl(env->psr), &pa, &perm, &pte, NULL,
-                            &entry) &&
+        ia64_vhpt_walk_entry(env, va, rid, false, false,
+                             ia64_psr_cpl(env->psr), true, &pa, &perm, &pte,
+                             NULL, &entry) &&
         (pte & IA64_PTE_PRESENT)) {
         if (entry && ia64_tlb_entry_present(entry)) {
             return (uint64_t)entry->key << IA64_ITIR_KEY_SHIFT;
@@ -2190,9 +2198,9 @@ typedef enum IA64VhptEntryStatus {
     IA64_VHPT_ENTRY_ABORT,
 } IA64VhptEntryStatus;
 
-static IA64VhptEntryStatus ia64_vhpt_entry_phys(CPUIA64State *env,
-                                                uint64_t entry_va,
-                                                uint64_t *entry_pa)
+static IA64VhptEntryStatus ia64_vhpt_entry_translate(CPUIA64State *env,
+                                                    uint64_t entry_va,
+                                                    uint64_t *entry_pa)
 {
     const IA64TlbEntry *entry;
     uint8_t perm;
@@ -2243,6 +2251,29 @@ static IA64VhptEntryStatus ia64_vhpt_entry_phys(CPUIA64State *env,
     return IA64_VHPT_ENTRY_TLB_MISS;
 }
 
+/*
+ * A walker read of dbr_len bytes that matches a DBR.r pair at PL0 aborts the
+ * walk to the TLB Miss fault, as a fault of the VHPT entry's translation
+ * does (SDM Vol. 2 4.1.7, 7.1.1 DBR.r); 0 skips the check, as for tak.
+ */
+static IA64VhptEntryStatus ia64_vhpt_entry_phys(CPUIA64State *env,
+                                                uint64_t entry_va,
+                                                uint64_t *entry_pa,
+                                                uint32_t dbr_len)
+{
+    IA64VhptEntryStatus status = ia64_vhpt_entry_translate(env, entry_va,
+                                                           entry_pa);
+
+    if (status == IA64_VHPT_ENTRY_TRANSLATED && dbr_len &&
+        ia64_data_debug_hit(env, entry_va, dbr_len, dbr_len, IA64_ISR_R, 0)) {
+        qemu_log_mask(CPU_LOG_MMU,
+                      "ia64 vhpt entry DBR abort va=0x%016" PRIx64 "\n",
+                      entry_va);
+        return IA64_VHPT_ENTRY_ABORT;
+    }
+    return status;
+}
+
 bool ia64_vhpt_entry_accessible(CPUIA64State *env, uint64_t va,
                                 bool is_ifetch, bool is_rse,
                                 uint64_t *entry_va)
@@ -2266,7 +2297,7 @@ bool ia64_vhpt_entry_accessible(CPUIA64State *env, uint64_t va,
      * abort to the original TLB miss.  Only a missing DTLB translation for
      * the VHPT entry raises a VHPT Translation fault.
      */
-    return ia64_vhpt_entry_phys(env, *entry_va, &entry_pa) !=
+    return ia64_vhpt_entry_phys(env, *entry_va, &entry_pa, 0) !=
            IA64_VHPT_ENTRY_TLB_MISS;
 }
 
@@ -2312,9 +2343,11 @@ static bool ia64_vhpt_itir_valid(const CPUIA64State *env,
            ia64_page_shift_insertable(env, page_shift);
 }
 
+/* walker: the lookup stands for a walker reference, which DBRs can abort. */
 static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
-                                 bool is_ifetch, bool is_rse, uint64_t *pte,
-                                 uint64_t *entry_va, uint8_t *page_shift)
+                                 bool is_ifetch, bool is_rse, bool walker,
+                                 uint64_t *pte, uint64_t *entry_va,
+                                 uint8_t *page_shift)
 {
     uint8_t size;
     bool long_format;
@@ -2330,7 +2363,8 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
 
     if (!long_format) {
         *entry_va = ia64_vhpt_short_hash_address(env, va, size);
-        if (ia64_vhpt_entry_phys(env, *entry_va, &entry_pa) !=
+        if (ia64_vhpt_entry_phys(env, *entry_va, &entry_pa,
+                                 walker ? 8 : 0) !=
             IA64_VHPT_ENTRY_TRANSLATED) {
             return false;
         }
@@ -2347,7 +2381,8 @@ static bool ia64_vhpt_lookup_pte(CPUIA64State *env, uint64_t va,
         uint64_t tag;
 
         *entry_va = ia64_vhpt_long_hash_address(env, va, size, NULL);
-        if (ia64_vhpt_entry_phys(env, *entry_va, &entry_pa) !=
+        if (ia64_vhpt_entry_phys(env, *entry_va, &entry_pa,
+                                 walker ? 32 : 0) !=
             IA64_VHPT_ENTRY_TRANSLATED) {
             return false;
         }
@@ -2374,7 +2409,7 @@ bool ia64_vhpt_pte_not_present(CPUIA64State *env, uint64_t va,
         entry_va = &local_entry_va;
     }
 
-    return ia64_vhpt_lookup_pte(env, va, is_ifetch, is_rse,
+    return ia64_vhpt_lookup_pte(env, va, is_ifetch, is_rse, true,
                                 &pte, entry_va, NULL) &&
            !(pte & IA64_PTE_PRESENT);
 }
@@ -2421,10 +2456,10 @@ bool ia64_mmu_translate_debug(CPUIA64State *env, uint64_t va, uint64_t *pa)
         return true;
     }
 
-    if ((ia64_vhpt_lookup_pte(env, va, false, false, &pte, &entry_va,
-                              &page_shift) ||
-         ia64_vhpt_lookup_pte(env, va, true, false, &pte, &entry_va,
-                              &page_shift)) &&
+    if ((ia64_vhpt_lookup_pte(env, va, false, false, false, &pte,
+                              &entry_va, &page_shift) ||
+         ia64_vhpt_lookup_pte(env, va, true, false, false, &pte,
+                              &entry_va, &page_shift)) &&
         (pte & IA64_PTE_PRESENT)) {
         uint64_t page_mask = (1ULL << page_shift) - 1;
 
@@ -2501,11 +2536,13 @@ ia64_vhpt_install_tc(CPUIA64State *env, uint64_t va, uint32_t rid,
 
 /* ---- VHPT walker ---- */
 
-bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
-                         bool is_ifetch, bool is_rse, uint8_t access_level,
-                         uint64_t *pa, uint8_t *perm, uint64_t *pte,
-                         uint32_t *access_key,
-                         const IA64TlbEntry **installed_entry)
+/* tak: the walk serves tak, which DBR.r matches do not abort. */
+static bool ia64_vhpt_walk_entry(CPUIA64State *env, uint64_t va, uint32_t rid,
+                                 bool is_ifetch, bool is_rse,
+                                 uint8_t access_level, bool tak,
+                                 uint64_t *pa, uint8_t *perm, uint64_t *pte,
+                                 uint32_t *access_key,
+                                 const IA64TlbEntry **installed_entry)
 {
     uint64_t vhpt_base;
     uint64_t hash;
@@ -2546,7 +2583,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
 
         entry_va = ia64_vhpt_short_hash_address(env, va, size);
         page_shift = ia64_region_preferred_ps(env, va);
-        if (ia64_vhpt_entry_phys(env, entry_va, &entry_pa) !=
+        if (ia64_vhpt_entry_phys(env, entry_va, &entry_pa, tak ? 0 : 8) !=
             IA64_VHPT_ENTRY_TRANSLATED) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt short entry miss %c va=0x%016" PRIx64
@@ -2626,7 +2663,7 @@ bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
     expected_tag = ia64_vhpt_long_tag(env, va);
     {
         entry_va = ia64_vhpt_long_hash_address(env, va, size, &hash);
-        if (ia64_vhpt_entry_phys(env, entry_va, &entry_pa) !=
+        if (ia64_vhpt_entry_phys(env, entry_va, &entry_pa, tak ? 0 : 32) !=
             IA64_VHPT_ENTRY_TRANSLATED) {
             qemu_log_mask(CPU_LOG_MMU,
                           "ia64 vhpt long entry miss %c va=0x%016" PRIx64
@@ -2727,6 +2764,17 @@ long_miss:
                   " hash=0x%016" PRIx64 "\n",
                   is_ifetch ? 'i' : 'd', va, rid, vhpt_base, hash);
     return false;
+}
+
+bool ia64_vhpt_walk_full(CPUIA64State *env, uint64_t va, uint32_t rid,
+                         bool is_ifetch, bool is_rse, uint8_t access_level,
+                         uint64_t *pa, uint8_t *perm, uint64_t *pte,
+                         uint32_t *access_key,
+                         const IA64TlbEntry **installed_entry)
+{
+    return ia64_vhpt_walk_entry(env, va, rid, is_ifetch, is_rse,
+                                access_level, false, pa, perm, pte,
+                                access_key, installed_entry);
 }
 
 bool ia64_vhpt_walk(CPUIA64State *env, uint64_t va, uint32_t rid,

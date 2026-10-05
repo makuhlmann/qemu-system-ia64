@@ -158,8 +158,9 @@ void ia64_check_instruction_debug(CPUIA64State *env, uint64_t ip,
  * A reference of len bytes that is aligned matches on any byte of its datum,
  * 16 bytes for a 10-byte operand and for cmp8xchg16; an unaligned one only
  * on a byte it accesses (SDM Vol. 2 7.1.2).  Itanium 2 also takes Data Debug
- * on any access across a 16-byte boundary while a pair is enabled for it,
- * whatever its address (251110-003 12.3).  ISR.r and ISR.w in access select
+ * on any unaligned access across a 16-byte boundary while a pair is enabled
+ * for it, whatever its address (251110-003 12.3, the freedom 7.1.2 gives
+ * for unaligned datums).  ISR.r and ISR.w in access select
  * the pairs with DBR.r and DBR.w set; pl is the privilege level of the
  * reference.
  */
@@ -167,7 +168,8 @@ bool ia64_data_debug_hit(CPUIA64State *env, uint64_t va, uint32_t datum,
                          uint32_t len, uint64_t access, unsigned pl)
 {
     uint32_t align = is_power_of_2(len) ? len : datum;
-    bool cross16 = ia64_env_cpu_class(env)->dbr_cross16 &&
+    bool aligned = (va & (align - 1)) == 0;
+    bool cross16 = !aligned && ia64_env_cpu_class(env)->dbr_cross16 &&
                    (va & 15) + len > 16;
     uint64_t start = va;
     unsigned pair, i;
@@ -175,7 +177,7 @@ bool ia64_data_debug_hit(CPUIA64State *env, uint64_t va, uint32_t datum,
     if (!(env->psr & IA64_PSR_DB) || (env->psr & IA64_PSR_DD)) {
         return false;
     }
-    if ((va & (align - 1)) == 0) {
+    if (aligned) {
         start = va & ~(uint64_t)(datum - 1);
         len = datum;
     }
