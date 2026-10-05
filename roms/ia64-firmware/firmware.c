@@ -15559,8 +15559,9 @@ void fw_init_itc_rate(void)
     den = itc & 0xffffffffULL;
     /* Rounded: Merced's 133.33 MHz bus clock gives an ITC of 799999998 Hz. */
     if (num != 0 && den != 0) {
+        mFwItcFrequency = mFwPlatformBaseFrequency * num / den;
         fw_itc_ticks_per_100ns =
-            (mFwPlatformBaseFrequency * num / den + 5000000ULL) / 10000000ULL;
+            (mFwItcFrequency + 5000000ULL) / 10000000ULL;
     }
 }
 

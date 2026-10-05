@@ -56,6 +56,8 @@ extern UINT64 fw_itc_ticks_per_100ns;
 void fw_pal_freq_ratios(UINT64 *Processor, UINT64 *Bus, UINT64 *Itc);
 /* SAL_FREQ_BASE's platform clock, from PAL_FREQ_BASE at boot. */
 extern UINT64 mFwPlatformBaseFrequency;
+/* The ITC's clock in Hz, from PAL_FREQ_RATIOS at boot; 0 if PAL gave none. */
+extern UINT64 mFwItcFrequency;
 void fw_init_platform_base_frequency(void);
 /* PAL_LOGICAL_TO_PHYSICAL for the calling processor: status, first return. */
 UINT64 fw_pal_logical_to_physical(UINT64 *Info);
