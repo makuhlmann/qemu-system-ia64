@@ -569,7 +569,7 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
      * off; a store the chipset ignores leaves the HAL to fall back on
      * EFI ResetSystem(EfiResetCold), which reboots instead
      * (WSRV03/base/hals/halia64/ia64/pmsleep.c).  Our own firmware's DSDT
-     * uses 0, which the ACPI core takes anyway.
+     * gives 5 as well.
      */
     imc->acpi_s5_slp_typ = 5;
     /*

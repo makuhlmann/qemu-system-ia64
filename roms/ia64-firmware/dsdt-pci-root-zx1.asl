@@ -26,10 +26,11 @@
 
 DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
 {
+    // SLP_TYP 5, as in HP's DSDT on the rx2600.
     Name (_S5, Package (0x04)
     {
-        0x00,
-        0x00,
+        0x05,
+        0x05,
         0x00,
         0x00
     })
