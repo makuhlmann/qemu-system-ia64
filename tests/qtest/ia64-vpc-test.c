@@ -5116,8 +5116,9 @@ static void gpio_outl(QTestState *qts, uint16_t port, uint32_t value)
 
 /*
  * The 460gx `nvram=` file keeps the RTC's battery-backed RAM after the flash
- * image: a tag, the standard bank, the extended bank.  The clock and the
- * century byte come from -rtc; the rest of both banks survives a restart.
+ * image: a tag, the standard bank, the extended bank.  The clock comes from
+ * -rtc; the rest of both banks, the century byte at 32h with it, survives a
+ * restart.  A new battery starts with the century of the -rtc date.
  */
 #define IA64_RTC_BATTERY_BANKS  16
 
@@ -5146,7 +5147,9 @@ static void test_nvram_rtc_battery(void)
                       quoted_path, quoted_flash);
     /* A new battery. */
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x03), ==, 0);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x32), ==, 0x20);
     rtc_bank_write(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH, 0xa5);
+    rtc_bank_write(qts, IA64_RTC_INDEX, 0x32, 0x19);
     rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x03, 0x08);
     /* The area is written when the machine stops. */
     qtest_qmp_assert_success(qts, "{ 'execute': 'cont' }");
@@ -5157,6 +5160,7 @@ static void test_nvram_rtc_battery(void)
     area = (const uint8_t *)contents + image_size;
     g_assert_cmpmem(area, 8, "IFB-RTC1", 8);
     g_assert_cmphex(area[IA64_RTC_BATTERY_BANKS + IA64_RTC_SCRATCH], ==, 0xa5);
+    g_assert_cmphex(area[IA64_RTC_BATTERY_BANKS + 0x32], ==, 0x19);
     g_assert_cmphex(area[IA64_RTC_BATTERY_BANKS + 128 + 0x03], ==, 0x08);
     qtest_quit(qts);
 
@@ -5164,6 +5168,7 @@ static void test_nvram_rtc_battery(void)
                       quoted_path, quoted_flash);
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH), ==,
                     0xa5);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x32), ==, 0x19);
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x03), ==, 0x08);
     qtest_quit(qts);
 
@@ -5348,6 +5353,28 @@ static void test_460gx_south_bridge_rtc_banks(void)
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x32), ==, 0x19);
     rtc_bank_write(qts, IA64_RTC_INDEX, 0x32, 0x20);
     g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x32), ==, 0x20);
+
+    /*
+     * The part has no century register, so the clock keeps a two-digit
+     * year and a century byte of 00h neither reads back as anything else
+     * nor moves the calendar; 37h is RAM of its own, not an alias of 32h.
+     */
+    {
+        uint8_t year = rtc_bank_read(qts, IA64_RTC_INDEX, 0x09);
+        g_autoptr(QDict) rsp = NULL;
+
+        rtc_bank_write(qts, IA64_RTC_INDEX, 0x32, 0x00);
+        rtc_bank_write(qts, IA64_RTC_INDEX, 0x37, 0x5a);
+        g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x32), ==, 0x00);
+        g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x37), ==, 0x5a);
+        g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, 0x09), ==, year);
+        rsp = qtest_qmp(qts, "{'execute': 'qom-get', 'arguments':"
+                        " { 'path': '/machine', 'property': 'rtc-time' } }");
+        g_assert_cmpint(qdict_get_int(qdict_get_qdict(rsp, "return"),
+                                      "tm_year") % 100, ==, bcd(year));
+        g_assert_cmpint(qdict_get_int(qdict_get_qdict(rsp, "return"),
+                                      "tm_year"), >=, 100);
+    }
     qtest_quit(qts);
 }
 

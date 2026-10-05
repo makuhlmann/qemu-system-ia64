@@ -821,17 +821,16 @@ static void ifb_remove_function(PCIDevice **pci)
 }
 
 /*
- * The clock registers (00h-0Dh) and the century byte come from -rtc at each
- * start, as the part's own clock would have kept counting; the rest of both
- * banks is what the battery kept.
+ * The clock registers (00h-0Dh) come from -rtc at each start, as the part's
+ * own clock would have kept counting; the rest of both banks is what the
+ * battery kept.
  */
 #define IFB_BATTERY_HEADER      16
 #define IFB_BATTERY_PERIOD_MS   1000
 
 static bool ifb_battery_restores(unsigned index)
 {
-    return index >= IFB_RTC_BANK_SIZE ||
-           (index > RTC_REG_D && index != RTC_CENTURY);
+    return index > RTC_REG_D;
 }
 
 static void ifb_battery_image(Intel82468GXIFBState *s, uint8_t *area)
@@ -932,6 +931,7 @@ static bool ifb_battery_load(Intel82468GXIFBState *s, Error **errp)
 static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
 {
     Intel82468GXIFBState *s = INTEL_82468GX_IFB(pci);
+    ISADevice *rtc;
 
     if (PCI_FUNC(pci->devfn) != 0 ||
         !(pci->config[PCI_HEADER_TYPE] & PCI_HEADER_TYPE_MULTI_FUNCTION)) {
@@ -967,8 +967,21 @@ static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
     memory_region_add_subregion(pci_address_space_io(pci), IFB_NMISC_IOPORT,
                                 &s->nmisc);
 
-    /* The bridge carries the RTC too (SSDM 15.5), both of its banks. */
-    s->rtc = mc146818_rtc_init(s->isa_bus, 2000, NULL);
+    /*
+     * The bridge carries the RTC too (SSDM 15.5), both of its banks.  Bytes
+     * 0Eh-7Fh of the standard bank are user RAM (Table 15-2): the part has
+     * no century register, and firmware keeps the century at 32h.
+     */
+    rtc = isa_new(TYPE_MC146818_RTC);
+    qdev_prop_set_int32(DEVICE(rtc), "base_year", 2000);
+    qdev_prop_set_bit(DEVICE(rtc), "century-register", false);
+    if (!isa_realize_and_unref(rtc, s->isa_bus, errp)) {
+        return;
+    }
+    s->rtc = MC146818_RTC(rtc);
+    isa_connect_gpio_out(rtc, 0, s->rtc->isairq);
+    object_property_add_alias(qdev_get_machine(), "rtc-time", OBJECT(rtc),
+                              "date");
     if (s->battery && !ifb_battery_load(s, errp)) {
         return;
     }
