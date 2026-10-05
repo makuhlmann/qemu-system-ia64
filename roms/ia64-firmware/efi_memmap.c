@@ -421,7 +421,8 @@ static void efi_add_firmware_image(UINTN *Index)
     efi_add_memory_range(Index, EfiBootServicesData, firmware_end, pal_start,
                          EFI_MEMORY_WB);
     efi_add_memory_range(Index, EfiPalCode, pal_start,
-                         pal_start + IA64_FW_PAL_BUFFER_SIZE, EFI_MEMORY_WB);
+                         pal_start + IA64_FW_PAL_BUFFER_SIZE,
+                         efi_memory_attribute(EfiPalCode, EFI_MEMORY_WB));
 }
 
 /* The end of what efi_add_firmware_image describes. */

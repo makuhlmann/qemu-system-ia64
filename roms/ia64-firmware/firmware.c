@@ -131,10 +131,16 @@ static BOOLEAN efi_memory_type_is_valid(EFI_MEMORY_TYPE Type)
            type >= EFI_MEMORY_TYPE_OS_RESERVED_MIN;
 }
 
+/*
+ * EfiPalCode is runtime as on the rx2600 (8000000000000008h in its EFI map);
+ * the Windows HAL gives such a descriptor the PAL TR's virtual address
+ * (WXPSP1 base/hals/halia64/ia64/i64efi.c:1642).
+ */
 UINT64 efi_memory_attribute(EFI_MEMORY_TYPE Type, UINT64 Attribute)
 {
     if (Type == EfiRuntimeServicesCode ||
-        Type == EfiRuntimeServicesData) {
+        Type == EfiRuntimeServicesData ||
+        Type == EfiPalCode) {
         return Attribute | EFI_MEMORY_RUNTIME;
     }
     return Attribute;
@@ -6519,7 +6525,7 @@ BOOLEAN __attribute__((noinline)) uefi_memory_map_selftest(void)
         !efi_memory_map_has_descriptor(EfiPalCode, (UINTN)fw_pal_buffer,
                                        (UINTN)fw_pal_buffer +
                                        IA64_FW_PAL_BUFFER_SIZE,
-                                       EFI_MEMORY_WB) ||
+                                       EFI_MEMORY_WB | EFI_MEMORY_RUNTIME) ||
         /* The 32/48/64/80 MB no-coalesce rule only holds with its quirk. */
         (fw_map_quirk_enabled(IA64_FW_QUIRK_LOW_BOUNDARIES) &&
          (efi_memory_descriptors_can_merge(&before, &preserved) ||
