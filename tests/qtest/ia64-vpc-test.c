@@ -1752,6 +1752,10 @@ static void test_lba_rope_window(void)
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x1400), ==,
                     0x0008ffff05434a03ULL);
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x1410), ==, 0x73f);
+    /* 0400 and 0408 power up with the bits that SAL_B's RMWs keep. */
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x0400), ==, 0x300);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x0408), ==,
+                    0x0000001f00000000ULL);
     qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x8620, 0xc000000700000159ULL);
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x8620), ==,
                     0xc000000700000159ULL);

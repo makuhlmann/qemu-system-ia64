@@ -146,11 +146,20 @@ static const hwaddr ia64_sba_stored_regs[] = {
 #define IA64_SBA_IOC_QUEUE_OFFSET      UINT64_C(0x1400)
 #define IA64_SBA_IOC_QUEUE_GO          (UINT64_C(1) << 10)
 /*
- * FFEAD180 changes only bits 47:32 of FED0_1410, and the rx2600 reads 0x73F
- * below them: the value the part powers up with.
+ * Power-on values: SAL_B changes these registers only by read-modify-write,
+ * and the rx2600 reads back the bits it keeps.  FED0_0400: FFECAC50 sets and
+ * clears bits 0-7 and 11, FFEEBF30 bit 10, and 300h stays.  0408: FFEEBF30
+ * sets bit 16 and 1Fh stays in bits 36:32.  1410: FFEAD180 changes bits
+ * 47:32 and 73Fh stays below them.
  */
-#define IA64_SBA_IOC_1410_OFFSET       UINT64_C(0x1410)
-#define IA64_SBA_IOC_1410_POWER_ON     UINT64_C(0x073f)
+static const struct {
+    hwaddr addr;
+    uint64_t value;
+} ia64_sba_stored_power_on[] = {
+    { 0x0400, UINT64_C(0x0000000000000300) },
+    { 0x0408, UINT64_C(0x0000001f00000000) },
+    { 0x1410, UINT64_C(0x000000000000073f) },
+};
 
 /*
  * ROPE_CONFIG (mio ERS register 23): which ropes run double- or quad-wide.
@@ -688,9 +697,11 @@ static void ia64_sba_realize(PCIDevice *dev, Error **errp)
     s->unimp_read = bitmap_new(IA64_SBA_CSR_SIZE);
     s->unimp_write = bitmap_new(IA64_SBA_CSR_SIZE);
     s->rope_width = IA64_SBA_ROPE_WIDTH_POWER_ON;
-    for (i = 0; i < IA64_SBA_STORED_REGS; i++) {
-        if (ia64_sba_stored_regs[i] == IA64_SBA_IOC_1410_OFFSET) {
-            s->stored[i] = IA64_SBA_IOC_1410_POWER_ON;
+    for (i = 0; i < ARRAY_SIZE(ia64_sba_stored_power_on); i++) {
+        unsigned int n;
+
+        if (ia64_sba_stored_reg(ia64_sba_stored_power_on[i].addr, 8, &n)) {
+            s->stored[n] = ia64_sba_stored_power_on[i].value;
         }
     }
 
