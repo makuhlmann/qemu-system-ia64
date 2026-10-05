@@ -1489,7 +1489,12 @@ static const IA64PalProfile ia64_pal_profile_merced = {
     /* 245320-003 Table 6-24 */
     .perf_counter_width = 32,
     .perf_pmc_mask = 0x3fff,
-    .perf_retired_mask = 0x10,
+    /*
+     * The table's retired mask of 10h (PMC4 only) is PAL erratum 29 of
+     * 249720-009; PAL 8.8.30, the version this profile reports, has it fixed
+     * and gives PMC4 and PMC5.
+     */
+    .perf_retired_mask = 0x30,
     .cr_implemented_low = IA64_PAL_CR_IMPLEMENTED_LOW,
     .halt_info = IA64_PAL_HALT_INFO_PLACEHOLDER,
     .test_alignment = 1,

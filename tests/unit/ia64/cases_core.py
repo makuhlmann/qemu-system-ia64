@@ -3501,12 +3501,13 @@ test_pmu_ism_counts_ia32_code_only = require_registers(
     ], {"ip": 0x290, "exception": IA64_EXCP_NONE, "r12": 0, "r13": 1},
     entry=0x700, cpu="madison")
 
-# Merced counts retired instructions on PMC4 only (PAL_PERF_MON_INFO retired
-# mask 10h): the same event on PMC5 leaves PMD5 at 0 (r14).
-test_pmu_merced_retired_counts_on_pmc4_only = require_registers(
-    "pmu_merced_retired_counts_on_pmc4_only", [
+# Merced counts retired instructions on PMC4 and PMC5 (249720-009 erratum 29,
+# fixed in PAL 8.8.30): PMD5 counts (r13), and the same event on PMC6 leaves
+# PMD6 at 0 (r14).
+test_pmu_merced_retired_counts_on_pmc4_and_pmc5 = require_registers(
+    "pmu_merced_retired_counts_on_pmc4_and_pmc5", [
         (0x10, *movl_mlx(2, _PMU_RETIRED | _PMU_PM | _PMU_PLM0)),
-        (0x20, 0x01, adds(9, 4, 0), adds(10, 5, 0), nop_i()),
+        (0x20, 0x01, adds(9, 5, 0), adds(10, 6, 0), nop_i()),
         (0x30, 0x01, mov_grpmc_indexed(9, 2), nop_i(), nop_i()),
         (0x40, 0x01, mov_grpmc_indexed(10, 2), nop_i(), nop_i()),
         (0x50, 0x01, mov_grpmd_indexed(9, 0), nop_i(), nop_i()),
@@ -4005,7 +4006,7 @@ CASE_NAMES = (
     'pmu_cycles_count_while_psr_pp',
     'pmu_user_monitor_follows_sum_rum',
     'pmu_ism_counts_ia32_code_only',
-    'pmu_merced_retired_counts_on_pmc4_only',
+    'pmu_merced_retired_counts_on_pmc4_and_pmc5',
     'pmu_overflow_freezes_and_pends_pmv',
     'pmd_merced_counter_is_32_bit_sign_extended',
     'pminmax_pack_decode',

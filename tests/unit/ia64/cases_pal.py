@@ -1542,9 +1542,10 @@ def _pal_perf_mon_info_case(name, info, retired_mask, cpu=None,
 test_pal_perf_mon_info = _pal_perf_mon_info_case(
     "pal_perf_mon_info", 0x08123004, 0xf0)
 
-# 245320-003 Table 6-24: 32-bit counters; only PMD4 counts retired instructions.
+# 245320-003 Table 6-24: 32-bit counters.  Its retired mask of 10h is erratum
+# 29 of 249720-009, fixed in PAL 8.8.30: PMD4 and PMD5 count them.
 test_pal_perf_mon_info_merced = _pal_perf_mon_info_case(
-    "pal_perf_mon_info_merced", 0x08122004, 0x10, cpu="merced")
+    "pal_perf_mon_info_merced", 0x08122004, 0x30, cpu="merced")
 
 # The rx2600: 47-bit counters and PMC0-15 (capture 2026-10-03, CPU-14).
 test_pal_perf_mon_info_madison = _pal_perf_mon_info_case(
