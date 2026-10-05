@@ -1278,7 +1278,7 @@ IA64UnalignedWindow ia64_unaligned_window(const Ia64Instruction *insn,
     }
     if (!icc->unaligned_windows) {
         /* FP references: only the 4 KiB rule. */
-        w = (IA64UnalignedWindow){ .window = 0, .span = size };
+        w = (IA64UnalignedWindow){ .window = 0, .span = w.span };
     }
     return w;
 }
@@ -1364,17 +1364,19 @@ static void ia64_gen_branch_if_alignment_fault(const Ia64Instruction *insn,
 /*
  * Data Debug outranks Unaligned Data Reference, so the DBRs are compared
  * before the alignment check.  cmp8xchg16 matches as a 16-byte datum for
- * reads and writes although it reads 8 bytes (SDM Vol. 2 7.1.2).
+ * reads and writes although it reads 8 bytes, and a 10-byte operand as its
+ * 16-byte slot (SDM Vol. 2 7.1.2).
  */
 static void ia64_gen_check_data_debug(const Ia64Instruction *insn,
                                       TCGv_i64 addr, uint32_t size,
                                       uint64_t isr_access)
 {
     uint32_t datum = insn->opcode == IA64_OP_CMP8XCHG16 ? 16 : size;
+    uint32_t len = ia64_unaligned_window(insn, size).span;
 
     tcg_gen_movi_i64(cpu_ip, insn->address);
     gen_helper_check_data_debug(tcg_env, addr, tcg_constant_i32(datum),
-                                tcg_constant_i32(size),
+                                tcg_constant_i32(len),
                                 tcg_constant_i64(isr_access),
                                 tcg_constant_i64(insn->address | insn->slot));
 }

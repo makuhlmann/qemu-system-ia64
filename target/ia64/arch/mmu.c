@@ -1939,7 +1939,7 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
     alignment_fault = ia64_speculative_alignment_fault(env, va, size,
                                                        window, span);
     debug = !is_ifetch &&
-            ia64_data_debug_hit(env, va, size, size,
+            ia64_data_debug_hit(env, va, size, span,
                                 is_write ? IA64_ISR_W : IA64_ISR_R,
                                 ia64_psr_cpl(env->psr));
     /*

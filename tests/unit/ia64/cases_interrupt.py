@@ -90,6 +90,7 @@ from .encoding import (
     IA64_ISR_NA,
     IA64_ISR_SP,
     ld8_s,
+    ldfe,
     xchg,
     probe_w_fault,
     lfetch,
@@ -7179,13 +7180,63 @@ test_dbr_false_predicate_no_fault = require_registers(
     _dbr_no_fault(1, r20=1),
 )
 
-# Data Debug outranks Unaligned Data Reference (SDM Vol. 2 Table 5-6).
+# Data Debug outranks Unaligned Data Reference (SDM Vol. 2 Table 5-6); an
+# unaligned reference matches on the bytes it accesses, here its last one.
 test_dbr_precedes_unaligned_reference = require_registers(
     "dbr_precedes_unaligned_reference",
-    _dbr_program(_DBR_DATA, _DBR_RW_PLM0, [_dbr_body(ld8(9, 8))],
+    _dbr_program(_DBR_DATA + 8, _DBR_RW_PLM0, [_dbr_body(ld8(9, 8))],
                  psr=IA64_PSR_IC | IA64_PSR_DB | IA64_PSR_AC,
                  data=_DBR_DATA + 1),
     _dbr_fault(_DBR_DATA + 1, IA64_ISR_R),
+)
+
+# An unaligned 10-byte ldfe does not match on the unaccessed rest of the
+# 16 bytes it would take aligned.
+test_dbr_unaligned_ldfe_ignores_slot_padding = require_registers(
+    "dbr_unaligned_ldfe_ignores_slot_padding",
+    _dbr_program(_DBR_DATA + 12, _DBR_RW_PLM0, [_dbr_body(ldfe(6, 8))],
+                 data=_DBR_DATA + 1),
+    _dbr_no_fault(1, r20=1),
+)
+
+test_dbr_aligned_ldfe_matches_slot_padding = require_registers(
+    "dbr_aligned_ldfe_matches_slot_padding",
+    _dbr_program(_DBR_DATA + 12, _DBR_RW_PLM0, [_dbr_body(ldfe(6, 8))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R),
+)
+
+# Itanium 2 takes Data Debug on any access across 16 bytes while a pair is
+# enabled for it, whatever the address (251110-003 12.3); Merced compares
+# the address. Without a Data Debug fault, both take Unaligned Data
+# Reference for this ld2.
+_DBR_CROSS16_BODY = [_dbr_body(ld2(9, 8))]
+_DBR_UNALIGNED_SPIN = [
+    (IA64_UNALIGNED_VECTOR, 0x10, nop_m(), nop_i(),
+     br_cond(IA64_UNALIGNED_VECTOR, IA64_UNALIGNED_VECTOR)),
+]
+
+
+def _dbr_cross16_program(control):
+    return _dbr_program(_DBR_DATA + 0x100, control, _DBR_CROSS16_BODY,
+                        data=_DBR_DATA + 0xf) + _DBR_UNALIGNED_SPIN
+
+
+test_dbr_madison_cross16_ignores_address = require_registers(
+    "dbr_madison_cross16_ignores_address",
+    _dbr_cross16_program(_DBR_R | _IBR_PLM0 | _IBR_FULL_MASK),
+    _dbr_fault(_DBR_DATA + 0xf, IA64_ISR_R), cpu="madison",
+)
+
+test_dbr_madison_cross16_needs_enabled_pair = require_registers(
+    "dbr_madison_cross16_needs_enabled_pair",
+    _dbr_cross16_program(_DBR_W | _IBR_PLM0 | _IBR_FULL_MASK),
+    {"ip": IA64_UNALIGNED_VECTOR, "r20": 0}, cpu="madison",
+)
+
+test_dbr_merced_cross16_compares_address = require_registers(
+    "dbr_merced_cross16_compares_address",
+    _dbr_cross16_program(_DBR_R | _IBR_PLM0 | _IBR_FULL_MASK),
+    {"ip": IA64_UNALIGNED_VECTOR, "r20": 0}, cpu="merced",
 )
 
 test_dbr_semaphore_reports_read_and_write = require_registers(
@@ -7269,6 +7320,11 @@ CASE_NAMES = (
     'dbr_plm_excludes_cpl',
     'dbr_false_predicate_no_fault',
     'dbr_precedes_unaligned_reference',
+    'dbr_unaligned_ldfe_ignores_slot_padding',
+    'dbr_aligned_ldfe_matches_slot_padding',
+    'dbr_madison_cross16_ignores_address',
+    'dbr_madison_cross16_needs_enabled_pair',
+    'dbr_merced_cross16_compares_address',
     'dbr_semaphore_reports_read_and_write',
     'dbr_psr_dd_passes_one_instruction',
     'dbr_speculative_load_fault',

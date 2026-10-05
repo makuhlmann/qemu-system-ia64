@@ -1546,6 +1546,7 @@ static void ia64_cpu_class_init(ObjectClass *oc, const void *data)
     icc->is_montecito = false;
     icc->unaligned_windows = true;
     icc->unaligned_uc_exempt = false;
+    icc->dbr_cross16 = false;
     icc->pal = &ia64_pal_profile_madison;
 }
 
@@ -1571,6 +1572,7 @@ typedef struct IA64CPUModelDef {
     bool unaligned_windows;
     uint8_t unaligned_int_block;
     bool unaligned_uc_exempt;
+    bool dbr_cross16;
     const IA64PalProfile *pal;
     const IA64PmuLayout *pmu;
 } IA64CPUModelDef;
@@ -1602,6 +1604,7 @@ static void ia64_cpu_model_class_init(ObjectClass *oc, const void *data)
     icc->unaligned_windows = model->unaligned_windows;
     icc->unaligned_int_block = model->unaligned_int_block;
     icc->unaligned_uc_exempt = model->unaligned_uc_exempt;
+    icc->dbr_cross16 = model->dbr_cross16;
     icc->pal = model->pal;
     icc->pmu = model->pmu;
 }
@@ -1726,6 +1729,7 @@ static const IA64CPUModelDef ia64_cpu_model_madison = {
     .has_native_ia32 = true,
     .has_virtualization = false,
     .unaligned_windows = true,
+    .dbr_cross16 = true,
     .pal = &ia64_pal_profile_madison,
     .pmu = &ia64_pmu_layout_madison,
 };

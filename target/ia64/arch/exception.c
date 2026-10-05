@@ -155,35 +155,46 @@ void ia64_check_instruction_debug(CPUIA64State *env, uint64_t ip,
 #define IA64_DBR_W            (1ULL << 62)
 
 /*
- * A reference of len bytes matches as the aligned datum-byte block that holds
- * its first byte and, when unaligned, the block that holds its last byte too;
- * the second block may report bytes the reference does not touch, which the
- * architecture allows for unaligned datums (SDM Vol. 2 7.1.2).  ISR.r and
- * ISR.w in access select the pairs with DBR.r and DBR.w set; pl is the
- * privilege level of the reference.
+ * A reference of len bytes that is aligned matches on any byte of its datum,
+ * 16 bytes for a 10-byte operand and for cmp8xchg16; an unaligned one only
+ * on a byte it accesses (SDM Vol. 2 7.1.2).  Itanium 2 also takes Data Debug
+ * on any access across a 16-byte boundary while a pair is enabled for it,
+ * whatever its address (251110-003 12.3).  ISR.r and ISR.w in access select
+ * the pairs with DBR.r and DBR.w set; pl is the privilege level of the
+ * reference.
  */
 bool ia64_data_debug_hit(CPUIA64State *env, uint64_t va, uint32_t datum,
                          uint32_t len, uint64_t access, unsigned pl)
 {
-    uint64_t ignored = datum - 1;
-    uint64_t first = va & ~ignored;
-    uint64_t last = (va + len - 1) & ~ignored;
-    unsigned pair;
+    uint32_t align = is_power_of_2(len) ? len : datum;
+    bool cross16 = ia64_env_cpu_class(env)->dbr_cross16 &&
+                   (va & 15) + len > 16;
+    uint64_t start = va;
+    unsigned pair, i;
 
     if (!(env->psr & IA64_PSR_DB) || (env->psr & IA64_PSR_DD)) {
         return false;
+    }
+    if ((va & (align - 1)) == 0) {
+        start = va & ~(uint64_t)(datum - 1);
+        len = datum;
     }
     for (pair = 0; pair < IA64_DBR_PAIRS; pair++) {
         uint64_t address = env->dbr[pair * 2];
         uint64_t control = env->dbr[pair * 2 + 1];
 
-        if (!((access & IA64_ISR_R) && (control & IA64_DBR_R)) &&
-            !((access & IA64_ISR_W) && (control & IA64_DBR_W))) {
+        if ((!((access & IA64_ISR_R) && (control & IA64_DBR_R)) &&
+             !((access & IA64_ISR_W) && (control & IA64_DBR_W))) ||
+            !(control & (1ULL << (IA64_DEBUG_PLM_SHIFT + pl)))) {
             continue;
         }
-        if (ia64_debug_pair_matches(address, control, pl, first, ignored) ||
-            ia64_debug_pair_matches(address, control, pl, last, ignored)) {
+        if (cross16) {
             return true;
+        }
+        for (i = 0; i < len; i++) {
+            if (ia64_debug_pair_matches(address, control, pl, start + i, 0)) {
+                return true;
+            }
         }
     }
     return false;

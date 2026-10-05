@@ -2163,6 +2163,8 @@ struct IA64CPUClass {
      * until that firmware runs against the SDM rule.
      */
     bool unaligned_uc_exempt;
+    /* Data Debug on every access across 16 bytes (251110-003 12.3). */
+    bool dbr_cross16;
     const IA64PalProfile *pal;
     /* NULL keeps all IA64_PMC_COUNT/IA64_PMD_COUNT registers as storage. */
     const IA64PmuLayout *pmu;
