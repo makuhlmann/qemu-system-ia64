@@ -19,7 +19,7 @@
 #define TYPE_LONGSPEAK_RTC "longspeak-rtc"
 OBJECT_DECLARE_SIMPLE_TYPE(LongspeakPDHState, LONGSPEAK_PDH)
 
-#define LONGSPEAK_BMC_TOKEN_BYTES 512
+#define LONGSPEAK_BMC_TOKEN_BYTES 1024
 #define LONGSPEAK_BMC_SEL_RECORDS 1023
 #define LONGSPEAK_BMC_SEL_RECORD  16
 
@@ -97,6 +97,7 @@ void longspeak_pdh_store_seeded(DeviceState *dev);
 void longspeak_bmc_tokens_save(const uint8_t *tokens, uint8_t *area);
 void longspeak_bmc_tokens_load(uint8_t *tokens, const uint8_t *area);
 /* The values the BMC has before the firmware writes any: the system UUID. */
+void longspeak_bmc_tokens_reset(uint8_t *tokens);
 void longspeak_bmc_tokens_init(uint8_t *tokens);
 
 /* sysbus MMIO indexes */

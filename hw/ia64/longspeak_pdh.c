@@ -496,6 +496,7 @@ static void longspeak_pdh_realize(DeviceState *dev, Error **errp)
     }
     sysbus_init_mmio(sbd, &s->bbsram);
     sysbus_init_mmio(sbd, &s->sram);
+    longspeak_bmc_tokens_reset(s->bmc_tokens);
     if (s->store != NULL) {
         g_autofree uint8_t *file = g_malloc(LONGSPEAK_PDH_STORE_SIZE);
 
@@ -641,8 +642,8 @@ static void longspeak_pdh_reset(DeviceState *dev)
 
 static const VMStateDescription vmstate_longspeak_pdh_bmc_tokens = {
     .name = TYPE_LONGSPEAK_PDH "/bmc-tokens",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(bmc_tokens, LongspeakPDHState,
                             LONGSPEAK_BMC_TOKEN_BYTES),

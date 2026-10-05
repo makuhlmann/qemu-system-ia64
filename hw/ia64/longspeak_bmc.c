@@ -67,6 +67,9 @@
 #define LONGSPEAK_BMC_TOKEN_WRITE       0x03
 #define LONGSPEAK_BMC_TOKEN_READ_PART   0x08
 #define LONGSPEAK_BMC_TOKEN_WRITE_PART  0x09
+#define LONGSPEAK_BMC_TOKEN_VERIFY      0x0a
+#define LONGSPEAK_BMC_TOKEN_UPDATE      0x0b
+#define LONGSPEAK_BMC_CC_TOKEN_CHECKSUM 0x70
 
 #define LONGSPEAK_BMC_NETFN_STORAGE 0x0a
 #define LONGSPEAK_BMC_CMD_FRU_INFO  0x10
@@ -462,72 +465,125 @@ static int longspeak_bmc_dimm_slot_of(uint8_t device)
 
 typedef struct LongspeakBmcToken {
     uint16_t id;
+    uint8_t flags;
     uint8_t size;
 } LongspeakBmcToken;
 
 /*
- * The tokens the firmware copies to the BMC: its table at FFF96FB8 holds 40
- * bytes a token, the BMC token at +0 (0 for a token kept only in the NVM) and
- * the size at +2; the name at +24 is the next entry's.  0x500 and 0xD02
- * (FFF55790 writes 16 bytes) are the BMC's own.  GET_TOKEN_INFO flag bit 6
- * would put a checksum byte in front of a value (FFF53870); no token here
- * has one, so the firmware sends none of the checksum commands 10 and 11.
+ * GET_TOKEN_INFO flags as the rx2600's BMC answers them (capture 2026-10-04,
+ * BMC-7).  With bit 6 the value starts with a checksum byte that makes the
+ * sum of all its bytes zero, and the size counts it: SAL_B checks the sum of
+ * a READ (FFF53870, "Token transmit checksum error on read") and puts the
+ * byte in front of what it writes (FFF54190, FFF543F0).
+ */
+#define LONGSPEAK_BMC_TOKEN_PLAIN       0x27
+#define LONGSPEAK_BMC_TOKEN_SUMMED      0x67
+#define LONGSPEAK_BMC_TOKEN_SYSTEM_ID   0x07
+#define LONGSPEAK_BMC_TOKEN_CHECKSUM    0x40
+
+#define P LONGSPEAK_BMC_TOKEN_PLAIN
+#define S LONGSPEAK_BMC_TOKEN_SUMMED
+
+/*
+ * The rx2600's tokens.  SAL_B's table at FFF96FB8 holds 40 bytes a token,
+ * the BMC token at +0 (0 for a token kept only in the NVM) and the size of
+ * the value at +2; the name at +24 is the next entry's.  The others are the
+ * BMC's own; SAL_B writes 0xD01 and the UUID in 0xD02 (FFF55790).
  */
 static const LongspeakBmcToken longspeak_bmc_tokens[] = {
-    { 0x0067,  1 },     /* WAKE_LAN */
-    { 0x0500,  1 },     /* first boot */
-    { 0x0501,  1 },     /* BMC_FLSH */
-    { 0x0502,  1 },     /* E_BUZZER */
-    { 0x0503,  1 },     /* LAN_1GB */
-    { 0x0504,  1 },     /* MANG_LAN */
-    { 0x0505,  1 },     /* SERIAL_1 */
-    { 0x0506,  1 },     /* SERIAL_2 */
-    { 0x0509,  1 },     /* BMC_OP_M */
-    { 0x0511,  1 },     /* SPR_SPEC */
-    { 0x0513,  1 },     /* DEBUG */
-    { 0x0514,  1 },     /* SPARE_01 to SPARE_12 */
-    { 0x0515,  1 },
-    { 0x0516,  1 },
-    { 0x0517,  1 },
-    { 0x0518,  1 },
-    { 0x0519,  1 },
-    { 0x051a,  1 },
-    { 0x051b,  1 },
-    { 0x051c,  1 },
-    { 0x051d,  1 },
-    { 0x051e,  1 },
-    { 0x051f,  1 },
-    { 0x0900,  8 },     /* SPEEDY_B */
-    { 0x0901,  8 },     /* SPEEDY_D */
-    { 0x0920,  2 },     /* CPU_MON */
-    { 0x0921,  2 },     /* CELL_MON */
-    { 0x0922,  1 },     /* MON_ALGO */
-    { 0x0940,  4 },     /* EFI_LANG */
-    { 0x0941,  2 },     /* EFI_TIME */
-    { 0x0942,  8 },     /* EFI_DEBG */
-    { 0x0a00,  2 },     /* ROM_RELS */
-    { 0x0a01,  4 },     /* ROM_DATE */
-    { 0x0a03,  2 },     /* SALA_REV */
-    { 0x0a04,  2 },     /* SALB_REV */
-    { 0x0a05,  2 },     /* ACPI_REV */
-    { 0x0a06,  2 },     /* EFI_REV */
-    { 0x0a07,  2 },     /* EFI_SPEC */
-    { 0x0a08,  2 },     /* EFI_INTL */
-    { 0x0a09,  2 },     /* POSE_REV */
-    { 0x0a0a,  2 },     /* IPMI_REV */
-    { 0x0a0b,  8 },     /* BIOS_REV */
-    { 0x0a0c,  8 },     /* GSP_REV */
-    { 0x0a0d,  2 },     /* SAL_NVMR */
-    { 0x0a0e,  2 },     /* EFI_NVMR */
-    { 0x0a20, 64 },     /* FW_REV_S */
-    { 0x0a21, 10 },     /* DATE_STR */
-    { 0x0c10, 40 },     /* CONDEV00 to CONDEV05 */
-    { 0x0c11, 40 },
-    { 0x0c12, 40 },
-    { 0x0c13, 40 },
-    { 0x0c14, 40 },
-    { 0x0c15, 40 },
-    { 0x0d02, 16 },
+    { 0x0067, P,   1 },     /* WAKE_LAN */
+    { 0x0500, P,   1 },     /* first boot */
+    { 0x0501, P,   1 },     /* BMC_FLSH */
+    { 0x0502, P,   1 },     /* E_BUZZER */
+    { 0x0503, P,   1 },     /* LAN_1GB */
+    { 0x0504, P,   1 },     /* MANG_LAN */
+    { 0x0505, P,   1 },     /* SERIAL_1 */
+    { 0x0506, P,   1 },     /* SERIAL_2 */
+    { 0x0508, P,   1 },
+    { 0x0509, P,   1 },     /* BMC_OP_M */
+    { 0x050a, P,   1 },
+    { 0x0510, P,   1 },
+    { 0x0511, P,   1 },     /* SPR_SPEC */
+    { 0x0512, P,   1 },
+    { 0x0513, P,   1 },     /* DEBUG */
+    { 0x0514, P,   1 },     /* SPARE_01 to SPARE_12 */
+    { 0x0515, P,   1 },
+    { 0x0516, P,   1 },
+    { 0x0517, P,   1 },
+    { 0x0518, P,   1 },
+    { 0x0519, P,   1 },
+    { 0x051a, P,   1 },
+    { 0x051b, P,   1 },
+    { 0x051c, P,   1 },
+    { 0x051d, P,   1 },
+    { 0x051e, P,   1 },
+    { 0x051f, P,   1 },
+    { 0x0900, S,   9 },     /* SPEEDY_B */
+    { 0x0901, S,   9 },     /* SPEEDY_D */
+    { 0x0920, S,   3 },     /* CPU_MON */
+    { 0x0921, S,   3 },     /* CELL_MON */
+    { 0x0922, P,   1 },     /* MON_ALGO */
+    { 0x0928, P,   2 },
+    { 0x0929, S,   2 },
+    { 0x092a, S,   2 },
+    { 0x0940, S,   5 },     /* EFI_LANG */
+    { 0x0941, S,   3 },     /* EFI_TIME */
+    { 0x0942, P,   8 },     /* EFI_DEBG */
+    { 0x0a00, P,   2 },     /* ROM_RELS */
+    { 0x0a01, P,   4 },     /* ROM_DATE */
+    { 0x0a02, P,   8 },
+    { 0x0a03, P,   2 },     /* SALA_REV */
+    { 0x0a04, P,   2 },     /* SALB_REV */
+    { 0x0a05, P,   2 },     /* ACPI_REV */
+    { 0x0a06, P,   2 },     /* EFI_REV */
+    { 0x0a07, P,   2 },     /* EFI_SPEC */
+    { 0x0a08, P,   2 },     /* EFI_INTL */
+    { 0x0a09, P,   2 },     /* POSE_REV */
+    { 0x0a0a, P,   2 },     /* IPMI_REV */
+    { 0x0a0b, P,   8 },     /* BIOS_REV */
+    { 0x0a0c, P,   8 },     /* GSP_REV */
+    { 0x0a0d, P,   2 },     /* SAL_NVMR */
+    { 0x0a0e, P,   2 },     /* EFI_NVMR */
+    { 0x0a20, P,  64 },     /* FW_REV_S */
+    { 0x0a21, P,  10 },     /* DATE_STR */
+    { 0x0b00, S,   2 },
+    { 0x0b01, P,   1 },
+    { 0x0c00, S,  81 },
+    { 0x0c10, S,  41 },     /* CONDEV00 to CONDEV05 */
+    { 0x0c11, S,  41 },
+    { 0x0c12, S,  41 },
+    { 0x0c13, S,  41 },
+    { 0x0c14, S,  41 },
+    { 0x0c15, S,  41 },
+    { 0x0d00, S, 129 },
+    { 0x0d01, S, 129 },
+    { 0x0d02, LONGSPEAK_BMC_TOKEN_SYSTEM_ID, 16 },
+};
+
+#undef P
+#undef S
+
+/*
+ * The values a new BMC holds where they are not zero, as the rx2600's BMC
+ * kept them; their meaning is not known.  0x929, 0x92A, 0xB00, 0xC00 and
+ * 0xD00 fail their checksum there, and SAL_B boots past that.
+ */
+typedef struct LongspeakBmcTokenDefault {
+    uint16_t id;
+    uint8_t fill;
+    uint8_t first;
+} LongspeakBmcTokenDefault;
+
+static const LongspeakBmcTokenDefault longspeak_bmc_token_defaults[] = {
+    { 0x0508, 0x00, 0x03 },
+    { 0x0510, 0x00, 0xd2 },
+    { 0x0928, 0xff, 0xff },
+    { 0x0929, 0xff, 0xff },
+    { 0x092a, 0xff, 0xff },
+    { 0x0b00, 0xff, 0xff },
+    { 0x0b01, 0xff, 0xff },
+    { 0x0c00, 0xff, 0xff },
+    { 0x0d00, 0xff, 0xff },
 };
 
 /* The token, and where its value starts in the store. */
@@ -562,6 +618,22 @@ static const QemuUUID longspeak_bmc_uuid = {
               0x8b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 },
 };
 
+void longspeak_bmc_tokens_reset(uint8_t *tokens)
+{
+    const LongspeakBmcToken *token;
+    unsigned int i, base;
+
+    memset(tokens, 0, LONGSPEAK_BMC_TOKEN_BYTES);
+    for (i = 0; i < ARRAY_SIZE(longspeak_bmc_token_defaults); i++) {
+        const LongspeakBmcTokenDefault *d = &longspeak_bmc_token_defaults[i];
+
+        token = longspeak_bmc_token_find(d->id, &base);
+        assert(token != NULL);
+        memset(tokens + base, d->fill, token->size);
+        tokens[base] = d->first;
+    }
+}
+
 void longspeak_bmc_tokens_init(uint8_t *tokens)
 {
     const LongspeakBmcToken *token;
@@ -581,10 +653,27 @@ void longspeak_bmc_tokens_init(uint8_t *tokens)
     memcpy(tokens + base, uuid.data, token->size);
 }
 
+/* The byte that makes the sum of a value with a checksum zero. */
+static uint8_t longspeak_bmc_token_checksum(const uint8_t *data,
+                                            unsigned int len)
+{
+    uint8_t sum = 0;
+
+    while (len--) {
+        sum += *data++;
+    }
+    return -sum;
+}
+
 /*
- * A token the BMC does not keep reads as an empty value and takes any write:
- * the firmware reads a few more of the BMC's own (0x508, 0x50A, 0x510, 0x512,
- * 0xA02) and writes 0xD01, none of them with a known size.
+ * Token 0 answers GET_TOKEN_INFO with size 0, a token the BMC does not keep
+ * cc CBh.  A READ or WRITE of a value that fails its checksum answers cc
+ * 70h; the READ still returns the value.  VERIFY (0Ah, SAL_B's
+ * VERIFY_TOKEN_CHECKSUM) checks a value before SAL_B reads it in parts
+ * (FFF53B4C); UPDATE (0Bh, UPDATE_TOKEN_CHECKSUM) sets the checksum byte
+ * from the rest of the value, and SAL_B compares the byte it answers with
+ * its own after a write in parts (FFF5474C).  The two bytes VERIFY answers
+ * are not read by SAL_B; the stored and the computed checksum are inferred.
  */
 static bool longspeak_bmc_token(IPMIBmc *s, uint8_t *cmd,
                                 unsigned int cmd_len, RspBuffer *rsp)
@@ -592,8 +681,10 @@ static bool longspeak_bmc_token(IPMIBmc *s, uint8_t *cmd,
     LongspeakPDHState *pdh = (LongspeakPDHState *)
         object_dynamic_cast(OBJECT(s)->parent, TYPE_LONGSPEAK_PDH);
     const LongspeakBmcToken *token = NULL;
-    unsigned int base = 0, size = 0, offset, count, i;
-    uint8_t *value = NULL;
+    unsigned int base = 0, size, offset, count, i;
+    uint16_t id;
+    uint8_t *value;
+    bool summed;
 
     switch (cmd[1]) {
     case LONGSPEAK_BMC_TOKEN_INFO:
@@ -601,6 +692,8 @@ static bool longspeak_bmc_token(IPMIBmc *s, uint8_t *cmd,
     case LONGSPEAK_BMC_TOKEN_WRITE:
     case LONGSPEAK_BMC_TOKEN_READ_PART:
     case LONGSPEAK_BMC_TOKEN_WRITE_PART:
+    case LONGSPEAK_BMC_TOKEN_VERIFY:
+    case LONGSPEAK_BMC_TOKEN_UPDATE:
         break;
     default:
         return false;
@@ -609,33 +702,62 @@ static bool longspeak_bmc_token(IPMIBmc *s, uint8_t *cmd,
         rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_LENGTH_INVALID);
         return true;
     }
+    id = lduw_le_p(cmd + 2);
     if (pdh != NULL) {
-        token = longspeak_bmc_token_find(lduw_le_p(cmd + 2), &base);
+        token = longspeak_bmc_token_find(id, &base);
     }
-    if (token != NULL) {
-        size = token->size;
-        value = pdh->bmc_tokens + base;
+    if (token == NULL) {
+        if (id == 0 && cmd[1] == LONGSPEAK_BMC_TOKEN_INFO) {
+            rsp_buffer_push(rsp, 0);
+            rsp_buffer_push(rsp, 0);
+        } else {
+            rsp_buffer_set_error(rsp, IPMI_CC_REQ_ENTRY_NOT_PRESENT);
+        }
+        return true;
     }
+    size = token->size;
+    value = pdh->bmc_tokens + base;
+    summed = token->flags & LONGSPEAK_BMC_TOKEN_CHECKSUM;
 
     switch (cmd[1]) {
     case LONGSPEAK_BMC_TOKEN_INFO:
-        rsp_buffer_push(rsp, 0);
+        rsp_buffer_push(rsp, token->flags);
         rsp_buffer_push(rsp, size);
         return true;
     case LONGSPEAK_BMC_TOKEN_READ:
         for (i = 0; i < size; i++) {
             rsp_buffer_push(rsp, value[i]);
         }
+        if (summed && longspeak_bmc_token_checksum(value, size) != 0) {
+            rsp_buffer_set_error(rsp, LONGSPEAK_BMC_CC_TOKEN_CHECKSUM);
+        }
         return true;
     case LONGSPEAK_BMC_TOKEN_WRITE:
-        if (token == NULL) {
-            return true;
-        }
         if (cmd_len != 4 + size) {
             rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_LENGTH_INVALID);
+        } else if (summed &&
+                   longspeak_bmc_token_checksum(cmd + 4, size) != 0) {
+            rsp_buffer_set_error(rsp, LONGSPEAK_BMC_CC_TOKEN_CHECKSUM);
+        } else {
+            memcpy(value, cmd + 4, size);
+        }
+        return true;
+    case LONGSPEAK_BMC_TOKEN_VERIFY:
+    case LONGSPEAK_BMC_TOKEN_UPDATE:
+        if (!summed) {
+            rsp_buffer_set_error(rsp, IPMI_CC_INVALID_DATA_FIELD);
             return true;
         }
-        memcpy(value, cmd + 4, size);
+        if (cmd[1] == LONGSPEAK_BMC_TOKEN_UPDATE) {
+            value[0] = longspeak_bmc_token_checksum(value + 1, size - 1);
+            rsp_buffer_push(rsp, value[0]);
+            return true;
+        }
+        rsp_buffer_push(rsp, value[0]);
+        rsp_buffer_push(rsp, longspeak_bmc_token_checksum(value + 1, size - 1));
+        if (longspeak_bmc_token_checksum(value, size) != 0) {
+            rsp_buffer_set_error(rsp, LONGSPEAK_BMC_CC_TOKEN_CHECKSUM);
+        }
         return true;
     }
 
@@ -665,7 +787,8 @@ static bool longspeak_bmc_token(IPMIBmc *s, uint8_t *cmd,
 /*
  * In the file: a tag, then each token's number, size and value, up to a zero
  * number.  A record of a token this BMC does not keep, or of another size, is
- * left out on load, so the file outlives a change of the table.
+ * left out on load, so the file outlives a change of the table; a value that
+ * lacks only its checksum byte gets one.
  */
 #define LONGSPEAK_BMC_STORE_TAG "BMCTOKEN"
 #define LONGSPEAK_BMC_STORE_TAG_LEN 8
@@ -705,6 +828,13 @@ void longspeak_bmc_tokens_load(uint8_t *tokens, const uint8_t *area)
         token = longspeak_bmc_token_find(lduw_le_p(p), &base);
         if (token != NULL && token->size == p[2]) {
             memcpy(tokens + base, p + LONGSPEAK_BMC_STORE_RECORD, p[2]);
+        } else if (token != NULL &&
+                   (token->flags & LONGSPEAK_BMC_TOKEN_CHECKSUM) &&
+                   token->size == p[2] + 1) {
+            /* A file from before the checksum bytes: the value alone. */
+            memcpy(tokens + base + 1, p + LONGSPEAK_BMC_STORE_RECORD, p[2]);
+            tokens[base] = longspeak_bmc_token_checksum(tokens + base + 1,
+                                                        p[2]);
         }
         p += LONGSPEAK_BMC_STORE_RECORD + p[2];
     }

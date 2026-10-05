@@ -2514,6 +2514,10 @@ static void test_pdh_bmc_sel(void)
 #define IPMI_HP_TOKEN_WRITE      0x03U
 #define IPMI_HP_TOKEN_READ_PART  0x08U
 #define IPMI_HP_TOKEN_WRITE_PART 0x09U
+#define IPMI_HP_TOKEN_VERIFY     0x0aU
+#define IPMI_HP_TOKEN_UPDATE     0x0bU
+#define IPMI_HP_TOKEN_PLAIN      0x27U
+#define IPMI_HP_TOKEN_SUMMED     0x67U
 
 /*
  * HP's token commands: the BMC keeps what the firmware writes through either
@@ -2574,7 +2578,7 @@ static void test_pdh_bmc_tokens(void)
                                          rsp, sizeof(rsp)), ==, 5);
         g_assert_cmphex(rsp[0], ==, IPMI_NETFN_HP_TOKEN_LUN0 | 0x04);
         g_assert_cmphex(rsp[2], ==, 0x00);
-        g_assert_cmphex(rsp[3], ==, 0x00);
+        g_assert_cmphex(rsp[3], ==, IPMI_HP_TOKEN_PLAIN);
         g_assert_cmpuint(rsp[4], ==, 1);
         g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
                                          rsp, sizeof(rsp)), ==, 4);
@@ -2643,27 +2647,116 @@ static void test_pdh_bmc_tokens(void)
         g_assert_cmphex(rsp[2], ==, 0xc9);
     }
 
-    /* A token the BMC does not keep is empty and takes a write. */
+    /* Token 0 has size 0; a token the BMC does not keep answers cc CBh. */
     {
+        const uint8_t zero[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_INFO,
+                                 0x00, 0x00 };
         const uint8_t info[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_INFO,
-                                 0x0a, 0x05 };
+                                 0x07, 0x05 };
         const uint8_t write[] = { IPMI_NETFN_HP_TOKEN_LUN0,
-                                  IPMI_HP_TOKEN_WRITE, 0x0a, 0x05, 1, 2 };
+                                  IPMI_HP_TOKEN_WRITE, 0x07, 0x05, 1 };
         const uint8_t unknown[] = { IPMI_NETFN_HP_TOKEN_LUN0, 0x42 };
 
-        g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, G_N_ELEMENTS(info),
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, zero, G_N_ELEMENTS(zero),
                                          rsp, sizeof(rsp)), ==, 5);
         g_assert_cmphex(rsp[2], ==, 0x00);
         g_assert_cmpuint(rsp[4], ==, 0);
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, G_N_ELEMENTS(info),
+                                         rsp, sizeof(rsp)), ==, 3);
+        g_assert_cmphex(rsp[2], ==, 0xcb);
         g_assert_cmpuint(bmc_kcs_command(qts, kcs, write, G_N_ELEMENTS(write),
                                          rsp, sizeof(rsp)), ==, 3);
-        g_assert_cmphex(rsp[2], ==, 0x00);
+        g_assert_cmphex(rsp[2], ==, 0xcb);
         g_assert_cmpuint(bmc_kcs_command(qts, kcs, unknown,
                                          G_N_ELEMENTS(unknown),
                                          rsp, sizeof(rsp)), ==, 3);
         g_assert_cmphex(rsp[2], ==, 0xc1);
     }
 
+    qtest_quit(qts);
+}
+
+/*
+ * A token with flag bit 6 starts with a checksum byte that makes the sum of
+ * its value zero.  The BMC refuses a WRITE that breaks the sum and answers a
+ * READ of a broken value with cc 70h, as the rx2600's BMC does for 0x929;
+ * VERIFY (0Ah) checks the sum, UPDATE (0Bh) sets the byte.
+ */
+static void test_pdh_bmc_token_checksum(void)
+{
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    const uint8_t info[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_INFO,
+                             0x41, 0x09 };
+    const uint8_t read[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_READ,
+                             0x41, 0x09 };
+    const uint8_t bad[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_WRITE,
+                            0x41, 0x09, 0x00, 0x12, 0x34 };
+    const uint8_t good[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_WRITE,
+                             0x41, 0x09, 0xba, 0x12, 0x34 };
+    const uint8_t poke[] = { IPMI_NETFN_HP_TOKEN_LUN0,
+                             IPMI_HP_TOKEN_WRITE_PART, 0x41, 0x09,
+                             2, 0, 1, 0x35 };
+    const uint8_t verify[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_VERIFY,
+                               0x41, 0x09 };
+    const uint8_t update[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_UPDATE,
+                               0x41, 0x09 };
+    const uint8_t plain[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_UPDATE,
+                              0x00, 0x05 };
+    const uint8_t unset[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_READ,
+                              0x29, 0x09 };
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t rsp[16];
+
+    /* EFI_TIME: three bytes with the checksum, zero on a new BMC. */
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, info, G_N_ELEMENTS(info),
+                                     rsp, sizeof(rsp)), ==, 5);
+    g_assert_cmphex(rsp[3], ==, IPMI_HP_TOKEN_SUMMED);
+    g_assert_cmpuint(rsp[4], ==, 3);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                     rsp, sizeof(rsp)), ==, 6);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, bad, G_N_ELEMENTS(bad),
+                                     rsp, sizeof(rsp)), ==, 3);
+    g_assert_cmphex(rsp[2], ==, 0x70);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                     rsp, sizeof(rsp)), ==, 6);
+    g_assert_cmphex(rsp[4], ==, 0x00);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, good, G_N_ELEMENTS(good),
+                                     rsp, sizeof(rsp)), ==, 3);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, verify, G_N_ELEMENTS(verify),
+                                     rsp, sizeof(rsp)), ==, 5);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+
+    /* A write in parts carries no check until UPDATE sets the byte. */
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, poke, G_N_ELEMENTS(poke),
+                                     rsp, sizeof(rsp)), ==, 3);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                     rsp, sizeof(rsp)), ==, 6);
+    g_assert_cmphex(rsp[2], ==, 0x70);
+    g_assert_cmphex(rsp[5], ==, 0x35);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, verify, G_N_ELEMENTS(verify),
+                                     rsp, sizeof(rsp)), ==, 5);
+    g_assert_cmphex(rsp[2], ==, 0x70);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, update, G_N_ELEMENTS(update),
+                                     rsp, sizeof(rsp)), ==, 4);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    g_assert_cmphex(rsp[3], ==, 0xb9);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                     rsp, sizeof(rsp)), ==, 6);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    g_assert_cmphex(rsp[3], ==, 0xb9);
+
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, plain, G_N_ELEMENTS(plain),
+                                     rsp, sizeof(rsp)), ==, 3);
+    g_assert_cmphex(rsp[2], ==, 0xcc);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, unset, G_N_ELEMENTS(unset),
+                                     rsp, sizeof(rsp)), ==, 5);
+    g_assert_cmphex(rsp[2], ==, 0x70);
+    g_assert_cmphex(rsp[3], ==, 0xff);
+    g_assert_cmphex(rsp[4], ==, 0xff);
     qtest_quit(qts);
 }
 
@@ -2703,6 +2796,30 @@ static void test_pdh_bmc_tokens_persist(void)
                                      rsp, sizeof(rsp)), ==, 4);
     g_assert_cmpuint(rsp[3], ==, 18);
     qtest_quit(qts);
+
+    /* A file from before the checksum bytes keeps EFI_TIME's value. */
+    {
+        g_autofree uint8_t *file = g_malloc0(IA64_PDH_STORE_SIZE);
+        uint8_t *record = file + IA64_PDH_BBSRAM_SIZE;
+        const uint8_t time[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_READ,
+                                 0x41, 0x09 };
+
+        memcpy(record, "BMCTOKEN", 8);
+        stw_le_p(record + 8, 0x0941);
+        record[10] = 2;
+        record[11] = 0x12;
+        record[12] = 0x34;
+        g_assert_true(g_file_set_contents(path, (const char *)file,
+                                          IA64_PDH_STORE_SIZE, &error));
+        qts = qtest_initf("-machine zx1,nvram=%s -m 256M", quoted);
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, time, G_N_ELEMENTS(time),
+                                         rsp, sizeof(rsp)), ==, 6);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        g_assert_cmphex(rsp[3], ==, 0xba);
+        g_assert_cmphex(rsp[4], ==, 0x12);
+        g_assert_cmphex(rsp[5], ==, 0x34);
+        qtest_quit(qts);
+    }
 
     g_assert_cmpint(g_unlink(path), ==, 0);
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
@@ -10538,6 +10655,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pdh/bmc-identity", test_pdh_bmc_identity);
     qtest_add_func("/ia64-vpc/pdh/bmc-sel", test_pdh_bmc_sel);
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens", test_pdh_bmc_tokens);
+    qtest_add_func("/ia64-vpc/pdh/bmc-token-checksum",
+                   test_pdh_bmc_token_checksum);
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens-persist",
                    test_pdh_bmc_tokens_persist);
     qtest_add_func("/ia64-vpc/pdh/clock", test_pdh_clock);
