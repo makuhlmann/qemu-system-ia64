@@ -94,7 +94,6 @@ from .encoding import (
     probe_w_fault,
     lfetch,
     lfetch_fault,
-    tnat_z,
     IA64_VECTOR_MASKED,
     LOW_VECTOR_TR_PTE,
     PAL_COPY_BUFFER_SIZE,
@@ -7290,14 +7289,13 @@ test_dbr_speculative_load_fault = require_registers(
     _dbr_fault(_DBR_DATA, IA64_ISR_R | IA64_ISR_SP),
 )
 
-test_dbr_speculative_load_deferred_by_dcr_dd = require_registers(
-    "dbr_speculative_load_deferred_by_dcr_dd",
-    _dbr_program(_DBR_DATA, _DBR_RW_PLM0,
-                 [_dbr_body(ld8_s(9, 8)),
-                  (0x00, nop_m(), tnat_z(6, 7, 9), nop_i()),
-                  (0x00, nop_m(), adds(21, 1, 21, qp=7), nop_i())],
+# DCR.dd defers only while PSR.it and ITLB.ed are both 1 (SDM Vol. 2
+# Table 5-4); this program runs with PSR.it = 0.
+test_dbr_speculative_load_dcr_dd_needs_psr_it = require_registers(
+    "dbr_speculative_load_dcr_dd_needs_psr_it",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0, [_dbr_body(ld8_s(9, 8))],
                  dcr=IA64_DCR_DD),
-    _dbr_no_fault(3, r20=1, r21=1),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R | IA64_ISR_SP),
 )
 
 # probe.fault and lfetch.fault report as non-access instructions 5 and 4;
@@ -7347,7 +7345,7 @@ CASE_NAMES = (
     'dbr_semaphore_reports_read_and_write',
     'dbr_psr_dd_passes_one_instruction',
     'dbr_speculative_load_fault',
-    'dbr_speculative_load_deferred_by_dcr_dd',
+    'dbr_speculative_load_dcr_dd_needs_psr_it',
     'dbr_probe_fault_non_access',
     'dbr_lfetch_fault_non_access',
     'dbr_psr_db_clear_no_fault',

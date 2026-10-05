@@ -1520,13 +1520,14 @@ static bool ia64_speculative_exception_deferrable(CPUIA64State *env,
     }
 
     /*
-     * SDM Vol. 2 Table 5-4 defers when PSR.it && ITLB.ed && the DCR bit.  The
-     * model drops PSR.it && ITLB.ed so that an ld.s of the OS loaders, which
-     * run with PSR.it = 0, defers with the DCR bit alone (be03219); the DCR
-     * bit stays required, so DCR.dd = 0 keeps a Data Debug fault behind a
-     * deferred translation condition.
+     * SDM Vol. 2 Table 5-4: the DCR bit defers only while PSR.it and ITLB.ed
+     * are both 1.  Code that runs with PSR.it = 0, such as an OS loader on
+     * the firmware IVT, takes the fault, and the handler defers it in
+     * software (Part II 6.1).  An unknown ITLB.ed counts as set, as for
+     * Unaligned above.
      */
-    return dcr_mask != 0 && (env->cr_dcr & dcr_mask);
+    return (env->psr & IA64_PSR_IT) && (itlb_ed || itlb_ed_unknown) &&
+           dcr_mask != 0 && (env->cr_dcr & dcr_mask);
 }
 
 /* window and span as in IA64UnalignedWindow (translate/translate.h). */
