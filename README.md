@@ -65,8 +65,9 @@ By default, a PS/2 controller and peripherals are attached. Some operating syste
 
 #### Networking
 
-By default, the board's Intel® 8255x 10/100 Mbps Ethernet Controller is attached to the machine in user mode: an 82550 (`model=i82550`) on `zx1` and an 82559 (`model=i82559c`) on `460gx`. A guest installed with an earlier release, which attached an 82557 (`model=i82557b`), finds a new network adapter; `-nic user,model=i82557b` keeps the old one. You can change it to a different type depending on needs (such as for newer operating systems). These are other tested models confirmed to work:
+By default, the board's Intel® 8255x 10/100 Mbps Ethernet Controller is attached to the machine in user mode: an 82550 (`model=i82550`) on `zx1` and an 82559 (`model=i82559c`) on `460gx`. You can change it to a different type depending on needs (such as for newer operating systems). These are other tested models confirmed to work:
 
+- Intel® 82557 Fast Ethernet PCI Controller: `-nic model=i82557b`
 - Intel® 82543GC Gigabit Ethernet Controller: `-nic model=e1000-82543gc`
 - Intel® 82545EM Gigabit Ethernet Controller: `-nic model=e1000-82545em`
 
