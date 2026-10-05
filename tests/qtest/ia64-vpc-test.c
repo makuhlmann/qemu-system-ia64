@@ -5207,6 +5207,41 @@ static void test_460gx_south_bridge_gpio(void)
     qtest_quit(qts);
 }
 
+/*
+ * The HP i2000 firmware's EFI GetTime stores 00 in the century byte and puts
+ * the old value back on every call, and the XP loader counts seconds by
+ * polling GetTime.  Writes to the calendar bytes must leave the divider chain
+ * alone, or a poll faster than once a second holds the clock on one second.
+ */
+static void test_460gx_rtc_writes_keep_divider_phase(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S "
+                                 "-rtc clock=vm");
+    uint8_t before, century;
+    int i;
+
+    before = rtc_bank_read(qts, IA64_RTC_INDEX, 0x00);
+    century = rtc_bank_read(qts, IA64_RTC_INDEX, 0x32);
+    for (i = 0; i < 300; i++) {
+        rtc_bank_write(qts, IA64_RTC_INDEX, 0x32, 0x00);
+        rtc_bank_write(qts, IA64_RTC_INDEX, 0x32, century);
+        qtest_clock_step(qts, 10 * 1000 * 1000);
+    }
+    g_assert_cmpuint(bcd(rtc_bank_read(qts, IA64_RTC_INDEX, 0x00)), ==,
+                     (bcd(before) + 3) % 60);
+
+    /* A write of the seconds byte itself moves the time, not the phase. */
+    before = rtc_bank_read(qts, IA64_RTC_INDEX, 0x00);
+    for (i = 0; i < 300; i++) {
+        rtc_bank_write(qts, IA64_RTC_INDEX, 0x00,
+                       rtc_bank_read(qts, IA64_RTC_INDEX, 0x00));
+        qtest_clock_step(qts, 10 * 1000 * 1000);
+    }
+    g_assert_cmpuint(bcd(rtc_bank_read(qts, IA64_RTC_INDEX, 0x00)), ==,
+                     (bcd(before) + 3) % 60);
+    qtest_quit(qts);
+}
+
 static void test_460gx_south_bridge_rtc_banks(void)
 {
     QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S");
@@ -10852,6 +10887,8 @@ int main(int argc, char **argv)
                    test_460gx_south_bridge_gpio);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",
                    test_460gx_south_bridge_rtc_banks);
+    qtest_add_func("/ia64-vpc/pci/460gx-rtc-writes-keep-divider-phase",
+                   test_460gx_rtc_writes_keep_divider_phase);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-timer",
                    test_460gx_south_bridge_timer);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-pic",

@@ -65,7 +65,7 @@
 
 #define RTC_ISA_BASE 0x70
 
-static void rtc_set_time(MC146818RtcState *s);
+static bool rtc_set_time(MC146818RtcState *s);
 static void rtc_update_time(MC146818RtcState *s);
 static void rtc_set_cmos(MC146818RtcState *s, const struct tm *tm);
 static inline int rtc_from_bcd(MC146818RtcState *s, int a);
@@ -455,11 +455,28 @@ static void cmos_ioport_write(void *opaque, hwaddr addr,
         case RTC_DAY_OF_MONTH:
         case RTC_MONTH:
         case RTC_YEAR:
-            s->cmos_data[s->cmos_index] = data;
             /* if in set mode, do not update the time */
             if (rtc_running(s)) {
-                rtc_set_time(s);
+                int64_t phase;
+
+                /*
+                 * A write moves the calendar, not the divider chain: only
+                 * DV2-DV0 reset the 22 stages whose 1 Hz output starts each
+                 * update cycle (MC146818 datasheet, "Divider Stages" and
+                 * "Update Cycle"), so the bytes not written keep counting and
+                 * the next update stays on its schedule.  The HP i2000
+                 * firmware rewrites the century byte inside every EFI
+                 * GetTime, and its callers poll GetTime many times a second.
+                 */
+                rtc_update_time(s);
+                phase = get_guest_rtc_ns(s) % NANOSECONDS_PER_SECOND;
+                s->cmos_data[s->cmos_index] = data;
+                if (rtc_set_time(s)) {
+                    s->offset = phase;
+                }
                 check_update_timer(s);
+            } else {
+                s->cmos_data[s->cmos_index] = data;
             }
             break;
         case RTC_REG_A:
@@ -639,7 +656,7 @@ static void rtc_get_time(MC146818RtcState *s, struct tm *tm)
         rtc_from_bcd(s, s->cmos_data[RTC_CENTURY]) * 100 - 1900;
 }
 
-static void rtc_set_time(MC146818RtcState *s)
+static bool rtc_set_time(MC146818RtcState *s)
 {
     struct tm tm = {};
     time_t base;
@@ -658,12 +675,13 @@ static void rtc_set_time(MC146818RtcState *s)
      */
     if (base < -(INT64_MAX / NANOSECONDS_PER_SECOND) ||
         base > INT64_MAX / NANOSECONDS_PER_SECOND) {
-        return;
+        return false;
     }
     s->base_rtc = base;
     s->last_update = qemu_clock_get_ns(rtc_clock);
 
     qapi_event_send_rtc_change(qemu_timedate_diff(&tm), qom_path);
+    return true;
 }
 
 static void rtc_set_cmos(MC146818RtcState *s, const struct tm *tm)
