@@ -1350,6 +1350,7 @@ static void ide_reset(IDEState *s)
 {
     trace_ide_reset(s);
 
+    timer_del(s->atapi_packet_timer);
     if (s->pio_aiocb) {
         blk_aio_cancel(s->pio_aiocb);
         s->pio_aiocb = NULL;
@@ -2722,6 +2723,8 @@ static void ide_init1(IDEBus *bus, int unit)
 
     s->sector_write_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                            ide_sector_write_timer_cb, s);
+    s->atapi_packet_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                         ide_atapi_packet_timer_cb, s);
 }
 
 static int ide_nop_int(const IDEDMA *dma, bool is_write)
@@ -2862,6 +2865,7 @@ void ide_bus_set_irq(IDEBus *bus)
 void ide_exit(IDEState *s)
 {
     timer_free(s->sector_write_timer);
+    timer_free(s->atapi_packet_timer);
     qemu_vfree(s->smart_selftest_data);
     qemu_vfree(s->io_buffer);
 }
@@ -2967,6 +2971,24 @@ static bool ide_error_needed(void *opaque)
     return (bus->error_status != 0);
 }
 
+static bool ide_atapi_packet_needed(void *opaque)
+{
+    IDEState *s = opaque;
+
+    return timer_pending(s->atapi_packet_timer);
+}
+
+static const VMStateDescription vmstate_ide_atapi_packet_state = {
+    .name = "ide_drive/atapi/packet_state",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ide_atapi_packet_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_TIMER_PTR(atapi_packet_timer, IDEState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 /* Fields for GET_EVENT_STATUS_NOTIFICATION ATAPI command */
 static const VMStateDescription vmstate_ide_atapi_gesn_state = {
     .name ="ide_drive/atapi/gesn_state",
@@ -3044,6 +3066,7 @@ const VMStateDescription vmstate_ide_drive = {
         &vmstate_ide_drive_pio_state,
         &vmstate_ide_tray_state,
         &vmstate_ide_atapi_gesn_state,
+        &vmstate_ide_atapi_packet_state,
         NULL
     }
 };

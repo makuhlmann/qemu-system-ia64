@@ -7293,6 +7293,75 @@ static void test_zx1_empty_optical_sense(void)
     qtest_quit(qts);
 }
 
+/* READ CAPACITY by DMA to the primary master; the bay has no disc. */
+static void zx1_atapi_dma_read_capacity(QTestState *qts)
+{
+    const uint64_t cmd = ZX1_IDE_TEST_CMD;
+    unsigned int i;
+
+    qtest_writeb(qts, zx1_ide_port(cmd + 6), 0xa0);
+    qtest_writeb(qts, zx1_ide_port(cmd + 1), 0x01);
+    qtest_writeb(qts, zx1_ide_port(cmd + 4), 0x08);
+    qtest_writeb(qts, zx1_ide_port(cmd + 5), 0x00);
+    qtest_writeb(qts, zx1_ide_port(cmd + 7), 0xa0);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(ZX1_IDE_TEST_CTRL + 2)) &
+                    0x89, ==, 0x08);
+    qtest_writew(qts, zx1_ide_port(cmd), 0x0025);
+    for (i = 1; i < 6; i++) {
+        qtest_writew(qts, zx1_ide_port(cmd), 0);
+    }
+}
+
+/*
+ * A DMA packet waits for the bus master start, so even a command that fails
+ * at once interrupts after the host has armed the bus master and cleared its
+ * interrupt bit, as Windows' atapi.sys does; with no start the drive answers
+ * after 10 ms.  An interrupt raised inside the packet write was lost to that
+ * clear, and the CMD649's native channel held its line with no driver
+ * claiming it (checked Server 2003 froze 600 s after boot).
+ */
+static void test_zx1_atapi_interrupt_after_bm_arm(void)
+{
+    QTestState *qts = qtest_initf("-machine zx1,ide=on -m 256M "
+                                  "-drive if=ide,index=0,media=cdrom");
+    const uint8_t dev = IA64_ZX1_IDE_SLOT;
+    const uint64_t altstatus = zx1_ide_port(ZX1_IDE_TEST_CTRL + 2);
+    const uint32_t bm = 0x1110;
+
+    ia64_cfg_writel(qts, 0, dev, 0, PCI_BASE_ADDRESS_0,
+                    ZX1_IDE_TEST_CMD | PCI_BASE_ADDRESS_SPACE_IO);
+    ia64_cfg_writel(qts, 0, dev, 0, PCI_BASE_ADDRESS_1,
+                    ZX1_IDE_TEST_CTRL | PCI_BASE_ADDRESS_SPACE_IO);
+    ia64_cfg_writel(qts, 0, dev, 0, PCI_BASE_ADDRESS_4,
+                    bm | PCI_BASE_ADDRESS_SPACE_IO);
+    ia64_cfg_writew(qts, 0, dev, 0, PCI_COMMAND,
+                    PCI_COMMAND_IO | PCI_COMMAND_MASTER);
+    qtest_writeb(qts, altstatus, 0x00);
+
+    zx1_atapi_dma_read_capacity(qts);
+    g_assert_cmphex(qtest_readb(qts, altstatus) & 0x80, ==, 0x80);
+    qtest_writeb(qts, zx1_ide_port(bm + 2), 0x06);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(bm + 1)) & 0x04, ==, 0);
+    qtest_writeb(qts, zx1_ide_port(bm), 0x09);
+    g_assert_cmphex(qtest_readb(qts, altstatus) & 0x81, ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(bm + 2)) & 0x04, ==, 0x04);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(bm + 1)) & 0x04, ==, 0x04);
+    /* The Status read takes INTRQ away again. */
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(ZX1_IDE_TEST_CMD + 7)) &
+                    0x01, ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(bm + 1)) & 0x04, ==, 0);
+
+    qtest_writeb(qts, zx1_ide_port(bm), 0x00);
+    qtest_writeb(qts, zx1_ide_port(bm + 2), 0x06);
+    zx1_atapi_dma_read_capacity(qts);
+    qtest_clock_step(qts, 9 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, altstatus) & 0x80, ==, 0x80);
+    qtest_clock_step(qts, 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, altstatus) & 0x81, ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(bm + 1)) & 0x04, ==, 0x04);
+    qtest_quit(qts);
+}
+
 /*
  * The zx1 board CMD649 as the PCI-649 Product Specification (Rev. 1.2,
  * chapter 6) and the rx2600 (capture 2026-10-04, 00:02.0) give it: subsystem
@@ -10528,6 +10597,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/ide-on-seat", test_ide_on_seat);
     qtest_add_func("/ia64-vpc/zx1/empty-optical-sense",
                    test_zx1_empty_optical_sense);
+    qtest_add_func("/ia64-vpc/zx1/atapi-interrupt-after-bm-arm",
+                   test_zx1_atapi_interrupt_after_bm_arm);
     qtest_add_func("/ia64-vpc/zx1/cmd649-registers",
                    test_zx1_cmd649_registers);
     qtest_add_func("/ia64-vpc/network/resources-survive-reset",
