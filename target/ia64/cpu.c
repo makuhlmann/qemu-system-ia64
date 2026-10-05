@@ -1318,6 +1318,11 @@ static const IA64PalProfile ia64_pal_profile_madison = {
     /* The HP Madison PAL_B 5.65 (capture 2026-10-04, CPU-20). */
     .copy_bytes = 0x3e000,
     .copy_ia32_bytes = 0x4c000,
+    /*
+     * The rx2600's answers 0xFFF61020 under the vendor SAL, which has
+     * registered a min-state area (capture 2026-10-03, CPU-21).
+     */
+    .mc_error_info_corrected_psp = true,
 };
 
 static const IA64PalProfile ia64_pal_profile_montecito = {

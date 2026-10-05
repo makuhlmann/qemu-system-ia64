@@ -1990,6 +1990,12 @@ typedef struct IA64PalProfile {
     /* PAL_BRAND_INFO exists, which it does from Montecito on. */
     bool has_brand_info;
     /*
+     * PAL_MC_ERROR_INFO info_index 1 answers the processor state parameter
+     * of a corrected event with all state valid even when no machine check
+     * occurred, while info_index 0 has no error map.
+     */
+    bool mc_error_info_corrected_psp;
+    /*
      * PAL_PREFETCH_VISIBILITY answers 1, "not necessary on remote
      * processors", instead of 0.
      */

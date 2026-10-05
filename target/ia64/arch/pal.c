@@ -867,6 +867,17 @@ static bool pal_mc_level_index_valid(uint64_t level_index)
     return structure_bits != 0 && (structure_bits & (structure_bits - 1)) == 0;
 }
 
+/* Processor State Parameter (SDM Vol. 2 Tables 11-7 and 11-12). */
+#define PAL_PSP_MN          (1ULL << 5)
+#define PAL_PSP_CO          (1ULL << 7)
+#define PAL_PSP_CI          (1ULL << 8)
+#define PAL_PSP_MI          (1ULL << 12)
+#define PAL_PSP_IN          (1ULL << 16)
+#define PAL_PSP_RS          (1ULL << 17)
+#define PAL_PSP_CM          (1ULL << 18)
+/* cr, pc, dr, tr, rr, ar, br, pr, fp, b1, b0 and gr valid. */
+#define PAL_PSP_STATE_VALID (0xfffULL << 20)
+
 static void pal_mc_error_info(CPUIA64State *env)
 {
     uint64_t info_index = env->gr[IA64_PAL_GR_ARG1];
@@ -893,6 +904,13 @@ static void pal_mc_error_info(CPUIA64State *env)
     env->gr[IA64_PAL_GR_RESULT1] = 0;
     env->gr[IA64_PAL_GR_RESULT2] = 0;
     env->gr[IA64_PAL_GR_RESULT3] = 0;
+    if (info_index == 1 &&
+        ia64_env_cpu_class(env)->pal->mc_error_info_corrected_psp) {
+        env->gr[IA64_PAL_GR_STATUS] = PAL_STATUS_SUCCESS;
+        env->gr[IA64_PAL_GR_RESULT1] =
+            PAL_PSP_STATE_VALID | PAL_PSP_CM | PAL_PSP_RS | PAL_PSP_MI |
+            (env->pal.pal_mc_save_addr != 0 ? PAL_PSP_MN : 0);
+    }
 }
 
 /*
@@ -916,15 +934,6 @@ enum {
     MINSTATE_BR1 = 0x1c8 / 8,
     MINSTATE_WORDS,
 };
-
-/* Processor State Parameter of an INIT (SDM Vol. 2 Table 11-12). */
-#define PAL_PSP_MN          (1ULL << 5)
-#define PAL_PSP_CO          (1ULL << 7)
-#define PAL_PSP_CI          (1ULL << 8)
-#define PAL_PSP_IN          (1ULL << 16)
-#define PAL_PSP_RS          (1ULL << 17)
-/* cr, pc, dr, tr, rr, ar, br, pr, fp, b1, b0 and gr valid. */
-#define PAL_PSP_STATE_VALID (0xfffULL << 20)
 
 static void pal_minstate_save_registers(CPUIA64State *env, uint64_t *area)
 {

@@ -2226,6 +2226,43 @@ test_pal_mc_error_info_structure_empty = require_registers(
      "r8": (-6 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
     entry=0x10)
 
+# info_index 1 on Madison: the processor state parameter of a corrected event
+# with every state group valid, also with no machine check, and mn once a
+# min-state area is registered (rx2600 capture 2026-10-03, CPU-21: 0xFFF61020
+# under the vendor SAL).  Merced has no such evidence and keeps -6.
+test_pal_mc_error_info_psp_madison = require_registers(
+    "pal_mc_error_info_psp_madison",
+    pal_call_program(PAL_MC_ERROR_INFO, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_MC_ERROR_INFO,
+     "r8": 0, "r9": 0xfff61000, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
+test_pal_mc_error_info_psp_merced = require_registers(
+    "pal_mc_error_info_psp_merced",
+    pal_call_program(PAL_MC_ERROR_INFO, [(29, 1), (30, 0), (31, 0)]),
+    {"ip": 0x60, "r28": PAL_MC_ERROR_INFO,
+     "r8": (-6 & 0xffffffffffffffff), "r9": 0, "r10": 0, "r11": 0},
+    entry=0x10, cpu="merced")
+
+test_pal_mc_error_info_psp_registered = require_registers(
+    "pal_mc_error_info_psp_registered",
+    [
+        (0x10, *movl_mlx(29, 0x2000)),
+        (0x20, 0x00, nop_m(), addl(28, PAL_MC_REGISTER_MEM, 0),
+         addl(30, 0, 0)),
+        (0x30, 0x00, nop_m(), addl(31, 0, 0), nop_i()),
+        (0x40, 0x10, nop_m(), nop_i(), br_call(0, 0x40, PAL_PROC_ENTRY)),
+        (0x50, 0x00, nop_m(), addl(28, PAL_MC_ERROR_INFO, 0), addl(29, 1, 0)),
+        (0x60, 0x00, nop_m(), addl(30, 0, 0), addl(31, 0, 0)),
+        (0x70, 0x10, nop_m(), nop_i(), br_call(0, 0x70, PAL_PROC_ENTRY)),
+        (0x80, 0x10, nop_m(), nop_i(), br_cond(0x80, 0x80)),
+        (PAL_PROC_ENTRY, 0x0a, pal_break(), nop_m(), nop_i()),
+        (PAL_PROC_ENTRY + 0x10, 0x10, nop_m(), nop_i(), br_ret(0)),
+    ],
+    {"ip": 0x80, "r28": PAL_MC_ERROR_INFO,
+     "r8": 0, "r9": 0xfff61020, "r10": 0, "r11": 0},
+    entry=0x10, cpu="madison")
+
 test_pal_mc_error_info_bad_index = require_registers(
     "pal_mc_error_info_bad_index",
     pal_call_program(PAL_MC_ERROR_INFO, [(29, 3), (30, 0), (31, 0)]),
@@ -2510,6 +2547,9 @@ CASE_NAMES = (
     'pal_mc_error_info_bad_index',
     'pal_mc_error_info_bad_level',
     'pal_mc_error_info_map_empty',
+    'pal_mc_error_info_psp_madison',
+    'pal_mc_error_info_psp_merced',
+    'pal_mc_error_info_psp_registered',
     'pal_mc_error_info_structure_empty',
     'pal_mc_expected',
     'pal_mc_register_mem',
