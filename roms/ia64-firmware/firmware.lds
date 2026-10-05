@@ -45,14 +45,15 @@ SECTIONS
      * The firmware IVT, pinned at image base + 0x8000 (naturally 32 KB
      * aligned since the shadow base is 1 MB aligned) so the machine can
      * seed cr.iva as base + IA64_FW_IVT_OFFSET without knowing the link
-     * layout.  Zero-filled: an all-zero bundle is a break instruction, the
-     * historical machine-side IVT fill.  Lives inside the runtime-code
-     * descriptor (handlers execute here).
+     * layout.  entry.S fills the data-reference vectors; the rest is zero,
+     * and an all-zero bundle is a break instruction.  Lives inside the
+     * runtime-code descriptor (handlers execute here).
      */
     . = __fw_link_base + 0x8000;
     .fw_ivt : {
         __fw_ivt = .;
-        QUAD(0);
+        KEEP(*(.fw_ivt))
+        ASSERT(. <= __fw_ivt + 0x8000, "fw_ivt: vectors overflow the IVT");
         . = __fw_ivt + 0x8000;
     }
 

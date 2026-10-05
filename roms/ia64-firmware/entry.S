@@ -705,6 +705,56 @@ fpswa_emulation_entry:
     .endp fpswa_emulation_entry
     .size fpswa_emulation_entry, . - fpswa_emulation_entry
 
+    /*
+     * The data-reference vectors of the firmware IVT.  The processor defers
+     * a speculative load's fault through DCR only when PSR.it and ITLB.ed
+     * are both 1 (SDM Vol. 2 Table 5-4), and an OS loader runs on this IVT
+     * with PSR.it = 0, so a fault with ISR.sp set is deferred here: IPSR.ed
+     * set, rfi, and the load completes with a NaT (SDM Vol. 2 Part II 6.1).
+     * HP's i2000 firmware does the same in its Alternate Data TLB vector,
+     * which its Data Access Rights vector shares.  Any other fault meets
+     * the break that fills the rest of the table.
+     */
+    .equ FW_ISR_SP_BIT, 36
+    .equ FW_PSR_ED_BIT, 43
+
+    .macro FW_IVT_DEFER_SPECULATIVE vector
+    .org \vector
+    mov r16 = pr
+    mov r17 = cr.isr
+    ;;
+    tbit.z p6, p7 = r17, FW_ISR_SP_BIT
+    ;;
+(p6) br.cond.spnt.few 1f
+    mov r17 = cr.ipsr
+    ;;
+    dep r17 = -1, r17, FW_PSR_ED_BIT, 1
+    ;;
+    mov cr.ipsr = r17
+    mov pr = r16, -1
+    ;;
+    rfi
+    ;;
+1:
+    mov pr = r16, -1
+    ;;
+    break.m 0
+    ;;
+    .endm
+
+    .section .fw_ivt, "ax"
+    .explicit
+    FW_IVT_DEFER_SPECULATIVE 0x0000     /* VHPT Translation */
+    FW_IVT_DEFER_SPECULATIVE 0x0800     /* Data TLB */
+    FW_IVT_DEFER_SPECULATIVE 0x1000     /* Alternate Data TLB */
+    FW_IVT_DEFER_SPECULATIVE 0x1c00     /* Data Key Miss */
+    FW_IVT_DEFER_SPECULATIVE 0x2800     /* Data Access-bit */
+    FW_IVT_DEFER_SPECULATIVE 0x5000     /* Page Not Present */
+    FW_IVT_DEFER_SPECULATIVE 0x5100     /* Key Permission */
+    FW_IVT_DEFER_SPECULATIVE 0x5300     /* Data Access Rights */
+    FW_IVT_DEFER_SPECULATIVE 0x5900     /* Debug */
+    FW_IVT_DEFER_SPECULATIVE 0x5a00     /* Unaligned Reference */
+
     /* Copied into an IVT slot while an EFI debug callback is registered. */
     .section .text.fw_debug_ivt_stub, "ax"
     .align 16

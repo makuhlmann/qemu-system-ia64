@@ -4446,8 +4446,8 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
     }
 
     /*
-     * The firmware IVT now lives inside the image (.fw_ivt, zero-filled =
-     * break bundles), so the historical machine-side fill is gone.
+     * The firmware IVT now lives inside the image (.fw_ivt), so the
+     * historical machine-side fill is gone.
      */
 
     /* Defer PE32+ plabel parsing until after ROM content is loaded */
