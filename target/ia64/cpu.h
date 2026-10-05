@@ -50,6 +50,9 @@
 #define IA64_AR_COUNT    128
 #define IA64_CR_COUNT    128
 #define IA64_DBR_COUNT   16
+/* Pairs the breakpoint logic compares; at least four (SDM Vol. 2 7.1.1). */
+#define IA64_DBR_PAIRS   4
+#define IA64_IBR_PAIRS   4
 #define IA64_FR_COUNT    128
 #define IA64_IBR_COUNT   16
 #define IA64_PMC_COUNT   64
@@ -175,7 +178,7 @@
 #define IA64_PSR_RI_MASK (3ULL << 41)
 #define IA64_PSR_RI_SHIFT  41
 #define IA64_PSR_FAULT_SUPPRESS_MASK \
-    (IA64_PSR_DA | IA64_PSR_DD | IA64_PSR_ED | IA64_PSR_IA)
+    (IA64_PSR_DA | IA64_PSR_DD | IA64_PSR_ED | IA64_PSR_IA | IA64_PSR_ID)
 
 #define IA64_REGION_SHIFT 61
 #define IA64_REGION_MASK  ((1ULL << IA64_REGION_BITS) - 1)
@@ -799,6 +802,7 @@ typedef enum IA64Exception {
     IA64_EXCP_TAKEN_BRANCH = 37,
     IA64_EXCP_SINGLE_STEP = 38,
     IA64_EXCP_LOWER_PRIV_TRANSFER = 39,
+    IA64_EXCP_DEBUG = 40,
     IA64_EXCP_MAX,
 } IA64Exception;
 

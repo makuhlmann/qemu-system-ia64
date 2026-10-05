@@ -816,6 +816,13 @@ void ia64_system_clear_psr_fault_suppression(CPUIA64State *env)
                         IA64_PSR_FAULT_SUPPRESS_MASK;
     uint64_t clear_mask = env->psr & old_mask;
 
+    /*
+     * br.ia leaves PSR.id for the target IA-32 instruction to clear
+     * (SDM Vol. 2 p. 2:245, EFLAG.rf).
+     */
+    if (env->psr & IA64_PSR_IS) {
+        clear_mask &= ~IA64_PSR_ID;
+    }
     if (clear_mask) {
         ia64_set_psr(env, env->psr & ~clear_mask);
     }

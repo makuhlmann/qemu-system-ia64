@@ -1855,21 +1855,12 @@ static void pal_test_proc(CPUIA64State *env)
  *
  * Real hardware has four of each -- the architecture requires at least that
  * many (SDM Vol. 2 sec 7.1.1) and 245320-002 sec 6.2.4 refers to "all four
- * architectural breakpoint registers (IBRs)" on Merced -- and IBR/DBR reads
- * and writes are modelled.  Nothing matches against them, though: no
- * reference in the instruction-fetch or data paths consults IBR/DBR, so the
- * Debug vector (0x5900) is never delivered and a guest that programmes a
- * hardware breakpoint gets silence.
- *
- * Report zero until matching exists.  A guest told there are none will not
- * offer hardware breakpoints; a guest told there are four sets them and
- * waits forever, which is strictly worse.  Implementing the match needs a
- * PSR.db translation-block flag so the per-bundle instruction compare can be
- * skipped when debugging is off, hooks on every load, store, semaphore,
- * lfetch.fault, probe.fault and mandatory RSE reference for the data side,
- * and Debug-fault priority placed against the TLB faults.
+ * architectural breakpoint registers (IBRs)" on Merced.  The IBRs raise
+ * Instruction Debug faults.  Nothing in the data paths consults the DBRs
+ * yet, so they are reported as absent: a guest told there are four sets
+ * them and waits for a fault that does not come.
  */
-#define IA64_IMPLEMENTED_IBR_PAIRS 0
+#define IA64_IMPLEMENTED_IBR_PAIRS IA64_IBR_PAIRS
 #define IA64_IMPLEMENTED_DBR_PAIRS 0
 
 static void pal_debug_info(CPUIA64State *env)

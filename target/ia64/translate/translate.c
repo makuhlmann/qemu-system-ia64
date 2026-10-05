@@ -3618,6 +3618,17 @@ static IA64PrepareResult ia64_gen_prepare_insn(
     TCGLabel *skip;
     TCGv_i64 qp_value;
 
+    /*
+     * An Instruction Debug fault outranks every fault the instruction
+     * itself raises and is reported even with a false predicate (SDM Vol. 2
+     * 7.1, Table 5-6 priority 31).
+     */
+    if (ctx->psr_db) {
+        tcg_gen_movi_i64(cpu_ip, insn->address);
+        gen_helper_check_instruction_debug(
+            tcg_env, tcg_constant_i64(insn->address | insn->slot));
+    }
+
     if (!insn->valid) {
         static unsigned invalid_logs;
 
@@ -3935,6 +3946,7 @@ static void ia64_tr_init_disas_context(DisasContextBase *db, CPUState *cs)
         ctx->restart.instruction_group_start;
     ctx->psr_ss = flags & IA64_TB_FLAG_PSR_SS;
     ctx->psr_tb = flags & IA64_TB_FLAG_PSR_TB;
+    ctx->psr_db = flags & IA64_TB_FLAG_PSR_DB;
 }
 
 static void ia64_tr_tb_start(DisasContextBase *db, CPUState *cs)
@@ -4170,7 +4182,7 @@ static void ia64_tr_translate_insn(DisasContextBase *db, CPUState *cs)
             !ia64_insn_is_yielding_pause(ctx, &insn) &&
             !(record_iipa && track_iipa_for_insn) &&
             !ctx->restart.track_psr_suppression &&
-            !ctx->psr_ss && !ctx->psr_tb) {
+            !ctx->psr_ss && !ctx->psr_tb && !ctx->psr_db) {
             ia64_gen_advance_restart_point(ctx, bundle_ip, slot,
                                            skip_x_slot);
             ctx->restart.instruction_group_start =

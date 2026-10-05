@@ -83,6 +83,8 @@ from .encoding import (
     IA64_TAKEN_BRANCH_VECTOR,
     IA64_SINGLE_STEP_VECTOR,
     IA64_UNALIGNED_VECTOR,
+    IA64_DEBUG_VECTOR,
+    IA64_PSR_ID,
     IA64_VECTOR_MASKED,
     LOW_VECTOR_TR_PTE,
     PAL_COPY_BUFFER_SIZE,
@@ -147,6 +149,8 @@ from .encoding import (
     nop_b,
     nop_i,
     nop_m,
+    or_reg,
+    mov_m_gr_psrl,
     pal_break,
     raw_bundle,
     require_exception,
@@ -6950,7 +6954,117 @@ test_pmi_return_moves_with_pal_copy = require_registers(
         "r24": 1,
     }, entry=0x10)
 
+# Instruction breakpoints (SDM Vol. 2 7.1, 7.1.1): IBR0 holds the address,
+# IBR1 x (bit 63), the privilege-level mask (bits 59:56) and the address mask
+# (bits 55:0).  The setup arms the pair, sets PSR.ic and PSR.db and branches
+# to the bundle at _IBR_TARGET; IBR.addr{3:0} is not compared.
+_IBR_TARGET = 0x100
+_IBR_X = 1 << 63
+_IBR_PLM0 = 1 << 56
+_IBR_FULL_MASK = 0x00ffffffffffffff
+
+
+def _ibr_program(address, control, target, psr=IA64_PSR_IC | IA64_PSR_DB,
+                 handler=None):
+    bundles = [
+        (0x10, *movl_mlx(2, address)),
+        (0x20, *movl_mlx(3, control)),
+        (0x30, 0x00, nop_m(), adds(4, 0, 0), adds(5, 1, 0)),
+        (0x40, 0x00, mov_ibr_indexed_write(4, 2), nop_i(), nop_i()),
+        (0x50, 0x00, mov_ibr_indexed_write(5, 3), nop_i(), nop_i()),
+        (0x60, *movl_mlx(6, psr)),
+        (0x70, 0x00, mov_m_gr_psrl(6), nop_i(), nop_i()),
+        (0x80, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0x90, 0x10, nop_m(), nop_i(), br_cond(0x90, _IBR_TARGET)),
+        (_IBR_TARGET, *target),
+        (_IBR_TARGET + 0x10, 0x10, nop_m(), nop_i(),
+         br_cond(_IBR_TARGET + 0x10, _IBR_TARGET + 0x10)),
+    ]
+    if handler is None:
+        handler = [
+            (IA64_DEBUG_VECTOR, 0x00, mov_m_cr_gr(14, 20), nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x10, 0x00, mov_m_cr_gr(15, 17),
+             nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x20, 0x00, mov_m_cr_gr(16, 19),
+             nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+             br_cond(IA64_DEBUG_VECTOR + 0x30, IA64_DEBUG_VECTOR + 0x30)),
+        ]
+    return bundles + handler
+
+
+_IBR_TARGET_ADDS = (0x00, nop_m(), adds(20, 1, 20), nop_i())
+
+test_ibr_instruction_debug_fault = require_registers(
+    "ibr_instruction_debug_fault",
+    _ibr_program(_IBR_TARGET | 0xf, _IBR_X | _IBR_PLM0 | _IBR_FULL_MASK,
+                 _IBR_TARGET_ADDS),
+    {"ip": IA64_DEBUG_VECTOR + 0x30, "r14": _IBR_TARGET,
+     "r15": IA64_ISR_X, "r16": _IBR_TARGET, "r20": 0},
+)
+
+# Reported even when the qualifying predicate is false.
+test_ibr_fault_on_false_predicate = require_registers(
+    "ibr_fault_on_false_predicate",
+    _ibr_program(_IBR_TARGET, _IBR_X | _IBR_PLM0 | _IBR_FULL_MASK,
+                 (0x00, nop_m(), adds(20, 1, 20, qp=6), nop_i())),
+    {"ip": IA64_DEBUG_VECTOR + 0x30, "r14": _IBR_TARGET,
+     "r15": IA64_ISR_X, "r20": 0},
+)
+
+# Address bits whose mask bit is 0 are not compared.
+test_ibr_mask_ignores_low_bits = require_registers(
+    "ibr_mask_ignores_low_bits",
+    _ibr_program(_IBR_TARGET | 0xf0,
+                 _IBR_X | _IBR_PLM0 | (_IBR_FULL_MASK & ~0xff),
+                 _IBR_TARGET_ADDS),
+    {"ip": IA64_DEBUG_VECTOR + 0x30, "r14": _IBR_TARGET, "r20": 0},
+)
+
+# No match at a privilege level the mask leaves out, nor with PSR.db clear.
+test_ibr_plm_excludes_cpl = require_registers(
+    "ibr_plm_excludes_cpl",
+    _ibr_program(_IBR_TARGET, _IBR_X | (0xe << 56) | _IBR_FULL_MASK,
+                 _IBR_TARGET_ADDS),
+    {"ip": _IBR_TARGET + 0x10, "r20": 1},
+)
+
+test_ibr_psr_db_clear_no_fault = require_registers(
+    "ibr_psr_db_clear_no_fault",
+    _ibr_program(_IBR_TARGET, _IBR_X | _IBR_PLM0 | _IBR_FULL_MASK,
+                 _IBR_TARGET_ADDS, psr=IA64_PSR_IC),
+    {"ip": _IBR_TARGET + 0x10, "r20": 1},
+)
+
+# Every instruction of the bundle faults in turn; a handler that returns with
+# IPSR.id set lets that one instruction through (SDM Vol. 2 7.1).
+test_ibr_psr_id_passes_one_instruction = require_registers(
+    "ibr_psr_id_passes_one_instruction",
+    _ibr_program(_IBR_TARGET, _IBR_X | _IBR_PLM0 | _IBR_FULL_MASK,
+                 (0x08, adds(20, 1, 20), adds(21, 1, 21), adds(22, 1, 22)),
+                 handler=[
+        (IA64_DEBUG_VECTOR, 0x00, mov_m_cr_gr(16, 16), adds(30, 1, 30),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x10, 0x00, mov_m_cr_gr(15, 17), nop_i(),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x20, *movl_mlx(17, IA64_PSR_ID)),
+        (IA64_DEBUG_VECTOR + 0x30, 0x00, nop_m(), or_reg(16, 16, 17),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x40, 0x00, mov_m_gr_cr(16, 16), nop_i(),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x50, 0x10, nop_m(), nop_i(), rfi_b()),
+    ]),
+    {"ip": _IBR_TARGET + 0x10, "r20": 1, "r21": 1, "r22": 1, "r30": 3,
+     "r15": IA64_ISR_X | (2 << IA64_ISR_EI_SHIFT)},
+)
+
 CASE_NAMES = (
+    'ibr_instruction_debug_fault',
+    'ibr_fault_on_false_predicate',
+    'ibr_mask_ignores_low_bits',
+    'ibr_plm_excludes_cpl',
+    'ibr_psr_db_clear_no_fault',
+    'ibr_psr_id_passes_one_instruction',
     'lrr_active_low_pin_asserted_when_low',
     'xtpr_redirects_lowest_priority_interrupt',
     'pmi_ipi_enters_sale_pmi',

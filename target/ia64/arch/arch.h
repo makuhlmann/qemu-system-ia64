@@ -68,6 +68,8 @@ G_NORETURN void ia64_raise_exception(CPUIA64State *env, uint32_t exception,
                                      uint64_t fault_ip, uint64_t fault_imm,
                                      uint32_t fault_slot);
 G_NORETURN void ia64_ia32_unsupported(CPUIA64State *env);
+void ia64_check_instruction_debug(CPUIA64State *env, uint64_t ip,
+                                  uint32_t slot);
 G_NORETURN void ia64_raise_unaligned(CPUIA64State *env, uint64_t addr,
                                      uint64_t isr_access,
                                      uint64_t fault_info);

@@ -137,6 +137,7 @@ static TCGTBCPUState ia64_get_tb_cpu_state(CPUState *cs)
               qatomic_read(&cpu->env.nat[1])) == 0 ?
              IA64_TB_FLAG_NAT_CLEAR : 0;
     flags |= (psr & IA64_PSR_DFL) ? IA64_TB_FLAG_PSR_DFL : 0;
+    flags |= (psr & IA64_PSR_DB) ? IA64_TB_FLAG_PSR_DB : 0;
 
     return (TCGTBCPUState) {
         .pc = cpu->env.ip,

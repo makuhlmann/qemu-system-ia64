@@ -58,6 +58,7 @@ const uint16_t ia64_ivt_vectors[IA64_EXCP_MAX] = {
     [IA64_EXCP_TAKEN_BRANCH]    = 0x5f00,
     [IA64_EXCP_SINGLE_STEP]     = 0x6000,
     [IA64_EXCP_LOWER_PRIV_TRANSFER] = 0x5e00,
+    [IA64_EXCP_DEBUG]           = 0x5900,
 };
 
 G_NORETURN void ia64_raise_exception(CPUIA64State *env, uint32_t exception,
@@ -101,6 +102,53 @@ ia64_raise_disabled_isa_transition(CPUIA64State *env, uint64_t fault_ip,
     env->cr_isr = 4ULL << 4;
     ia64_raise_exception(env, IA64_EXCP_DISABLED_ISA_TRANSITION,
                            fault_ip, 0, fault_slot);
+}
+
+/*
+ * A breakpoint pair: the even register holds the address, the odd one the
+ * enables (bits 63:62), the privilege-level mask (bits 59:56, bit 56 for
+ * level 0) and the address mask (bits 55:0).  Address bits 63:56 have no
+ * mask bits and are always compared (SDM Vol. 2 7.1.1, Table 7-1).
+ */
+#define IA64_DEBUG_MASK_BITS  0x00ffffffffffffffULL
+#define IA64_DEBUG_PLM_SHIFT  56
+#define IA64_IBR_X            (1ULL << 63)
+
+static bool ia64_debug_pair_matches(uint64_t address, uint64_t control,
+                                    unsigned cpl, uint64_t reference,
+                                    uint64_t ignored)
+{
+    uint64_t mask = (control | ~IA64_DEBUG_MASK_BITS) & ~ignored;
+
+    return (control & (1ULL << (IA64_DEBUG_PLM_SHIFT + cpl))) &&
+           ((reference ^ address) & mask) == 0;
+}
+
+/*
+ * Each instruction of a bundle whose address matches an enabled IBR pair
+ * takes an Instruction Debug fault, unless PSR.id holds it off for this one
+ * instruction; IBR.addr{3:0} is not compared (SDM Vol. 2 7.1, 7.1.1).
+ */
+void ia64_check_instruction_debug(CPUIA64State *env, uint64_t ip,
+                                  uint32_t slot)
+{
+    unsigned cpl = ia64_psr_cpl(env->psr);
+    unsigned pair;
+
+    if (!(env->psr & IA64_PSR_DB) || (env->psr & IA64_PSR_ID)) {
+        return;
+    }
+    for (pair = 0; pair < IA64_IBR_PAIRS; pair++) {
+        uint64_t control = env->ibr[pair * 2 + 1];
+
+        if ((control & IA64_IBR_X) &&
+            ia64_debug_pair_matches(env->ibr[pair * 2], control, cpl, ip,
+                                    0xf)) {
+            env->exception_state.fault_addr = ip;
+            env->cr_isr = IA64_ISR_X;
+            ia64_raise_exception(env, IA64_EXCP_DEBUG, ip, 0, slot);
+        }
+    }
 }
 
 G_NORETURN void ia64_raise_unaligned(CPUIA64State *env, uint64_t addr,
@@ -229,6 +277,7 @@ static bool ia64_exception_writes_ifa(IA64Exception excp)
     case IA64_EXCP_UNSUPPORTED_DATA_REFERENCE:
     case IA64_EXCP_PAGE_NOT_PRESENT:
     case IA64_EXCP_UNIMPL_DATA_ADDR:
+    case IA64_EXCP_DEBUG:
         return true;
     default:
         return false;
@@ -348,6 +397,7 @@ static void ia64_deliver_exception(CPUState *cs, IA64Exception excp,
     case IA64_EXCP_TAKEN_BRANCH:
     case IA64_EXCP_SINGLE_STEP:
     case IA64_EXCP_LOWER_PRIV_TRANSFER:
+    case IA64_EXCP_DEBUG:
         isr_status = cpu->env.cr_isr;
         break;
     default:
@@ -629,6 +679,7 @@ void ia64_cpu_do_interrupt(CPUState *cs)
         }
         break;
     case IA64_EXCP_UNALIGNED:
+    case IA64_EXCP_DEBUG:
         /* CR.IFA is only written for a collected interruption. */
         fault_addr = cpu->env.exception_state.fault_addr;
         break;

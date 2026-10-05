@@ -30,6 +30,8 @@
 #define IA64_TB_FLAG_NAT_CLEAR    (1u << 13)
 /* PSR.dfl (bit 18) at TB entry. */
 #define IA64_TB_FLAG_PSR_DFL      (1u << 14)
+/* PSR.db (bit 24) at TB entry: compare every instruction with the IBRs. */
+#define IA64_TB_FLAG_PSR_DB       (1u << 15)
 
 /* The cs_base of an IA-64 TB holds CFM.sof and CFM.sol at entry. */
 #define IA64_TB_CS_BASE_SOL_SHIFT 8
@@ -174,6 +176,7 @@ typedef struct DisasContext {
      */
     bool psr_ss;
     bool psr_tb;
+    bool psr_db;
     uint8_t trap_slot;
 } DisasContext;
 
