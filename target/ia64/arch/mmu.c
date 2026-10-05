@@ -1520,19 +1520,12 @@ static bool ia64_speculative_exception_deferrable(CPUIA64State *env,
     }
 
     /*
-     * A deferrable fault is deferred when the ld.s bundle's page carries the
-     * TLB ED bit, OR when the DCR mask bit for the fault is set.  These are
-     * independent enables (SDM Vol.2, control speculation): in particular the
-     * DCR path does not require instruction translation to be enabled, so an
-     * ld.s issued with PSR.it == 0 (physical code, as in the OS loaders) still
-     * defers a TLB/access fault whenever the corresponding DCR bit is set.
-     * (ia64_current_code_tlb_ed() already returns false when PSR.it == 0, so
-     * the ED path keeps its dependence on instruction translation.)
+     * SDM Vol. 2 Table 5-4 defers when PSR.it && ITLB.ed && the DCR bit.  The
+     * model drops PSR.it && ITLB.ed so that an ld.s of the OS loaders, which
+     * run with PSR.it = 0, defers with the DCR bit alone (be03219); the DCR
+     * bit stays required, so DCR.dd = 0 keeps a Data Debug fault behind a
+     * deferred translation condition.
      */
-    if (itlb_ed) {
-        return true;
-    }
-
     return dcr_mask != 0 && (env->cr_dcr & dcr_mask);
 }
 
@@ -1982,16 +1975,10 @@ qualify:
      */
     if (excp == IA64_EXCP_UNIMPL_DATA_ADDR) {
         alignment_fault = false;
-    }
-    /*
-     * Data Debug ranks below the translation faults and above Unaligned
-     * Data Reference, and DCR.dd defers it (SDM Vol. 2 Table 5-6, Table 3-5).
-     */
-    if (excp == IA64_EXCP_NONE && debug) {
-        excp = IA64_EXCP_DEBUG;
+        debug = false;
     }
     /* ITLB.ed only qualifies a condition; the success path needs no lookup. */
-    if (excp != IA64_EXCP_NONE || alignment_fault) {
+    if (excp != IA64_EXCP_NONE || debug || alignment_fault) {
         itlb_ed = ia64_code_tlb_ed_lookup(env, &itlb_ed_known);
     }
     if (excp != IA64_EXCP_NONE &&
@@ -2000,6 +1987,19 @@ qualify:
         ia64_raise_data_reference_exception(
             env, va, is_write, false, false, 0, excp, true, itlb_ed);
     }
+    /*
+     * Data Debug ranks below the translation faults and above Unaligned
+     * Data Reference, and only an unimplemented address precludes it: a
+     * deferred translation condition leaves it to fault unless DCR.dd defers
+     * it too (SDM Vol. 2 Table 5-3, Table 5-4, Table 5-6).
+     */
+    if (debug &&
+        !ia64_speculative_exception_deferrable(env, IA64_EXCP_DEBUG, itlb_ed,
+                                               !itlb_ed_known)) {
+        ia64_raise_data_reference_exception(
+            env, va, is_write, false, false, 0, IA64_EXCP_DEBUG, true,
+            itlb_ed);
+    }
     if (alignment_fault &&
         !ia64_speculative_exception_deferrable(
             env, IA64_EXCP_UNALIGNED, itlb_ed, !itlb_ed_known)) {
@@ -2007,7 +2007,7 @@ qualify:
             env, va, is_write, false, false, 0, IA64_EXCP_UNALIGNED, true,
             itlb_ed);
     }
-    if (excp != IA64_EXCP_NONE || alignment_fault) {
+    if (excp != IA64_EXCP_NONE || debug || alignment_fault) {
         return 0;
     }
 

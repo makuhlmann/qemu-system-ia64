@@ -20,6 +20,7 @@ from .encoding import (
     IA64_DATA_NESTED_TLB_VECTOR,
     IA64_DCR_BE,
     IA64_DCR_DA,
+    IA64_DEBUG_VECTOR,
     IA64_DCR_DK,
     IA64_DCR_DM,
     IA64_DTLB_VECTOR,
@@ -45,9 +46,11 @@ from .encoding import (
     IA64_INST_ACCESS_VECTOR,
     IA64_INST_KEY_MISS_VECTOR,
     IA64_ISR_CODE_REG_NAT,
+    IA64_ISR_ED,
     IA64_ISR_NA,
     IA64_ISR_NI,
     IA64_ISR_R,
+    IA64_ISR_SP,
     IA64_ISR_W,
     IA64_ISR_X,
     IA64_KEY_PERMISSION_VECTOR,
@@ -313,6 +316,49 @@ test_speculative_recovery_dcr_da_defers_access_bit = require_registers(
         "ip": 0x460,
         "exception": IA64_EXCP_NONE,
         "r31_nat": 1,
+    }, entry=0x10)
+
+# Only Register NaT Consumption and Unimplemented Data Address preclude Data
+# Debug (SDM Vol. 2 Table 5-3): with DCR.da deferring the Access Bit
+# condition of ld.s, the DBR match still faults, as DCR.dd is 0.
+test_speculative_deferred_access_bit_yields_to_data_debug = require_registers(
+    "speculative_deferred_access_bit_yields_to_data_debug", [
+        (0x10, *movl_mlx(18, LOW_VECTOR_TR_PTE | PTE_ED)),
+        (0x20, *movl_mlx(23, LOW_VECTOR_TR_PTE & ~PTE_ACCESSED)),
+        (0x30, *movl_mlx(
+            19, IA64_PSR_IC | IA64_PSR_DT | IA64_PSR_IT | IA64_PSR_DB)),
+        (0x40, *movl_mlx(20, IA64_DCR_DA)),
+        (0x50, *movl_mlx(2, 0x2000)),
+        (0x60, *movl_mlx(4, 0)),
+        (0x70, *movl_mlx(5, 0x2000)),
+        (0x80, 0x00, mov_dbr_indexed_write(4, 5), nop_i(), nop_i()),
+        (0x90, 0x00, nop_m(), adds(4, 1, 0), nop_i()),
+        (0xa0, *movl_mlx(5, 0x81ffffffffffffff)),
+        (0xb0, 0x00, mov_dbr_indexed_write(4, 5), nop_i(), nop_i()),
+        (0xc0, 0x00, adds(7, 16 << 2, 0), adds(5, 5, 0), nop_i()),
+        (0xd0, 0x08, mov_m_gr_cr(7, 21), mov_m_gr_cr(0, 20), nop_i()),
+        (0xe0, 0x00, mov_m_gr_cr(20, 0), adds(6, 6, 0), nop_i()),
+        (0xf0, 0x00, itr_i(5, 18), nop_i(), nop_i()),
+        (0x100, 0x00, itr_d(6, 23), nop_i(), nop_i()),
+        (0x110, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0x120, 0x00, srlz_d(), adds(31, 0x430, 0), nop_i()),
+        *rfi_to_gr(0x130, 19, 31),
+        (0x4000430, 0x00, ld8_s(31, 2), nop_i(), nop_i()),
+        (0x4000000 + IA64_DEBUG_VECTOR, 0x00,
+         mov_m_cr_gr(8, 19), nop_i(), nop_i()),
+        (0x4000000 + IA64_DEBUG_VECTOR + 0x10, 0x00,
+         mov_m_cr_gr(9, 20), nop_i(), nop_i()),
+        (0x4000000 + IA64_DEBUG_VECTOR + 0x20, 0x00,
+         mov_m_cr_gr(10, 17), nop_i(), nop_i()),
+        (0x4000000 + IA64_DEBUG_VECTOR + 0x30, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_DEBUG_VECTOR + 0x30, IA64_DEBUG_VECTOR + 0x30)),
+    ], {
+        "ip": IA64_DEBUG_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r8": 0x430,
+        "r9": 0x2000,
+        "r10": IA64_ISR_R | IA64_ISR_SP | IA64_ISR_ED,
     }, entry=0x10)
 
 test_speculative_recovery_dcr_dk_defers_key_miss = require_registers(
@@ -7920,6 +7966,7 @@ CASE_NAMES = (
     'speculative_load_defers_region6_vhpt_not_present',
     'speculative_load_walks_short_vhpt_with_ic_clear',
     'speculative_recovery_dcr_da_defers_access_bit',
+    'speculative_deferred_access_bit_yields_to_data_debug',
     'speculative_recovery_dcr_dk_defers_key_miss',
     'speculative_recovery_dcr_dm_defers_tlb_miss',
     'srlz_i_without_pending_itlb_change_keeps_tb_cache',
