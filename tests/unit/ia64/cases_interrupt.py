@@ -38,7 +38,6 @@ from .encoding import (
     IA64_EXCP_RESERVED_TEMPLATE,
     IA64_EXCP_UNALIGNED,
     IA64_GENERAL_VECTOR,
-    IA64_GENEX_UNIMPL_INST_ADDR,
     IA64_IMPL_PA_BITS,
     IA64_IA32_EXCEPTION_VECTOR,
     IA64_IA32_INTERRUPT_VECTOR,
@@ -184,6 +183,7 @@ from .encoding import (
     st8,
     st8_postinc,
     IA64_EXCP_LOWER_PRIV_TRANSFER,
+    IA64_EXCP_UNIMPL_INST_ADDR,
     IA64_EXCP_SINGLE_STEP,
     IA64_EXCP_TAKEN_BRANCH,
     IA64_ISR_CODE_LP,
@@ -347,7 +347,7 @@ test_unimplemented_physical_instruction_traps = require_registers(
         "ip": IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x20,
         "exception": IA64_EXCP_NONE,
         "r8": 0,
-        "r9": IA64_GENEX_UNIMPL_INST_ADDR | IA64_ISR_X,
+        "r9": IA64_ISR_CODE_UI | (2 << IA64_ISR_EI_SHIFT),
     }, entry=0x10)
 
 # A QMP stop freezes QEMU_CLOCK_VIRTUAL (system/cpus.c do_vm_stop:
@@ -5307,30 +5307,49 @@ test_native_taken_branch_trap_skips_not_taken_branch = require_registers(
         "r13": 0,
     }, entry=0x10)
 
-# This model reports an unimplemented instruction address with a fault on
-# the fetch, so the traps of the branch come first and ISR.code has no ui
-# bit (SDM Vol. 2 4.3.3 and the Lower-Privilege Transfer Trap vector notes).
-test_native_taken_branch_to_unimplemented_address_precedes_uia_fault = \
-    require_registers(
-        "native_taken_branch_to_unimplemented_address_precedes_uia_fault", [
-            (0x10, *movl_mlx(4, (1 << IA64_IMPL_PA_BITS) | 0x100)),
-            (0x20, 0x00, nop_m(), mov_br_gr(7, 4), nop_i()),
-            (0x30, *movl_mlx(
-                2, IA64_PSR_IC | IA64_PSR_TB | IA64_PSR_SS | (2 << 41))),
-            (0x40, *movl_mlx(3, 0x80)),
-            *rfi_to_gr(0x50, 2, 3),
-            (0x80, 0x10, nop_m(), nop_i(), br_indirect(7)),
-            *_native_completion_trap_handler(IA64_TAKEN_BRANCH_VECTOR),
-        ], {
-            "ip": IA64_TAKEN_BRANCH_VECTOR + 0x50,
-            "exception": IA64_EXCP_NONE,
-            "fault_code": IA64_EXCP_TAKEN_BRANCH,
-            "r9": 0x80,
-            "r10": (IA64_ISR_CODE_TB | IA64_ISR_CODE_SS |
-                    (2 << IA64_ISR_EI_SHIFT)),
-            "r12": 0,
-            "r13": 0,
-        }, entry=0x10)
+# An Unimplemented Instruction Address trap is a trap of the branch, taken
+# with its other traps on the Lower-Privilege Transfer vector (SDM Vol. 2
+# 4.3.3, Table 5-6, Table 8-3). IIP holds the implemented address bits, as
+# PAL_PROC_GET_FEATURES bit 38 = 0 gives.
+test_native_uia_trap_precedes_taken_branch_and_single_step = require_registers(
+    "native_uia_trap_precedes_taken_branch_and_single_step", [
+        (0x10, *movl_mlx(4, (1 << IA64_IMPL_PA_BITS) | 0x100)),
+        (0x20, 0x00, nop_m(), mov_br_gr(7, 4), nop_i()),
+        (0x30, *movl_mlx(
+            2, IA64_PSR_IC | IA64_PSR_TB | IA64_PSR_SS | (2 << 41))),
+        (0x40, *movl_mlx(3, 0x80)),
+        *rfi_to_gr(0x50, 2, 3),
+        (0x80, 0x10, nop_m(), nop_i(), br_indirect(7)),
+        *_native_completion_trap_handler(IA64_LOWER_PRIV_TRANSFER_VECTOR),
+    ], {
+        "ip": IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_UNIMPL_INST_ADDR,
+        "r8": 0x100,
+        "r9": 0x80,
+        "r10": (IA64_ISR_CODE_UI | IA64_ISR_CODE_TB | IA64_ISR_CODE_SS |
+                (2 << IA64_ISR_EI_SHIFT)),
+        "r12": 0,
+        "r13": 0,
+    }, entry=0x10)
+
+# An rfi to an unimplemented address takes the trap itself; IPSR.ri is the
+# restored slot.
+test_rfi_to_unimplemented_address_traps_on_rfi = require_registers(
+    "rfi_to_unimplemented_address_traps_on_rfi", [
+        (0x10, *movl_mlx(2, IA64_PSR_IC | (1 << 41))),
+        (0x20, *movl_mlx(3, (1 << IA64_IMPL_PA_BITS) | 0x200)),
+        *rfi_to_gr(0x30, 2, 3),
+        *_native_completion_trap_handler(IA64_LOWER_PRIV_TRANSFER_VECTOR),
+    ], {
+        "ip": IA64_LOWER_PRIV_TRANSFER_VECTOR + 0x50,
+        "exception": IA64_EXCP_NONE,
+        "fault_code": IA64_EXCP_UNIMPL_INST_ADDR,
+        "r8": 0x200,
+        "r10": IA64_ISR_CODE_UI | (2 << IA64_ISR_EI_SHIFT),
+        "r12": 1,
+        "r13": 0,
+    }, entry=0x10)
 
 # A br.ret that lowers the privilege level with PSR.lp = 1 takes a
 # Lower-Privilege Transfer trap at the target (SDM Vol. 2 7.1, vector 0x5e00).
@@ -7367,7 +7386,8 @@ CASE_NAMES = (
     'native_single_step_not_taken_on_rfi',
     'native_single_step_traps_predicated_off_instruction',
     'native_taken_branch_precedes_single_step',
-    'native_taken_branch_to_unimplemented_address_precedes_uia_fault',
+    'native_uia_trap_precedes_taken_branch_and_single_step',
+    'rfi_to_unimplemented_address_traps_on_rfi',
     'native_taken_branch_trap_skips_not_taken_branch',
     'break_preserves_ifa_and_records_iim_isr',
     'cloop_zero_st1_timer_interrupts_batched_loop',

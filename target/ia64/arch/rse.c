@@ -1178,6 +1178,18 @@ void ia64_rfi(CPUIA64State *env, uint64_t fault_ip, uint32_t fault_slot)
         ia64_rse_complete_frame_loads(env, 0);
         ia64_rse_check(env, "rfi-resume");
     }
+    if ((ipsr & IA64_PSR_IT) ? !ia64_va_is_implemented(env, raw_iip) :
+                               !ia64_pa_is_implemented(env, raw_iip)) {
+        /*
+         * The trap belongs to the rfi (SDM Vol. 2 4.3.3); an rfi run with
+         * PSR.ic = 0 is not the last successfully executed instruction.
+         */
+        ia64_completion_trap_note(env,
+                                  (old_psr & IA64_PSR_IC) ?
+                                  ia64_ip_bundle_addr(fault_ip) :
+                                  env->last_successful_bundle,
+                                  fault_slot, IA64_ISR_CODE_UI, true);
+    }
 }
 
 bool ia64_gr_nat_get(const CPUIA64State *env, uint32_t reg)

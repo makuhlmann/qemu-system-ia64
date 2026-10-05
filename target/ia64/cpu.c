@@ -458,6 +458,10 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
             if (probe) {
                 return false;
             }
+            if (is_ifetch && !(cpu->env.psr & IA64_PSR_IS)) {
+                ia64_raise_unimplemented_target(
+                    &cpu->env, ia64_pa_canonicalize(&cpu->env, addr));
+            }
             excp = is_ifetch ? IA64_EXCP_UNIMPL_INST_ADDR :
                    IA64_EXCP_UNIMPL_DATA_ADDR;
             if (is_ifetch) {
@@ -488,6 +492,10 @@ static bool ia64_cpu_tlb_fill(CPUState *cs, vaddr addr, int size,
     if (virt_translation_enabled && !ia64_va_is_implemented(&cpu->env, addr)) {
         if (probe) {
             return false;
+        }
+        if (is_ifetch && !(cpu->env.psr & IA64_PSR_IS)) {
+            ia64_raise_unimplemented_target(
+                &cpu->env, ia64_va_canonicalize(&cpu->env, addr));
         }
         excp = is_ifetch ? IA64_EXCP_UNIMPL_INST_ADDR :
                IA64_EXCP_UNIMPL_DATA_ADDR;

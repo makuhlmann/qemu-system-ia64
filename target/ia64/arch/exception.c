@@ -341,7 +341,8 @@ static bool ia64_exception_writes_ifa(IA64Exception excp)
 static bool ia64_exception_is_completion_trap(IA64Exception excp)
 {
     return excp == IA64_EXCP_TAKEN_BRANCH || excp == IA64_EXCP_SINGLE_STEP ||
-           excp == IA64_EXCP_LOWER_PRIV_TRANSFER || excp == IA64_EXCP_FP_TRAP;
+           excp == IA64_EXCP_LOWER_PRIV_TRANSFER || excp == IA64_EXCP_FP_TRAP ||
+           excp == IA64_EXCP_UNIMPL_INST_ADDR;
 }
 
 static uint64_t ia64_interruption_psr(CPUIA64State *env)
@@ -566,7 +567,6 @@ static bool ia64_exception_uses_psr_ri_slot(IA64Exception excp, uint64_t isr)
     case IA64_EXCP_ALT_ITLB:
     case IA64_EXCP_INST_ACCESS:
     case IA64_EXCP_INST_ACCESS_BIT:
-    case IA64_EXCP_UNIMPL_INST_ADDR:
         return true;
     case IA64_EXCP_PAGE_NOT_PRESENT:
         return isr & IA64_ISR_X;
@@ -600,7 +600,6 @@ static bool ia64_fetch_fault_yields_to_completion_trap(CPUIA64State *env,
     case IA64_EXCP_KEY_PERMISSION:
     case IA64_EXCP_PAGE_NOT_PRESENT:
     case IA64_EXCP_NAT_CONSUMPTION:
-    case IA64_EXCP_UNIMPL_INST_ADDR:
         return true;
     default:
         return false;
@@ -820,6 +819,26 @@ void ia64_completion_trap_note(CPUIA64State *env, uint64_t iipa,
     qatomic_set(&cs->neg.icount_decr.u16.high, -1);
 }
 
+/*
+ * A taken branch, a taken chk or an rfi to an unimplemented address takes an
+ * Unimplemented Instruction Address trap on that instruction, together with
+ * its other traps (SDM Vol. 2 4.3.3, 5.5.2 step 7, Table 8-3).  The address
+ * shows on the fetch of the target, after the TB exit left the slot of the
+ * instruction in fault_slot.
+ */
+G_NORETURN void ia64_raise_unimplemented_target(CPUIA64State *env,
+                                                uint64_t ip)
+{
+    CPUState *cs = env_cpu(env);
+
+    env->ip = ip;
+    ia64_completion_trap_note(env, env->last_successful_bundle,
+                              env->exception_state.fault_slot,
+                              IA64_ISR_CODE_UI, true);
+    cs->exception_index = IA64_EXCP_NONE;
+    cpu_loop_exit(cs);
+}
+
 static bool ia64_take_completion_trap(CPUState *cs)
 {
     CPUIA64State *env = cpu_env(cs);
@@ -846,7 +865,9 @@ static bool ia64_take_completion_trap(CPUState *cs)
     }
 
     /* Priority order of SDM Vol. 2 Table 5-6; ISR.code keeps every bit. */
-    if (code & IA64_ISR_CODE_LP) {
+    if (code & IA64_ISR_CODE_UI) {
+        excp = IA64_EXCP_UNIMPL_INST_ADDR;
+    } else if (code & IA64_ISR_CODE_LP) {
         excp = IA64_EXCP_LOWER_PRIV_TRANSFER;
     } else if (code & IA64_ISR_CODE_TB) {
         excp = IA64_EXCP_TAKEN_BRANCH;

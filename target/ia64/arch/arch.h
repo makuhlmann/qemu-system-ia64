@@ -98,6 +98,8 @@ void ia64_completion_trap_arm(CPUIA64State *env, uint64_t iipa,
                               uint32_t slot, uint64_t code);
 void ia64_completion_trap_note(CPUIA64State *env, uint64_t iipa,
                                uint32_t slot, uint64_t code, bool taken);
+G_NORETURN void ia64_raise_unimplemented_target(CPUIA64State *env,
+                                                uint64_t ip);
 bool ia64_try_emulate_firmware_unaligned(CPUState *cs,
                                          uint64_t fault_addr,
                                          uint8_t fault_slot);
