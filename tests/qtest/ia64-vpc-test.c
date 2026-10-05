@@ -2225,6 +2225,205 @@ static void test_pdh_clock(void)
     qtest_quit(qts);
 }
 
+/* 2026-10-05 23:59:58, with day register 7. */
+static const uint8_t pdh_clock_late[] = { 0x58, 0x59, 0x23, 0x07,
+                                          0x05, 0x10, 0x26, 0x20 };
+
+static void pdh_clock_set(QTestState *qts, uint64_t rtc, const uint8_t *time)
+{
+    unsigned i;
+
+    qtest_writeb(qts, rtc + 0x0f, 0x00);
+    for (i = 0; i < 8; i++) {
+        qtest_writeb(qts, rtc + i, time[i]);
+    }
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+}
+
+static void pdh_clock_alarm(QTestState *qts, uint64_t rtc, uint8_t s,
+                            uint8_t m, uint8_t h, uint8_t d)
+{
+    qtest_writeb(qts, rtc + 0x08, s);
+    qtest_writeb(qts, rtc + 0x09, m);
+    qtest_writeb(qts, rtc + 0x0a, h);
+    qtest_writeb(qts, rtc + 0x0b, d);
+    qtest_readb(qts, rtc + 0x0e);
+}
+
+/* Steps in 100 ms until TDF; returns the time it took, or 0 for none. */
+static unsigned pdh_clock_wait_alarm(QTestState *qts, uint64_t rtc,
+                                     unsigned limit_ms)
+{
+    unsigned ms;
+
+    for (ms = 100; ms <= limit_ms; ms += 100) {
+        qtest_clock_step(qts, 100 * 1000 * 1000);
+        if (qtest_readb(qts, rtc + 0x0e) & 0x08) {
+            return ms;
+        }
+    }
+    return 0;
+}
+
+/* The DS1501/DS1511 data sheet (19-6820, rev 10/13), registers 08h-13h. */
+static void test_pdh_clock_control(void)
+{
+    const uint64_t rtc = IA64_PDH_DEV5B_BASE + IA64_PDH_RTC;
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t month, sec;
+    unsigned ms;
+
+    /* The power-on sets KSF (rx2600); a read of control A clears it. */
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x04);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0f), ==, 0x80);
+
+    /* PRS and PAB are storage; KSF clears PAB, and with KIE sets IRQF. */
+    qtest_writeb(qts, rtc + 0x0e, 0x30);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x30);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x30);
+    qtest_writeb(qts, rtc + 0x0e, 0x34);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x24);
+    qtest_writeb(qts, rtc + 0x0f, 0x84);
+    qtest_writeb(qts, rtc + 0x0e, 0xc4);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x05);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+
+    /* 08h-0Dh hold what is written; bit 6 of the alarm hours is 0. */
+    pdh_clock_alarm(qts, rtc, 0x7f, 0x7f, 0x7f, 0x3f);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x08), ==, 0x7f);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x09), ==, 0x7f);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0a), ==, 0x3f);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0b), ==, 0x3f);
+    /* The rx2600's alarm values can never match. */
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 3000), ==, 0);
+
+    /*
+     * The rx2600's watchdog, 04 00: 40 ms.  A timeout sets WDF with WDE 0,
+     * and the watchdog reloads.
+     */
+    qtest_writeb(qts, rtc + 0x0c, 0x04);
+    qtest_writeb(qts, rtc + 0x0d, 0x00);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0c), ==, 0x04);
+    qtest_clock_step(qts, 30 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    qtest_clock_step(qts, 20 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x02);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    qtest_clock_step(qts, 40 * 1000 * 1000);
+    qtest_writeb(qts, rtc + 0x0e, 0x00);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    /* WDE alone: WDF with IRQF, again and again. */
+    qtest_writeb(qts, rtc + 0x0f, 0x82);
+    qtest_clock_step(qts, 40 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x03);
+    qtest_clock_step(qts, 40 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x03);
+    /* WDE with WDS: one shot, which clears WDE. */
+    qtest_writeb(qts, rtc + 0x0f, 0x83);
+    qtest_writeb(qts, rtc + 0x0d, 0x00);
+    qtest_clock_step(qts, 50 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0f), ==, 0x81);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x02);
+    /* 00 00 stops it. */
+    qtest_writeb(qts, rtc + 0x0c, 0x00);
+    qtest_clock_step(qts, 100 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+
+    /*
+     * The day register keeps what is written, steps from 7 to 1 at midnight,
+     * and stays when the date is written.  A day alarm matches it.
+     */
+    pdh_clock_set(qts, rtc, pdh_clock_late);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x03), ==, 0x07);
+    pdh_clock_alarm(qts, rtc, 0x00, 0x00, 0x00, 0x41);
+    qtest_writeb(qts, rtc + 0x0f, 0x88);
+    ms = pdh_clock_wait_alarm(qts, rtc, 3000);
+    g_assert_cmpuint(ms, >, 1000);
+    g_assert_cmpuint(ms, <=, 2000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x00), ==, 0x00);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x03), ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x04), ==, 0x06);
+    qtest_writeb(qts, rtc + 0x04, 0x20);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x03), ==, 0x01);
+
+    /* A date alarm, with TIE: TDF and IRQF. */
+    pdh_clock_set(qts, rtc, pdh_clock_late);
+    pdh_clock_alarm(qts, rtc, 0x00, 0x00, 0x00, 0x06);
+    qtest_writeb(qts, rtc + 0x0f, 0x88);
+    qtest_clock_step(qts, 1000 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    ms = pdh_clock_wait_alarm(qts, rtc, 2000);
+    g_assert_cmpuint(ms, >, 0);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x04), ==, 0x06);
+    /* A match while nothing reads the part sets TDF all the same... */
+    pdh_clock_set(qts, rtc, pdh_clock_late);
+    qtest_clock_step(qts, 3000LL * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x08);
+    /* ...but not while TE is 0, nor later for that second. */
+    pdh_clock_set(qts, rtc, pdh_clock_late);
+    qtest_writeb(qts, rtc + 0x0f, 0x08);
+    qtest_clock_step(qts, 3000LL * 1000 * 1000);
+    qtest_writeb(qts, rtc + 0x0f, 0x88);
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 100), ==, 0);
+
+    /* Seconds match: once a minute. */
+    pdh_clock_set(qts, rtc, pdh_clock_late);
+    pdh_clock_alarm(qts, rtc, 0x05, 0x80, 0x80, 0x80);
+    ms = pdh_clock_wait_alarm(qts, rtc, 10000);
+    g_assert_cmpuint(ms, >, 6000);
+    g_assert_cmpuint(ms, <=, 7000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x00), ==, 0x05);
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 2000), ==, 0);
+
+    /*
+     * A mask set that Table 3 does not list gives once a second, but only
+     * while TE is 1, and not for the seconds that passed while it was 0.
+     */
+    pdh_clock_alarm(qts, rtc, 0x80, 0x00, 0x80, 0x00);
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 1100), >, 0);
+    qtest_writeb(qts, rtc + 0x0f, 0x08);
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 3000), ==, 0);
+    qtest_writeb(qts, rtc + 0x0f, 0x88);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 1100), >, 0);
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+    pdh_clock_alarm(qts, rtc, 0x00, 0x00, 0x00, 0x00);
+
+    /* BME: the RAM address steps after each data access and wraps. */
+    qtest_writeb(qts, rtc + 0x0f, 0xa0);
+    qtest_writeb(qts, rtc + 0x10, 0xfe);
+    qtest_writeb(qts, rtc + 0x13, 0x11);
+    qtest_writeb(qts, rtc + 0x13, 0x22);
+    qtest_writeb(qts, rtc + 0x13, 0x33);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x10), ==, 0x01);
+    qtest_writeb(qts, rtc + 0x10, 0xfe);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x13), ==, 0x11);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x13), ==, 0x22);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x13), ==, 0x33);
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+    qtest_writeb(qts, rtc + 0x10, 0xfe);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x13), ==, 0x11);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x13), ==, 0x11);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x10), ==, 0xfe);
+
+    /* EOSC stops the count; clearing it lets the count go on. */
+    month = qtest_readb(qts, rtc + 0x05) & 0x1f;
+    qtest_writeb(qts, rtc + 0x05, 0x80 | month);
+    sec = qtest_readb(qts, rtc + 0x00);
+    qtest_clock_step(qts, 3000LL * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x00), ==, sec);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x05), ==, 0x80 | month);
+    qtest_writeb(qts, rtc + 0x05, month);
+    qtest_clock_step(qts, 3000LL * 1000 * 1000);
+    g_assert_cmpuint(bcd(qtest_readb(qts, rtc + 0x00)), ==,
+                     (bcd(sec) + 3) % 60);
+
+    qtest_quit(qts);
+}
+
 static void test_pdh_bmc(void)
 {
     const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
@@ -10812,6 +11011,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens-persist",
                    test_pdh_bmc_tokens_persist);
     qtest_add_func("/ia64-vpc/pdh/clock", test_pdh_clock);
+    qtest_add_func("/ia64-vpc/pdh/clock-control", test_pdh_clock_control);
     qtest_add_func("/ia64-vpc/pdh/dimm-spd", test_pdh_dimm_spd);
     qtest_add_func("/ia64-vpc/pdh/product-area", test_pdh_product_area);
     qtest_add_func("/ia64-vpc/pdh/board-fru-layout",
