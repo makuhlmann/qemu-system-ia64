@@ -650,6 +650,23 @@ static const VMStateDescription vmstate_longspeak_pdh_bmc_tokens = {
     },
 };
 
+static const VMStateDescription vmstate_longspeak_pdh_bmc_sel = {
+    .name = TYPE_LONGSPEAK_PDH "/bmc-sel",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_2DARRAY(bmc_sel, LongspeakPDHState,
+                              LONGSPEAK_BMC_SEL_RECORDS,
+                              LONGSPEAK_BMC_SEL_RECORD),
+        VMSTATE_UINT16(bmc_sel_count, LongspeakPDHState),
+        VMSTATE_UINT16(bmc_sel_reservation, LongspeakPDHState),
+        VMSTATE_UINT32(bmc_sel_last_add, LongspeakPDHState),
+        VMSTATE_UINT32(bmc_sel_last_erase, LongspeakPDHState),
+        VMSTATE_INT64(bmc_sel_time_offset, LongspeakPDHState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_longspeak_pdh = {
     .name = TYPE_LONGSPEAK_PDH,
     .version_id = 2,
@@ -665,6 +682,7 @@ static const VMStateDescription vmstate_longspeak_pdh = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_longspeak_pdh_bmc_tokens,
+        &vmstate_longspeak_pdh_bmc_sel,
         NULL
     },
 };

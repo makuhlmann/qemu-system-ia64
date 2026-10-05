@@ -72,6 +72,14 @@
 #define LONGSPEAK_BMC_CMD_FRU_INFO  0x10
 #define LONGSPEAK_BMC_CMD_FRU_READ  0x11
 #define LONGSPEAK_BMC_CMD_SDR_TIME  0x28
+#define LONGSPEAK_BMC_CMD_SEL_INFO      0x40
+#define LONGSPEAK_BMC_CMD_SEL_ALLOC     0x41
+#define LONGSPEAK_BMC_CMD_SEL_RESERVE   0x42
+#define LONGSPEAK_BMC_CMD_SEL_GET       0x43
+#define LONGSPEAK_BMC_CMD_SEL_ADD       0x44
+#define LONGSPEAK_BMC_CMD_SEL_CLEAR     0x47
+#define LONGSPEAK_BMC_CMD_SEL_GET_TIME  0x48
+#define LONGSPEAK_BMC_CMD_SEL_SET_TIME  0x49
 
 #define LONGSPEAK_BMC_NETFN_CHASSIS         0x00
 #define LONGSPEAK_BMC_CMD_CHASSIS_CAPS      0x00
@@ -81,6 +89,7 @@
 #define LONGSPEAK_BMC_CMD_POH               0x0f
 #define LONGSPEAK_BMC_NETFN_SENSOR          0x04
 #define LONGSPEAK_BMC_CMD_EVENT_RECEIVER    0x01
+#define LONGSPEAK_BMC_CMD_PLATFORM_EVENT    0x02
 #define LONGSPEAK_BMC_CMD_PEF_CAPS          0x10
 #define LONGSPEAK_BMC_NETFN_APP             0x06
 #define LONGSPEAK_BMC_CMD_DEVICE_ID         0x01
@@ -893,6 +902,212 @@ static bool longspeak_bmc_ipmi(uint8_t *cmd, RspBuffer *rsp)
     }
 }
 
+/*
+ * The event log.  The board has one BMC behind its four interfaces, but the
+ * model has an IPMI simulator for each (longspeak_pdh.c), so the log lives in
+ * the PDH, as the tokens do: what the firmware logs through one interface,
+ * a reader finds through another.  Its shape is the rx2600's (capture
+ * 2026-10-04, BMC-9): SEL version 01h, 1023 records of 16 bytes, record ids
+ * 10h apart from 10h, allocation information and reservations.  The BMC as
+ * event receiver logs each platform event message as a system event record.
+ * The log is lost at power-off, which the rx2600's is not.
+ */
+static uint32_t longspeak_bmc_sel_now(const LongspeakPDHState *pdh)
+{
+    return pdh->bmc_sel_time_offset +
+           qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / NANOSECONDS_PER_SECOND;
+}
+
+static uint16_t longspeak_bmc_sel_id(unsigned int index)
+{
+    return (index + 1) * LONGSPEAK_BMC_SEL_RECORD;
+}
+
+static uint8_t *longspeak_bmc_sel_add(LongspeakPDHState *pdh,
+                                      const uint8_t *record)
+{
+    uint32_t now = longspeak_bmc_sel_now(pdh);
+    uint8_t *entry;
+
+    if (pdh->bmc_sel_count == LONGSPEAK_BMC_SEL_RECORDS) {
+        return NULL;
+    }
+    entry = pdh->bmc_sel[pdh->bmc_sel_count];
+    memcpy(entry, record, LONGSPEAK_BMC_SEL_RECORD);
+    stw_le_p(entry, longspeak_bmc_sel_id(pdh->bmc_sel_count));
+    if (entry[2] < 0xe0) {          /* OEM types E0h-FFh have no time */
+        stl_le_p(entry + 3, now);
+    }
+    pdh->bmc_sel_count++;
+    pdh->bmc_sel_last_add = now;
+    return entry;
+}
+
+/* Reservation 0 is none (IPMI v2.0 31.4). */
+static bool longspeak_bmc_sel_reserved(const LongspeakPDHState *pdh,
+                                       const uint8_t *cmd)
+{
+    return pdh->bmc_sel_reservation != 0 &&
+           lduw_le_p(cmd + 2) == pdh->bmc_sel_reservation;
+}
+
+static bool longspeak_bmc_sel(IPMIBmc *s, uint8_t *cmd, unsigned int cmd_len,
+                              RspBuffer *rsp)
+{
+    LongspeakPDHState *pdh = (LongspeakPDHState *)
+        object_dynamic_cast(OBJECT(s)->parent, TYPE_LONGSPEAK_PDH);
+    unsigned int free_units, index, offset, count, i;
+    uint8_t record[LONGSPEAK_BMC_SEL_RECORD] = { 0 };
+    const uint8_t *entry;
+    uint16_t id;
+
+    if (pdh == NULL) {
+        return false;
+    }
+    free_units = LONGSPEAK_BMC_SEL_RECORDS - pdh->bmc_sel_count;
+
+    if ((cmd[0] >> 2) == LONGSPEAK_BMC_NETFN_SENSOR) {
+        if (cmd[1] != LONGSPEAK_BMC_CMD_PLATFORM_EVENT) {
+            return false;
+        }
+        if (cmd_len < 10) {
+            rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_LENGTH_INVALID);
+            return true;
+        }
+        record[2] = 0x02;           /* system event record */
+        record[7] = cmd[2];         /* generator id */
+        memcpy(record + 9, cmd + 3, 7);
+        if (!longspeak_bmc_sel_add(pdh, record)) {
+            rsp_buffer_set_error(rsp, IPMI_CC_OUT_OF_SPACE);
+        }
+        return true;
+    }
+
+    switch (cmd[1]) {
+    case LONGSPEAK_BMC_CMD_SEL_INFO:
+        rsp_buffer_push(rsp, 0x01);
+        rsp_buffer_push(rsp, pdh->bmc_sel_count & 0xff);
+        rsp_buffer_push(rsp, pdh->bmc_sel_count >> 8);
+        rsp_buffer_push(rsp, (free_units * LONGSPEAK_BMC_SEL_RECORD) & 0xff);
+        rsp_buffer_push(rsp, (free_units * LONGSPEAK_BMC_SEL_RECORD) >> 8);
+        for (i = 0; i < 4; i++) {
+            rsp_buffer_push(rsp, pdh->bmc_sel_last_add >> (8 * i));
+        }
+        for (i = 0; i < 4; i++) {
+            rsp_buffer_push(rsp, pdh->bmc_sel_last_erase >> (8 * i));
+        }
+        rsp_buffer_push(rsp, 0x03);     /* reserve, allocation information */
+        return true;
+    case LONGSPEAK_BMC_CMD_SEL_ALLOC:
+        rsp_buffer_push(rsp, LONGSPEAK_BMC_SEL_RECORDS & 0xff);
+        rsp_buffer_push(rsp, LONGSPEAK_BMC_SEL_RECORDS >> 8);
+        rsp_buffer_push(rsp, LONGSPEAK_BMC_SEL_RECORD);
+        rsp_buffer_push(rsp, 0);
+        for (i = 0; i < 2; i++) {
+            rsp_buffer_push(rsp, free_units & 0xff);
+            rsp_buffer_push(rsp, free_units >> 8);
+        }
+        rsp_buffer_push(rsp, 1);        /* one unit is the largest record */
+        return true;
+    case LONGSPEAK_BMC_CMD_SEL_RESERVE:
+        if (++pdh->bmc_sel_reservation == 0) {
+            pdh->bmc_sel_reservation = 1;
+        }
+        rsp_buffer_push(rsp, pdh->bmc_sel_reservation & 0xff);
+        rsp_buffer_push(rsp, pdh->bmc_sel_reservation >> 8);
+        return true;
+    case LONGSPEAK_BMC_CMD_SEL_GET:
+        if (cmd_len < 8) {
+            rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_LENGTH_INVALID);
+            return true;
+        }
+        id = lduw_le_p(cmd + 4);
+        offset = cmd[6];
+        /* A read of part of a record needs the reservation (IPMI 31.5). */
+        if ((offset != 0 || cmd[7] != 0xff) &&
+            !longspeak_bmc_sel_reserved(pdh, cmd)) {
+            rsp_buffer_set_error(rsp, IPMI_CC_INVALID_RESERVATION);
+            return true;
+        }
+        if (id == 0x0000) {
+            index = 0;
+        } else if (id == 0xffff) {
+            index = pdh->bmc_sel_count - 1;
+        } else if (id % LONGSPEAK_BMC_SEL_RECORD == 0) {
+            index = id / LONGSPEAK_BMC_SEL_RECORD - 1;
+        } else {
+            index = LONGSPEAK_BMC_SEL_RECORDS;
+        }
+        if (pdh->bmc_sel_count == 0 || index >= pdh->bmc_sel_count) {
+            rsp_buffer_set_error(rsp, IPMI_CC_REQ_ENTRY_NOT_PRESENT);
+            return true;
+        }
+        if (offset >= LONGSPEAK_BMC_SEL_RECORD) {
+            rsp_buffer_set_error(rsp, IPMI_CC_PARM_OUT_OF_RANGE);
+            return true;
+        }
+        count = MIN(cmd[7], LONGSPEAK_BMC_SEL_RECORD - offset);
+        id = index + 1 < pdh->bmc_sel_count ? longspeak_bmc_sel_id(index + 1)
+                                             : 0xffff;
+        rsp_buffer_push(rsp, id & 0xff);
+        rsp_buffer_push(rsp, id >> 8);
+        entry = pdh->bmc_sel[index];
+        for (i = 0; i < count; i++) {
+            rsp_buffer_push(rsp, entry[offset + i]);
+        }
+        return true;
+    case LONGSPEAK_BMC_CMD_SEL_ADD:
+        if (cmd_len < 2 + LONGSPEAK_BMC_SEL_RECORD) {
+            rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_LENGTH_INVALID);
+            return true;
+        }
+        entry = longspeak_bmc_sel_add(pdh, cmd + 2);
+        if (!entry) {
+            rsp_buffer_set_error(rsp, IPMI_CC_OUT_OF_SPACE);
+            return true;
+        }
+        rsp_buffer_push(rsp, entry[0]);
+        rsp_buffer_push(rsp, entry[1]);
+        return true;
+    case LONGSPEAK_BMC_CMD_SEL_CLEAR:
+        if (cmd_len < 8) {
+            rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_LENGTH_INVALID);
+            return true;
+        }
+        if (!longspeak_bmc_sel_reserved(pdh, cmd)) {
+            rsp_buffer_set_error(rsp, IPMI_CC_INVALID_RESERVATION);
+            return true;
+        }
+        if (cmd[4] != 'C' || cmd[5] != 'L' || cmd[6] != 'R' ||
+            (cmd[7] != 0xaa && cmd[7] != 0x00)) {
+            rsp_buffer_set_error(rsp, IPMI_CC_INVALID_DATA_FIELD);
+            return true;
+        }
+        if (cmd[7] == 0xaa) {
+            pdh->bmc_sel_count = 0;
+            pdh->bmc_sel_last_erase = longspeak_bmc_sel_now(pdh);
+        }
+        rsp_buffer_push(rsp, 0x01);     /* erasure completed */
+        return true;
+    case LONGSPEAK_BMC_CMD_SEL_GET_TIME:
+        for (i = 0; i < 4; i++) {
+            rsp_buffer_push(rsp, longspeak_bmc_sel_now(pdh) >> (8 * i));
+        }
+        return true;
+    case LONGSPEAK_BMC_CMD_SEL_SET_TIME:
+        if (cmd_len < 6) {
+            rsp_buffer_set_error(rsp, IPMI_CC_REQUEST_DATA_LENGTH_INVALID);
+            return true;
+        }
+        pdh->bmc_sel_time_offset = (int64_t)ldl_le_p(cmd + 2) -
+            (int64_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) /
+                      NANOSECONDS_PER_SECOND);
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void longspeak_bmc_handle_command(IPMIBmc *s, uint8_t *cmd,
                                          unsigned int cmd_len,
                                          unsigned int max_cmd_len,
@@ -925,7 +1140,12 @@ static void longspeak_bmc_handle_command(IPMIBmc *s, uint8_t *cmd,
                 cmd[1] == LONGSPEAK_BMC_CMD_FRU_READ ||
                 cmd[1] == LONGSPEAK_BMC_CMD_FRU_STATUS) {
                 handled = longspeak_bmc_fru(cmd, cmd_len, &rsp);
+            } else {
+                handled = longspeak_bmc_sel(s, cmd, cmd_len, &rsp);
             }
+            break;
+        case LONGSPEAK_BMC_NETFN_SENSOR:
+            handled = longspeak_bmc_sel(s, cmd, cmd_len, &rsp);
             break;
         default:
             break;

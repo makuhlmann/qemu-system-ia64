@@ -20,6 +20,8 @@
 OBJECT_DECLARE_SIMPLE_TYPE(LongspeakPDHState, LONGSPEAK_PDH)
 
 #define LONGSPEAK_BMC_TOKEN_BYTES 512
+#define LONGSPEAK_BMC_SEL_RECORDS 1023
+#define LONGSPEAK_BMC_SEL_RECORD  16
 
 /*
  * The nvram= file: the battery-backed part, then the BMC's tokens, which the
@@ -78,6 +80,13 @@ struct LongspeakPDHState {
     DeviceState *kcs[3];           /* IPMI KCS1, 2, 3: FF5B_0CA2, 0000, 0062 */
     /* The BMC's tokens, which every interface reaches (longspeak_bmc.c). */
     uint8_t bmc_tokens[LONGSPEAK_BMC_TOKEN_BYTES];
+    /* The BMC's event log, the same way. */
+    uint8_t bmc_sel[LONGSPEAK_BMC_SEL_RECORDS][LONGSPEAK_BMC_SEL_RECORD];
+    uint16_t bmc_sel_count;
+    uint16_t bmc_sel_reservation;
+    uint32_t bmc_sel_last_add;
+    uint32_t bmc_sel_last_erase;
+    int64_t bmc_sel_time_offset;   /* the log's clock less the machine's */
     DeviceState *rtc;              /* the clock, FF5B_8000 */
 };
 

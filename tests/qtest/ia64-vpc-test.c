@@ -2435,6 +2435,80 @@ static void test_pdh_bmc_identity(void)
     qtest_quit(qts);
 }
 
+/*
+ * One event log behind the BMC's interfaces: a record added through KCS1
+ * reads back through KCS2, in the rx2600's shape (capture 2026-10-04,
+ * BMC-9), and a platform event message becomes a system event record with
+ * the log's time.
+ */
+static void test_pdh_bmc_sel(void)
+{
+    const uint64_t kcs1 = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    const uint64_t kcs2 = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS2;
+    const uint8_t info[] = { 0x0a << 2, 0x40 };
+    const uint8_t alloc[] = { 0x0a << 2, 0x41 };
+    const uint8_t reserve[] = { 0x0a << 2, 0x42 };
+    const uint8_t set_time[] = { 0x0a << 2, 0x49, 0x00, 0x10, 0x00, 0x00 };
+    uint8_t add[18] = { 0x0a << 2, 0x44, 0x00, 0x00, 0xe0, 0x00, 0x0b, 0x02,
+                        0x80, 0x54, 0x06 };
+    const uint8_t event[] = { 0x04 << 2, 0x02, 0x41, 0x03, 0x12, 0x00, 0x6f,
+                              0x41, 0x8f, 0xff };
+    uint8_t get[] = { 0x0a << 2, 0x43, 0, 0, 0x00, 0x00, 0, 0xff };
+    uint8_t clear[] = { 0x0a << 2, 0x47, 0, 0, 'C', 'L', 'R', 0xaa };
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t rsp[64];
+
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs2, info, sizeof(info),
+                                     rsp, sizeof(rsp)), ==, 3 + 14);
+    g_assert_cmphex(rsp[3], ==, 0x01);
+    g_assert_cmpuint(lduw_le_p(rsp + 4), ==, 0);
+    g_assert_cmpuint(lduw_le_p(rsp + 6), ==, 1023 * 16);
+    g_assert_cmphex(rsp[16], ==, 0x03);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs2, alloc, sizeof(alloc),
+                                     rsp, sizeof(rsp)), ==, 3 + 9);
+    g_assert_cmpuint(lduw_le_p(rsp + 3), ==, 1023);
+    g_assert_cmpuint(lduw_le_p(rsp + 5), ==, 16);
+
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs1, set_time, sizeof(set_time),
+                                     rsp, sizeof(rsp)), ==, 3);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs1, add, sizeof(add),
+                                     rsp, sizeof(rsp)), ==, 3 + 2);
+    g_assert_cmpuint(lduw_le_p(rsp + 3), ==, 0x10);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs1, event, sizeof(event),
+                                     rsp, sizeof(rsp)), ==, 3);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs2, get, sizeof(get),
+                                     rsp, sizeof(rsp)), ==, 3 + 2 + 16);
+    g_assert_cmpuint(lduw_le_p(rsp + 3), ==, 0x20);
+    g_assert_cmpmem(rsp + 5 + 2, 9, add + 4, 9);
+    get[4] = 0x20;
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs2, get, sizeof(get),
+                                     rsp, sizeof(rsp)), ==, 3 + 2 + 16);
+    g_assert_cmpuint(lduw_le_p(rsp + 3), ==, 0xffff);
+    g_assert_cmphex(rsp[5 + 2], ==, 0x02);
+    g_assert_cmpuint(ldl_le_p(rsp + 5 + 3), ==, 0x1000);
+    g_assert_cmphex(rsp[5 + 7], ==, 0x41);
+    g_assert_cmpmem(rsp + 5 + 9, 7, event + 3, 7);
+
+    /* Clearing takes the reservation. */
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs2, clear, sizeof(clear),
+                                     rsp, sizeof(rsp)), ==, 3);
+    g_assert_cmphex(rsp[2], ==, 0xc5);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs1, reserve, sizeof(reserve),
+                                     rsp, sizeof(rsp)), ==, 3 + 2);
+    clear[2] = rsp[3];
+    clear[3] = rsp[4];
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs2, clear, sizeof(clear),
+                                     rsp, sizeof(rsp)), ==, 3 + 1);
+    g_assert_cmphex(rsp[3], ==, 0x01);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs1, info, sizeof(info),
+                                     rsp, sizeof(rsp)), ==, 3 + 14);
+    g_assert_cmpuint(lduw_le_p(rsp + 4), ==, 0);
+    g_assert_cmpuint(ldl_le_p(rsp + 12), ==, 0x1000);
+    qtest_quit(qts);
+}
+
 #define IPMI_HP_TOKEN_INFO       0x01U
 #define IPMI_HP_TOKEN_READ       0x02U
 #define IPMI_HP_TOKEN_WRITE      0x03U
@@ -10393,6 +10467,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pdh/bmc", test_pdh_bmc);
     qtest_add_func("/ia64-vpc/pdh/bmc-ports", test_pdh_bmc_ports);
     qtest_add_func("/ia64-vpc/pdh/bmc-identity", test_pdh_bmc_identity);
+    qtest_add_func("/ia64-vpc/pdh/bmc-sel", test_pdh_bmc_sel);
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens", test_pdh_bmc_tokens);
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens-persist",
                    test_pdh_bmc_tokens_persist);
