@@ -1755,6 +1755,11 @@ static void test_lba_rope_window(void)
     qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x8620, 0xc000000700000159ULL);
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x8620), ==,
                     0xc000000700000159ULL);
+    /* FFE67500 writes A338 once; the rx2600 reads it back (MIO-10). */
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0xa338), ==, 0);
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0xa338, 0x017ff847e807fffdULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0xa338), ==,
+                    0x017ff847e807fffdULL);
 
     /* The window answers only once ROPE_CONFIG_BASE enables it. */
     qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, rope);

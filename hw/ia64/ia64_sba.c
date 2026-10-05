@@ -126,15 +126,19 @@
  * bit 23 added at FFECB656, the request queue depth in bits 55:48 that
  * FFECA050 reads back and that has to be two or more
  * ("queueDepth >= MERCURY_ROPE_REQ_DEPTH_MIN"); the memory controls at 8600
- * and 8700 (G10); the error enables at 9500 and 9508.
+ * and 8700 (G10); the error enables at 9500 and 9508; A208, A218 and A338,
+ * which FFE67500 writes with constants (MIO-10).
  */
 static const hwaddr ia64_sba_stored_regs[] = {
     0x0400, 0x0408, 0x0418,
     0x1400, 0x1408, 0x1410, 0x1418,
     0x8600, 0x8608, 0x8610, 0x8620, 0x8700, 0x8708, 0x8710, 0x8720,
     0x9420, 0x9500, 0x9508,
+    0xa208, 0xa218, 0xa338,
 };
 #define IA64_SBA_STORED_REGS           ARRAY_SIZE(ia64_sba_stored_regs)
+/* The registers before A208 are in vmstate version 4, the rest in 5. */
+#define IA64_SBA_STORED_REGS_V4        18
 /*
  * FFEC6620 sets bit 10 of FED0_1400 and waits for it to clear again; the
  * rx2600 reads it clear.
@@ -744,7 +748,7 @@ static int ia64_sba_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ia64_sba = {
     .name = "ia64-sba-ioc",
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 3,
     .post_load = ia64_sba_post_load,
     .fields = (const VMStateField[]) {
@@ -760,7 +764,11 @@ static const VMStateDescription vmstate_ia64_sba = {
         VMSTATE_UINT64_ARRAY(range, IA64SBAState, IA64_SBA_RANGE_REGS),
         VMSTATE_UINT64(error_control, IA64SBAState),
         VMSTATE_UINT64(rope_width, IA64SBAState),
-        VMSTATE_UINT64_ARRAY_V(stored, IA64SBAState, IA64_SBA_STORED_REGS, 4),
+        VMSTATE_SUB_ARRAY(stored, IA64SBAState, 0, IA64_SBA_STORED_REGS_V4, 4,
+                          vmstate_info_uint64, uint64_t),
+        VMSTATE_SUB_ARRAY(stored, IA64SBAState, IA64_SBA_STORED_REGS_V4,
+                          IA64_SBA_STORED_REGS - IA64_SBA_STORED_REGS_V4, 5,
+                          vmstate_info_uint64, uint64_t),
         VMSTATE_END_OF_LIST()
     },
 };
