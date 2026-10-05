@@ -85,6 +85,16 @@ from .encoding import (
     IA64_UNALIGNED_VECTOR,
     IA64_DEBUG_VECTOR,
     IA64_PSR_ID,
+    IA64_PSR_DD,
+    IA64_DCR_DD,
+    IA64_ISR_NA,
+    IA64_ISR_SP,
+    ld8_s,
+    xchg,
+    probe_w_fault,
+    lfetch,
+    lfetch_fault,
+    tnat_z,
     IA64_VECTOR_MASKED,
     LOW_VECTOR_TR_PTE,
     PAL_COPY_BUFFER_SIZE,
@@ -7058,6 +7068,192 @@ test_ibr_psr_id_passes_one_instruction = require_registers(
      "r15": IA64_ISR_X | (2 << IA64_ISR_EI_SHIFT)},
 )
 
+# Data breakpoints (SDM Vol. 2 7.1.1, 7.1.2): DBR1 holds r (bit 63), w (bit
+# 62), the privilege-level mask and the address mask.  The setup arms the
+# pair, writes DCR, points r8 at data, sets PSR from psr and runs the bundles
+# from _DBR_TARGET.  Data references are physical, so no TLB fault comes
+# first.
+_DBR_TARGET = 0x100
+_DBR_DATA = 0xa000
+_DBR_R = 1 << 63
+_DBR_W = 1 << 62
+_DBR_RW_PLM0 = _DBR_R | _DBR_W | _IBR_PLM0 | _IBR_FULL_MASK
+
+
+def _dbr_program(address, control, targets, psr=IA64_PSR_IC | IA64_PSR_DB,
+                 data=_DBR_DATA, dcr=0, handler=None):
+    bundles = [
+        (0x10, *movl_mlx(2, address)),
+        (0x20, *movl_mlx(3, control)),
+        (0x30, 0x00, nop_m(), adds(4, 0, 0), adds(5, 1, 0)),
+        (0x40, 0x00, mov_dbr_indexed_write(4, 2), nop_i(), nop_i()),
+        (0x50, 0x00, mov_dbr_indexed_write(5, 3), nop_i(), nop_i()),
+        (0x60, *movl_mlx(7, dcr)),
+        (0x70, 0x00, mov_m_gr_cr(7, 0), nop_i(), nop_i()),
+        (0x80, *movl_mlx(8, data)),
+        (0x90, *movl_mlx(6, psr)),
+        (0xa0, 0x00, mov_m_gr_psrl(6), nop_i(), nop_i()),
+        (0xb0, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0xc0, 0x10, nop_m(), nop_i(), br_cond(0xc0, _DBR_TARGET)),
+    ]
+    end = _DBR_TARGET + 0x10 * len(targets)
+    bundles += [(_DBR_TARGET + 0x10 * i, *bundle)
+                for i, bundle in enumerate(targets)]
+    bundles.append((end, 0x10, nop_m(), nop_i(), br_cond(end, end)))
+    if handler is None:
+        handler = [
+            (IA64_DEBUG_VECTOR, 0x00, mov_m_cr_gr(14, 20), nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x10, 0x00, mov_m_cr_gr(15, 17),
+             nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x20, 0x00, mov_m_cr_gr(16, 19),
+             nop_i(), nop_i()),
+            (IA64_DEBUG_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+             br_cond(IA64_DEBUG_VECTOR + 0x30, IA64_DEBUG_VECTOR + 0x30)),
+        ]
+    return bundles + handler
+
+
+def _dbr_fault(ifa, isr, iip=_DBR_TARGET, **extra):
+    return {"ip": IA64_DEBUG_VECTOR + 0x30, "r14": ifa, "r15": isr,
+            "r16": iip, **extra}
+
+
+def _dbr_no_fault(count, **extra):
+    return {"ip": _DBR_TARGET + 0x10 * count, **extra}
+
+
+def _dbr_body(insn):
+    return (0x00, insn, adds(20, 1, 20), nop_i())
+
+
+test_dbr_load_data_debug_fault = require_registers(
+    "dbr_load_data_debug_fault",
+    _dbr_program(_DBR_DATA, _DBR_R | _IBR_PLM0 | _IBR_FULL_MASK,
+                 [_dbr_body(ld8(9, 8))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R, r20=0),
+)
+
+# DBR.r alone ignores stores and DBR.w alone ignores loads.
+test_dbr_access_kind_selects_enable = require_registers(
+    "dbr_access_kind_selects_enable",
+    _dbr_program(_DBR_DATA, _DBR_R | _IBR_PLM0 | _IBR_FULL_MASK,
+                 [_dbr_body(st8(8, 0))]),
+    _dbr_no_fault(1, r20=1),
+)
+
+test_dbr_store_data_debug_fault = require_registers(
+    "dbr_store_data_debug_fault",
+    _dbr_program(_DBR_DATA, _DBR_W | _IBR_PLM0 | _IBR_FULL_MASK,
+                 [_dbr_body(ld8(9, 8)), _dbr_body(st8(8, 0))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_W, iip=_DBR_TARGET + 0x10, r20=1),
+)
+
+# An aligned reference matches on any byte of its datum, and only there.
+test_dbr_matches_any_byte_of_datum = require_registers(
+    "dbr_matches_any_byte_of_datum",
+    _dbr_program(_DBR_DATA + 5, _DBR_RW_PLM0,
+                 [_dbr_body(ld4(9, 8)), _dbr_body(ld8(9, 8))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R, iip=_DBR_TARGET + 0x10, r20=1),
+)
+
+# Address bits whose mask bit is 0 are not compared.
+test_dbr_mask_ignores_low_bits = require_registers(
+    "dbr_mask_ignores_low_bits",
+    _dbr_program(_DBR_DATA + 0xc0,
+                 _DBR_R | _IBR_PLM0 | (_IBR_FULL_MASK & ~0xff),
+                 [_dbr_body(ld1(9, 8))], data=_DBR_DATA + 0x31),
+    _dbr_fault(_DBR_DATA + 0x31, IA64_ISR_R),
+)
+
+test_dbr_plm_excludes_cpl = require_registers(
+    "dbr_plm_excludes_cpl",
+    _dbr_program(_DBR_DATA, _DBR_R | _DBR_W | (0xe << 56) | _IBR_FULL_MASK,
+                 [_dbr_body(ld8(9, 8))]),
+    _dbr_no_fault(1, r20=1),
+)
+
+test_dbr_false_predicate_no_fault = require_registers(
+    "dbr_false_predicate_no_fault",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0,
+                 [_dbr_body(ld8(9, 8, qp=6))]),
+    _dbr_no_fault(1, r20=1),
+)
+
+# Data Debug outranks Unaligned Data Reference (SDM Vol. 2 Table 5-6).
+test_dbr_precedes_unaligned_reference = require_registers(
+    "dbr_precedes_unaligned_reference",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0, [_dbr_body(ld8(9, 8))],
+                 psr=IA64_PSR_IC | IA64_PSR_DB | IA64_PSR_AC,
+                 data=_DBR_DATA + 1),
+    _dbr_fault(_DBR_DATA + 1, IA64_ISR_R),
+)
+
+test_dbr_semaphore_reports_read_and_write = require_registers(
+    "dbr_semaphore_reports_read_and_write",
+    _dbr_program(_DBR_DATA, _DBR_W | _IBR_PLM0 | _IBR_FULL_MASK,
+                 [_dbr_body(xchg(3, 9, 8, 0))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R | IA64_ISR_W),
+)
+
+# A handler that returns with IPSR.dd set lets the one load through.
+test_dbr_psr_dd_passes_one_instruction = require_registers(
+    "dbr_psr_dd_passes_one_instruction",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0,
+                 [_dbr_body(ld8(9, 8)), _dbr_body(ld8(9, 8))],
+                 handler=[
+        (IA64_DEBUG_VECTOR, 0x00, mov_m_cr_gr(16, 16), adds(30, 1, 30),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x10, *movl_mlx(17, IA64_PSR_DD)),
+        (IA64_DEBUG_VECTOR + 0x20, 0x00, nop_m(), or_reg(16, 16, 17),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x30, 0x00, mov_m_gr_cr(16, 16), nop_i(),
+         nop_i()),
+        (IA64_DEBUG_VECTOR + 0x40, 0x10, nop_m(), nop_i(), rfi_b()),
+    ]),
+    _dbr_no_fault(2, r20=2, r30=2),
+)
+
+# A speculative load takes the fault with ISR.sp unless DCR.dd defers it.
+test_dbr_speculative_load_fault = require_registers(
+    "dbr_speculative_load_fault",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0, [_dbr_body(ld8_s(9, 8))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_R | IA64_ISR_SP),
+)
+
+test_dbr_speculative_load_deferred_by_dcr_dd = require_registers(
+    "dbr_speculative_load_deferred_by_dcr_dd",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0,
+                 [_dbr_body(ld8_s(9, 8)),
+                  (0x00, nop_m(), tnat_z(6, 7, 9), nop_i()),
+                  (0x00, nop_m(), adds(21, 1, 21, qp=7), nop_i())],
+                 dcr=IA64_DCR_DD),
+    _dbr_no_fault(3, r20=1, r21=1),
+)
+
+# probe.fault and lfetch.fault report as non-access instructions 5 and 4;
+# the non-faulting lfetch reports nothing (SDM Vol. 2 7.1.2).
+test_dbr_probe_fault_non_access = require_registers(
+    "dbr_probe_fault_non_access",
+    _dbr_program(_DBR_DATA, _DBR_W | _IBR_PLM0 | _IBR_FULL_MASK,
+                 [_dbr_body(probe_w_fault(8, 0))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_NA | IA64_ISR_W | 5),
+)
+
+test_dbr_lfetch_fault_non_access = require_registers(
+    "dbr_lfetch_fault_non_access",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0,
+                 [_dbr_body(lfetch(8)), _dbr_body(lfetch_fault(8))]),
+    _dbr_fault(_DBR_DATA, IA64_ISR_NA | IA64_ISR_R | 4,
+               iip=_DBR_TARGET + 0x10, r20=1),
+)
+
+test_dbr_psr_db_clear_no_fault = require_registers(
+    "dbr_psr_db_clear_no_fault",
+    _dbr_program(_DBR_DATA, _DBR_RW_PLM0, [_dbr_body(ld8(9, 8))],
+                 psr=IA64_PSR_IC),
+    _dbr_no_fault(1, r20=1),
+)
+
 CASE_NAMES = (
     'ibr_instruction_debug_fault',
     'ibr_fault_on_false_predicate',
@@ -7065,6 +7261,21 @@ CASE_NAMES = (
     'ibr_plm_excludes_cpl',
     'ibr_psr_db_clear_no_fault',
     'ibr_psr_id_passes_one_instruction',
+    'dbr_load_data_debug_fault',
+    'dbr_access_kind_selects_enable',
+    'dbr_store_data_debug_fault',
+    'dbr_matches_any_byte_of_datum',
+    'dbr_mask_ignores_low_bits',
+    'dbr_plm_excludes_cpl',
+    'dbr_false_predicate_no_fault',
+    'dbr_precedes_unaligned_reference',
+    'dbr_semaphore_reports_read_and_write',
+    'dbr_psr_dd_passes_one_instruction',
+    'dbr_speculative_load_fault',
+    'dbr_speculative_load_deferred_by_dcr_dd',
+    'dbr_probe_fault_non_access',
+    'dbr_lfetch_fault_non_access',
+    'dbr_psr_db_clear_no_fault',
     'lrr_active_low_pin_asserted_when_low',
     'xtpr_redirects_lowest_priority_interrupt',
     'pmi_ipi_enters_sale_pmi',

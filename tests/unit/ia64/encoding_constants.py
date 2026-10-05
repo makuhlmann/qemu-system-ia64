@@ -60,6 +60,7 @@ IA64_DCR_DM = 1 << 8
 IA64_DCR_DK = 1 << 10
 IA64_DCR_DX = 1 << 11
 IA64_DCR_DA = 1 << 13
+IA64_DCR_DD = 1 << 14
 IA64_PSR_BE = 1 << 1
 IA64_PSR_UP = 1 << 2
 IA64_PSR_AC = 1 << 3
@@ -77,6 +78,7 @@ IA64_PSR_DI = 1 << 22
 IA64_PSR_SI = 1 << 23
 IA64_PSR_DB = 1 << 24
 IA64_PSR_ID = 1 << 37
+IA64_PSR_DD = 1 << 39
 IA64_PSR_LP = 1 << 25
 IA64_PSR_TB = 1 << 26
 IA64_PSR_RT = 1 << 27
@@ -424,6 +426,7 @@ __all__ = (
     'IA64_DCR_DK',
     'IA64_DCR_DX',
     'IA64_DCR_DA',
+    'IA64_DCR_DD',
     'IA64_PSR_BE',
     'IA64_PSR_UP',
     'IA64_PSR_AC',
@@ -441,6 +444,7 @@ __all__ = (
     'IA64_PSR_SI',
     'IA64_PSR_DB',
     'IA64_PSR_ID',
+    'IA64_PSR_DD',
     'IA64_PSR_LP',
     'IA64_PSR_TB',
     'IA64_PSR_RT',

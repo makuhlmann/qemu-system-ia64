@@ -32,6 +32,9 @@ void ia64_mmu_probe_fault(CPUIA64State *env, uint64_t va,
                           uint64_t access_level);
 void ia64_mmu_lfetch_fault(CPUIA64State *env, uint64_t va,
                            uint64_t fault_info, uint32_t hint);
+void ia64_mmu_check_data_debug(CPUIA64State *env, uint64_t va,
+                               uint32_t datum, uint32_t len, uint64_t access,
+                               uint64_t fault_ip, uint8_t fault_slot);
 void ia64_mmu_check_semaphore_access(CPUIA64State *env, uint64_t va);
 void ia64_mmu_check_montecito_16byte_access(CPUIA64State *env, uint64_t va,
                                             uint32_t is_write);
@@ -70,6 +73,8 @@ G_NORETURN void ia64_raise_exception(CPUIA64State *env, uint32_t exception,
 G_NORETURN void ia64_ia32_unsupported(CPUIA64State *env);
 void ia64_check_instruction_debug(CPUIA64State *env, uint64_t ip,
                                   uint32_t slot);
+bool ia64_data_debug_hit(CPUIA64State *env, uint64_t va, uint32_t datum,
+                         uint32_t len, uint64_t access, unsigned pl);
 G_NORETURN void ia64_raise_unaligned(CPUIA64State *env, uint64_t addr,
                                      uint64_t isr_access,
                                      uint64_t fault_info);

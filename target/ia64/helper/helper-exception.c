@@ -28,6 +28,14 @@ void helper_check_instruction_debug(CPUIA64State *env, uint64_t fault_info)
     ia64_check_instruction_debug(env, fault_info & ~3ULL, fault_info & 3);
 }
 
+void helper_check_data_debug(CPUIA64State *env, uint64_t addr,
+                             uint32_t datum, uint32_t len,
+                             uint64_t isr_access, uint64_t fault_info)
+{
+    ia64_mmu_check_data_debug(env, addr, datum, len, isr_access,
+                              fault_info & ~3ULL, fault_info & 3);
+}
+
 void helper_raise_nat_consumption(CPUIA64State *env, uint64_t isr_access,
                                   uint64_t fault_info)
 {

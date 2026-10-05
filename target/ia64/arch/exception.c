@@ -151,6 +151,44 @@ void ia64_check_instruction_debug(CPUIA64State *env, uint64_t ip,
     }
 }
 
+#define IA64_DBR_R            (1ULL << 63)
+#define IA64_DBR_W            (1ULL << 62)
+
+/*
+ * A reference of len bytes matches as the aligned datum-byte block that holds
+ * its first byte and, when unaligned, the block that holds its last byte too;
+ * the second block may report bytes the reference does not touch, which the
+ * architecture allows for unaligned datums (SDM Vol. 2 7.1.2).  ISR.r and
+ * ISR.w in access select the pairs with DBR.r and DBR.w set; pl is the
+ * privilege level of the reference.
+ */
+bool ia64_data_debug_hit(CPUIA64State *env, uint64_t va, uint32_t datum,
+                         uint32_t len, uint64_t access, unsigned pl)
+{
+    uint64_t ignored = datum - 1;
+    uint64_t first = va & ~ignored;
+    uint64_t last = (va + len - 1) & ~ignored;
+    unsigned pair;
+
+    if (!(env->psr & IA64_PSR_DB) || (env->psr & IA64_PSR_DD)) {
+        return false;
+    }
+    for (pair = 0; pair < IA64_DBR_PAIRS; pair++) {
+        uint64_t address = env->dbr[pair * 2];
+        uint64_t control = env->dbr[pair * 2 + 1];
+
+        if (!((access & IA64_ISR_R) && (control & IA64_DBR_R)) &&
+            !((access & IA64_ISR_W) && (control & IA64_DBR_W))) {
+            continue;
+        }
+        if (ia64_debug_pair_matches(address, control, pl, first, ignored) ||
+            ia64_debug_pair_matches(address, control, pl, last, ignored)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 G_NORETURN void ia64_raise_unaligned(CPUIA64State *env, uint64_t addr,
                             uint64_t isr_access, uint64_t fault_info)
 {
@@ -583,6 +621,7 @@ static bool ia64_frame_restore_fault_yields_to_completion_trap(
     case IA64_EXCP_KEY_PERMISSION:
     case IA64_EXCP_DATA_ACCESS:
     case IA64_EXCP_DATA_ACCESS_BIT:
+    case IA64_EXCP_DEBUG:
         return true;
     default:
         return false;

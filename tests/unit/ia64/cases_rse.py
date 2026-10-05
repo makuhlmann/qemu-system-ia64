@@ -27,6 +27,11 @@ from .encoding import (
     IA64_ISR_R,
     IA64_ISR_RS,
     IA64_ISR_W,
+    IA64_DEBUG_VECTOR,
+    IA64_PSR_DB,
+    mov_dbr_indexed_write,
+    mov_m_gr_psrl,
+    srlz_i,
     IA64_PSR_CPL3,
     IA64_PSR_DT,
     IA64_PSR_IC,
@@ -5590,6 +5595,77 @@ test_pfs_write_rrb_gr_below_sor = _pfs_write_keeps(
 test_pfs_write_frame_without_rotating_region = _pfs_write_keeps(
     "pfs_write_frame_without_rotating_region", (5 << 7) | 10)
 
+# A DBR match on a mandatory RSE reference takes a Data Debug fault with
+# ISR.rs, and with ISR.ir for a fill that restores the frame of an rfi
+# (SDM Vol. 2 7.1.2, Table 5-6).
+_RSE_DBR_STORE = 1 << 62
+_RSE_DBR_LOAD = 1 << 63
+_RSE_DBR_PLM0_FULL = (1 << 56) | 0x00ffffffffffffff
+
+
+def _rse_dbr_bundles(base, address, control):
+    return [
+        (base, *movl_mlx(2, address)),
+        (base + 0x10, *movl_mlx(4, control | _RSE_DBR_PLM0_FULL)),
+        (base + 0x20, 0x00, nop_m(), adds(5, 0, 0), adds(6, 1, 0)),
+        (base + 0x30, 0x00, mov_dbr_indexed_write(5, 2), nop_i(), nop_i()),
+        (base + 0x40, 0x00, mov_dbr_indexed_write(6, 4), nop_i(), nop_i()),
+    ]
+
+
+_RSE_DEBUG_HANDLER = [
+    (IA64_DEBUG_VECTOR, 0x00, mov_m_cr_gr(31, 17), nop_i(), nop_i()),
+    (IA64_DEBUG_VECTOR + 0x10, 0x00, mov_m_cr_gr(30, 20), nop_i(), nop_i()),
+    (IA64_DEBUG_VECTOR + 0x20, 0x00, mov_m_cr_gr(29, 19), nop_i(), nop_i()),
+    (IA64_DEBUG_VECTOR + 0x30, 0x10, nop_m(), nop_i(),
+     br_cond(IA64_DEBUG_VECTOR + 0x30, IA64_DEBUG_VECTOR + 0x30)),
+]
+
+test_rse_spill_data_debug_sets_isr_rs = require_registers(
+    "rse_spill_data_debug_sets_isr_rs", [
+        (0x10, *movl_mlx(3, 0x100000)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        (0x30, 0x00, nop_m(), alloc(1, 1, 0, 0, 0), nop_i()),
+        (0x40, *movl_mlx(32, 0x123456789abcdef0)),
+        (0x50, 0x18, nop_m(), nop_m(), cover_b()),
+        *_rse_dbr_bundles(0x60, 0x100000, _RSE_DBR_STORE),
+        (0xb0, *movl_mlx(7, IA64_PSR_IC | IA64_PSR_DB)),
+        (0xc0, 0x00, mov_m_gr_psrl(7), nop_i(), nop_i()),
+        (0xd0, 0x00, srlz_i(), nop_i(), nop_i()),
+        (0xe0, 0x00, flushrs_enc(), nop_i(), nop_i()),
+        (0xf0, 0x10, nop_m(), nop_i(), br_cond(0xf0, 0xf0)),
+        *_RSE_DEBUG_HANDLER,
+    ], {
+        "ip": IA64_DEBUG_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0xe0,
+        "r30": 0x100000,
+        "r31": IA64_ISR_W | IA64_ISR_RS,
+    }, entry=0x10)
+
+test_rse_target_fill_data_debug_sets_isr_rs_ir = require_registers(
+    "rse_target_fill_data_debug_sets_isr_rs_ir", [
+        (0x10, *movl_mlx(3, 0x100008)),
+        (0x20, 0x00, mov_ar(3, 18), nop_i(), nop_i()),
+        *_rse_dbr_bundles(0x30, 0x100000, _RSE_DBR_LOAD),
+        (0x80, *movl_mlx(20, (1 << 63) | 1)),
+        (0x90, 0x00, mov_m_gr_cr(20, 23), nop_i(), nop_i()),
+        (0xa0, *movl_mlx(20, 0x200)),
+        (0xb0, 0x00, mov_m_gr_cr(20, 19), nop_i(), nop_i()),
+        (0xc0, *movl_mlx(20, IA64_PSR_IC | IA64_PSR_DB)),
+        (0xd0, 0x00, mov_m_gr_cr(20, 16), nop_i(), nop_i()),
+        (0xe0, 0x10, nop_m(), nop_i(), rfi_b()),
+        (0x200, 0x10, nop_m(), nop_i(), br_cond(0x200, 0x200)),
+        *_RSE_DEBUG_HANDLER,
+    ], {
+        "ip": IA64_DEBUG_VECTOR + 0x30,
+        "exception": IA64_EXCP_NONE,
+        "r29": 0x200,
+        "r30": 0x100000,
+        "r31": IA64_ISR_R | IA64_ISR_RS | IA64_ISR_IR,
+    }, entry=0x10)
+
+
 CASE_NAMES = (
     'pfs_write_reserved_high_bits_fault',
     'pfs_write_reserved_middle_bits_fault',
@@ -5744,6 +5820,8 @@ CASE_NAMES = (
     'rse_rt_translates_with_dt_disabled',
     'rse_physical_spill_fault_sets_isr_rs',
     'rse_physical_target_fill_fault_sets_isr_rs_ir',
+    'rse_spill_data_debug_sets_isr_rs',
+    'rse_target_fill_data_debug_sets_isr_rs_ir',
     'rse_spill_fault_sets_isr_rs',
     'rse_tracked_return_redirties_reused_frame',
     'rse_untracked_return_redirties_restored_frame',

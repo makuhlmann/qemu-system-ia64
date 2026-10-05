@@ -1470,6 +1470,8 @@ static uint64_t ia64_speculative_deferral_dcr_mask(IA64Exception excp)
         return IA64_DCR_DR;
     case IA64_EXCP_DATA_ACCESS_BIT:
         return IA64_DCR_DA;
+    case IA64_EXCP_DEBUG:
+        return IA64_DCR_DD;
     case IA64_EXCP_UNIMPL_DATA_ADDR:
         return UINT64_MAX;
     default:
@@ -1770,13 +1772,44 @@ void ia64_raise_pre_unaligned_data_fault(CPUIA64State *env,
         ia64_code_tlb_ed(env), fault_ip, fault_slot);
 }
 
+/*
+ * Unimplemented Data Address and every translation fault outrank Data
+ * Debug, which outranks Unaligned Data Reference (SDM Vol. 2 Table 5-6).
+ */
+void ia64_mmu_check_data_debug(CPUIA64State *env, uint64_t va,
+                               uint32_t datum, uint32_t len, uint64_t access,
+                               uint64_t fault_ip, uint8_t fault_slot)
+{
+    uint32_t is_write = (access & IA64_ISR_W) != 0;
+    uint32_t is_rw = (access & (IA64_ISR_R | IA64_ISR_W)) ==
+                     (IA64_ISR_R | IA64_ISR_W);
+
+    if (!ia64_data_debug_hit(env, va, datum, len, access,
+                             ia64_psr_cpl(env->psr))) {
+        return;
+    }
+    ia64_raise_pre_unaligned_data_fault(env, va, is_write, is_rw, fault_ip,
+                                        fault_slot);
+    ia64_raise_data_reference_exception_at(
+        env, va, is_write, is_rw, false, 0, IA64_EXCP_DEBUG, false,
+        ia64_code_tlb_ed(env), fault_ip, fault_slot);
+}
+
+/* probe.fault and lfetch.fault are the non-access Data Debug sources. */
 void ia64_mmu_probe_fault(CPUIA64State *env, uint64_t va, uint32_t is_write,
                         uint32_t is_rw, uint64_t access_level)
 {
     uint8_t effective_pl = ia64_probe_access_level(env, access_level);
+    uint64_t access = is_rw ? IA64_ISR_R | IA64_ISR_W :
+                      is_write ? IA64_ISR_W : IA64_ISR_R;
 
     ia64_raise_data_reference_fault_if_needed(env, va, is_write, is_rw,
                                               effective_pl, true, 5);
+    if (ia64_data_debug_hit(env, va, 1, 1, access, ia64_psr_cpl(env->psr))) {
+        ia64_raise_data_reference_exception(env, va, is_write, is_rw, true,
+                                            5, IA64_EXCP_DEBUG, false,
+                                            ia64_code_tlb_ed(env));
+    }
 }
 
 void ia64_mmu_lfetch_fault(CPUIA64State *env, uint64_t va,
@@ -1785,6 +1818,11 @@ void ia64_mmu_lfetch_fault(CPUIA64State *env, uint64_t va,
     IA64Exception excp = ia64_data_reference_exception(
         env, va, false, false, ia64_psr_cpl(env->psr), true, NULL);
 
+    if (excp == IA64_EXCP_NONE &&
+        ia64_data_debug_hit(env, va, 1, 1, IA64_ISR_R,
+                            ia64_psr_cpl(env->psr))) {
+        excp = IA64_EXCP_DEBUG;
+    }
     if (excp == IA64_EXCP_NONE) {
         return;
     }
@@ -1888,6 +1926,7 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
                                   uint32_t span)
 {
     bool alignment_fault;
+    bool debug;
     bool itlb_ed = false;
     bool itlb_ed_known = true;
     IA64Exception excp;
@@ -1899,13 +1938,17 @@ uint64_t ia64_mmu_speculative_probe(CPUIA64State *env, uint64_t va,
 
     alignment_fault = ia64_speculative_alignment_fault(env, va, size,
                                                        window, span);
+    debug = !is_ifetch &&
+            ia64_data_debug_hit(env, va, size, size,
+                                is_write ? IA64_ISR_W : IA64_ISR_R,
+                                ia64_psr_cpl(env->psr));
     /*
      * A naturally aligned load that hits a softmmu read entry has passed
      * every data-reference check at this privilege level already; only the
      * memory attribute can still defer it.  Physical accesses never allow
      * control speculation (ia64_cpu_tlb_fill), so they skip the lookup.
      */
-    if (!is_ifetch && !is_write && (env->psr & IA64_PSR_DT) &&
+    if (!debug && !is_ifetch && !is_write && (env->psr & IA64_PSR_DT) &&
         size != 0 && (va & (size - 1)) == 0) {
         int mmu_idx = MMU_IDX_VIRT_CPL(ia64_psr_cpl(env->psr));
         int speculation = ia64_exec_load_hit_speculation(env, va, mmu_idx);
@@ -1938,6 +1981,13 @@ qualify:
      */
     if (excp == IA64_EXCP_UNIMPL_DATA_ADDR) {
         alignment_fault = false;
+    }
+    /*
+     * Data Debug ranks below the translation faults and above Unaligned
+     * Data Reference, and DCR.dd defers it (SDM Vol. 2 Table 5-6, Table 3-5).
+     */
+    if (excp == IA64_EXCP_NONE && debug) {
+        excp = IA64_EXCP_DEBUG;
     }
     /* ITLB.ed only qualifies a condition; the success path needs no lookup. */
     if (excp != IA64_EXCP_NONE || alignment_fault) {

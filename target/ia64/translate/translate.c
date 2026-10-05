@@ -1361,14 +1361,36 @@ static void ia64_gen_branch_if_alignment_fault(const Ia64Instruction *insn,
     gen_set_label(ok);
 }
 
+/*
+ * Data Debug outranks Unaligned Data Reference, so the DBRs are compared
+ * before the alignment check.  cmp8xchg16 matches as a 16-byte datum for
+ * reads and writes although it reads 8 bytes (SDM Vol. 2 7.1.2).
+ */
+static void ia64_gen_check_data_debug(const Ia64Instruction *insn,
+                                      TCGv_i64 addr, uint32_t size,
+                                      uint64_t isr_access)
+{
+    uint32_t datum = insn->opcode == IA64_OP_CMP8XCHG16 ? 16 : size;
+
+    tcg_gen_movi_i64(cpu_ip, insn->address);
+    gen_helper_check_data_debug(tcg_env, addr, tcg_constant_i32(datum),
+                                tcg_constant_i32(size),
+                                tcg_constant_i64(isr_access),
+                                tcg_constant_i64(insn->address | insn->slot));
+}
+
 void ia64_gen_check_alignment_access(const Ia64Instruction *insn,
                                      TCGv_i64 addr, uint32_t size,
                                      bool always_fault,
                                      uint64_t isr_access)
 {
+    const DisasContext *ctx = insn->ctx;
     TCGLabel *fault;
     TCGLabel *ok;
 
+    if (ctx && ctx->psr_db) {
+        ia64_gen_check_data_debug(insn, addr, size, isr_access);
+    }
     if (size <= 1) {
         return;
     }

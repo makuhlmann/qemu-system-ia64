@@ -1432,12 +1432,11 @@ test_pal_brand_info_bus = require_registers(
     {"ip": 0x80, "r28": PAL_BRAND_INFO, "r8": 0,
      "r9": 533333333, "r10": 0, "r11": 0}, entry=0x10)
 
-# Four IBR pairs raise Instruction Debug faults; no DBR pair is advertised
-# until the data paths compare them.  See pal_debug_info() in arch/pal.c.
+# Four IBR and four DBR pairs, as on the real processors (SDM Vol. 2 7.1.1).
 test_pal_debug_info = require_registers("pal_debug_info",
     pal_call_program(PAL_DEBUG_INFO),
     {"ip": 0x30, "r28": PAL_DEBUG_INFO, "r8": 0,
-     "r9": 4, "r10": 0, "r11": 0}, entry=0x10)
+     "r9": 4, "r10": 4, "r11": 0}, entry=0x10)
 
 test_pal_debug_info_reserved_arg = require_registers(
     "pal_debug_info_reserved_arg",

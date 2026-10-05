@@ -116,6 +116,40 @@ static void ia64_rse_write_slot(CPUIA64State *env, IA64RSEPage *pg,
                                      ia64_rse_mmu_index(env));
 }
 
+/*
+ * Every RSE reference is mandatory here, so a DBR match takes a Data Debug
+ * fault at once, after the reference's own translation faults, at the
+ * privilege level in RSC.pl (SDM Vol. 2 7.1.2, Table 5-6).  A fill that
+ * restores the frame of a br.ret or rfi reports ISR.ir, as its TLB faults do.
+ */
+static void ia64_rse_check_data_debug(CPUIA64State *env, uint64_t addr,
+                                      bool is_write, uintptr_t ra)
+{
+    uint64_t access = is_write ? IA64_ISR_W : IA64_ISR_R;
+    uint32_t slot;
+    void *host;
+
+    if (likely(!(env->psr & IA64_PSR_DB)) ||
+        !ia64_data_debug_hit(env, addr, 8, 8, access,
+                             ia64_rsc_pl(env->ar_rsc))) {
+        return;
+    }
+    ia64_exec_probe_host(env, addr, 8,
+                         is_write ? MMU_DATA_STORE : MMU_DATA_LOAD,
+                         ia64_rse_mmu_index(env), &host, ra);
+    slot = (env->psr & IA64_PSR_RI_MASK) >> IA64_PSR_RI_SHIFT;
+    if (ra) {
+        cpu_restore_state(env_cpu(env), ra);
+    }
+    env->exception_state.fault_addr = addr;
+    env->cr_isr = access | IA64_ISR_RS;
+    if (env->rse.rse_dirty < 0 || env->rse.rse_dirty_nat < 0) {
+        env->cr_isr |= IA64_ISR_IR;
+    }
+    ia64_raise_exception(env, IA64_EXCP_DEBUG, ia64_ip_bundle_addr(env->ip),
+                         0, slot);
+}
+
 uint64_t ia64_rse_current_cfm(const CPUIA64State *env)
 {
     return env->cfm_sof
@@ -514,6 +548,7 @@ static int ia64_rse_store_one(CPUIA64State *env, IA64RSEPage *pg,
     uint64_t bspstore = env->ar_bspstore;
     uint32_t ncb = ia64_rse_collect_bit(bspstore);
 
+    ia64_rse_check_data_debug(env, bspstore, true, ra);
     if (ncb == 63) {
         /*
          * SDM Vol.2 6.5: whenever BSPSTORE{8:3} are all ones the RSE
@@ -640,6 +675,7 @@ static int ia64_rse_load_one(CPUIA64State *env, IA64RSEPage *pg,
 {
     uint32_t ncb = ia64_rse_collect_bit(bspload);
 
+    ia64_rse_check_data_debug(env, bspload, false, ra);
     if (ncb == 63) {
         env->ar_rnat = ia64_rse_read_slot(env, pg, bspload, ra) & INT64_MAX;
         trace_ia64_rse_rnat_floor(env_cpu(env)->cpu_index, "collection-load",
