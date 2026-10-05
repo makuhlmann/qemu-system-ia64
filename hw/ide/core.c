@@ -2404,6 +2404,13 @@ void ide_ctrl_write(void *opaque, uint32_t addr, uint32_t val)
             s = &bus->ifs[i];
             s->status |= BUSY_STAT;
         }
+        /*
+         * SRST leaves Drive/Head at 00h, so device 0 is selected afterwards
+         * (SFF-8020i 6.3).  The selection changes with BSY here, not in the
+         * bottom half: a status read in between would otherwise reach an
+         * absent device 1, read 00h and end the host's wait for BSY early.
+         */
+        bus->unit = 0;
         replay_bh_schedule_oneshot_event(qemu_get_aio_context(),
                                          ide_bus_perform_srst, bus);
     }

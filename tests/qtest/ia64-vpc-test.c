@@ -7488,6 +7488,42 @@ static void test_zx1_empty_optical_sense(void)
     qtest_quit(qts);
 }
 
+/*
+ * SRST leaves device 0 selected (SFF-8020i 6.3).  The bay drive is alone on
+ * the channel: with device 1 still selected, the host's wait for BSY reads
+ * the absent device's 00h and can end before the reset has run.
+ */
+static void test_zx1_ide_srst_selects_device0(void)
+{
+    QTestState *qts = qtest_initf("-machine zx1,ide=on -m 256M -S "
+                                  "-drive if=ide,index=0,media=cdrom");
+    const uint64_t cmd = ZX1_IDE_TEST_CMD;
+    const uint64_t ctrl = zx1_ide_port(ZX1_IDE_TEST_CTRL + 2);
+    unsigned int i;
+
+    ia64_cfg_writel(qts, 0, IA64_ZX1_IDE_SLOT, 0, PCI_BASE_ADDRESS_0,
+                    cmd | PCI_BASE_ADDRESS_SPACE_IO);
+    ia64_cfg_writel(qts, 0, IA64_ZX1_IDE_SLOT, 0, PCI_BASE_ADDRESS_1,
+                    ZX1_IDE_TEST_CTRL | PCI_BASE_ADDRESS_SPACE_IO);
+    ia64_cfg_writew(qts, 0, IA64_ZX1_IDE_SLOT, 0, PCI_COMMAND, PCI_COMMAND_IO);
+    qtest_writeb(qts, ctrl, 0x02);
+
+    qtest_writeb(qts, zx1_ide_port(cmd + 6), 0xb0);
+    g_assert_cmphex(qtest_readb(qts, ctrl), ==, 0x00);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(cmd + 5)), ==, 0xff);
+
+    qtest_writeb(qts, ctrl, 0x06);
+    qtest_writeb(qts, ctrl, 0x02);
+    for (i = 0; i < 1000 && (qtest_readb(qts, ctrl) & 0x80); i++) {
+        /* The reset runs from a bottom half between two qtest commands. */
+    }
+    g_assert_cmphex(qtest_readb(qts, ctrl) & 0x88, ==, 0x00);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(cmd + 6)) & 0x10, ==, 0);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(cmd + 4)), ==, 0x14);
+    g_assert_cmphex(qtest_readb(qts, zx1_ide_port(cmd + 5)), ==, 0xeb);
+    qtest_quit(qts);
+}
+
 /* READ CAPACITY by DMA to the primary master; the bay has no disc. */
 static void zx1_atapi_dma_read_capacity(QTestState *qts)
 {
@@ -10794,6 +10830,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/ide-on-seat", test_ide_on_seat);
     qtest_add_func("/ia64-vpc/zx1/empty-optical-sense",
                    test_zx1_empty_optical_sense);
+    qtest_add_func("/ia64-vpc/zx1/ide-srst-selects-device0",
+                   test_zx1_ide_srst_selects_device0);
     qtest_add_func("/ia64-vpc/zx1/atapi-interrupt-after-bm-arm",
                    test_zx1_atapi_interrupt_after_bm_arm);
     qtest_add_func("/ia64-vpc/zx1/cmd649-registers",

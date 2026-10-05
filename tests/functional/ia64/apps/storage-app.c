@@ -283,9 +283,11 @@ static BOOLEAN probe_unicode_collation(EFI_BOOT_SERVICES *bs)
     return 1;
 }
 
+/* On a failure, *Code and *Detail name the first contract that broke. */
 static BOOLEAN probe_empty_removable_media(EFI_BOOT_SERVICES *bs,
                                            EFI_HANDLE loaded_handle,
-                                           BOOLEAN *Found)
+                                           BOOLEAN *Found, EFI_STATUS *Code,
+                                           const char **Detail)
 {
     EFI_HANDLE *handles = NULL;
     UINTN handle_count = 0;
@@ -293,6 +295,8 @@ static BOOLEAN probe_empty_removable_media(EFI_BOOT_SERVICES *bs,
     BOOLEAN valid = 0;
 
     *Found = 0;
+    *Code = EFI_DEVICE_ERROR;
+    *Detail = "empty-removable-contracts";
     if (bs->LocateHandleBuffer(EFI_LOCATE_BY_PROTOCOL, block_io_guid, NULL,
                                &handle_count, &handles) != EFI_SUCCESS ||
         handles == NULL) {
@@ -330,6 +334,21 @@ static BOOLEAN probe_empty_removable_media(EFI_BOOT_SERVICES *bs,
             flush_status == EFI_NO_MEDIA &&
             bs->HandleProtocol(handles[index], disk_io_guid,
                                (VOID **)&disk) == EFI_SUCCESS && disk != NULL;
+        if (reset_status != EFI_SUCCESS) {
+            *Code = reset_status;
+            *Detail = "empty-removable-reset";
+        } else if (block->Media->MediaPresent) {
+            *Detail = "empty-removable-media-present";
+        } else if (read_status != EFI_NO_MEDIA) {
+            *Code = read_status;
+            *Detail = "empty-removable-read";
+        } else if (write_status != EFI_NO_MEDIA) {
+            *Code = write_status;
+            *Detail = "empty-removable-write";
+        } else if (flush_status != EFI_NO_MEDIA) {
+            *Code = flush_status;
+            *Detail = "empty-removable-flush";
+        }
         break;
     }
     (void)bs->FreePool(handles);
@@ -891,14 +910,17 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
                     probe_unicode_collation(bs), EFI_DEVICE_ERROR,
                     "unicode-collation-contracts");
     {
+        EFI_STATUS empty_removable_code;
+        const char *empty_removable_detail;
         BOOLEAN empty_removable_valid = probe_empty_removable_media(
             bs, loaded != NULL ? loaded->DeviceHandle : NULL,
-            &empty_removable_found);
+            &empty_removable_found, &empty_removable_code,
+            &empty_removable_detail);
 
         if (empty_removable_found) {
             ia64_test_check(&context, "empty-removable-media",
-                            empty_removable_valid, EFI_DEVICE_ERROR,
-                            "empty-removable-contracts");
+                            empty_removable_valid, empty_removable_code,
+                            empty_removable_detail);
         }
     }
     if (loaded != NULL &&
