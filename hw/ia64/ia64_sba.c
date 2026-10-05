@@ -127,7 +127,8 @@
  * FFECA050 reads back and that has to be two or more
  * ("queueDepth >= MERCURY_ROPE_REQ_DEPTH_MIN"); the memory controls at 8600
  * and 8700 (G10); the error enables at 9500 and 9508; A208, A218 and A338,
- * which FFE67500 writes with constants (MIO-10).
+ * which FFE67500 writes with constants (MIO-10); the logs at 9570 to 9580,
+ * which no firmware writes and FFED8880 copies into an error record (MEM-2).
  */
 static const hwaddr ia64_sba_stored_regs[] = {
     0x0400, 0x0408, 0x0418,
@@ -135,6 +136,7 @@ static const hwaddr ia64_sba_stored_regs[] = {
     0x8600, 0x8608, 0x8610, 0x8620, 0x8700, 0x8708, 0x8710, 0x8720,
     0x9420, 0x9500, 0x9508,
     0xa208, 0xa218, 0xa338,
+    0x9570, 0x9578, 0x9580,
 };
 #define IA64_SBA_STORED_REGS           ARRAY_SIZE(ia64_sba_stored_regs)
 /* The registers before A208 are in vmstate version 4, the rest in 5. */
@@ -150,7 +152,8 @@ static const hwaddr ia64_sba_stored_regs[] = {
  * and the rx2600 reads back the bits it keeps.  FED0_0400: FFECAC50 sets and
  * clears bits 0-7 and 11, FFEEBF30 bit 10, and 300h stays.  0408: FFEEBF30
  * sets bit 16 and 1Fh stays in bits 36:32.  1410: FFEAD180 changes bits
- * 47:32 and 73Fh stays below them.
+ * 47:32 and 73Fh stays below them.  The logs at 9570 to 9580, which no
+ * firmware writes, read FFFFFFFFh after a cold and after a warm start.
  */
 static const struct {
     hwaddr addr;
@@ -159,6 +162,9 @@ static const struct {
     { 0x0400, UINT64_C(0x0000000000000300) },
     { 0x0408, UINT64_C(0x0000001f00000000) },
     { 0x1410, UINT64_C(0x000000000000073f) },
+    { 0x9570, UINT64_C(0x00000000ffffffff) },
+    { 0x9578, UINT64_C(0x00000000ffffffff) },
+    { 0x9580, UINT64_C(0x00000000ffffffff) },
 };
 
 /*

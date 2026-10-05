@@ -1756,6 +1756,8 @@ static void test_lba_rope_window(void)
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x0400), ==, 0x300);
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x0408), ==,
                     0x0000001f00000000ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x9578), ==,
+                    0x00000000ffffffffULL);
     qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x8620, 0xc000000700000159ULL);
     g_assert_cmphex(qtest_readq(qts, IA64_SBA_CSR_BASE + 0x8620), ==,
                     0xc000000700000159ULL);
