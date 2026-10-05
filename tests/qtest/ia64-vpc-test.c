@@ -6432,6 +6432,14 @@ static void test_realfw_ifb_acpi_block(void)
     qtest_writeb(qts, realfw_port(0x00b3), 0x5a);
     g_assert_cmphex(qtest_readb(qts, realfw_port(0x00b3)), ==, 0x5a);
 
+    /*
+     * SLP_TYP 0 is the ON state; a reserved type stays ON too and reads
+     * back as written (SSDM 11.2.7.3).
+     */
+    qtest_writew(qts, realfw_port(0x0a04), (1 << 13) | 1);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a04)), ==, 0x0001);
+    qtest_writew(qts, realfw_port(0x0a04), (7 << 10) | (1 << 13) | 1);
+    g_assert_cmphex(qtest_readw(qts, realfw_port(0x0a04)), ==, 0x1c01);
     /* The vendor _S5 (SLP_TYP 4) with SLP_EN powers the machine off. */
     qtest_writew(qts, realfw_port(0x0a04), (4 << 10) | (1 << 13) | 1);
     qtest_qmp_eventwait(qts, "SHUTDOWN");

@@ -992,6 +992,11 @@ static void ifb_lpc_realize(PCIDevice *pci, Error **errp)
     acpi_pm1_evt_init(&s->acpi_regs, ifb_acpi_update_sci, &s->acpi_pm);
     acpi_pm1_cnt_init(&s->acpi_regs, &s->acpi_pm,
                       false, false, 4, false);
+    /*
+     * SLP_TYP 4 is S4/S5; 0 is ON, and so is any reserved value
+     * (460GX SSDM 11.2.7.3).
+     */
+    s->acpi_regs.pm1.cnt.type0_on = true;
     acpi_pm_tmr_init(&s->acpi_regs, ifb_acpi_update_sci, &s->acpi_pm);
     acpi_gpe_init(&s->acpi_regs, IFB_ACPI_GPE_LENGTH);
     memory_region_init_io(&s->acpi_gpe, OBJECT(s), &ifb_acpi_gpe_ops, s,

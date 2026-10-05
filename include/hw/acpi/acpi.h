@@ -135,6 +135,8 @@ struct ACPIPM1CNT {
     uint16_t cnt;
     uint8_t s4_val;
     bool acpi_only;
+    /* SLP_TYP 0 is the ON state, not soft off. */
+    bool type0_on;
 };
 
 struct ACPIGPE {

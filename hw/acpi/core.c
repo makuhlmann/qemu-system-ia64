@@ -602,6 +602,9 @@ static void acpi_pm_cnt_write(void *opaque, hwaddr addr, uint64_t val,
         uint16_t sus_typ = (val >> 10) & 7;
         switch (sus_typ) {
         case 0: /* soft power off */
+            if (ar->pm1.cnt.type0_on) {
+                break;
+            }
             qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
             break;
         case 1:
