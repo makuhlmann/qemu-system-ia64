@@ -395,10 +395,11 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         TCGv_i64 val = tcg_temp_new_i64();
 
         ia64_gen_check_nat_register(insn, op->register_index);
+        /* Registers past the implemented pairs do not exist (SDM Vol. 3). */
         ia64_gen_check_register_index(
             insn, ia64_gr_src(op->register_index),
             insn->opcode == IA64_OP_MOV_IBRGR_INDEXED ?
-            IA64_IBR_COUNT : IA64_DBR_COUNT);
+            2 * IA64_IBR_PAIRS : 2 * IA64_DBR_PAIRS);
         tcg_gen_mov_i64(index64, ia64_gr_src(op->register_index));
         tcg_gen_extrl_i64_i32(index, index64);
         if (insn->opcode == IA64_OP_MOV_IBRGR_INDEXED) {
@@ -419,7 +420,7 @@ IA64GenResult ia64_gen_system(DisasContext *ctx,
         ia64_gen_check_register_index(
             insn, ia64_gr_src(op->register_index),
             insn->opcode == IA64_OP_MOV_GRIBR_INDEXED ?
-            IA64_IBR_COUNT : IA64_DBR_COUNT);
+            2 * IA64_IBR_PAIRS : 2 * IA64_DBR_PAIRS);
         tcg_gen_mov_i64(index64, ia64_gr_src(op->register_index));
         tcg_gen_extrl_i64_i32(index, index64);
         if (insn->opcode == IA64_OP_MOV_GRIBR_INDEXED) {

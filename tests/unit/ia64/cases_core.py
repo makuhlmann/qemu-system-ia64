@@ -1466,7 +1466,7 @@ test_mov_msr_indexed_decode = require_registers("mov_msr_indexed_decode", [
 }, entry=0x10)
 
 test_mov_dbr_ibr_indexed_decode = require_registers("mov_dbr_ibr_indexed_decode", [
-    (0x10, 0x00, addl(2, 10, 0), addl(3, 0x66, 0),
+    (0x10, 0x00, addl(2, 6, 0), addl(3, 0x66, 0),
      nop_i()),
     (0x20, 0x00, addl(4, 0x77, 0), nop_i(),
      nop_i()),
@@ -1486,6 +1486,21 @@ test_mov_dbr_ibr_indexed_decode = require_registers("mov_dbr_ibr_indexed_decode"
     "r29": 0x66,
     "r30": 0x77,
 }, entry=0x10)
+
+# Four pairs are implemented, as PAL_DEBUG_INFO reports; DBR and IBR 8 and up
+# do not exist and take Reserved Register/Field (SDM Vol. 3 mov indirect).
+test_mov_dbr_index8_reserved_register_field = require_exception(
+    "mov_dbr_index8_reserved_register_field", [
+        (0x10, 0x00, addl(2, 8, 0), addl(3, 0x66, 0), nop_i()),
+        (0x20, 0x00, mov_dbr_indexed_write(2, 3), nop_i(), nop_i()),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x20)
+
+test_mov_ibr_index8_read_reserved_register_field = require_exception(
+    "mov_ibr_index8_read_reserved_register_field", [
+        (0x10, 0x00, addl(2, 8, 0), nop_i(), nop_i()),
+        (0x20, 0x00, mov_ibr_indexed_read(30, 2, bit36=1), nop_i(),
+         nop_i()),
+    ], IA64_EXCP_RESERVED_REG_FIELD, fault_ip=0x20)
 
 test_mov_br_hint_decode = require_registers("mov_br_hint_decode", [
     (0x10, 0x00, addl(3, 0x1234, 0), nop_i(),
@@ -3949,6 +3964,8 @@ CASE_NAMES = (
     'stacked_write_faults_in_smaller_frame_at_same_ip',
     'mov_dahr_indexed_decode',
     'mov_dbr_ibr_indexed_decode',
+    'mov_dbr_index8_reserved_register_field',
+    'mov_ibr_index8_read_reserved_register_field',
     'mov_ip_current_bundle',
     'mov_lc_imm_decode',
     'mov_lc_negative_imm_sign_extends',
