@@ -2844,6 +2844,59 @@ test_ia32_instruction_intercept_records_prefix_and_opcode = \
             "exception": IA64_EXCP_NONE,
         }, entry=0x700, cpu="madison")
 
+# An intercept raised from a helper reports the intercepted instruction, not an
+# earlier one of the same translation block, and keeps the work before it.
+test_ia32_rdmsr_intercept_after_other_instructions = require_registers(
+    "ia32_rdmsr_intercept_after_other_instructions", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(2, IA64_PSR_IC)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, *movl_mlx(8, 0x100)),
+        (0x50, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x60, 0x10, nop_m(), nop_i(),
+         br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex("40 40 0f 32")),
+        (IA64_IA32_INTERCEPT_VECTOR, 0x00,
+         mov_m_cr_gr(20, 19), nop_i(), nop_i()),
+        (IA64_IA32_INTERCEPT_VECTOR + 0x10, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_IA32_INTERCEPT_VECTOR + 0x10,
+                 IA64_IA32_INTERCEPT_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_IA32_INTERCEPT_VECTOR + 0x10,
+        "r8": 0x102,
+        "r20": 0x102,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
+# The same for a data TLB fault on the port access of an IN instruction.
+test_ia32_in_port_tlb_fault_after_other_instructions = require_registers(
+    "ia32_in_port_tlb_fault_after_other_instructions", [
+        *ia32_environment_bundles(0x700, 0x10),
+        (0x10, *movl_mlx(2, IA64_PSR_IC | IA64_PSR_DT)),
+        (0x20, 0x00, mov_gr_psr_full(2), nop_i(), nop_i()),
+        (0x30, 0x00, srlz_d(), nop_i(), nop_i()),
+        (0x40, *movl_mlx(8, 0x100)),
+        (0x50, 0x00, nop_m(), mov_br_gr(7, 8), nop_i()),
+        (0x60, *movl_mlx(3, 0x10000000)),
+        (0x70, 0x00, mov_m_gr_ar(3, 0), adds(10, 0x70, 0), nop_i()),
+        (0x80, 0x10, nop_m(), nop_i(),
+         br_indirect(7, btype=1)),
+        ia32_bundle(0x100, bytes.fromhex("40 40 ec")),
+        (IA64_ALT_DTLB_VECTOR, 0x00,
+         mov_m_cr_gr(20, 19), nop_i(), nop_i()),
+        (IA64_ALT_DTLB_VECTOR + 0x10, 0x10,
+         nop_m(), nop_i(),
+         br_cond(IA64_ALT_DTLB_VECTOR + 0x10,
+                 IA64_ALT_DTLB_VECTOR + 0x10)),
+    ], {
+        "ip": IA64_ALT_DTLB_VECTOR + 0x10,
+        "r8": 0x102,
+        "r20": 0x102,
+        "exception": IA64_EXCP_NONE,
+    }, entry=0x700, cpu="madison")
+
 test_ia32_illegal_x87_opcode_intercepts_with_cr0_em = require_registers(
     "ia32_illegal_x87_opcode_intercepts_with_cr0_em", [
         *ia32_environment_bundles(0x700, 0x10),
@@ -7484,6 +7537,8 @@ CASE_NAMES = (
     'ia32_ibr_precedes_start_page_instruction_tlb_fault',
     'ia32_int3_clears_rf_and_psr_id_after_completion',
     'ia32_int_n_raises_ia32_interrupt',
+    'ia32_rdmsr_intercept_after_other_instructions',
+    'ia32_in_port_tlb_fault_after_other_instructions',
     'ia32_illegal_x87_opcode_intercepts_with_cr0_em',
     'ia32_amd_prefetch_opcode_intercepts',
     'ia32_instruction_intercept_records_prefix_and_opcode',

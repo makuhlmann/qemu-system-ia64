@@ -13,10 +13,17 @@ void helper_ia32_rsm(CPUIA64State *env);
 void helper_ia32_rdtsc(CPUIA64State *env);
 void helper_ia32_rdpmc(CPUIA64State *env);
 
-static G_NORETURN void ia32_instruction_intercept(CPUX86State *xenv)
+/*
+ * RETADDR is the GETPC() of the helper that translated code called: taken in
+ * a function the helper calls, it does not point into the translation block,
+ * the state is not restored to the faulting instruction, and the
+ * interruption reports the first instruction of the block.
+ */
+static G_NORETURN void ia32_instruction_intercept(CPUX86State *xenv,
+                                                  uintptr_t retaddr)
 {
     ia64_ia32_raise_intercept(xenv, IA64_IA32_INTERCEPT_INSTRUCTION,
-                              0, GETPC());
+                              0, retaddr);
 }
 
 static uint64_t ia32_io_address(CPUIA64State *env, uint32_t port)
@@ -79,11 +86,10 @@ static uint16_t ia32_tss_lduw(CPUX86State *xenv, uint32_t addr,
 }
 
 static uint32_t ia32_io_read(CPUX86State *xenv, uint32_t port,
-                             unsigned size)
+                             unsigned size, uintptr_t retaddr)
 {
     CPUIA64State *env = (CPUIA64State *)xenv;
     CPUState *cs = env_cpu(env);
-    uintptr_t retaddr = GETPC();
     uint64_t addr;
     int mmu_idx;
 
@@ -117,11 +123,10 @@ static uint32_t ia32_io_read(CPUX86State *xenv, uint32_t port,
 }
 
 static void ia32_io_write(CPUX86State *xenv, uint32_t port,
-                          uint32_t value, unsigned size)
+                          uint32_t value, unsigned size, uintptr_t retaddr)
 {
     CPUIA64State *env = (CPUIA64State *)xenv;
     CPUState *cs = env_cpu(env);
-    uintptr_t retaddr = GETPC();
     uint64_t addr;
     int mmu_idx;
 
@@ -158,32 +163,32 @@ static void ia32_io_write(CPUX86State *xenv, uint32_t port,
 
 void helper_outb(CPUX86State *xenv, uint32_t port, uint32_t value)
 {
-    ia32_io_write(xenv, port, value, 1);
+    ia32_io_write(xenv, port, value, 1, GETPC());
 }
 
 target_ulong helper_inb(CPUX86State *xenv, uint32_t port)
 {
-    return ia32_io_read(xenv, port, 1);
+    return ia32_io_read(xenv, port, 1, GETPC());
 }
 
 void helper_outw(CPUX86State *xenv, uint32_t port, uint32_t value)
 {
-    ia32_io_write(xenv, port, value, 2);
+    ia32_io_write(xenv, port, value, 2, GETPC());
 }
 
 target_ulong helper_inw(CPUX86State *xenv, uint32_t port)
 {
-    return ia32_io_read(xenv, port, 2);
+    return ia32_io_read(xenv, port, 2, GETPC());
 }
 
 void helper_outl(CPUX86State *xenv, uint32_t port, uint32_t value)
 {
-    ia32_io_write(xenv, port, value, 4);
+    ia32_io_write(xenv, port, value, 4, GETPC());
 }
 
 target_ulong helper_inl(CPUX86State *xenv, uint32_t port)
 {
-    return ia32_io_read(xenv, port, 4);
+    return ia32_io_read(xenv, port, 4, GETPC());
 }
 
 void helper_check_io(CPUX86State *xenv, uint32_t port, uint32_t size)
@@ -261,42 +266,42 @@ void helper_bpt_io(CPUX86State *xenv, uint32_t port, uint32_t size,
 
 void helper_set_dr(CPUX86State *xenv, int reg, target_ulong value)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 target_ulong helper_get_dr(CPUX86State *xenv, int reg)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_syscall(CPUX86State *xenv, int next_eip_addend)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_ia32_rsm(CPUIA64State *env)
 {
-    ia32_instruction_intercept(&env->ia32);
+    ia32_instruction_intercept(&env->ia32, GETPC());
 }
 
 void helper_rdmsr(CPUX86State *xenv)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_wrmsr(CPUX86State *xenv)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 target_ulong helper_read_cr8(CPUX86State *xenv)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_write_crN(CPUX86State *xenv, int reg, target_ulong value)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_svm_check_intercept(CPUX86State *xenv, uint32_t type)
@@ -310,86 +315,86 @@ void helper_svm_check_io(CPUX86State *xenv, uint32_t port,
 
 void helper_vmrun(CPUX86State *xenv, int aflag, int next_eip_addend)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_vmmcall(CPUX86State *xenv)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_vmload(CPUX86State *xenv, int aflag)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_vmsave(CPUX86State *xenv, int aflag)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_stgi(CPUX86State *xenv)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_clgi(CPUX86State *xenv)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_flush_page(CPUX86State *xenv, target_ulong addr)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 G_NORETURN void helper_hlt(CPUX86State *xenv)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_monitor(CPUX86State *xenv, target_ulong addr)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 G_NORETURN void helper_mwait(CPUX86State *xenv, int next_eip_addend)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_bndck(CPUX86State *xenv, uint32_t op)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 uint64_t helper_bndldx32(CPUX86State *xenv, target_ulong base,
                          target_ulong ptr)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 uint64_t helper_bndldx64(CPUX86State *xenv, target_ulong base,
                          target_ulong ptr)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_bndstx32(CPUX86State *xenv, target_ulong base, target_ulong ptr,
                      uint64_t lb, uint64_t ub)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_bndstx64(CPUX86State *xenv, target_ulong base, target_ulong ptr,
                      uint64_t lb, uint64_t ub)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void helper_bnd_jmp(CPUX86State *xenv)
 {
-    ia32_instruction_intercept(xenv);
+    ia32_instruction_intercept(xenv, GETPC());
 }
 
 void cpu_svm_check_intercept_param(CPUX86State *xenv, uint32_t type,
