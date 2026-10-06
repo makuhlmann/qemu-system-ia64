@@ -6506,7 +6506,9 @@ static void check_root_window_containment(const char *args)
 /*
  * Rope 1's root and the AGP root own their own windows, cut out of PCI0's,
  * and every BAR the machine assigns lies in its root's: the graphics I/O BAR
- * in the AGP ioa's ports too, also with the other graphics adapters.
+ * in the AGP ioa's ports too, also with the other graphics adapters.  With
+ * the QLogic on as well, the board's LSI keeps rope 1's windows and the
+ * QLogic parks in PCI0's.
  */
 static void test_zx1_root_window_containment(void)
 {
@@ -6514,6 +6516,14 @@ static void test_zx1_root_window_containment(void)
                                zx1_root_windows,
                                G_N_ELEMENTS(zx1_root_windows));
     check_windows_contain_bars("-machine zx1,vga=rage128 -m 256M -S",
+                               zx1_root_windows,
+                               G_N_ELEMENTS(zx1_root_windows));
+    check_windows_contain_bars("-machine zx1,vga=nv15gl -m 256M -S",
+                               zx1_root_windows,
+                               G_N_ELEMENTS(zx1_root_windows));
+    check_windows_contain_bars("-machine zx1,isp=on,audio=on "
+                               "-nic user,model=i82550 "
+                               "-nic user,model=e1000 -m 256M -S",
                                zx1_root_windows,
                                G_N_ELEMENTS(zx1_root_windows));
 }

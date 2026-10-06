@@ -48,6 +48,14 @@
  */
 #define LONGSPEAK_UART_PIN          7
 #define LONGSPEAK_SCI_PIN           9
+/*
+ * A second SCSI adapter parks on PCI0, rope 0, so its BARs come out of rope
+ * 0's windows in the DSDT: the ports of the mio's directed range
+ * (0xC000-0xFFFF, mio ERS 2.5.4) and PCI0's upper memory window, above the
+ * CS4281.
+ */
+#define LONGSPEAK_SCSI_PARK_IO_BASE   0x0000e000U
+#define LONGSPEAK_SCSI_PARK_MMIO_BASE (IA64_PCI_MMIO_BASE + 0x01900000ULL)
 
 /*
  * The I/O backplane's PCI and PCI-X ropes, empty here.  SAL_B's table for a
@@ -587,6 +595,8 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->lsi_default = true;
     imc->scsi_seat_io_base = IA64_ZX1_SCSI_IO_BASE;
     imc->scsi_seat_mmio_base = IA64_ZX1_ROPE1_MMIO_BASE;
+    imc->scsi_park_io_base = LONGSPEAK_SCSI_PARK_IO_BASE;
+    imc->scsi_park_mmio_base = LONGSPEAK_SCSI_PARK_MMIO_BASE;
     imc->vga_io_base = IA64_ZX1_AGP_IO_BASE;
     imc->ide_default = true;
     imc->ide_type = "cmd649-ide";
