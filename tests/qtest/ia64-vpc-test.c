@@ -7477,6 +7477,159 @@ static void test_e100_packet_transfer(void)
     close(sockets[0]);
 }
 
+#define IA64_E100_STATS_ADDR    0x00123000U
+#define IA64_E100_CU_STATSADDR  0x40U
+#define IA64_E100_CU_SHOWSTATS  0x50U
+
+static void e100_configure(QTestState *qts, const uint8_t *config)
+{
+    qtest_writel(qts, IA64_E100_CB_ADDR, 0x8002U << 16);
+    qtest_writel(qts, IA64_E100_CB_ADDR + 4, 0);
+    qtest_memwrite(qts, IA64_E100_CB_ADDR + 8, config, 22);
+    e100_scb_command(qts, IA64_E100_CB_ADDR, IA64_E100_CU_START);
+    g_assert_true(e100_wait_complete(qts, IA64_E100_CB_ADDR));
+}
+
+/* One simplified RFD, the last in the RFA, and one frame on the wire. */
+static void e100_receive_frame(QTestState *qts, int sock, uint16_t rfd_size,
+                               const uint8_t *frame, uint32_t len)
+{
+    uint32_t length = htonl(len);
+
+    qtest_writel(qts, IA64_E100_RFD_ADDR, 0x8000U << 16);
+    qtest_writel(qts, IA64_E100_RFD_ADDR + 4, 0);
+    qtest_writel(qts, IA64_E100_RFD_ADDR + 8, 0xffffffffU);
+    qtest_writel(qts, IA64_E100_RFD_ADDR + 12, (uint32_t)rfd_size << 16);
+    e100_scb_command(qts, IA64_E100_RFD_ADDR, IA64_E100_RU_START);
+    g_assert_cmpint(qemu_write_full(sock, &length, sizeof(length)), ==,
+                    sizeof(length));
+    g_assert_cmpint(qemu_write_full(sock, frame, len), ==, len);
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
+}
+
+static void e100_send_frame(int sock, const uint8_t *frame, uint32_t len)
+{
+    uint32_t length = htonl(len);
+
+    g_assert_cmpint(qemu_write_full(sock, &length, sizeof(length)), ==,
+                    sizeof(length));
+    g_assert_cmpint(qemu_write_full(sock, frame, len), ==, len);
+}
+
+static uint32_t e100_rx_resource_errors(QTestState *qts)
+{
+    e100_scb_command(qts, IA64_E100_STATS_ADDR, IA64_E100_CU_STATSADDR);
+    e100_scb_command(qts, 0, IA64_E100_CU_SHOWSTATS);
+    return qtest_readl(qts, IA64_E100_STATS_ADDR + 48);
+}
+
+static uint32_t eth_fcs(const uint8_t *p, size_t len)
+{
+    uint32_t crc = 0xffffffffU;
+    size_t i;
+    int bit;
+
+    for (i = 0; i < len; i++) {
+        crc ^= p[i];
+        for (bit = 0; bit < 8; bit++) {
+            crc = (crc >> 1) ^ (crc & 1 ? 0xedb88320U : 0);
+        }
+    }
+    return ~crc;
+}
+
+/*
+ * 8255x manual Table 52 and configure bytes 6 and 18: a type frame sets
+ * status bit 5; with CRC transfer the FCS follows the frame; stripping
+ * drops what follows an 802.3 length; a frame that does not fit its RFD
+ * sets bit 9 without OK and, unless bad frames are saved, leaves the RFD
+ * for the next frame.
+ */
+static void test_e100_receive_status(void)
+{
+    static const uint8_t mac[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+    uint8_t config[22] = { [0] = 22, [8] = 0x01 };
+    uint8_t frame[64], got[68];
+    g_autofree char *args = NULL;
+    QTestState *qts;
+    int sockets[2];
+    unsigned i;
+
+    for (i = 0; i < sizeof(frame); i++) {
+        frame[i] = i * 5 + 1;
+    }
+    memcpy(frame, mac, sizeof(mac));
+    frame[12] = 0x08;
+    frame[13] = 0x00;
+    g_assert_cmpint(qemu_socketpair(PF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    qemu_clear_cloexec(sockets[1]);
+    args = g_strdup_printf("-nic socket,fd=%d,model=i82559c,"
+                           "mac=52:54:00:12:34:56", sockets[1]);
+    qts = qtest_initf("-machine 460gx -m 256M %s", args);
+    close(sockets[1]);
+    e100_scb_command(qts, 0, IA64_E100_CU_BASE);
+    e100_scb_command(qts, 0, IA64_E100_RU_BASE);
+    e100_configure(qts, config);
+
+    e100_receive_frame(qts, sockets[0], 1536, frame, sizeof(frame));
+    g_assert_true(e100_wait_complete(qts, IA64_E100_RFD_ADDR));
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR), ==, 0xa020);
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR + 12), ==,
+                    0xc000U | sizeof(frame));
+
+    config[18] = 0x04;
+    e100_configure(qts, config);
+    e100_receive_frame(qts, sockets[0], 1536, frame, sizeof(frame));
+    g_assert_true(e100_wait_complete(qts, IA64_E100_RFD_ADDR));
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR + 12), ==,
+                    0xc000U | (sizeof(frame) + 4));
+    qtest_memread(qts, IA64_E100_RFD_ADDR + IA64_E100_RFD_DATA, got,
+                  sizeof(frame) + 4);
+    g_assert_cmpmem(got, sizeof(frame), frame, sizeof(frame));
+    g_assert_cmphex(ldl_le_p(got + sizeof(frame)), ==,
+                    eth_fcs(frame, sizeof(frame)));
+
+    /* An 802.3 frame with 20 bytes of data, padded to 60 by its sender. */
+    config[18] = 0x01;
+    e100_configure(qts, config);
+    frame[12] = 0x00;
+    frame[13] = 20;
+    e100_receive_frame(qts, sockets[0], 1536, frame, 60);
+    g_assert_true(e100_wait_complete(qts, IA64_E100_RFD_ADDR));
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR), ==, 0xa000);
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR + 12), ==,
+                    0xc000U | 34);
+    frame[12] = 0x08;
+    frame[13] = 0x00;
+
+    /* Too large for a 32-byte RFD: dropped, and the RFD waits. */
+    config[18] = 0;
+    e100_configure(qts, config);
+    e100_receive_frame(qts, sockets[0], 32, frame, sizeof(frame));
+    for (i = 0; i < IA64_E1000_TEST_TIMEOUT_MS &&
+                e100_rx_resource_errors(qts) == 0; i++) {
+        qtest_clock_step(qts, 1000);
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(e100_rx_resource_errors(qts), ==, 1);
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR) & 0x8000, ==, 0);
+
+    /* With bad frames saved, the same RFD keeps the start of the next one. */
+    config[6] = 0x80;
+    e100_configure(qts, config);
+    e100_send_frame(sockets[0], frame, sizeof(frame));
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
+    g_assert_true(e100_wait_complete(qts, IA64_E100_RFD_ADDR));
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR), ==, 0x8220);
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR + 12), ==,
+                    0xc000U | 32);
+    qtest_memread(qts, IA64_E100_RFD_ADDR + IA64_E100_RFD_DATA, got, 32);
+    g_assert_cmpmem(got, 32, frame, 32);
+
+    qtest_quit(qts);
+    close(sockets[0]);
+}
+
 /*
  * The 82550's IPCB (manual Table 73) with hardware parsing and the IP
  * checksum bit: the IP header checksum goes into every IPv4 frame, here an
@@ -11092,6 +11245,8 @@ int main(int argc, char **argv)
                    test_e1000_packet_transfer);
     qtest_add_func("/ia64-vpc/e100/packet-transfer",
                    test_e100_packet_transfer);
+    qtest_add_func("/ia64-vpc/e100/receive-status",
+                   test_e100_receive_status);
     qtest_add_func("/ia64-vpc/e100/ipcb-ip-checksum",
                    test_e100_ipcb_ip_checksum);
     qtest_add_func("/ia64-vpc/lsi/async-nodata-command",

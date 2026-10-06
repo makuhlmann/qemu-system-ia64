@@ -2365,6 +2365,8 @@ static bool e100_ext_rfa(const EEPRO100State *s)
 }
 
 #define RFD_STATUS_PARSE        BIT(3)
+#define RFD_STATUS_TYPE         BIT(5)
+#define RFD_STATUS_NO_SPACE     BIT(9)
 #define RFD_STATUS_VLAN         BIT(12)
 #define RFDX_P_TCP              0x00
 #define RFDX_P_UDP              0x01
@@ -2527,27 +2529,58 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
 #endif
         return -1;
     }
-    /* !!! */
     eepro100_rx_t rx;
     pci_dma_read(&s->dev, s->ru_base + s->ru_offset,
                  &rx, sizeof(eepro100_rx_t));
     uint16_t rfd_command = le16_to_cpu(rx.command);
     uint16_t rfd_size = le16_to_cpu(rx.size);
     size_t rfd_header = sizeof(eepro100_rx_t);
+    size_t in_size = size;
+    uint16_t type_length = size >= ETH_HLEN ? lduw_be_p(buf + 12) : 0;
+    bool type_frame = type_length == 0 || type_length > ETH_MTU;
     g_autofree uint8_t *frame = NULL;
     uint8_t rfd_ext[16];
 
+    if (type_frame) {
+        rfd_status |= RFD_STATUS_TYPE;
+    }
+    /*
+     * Configure byte 18 bit 2 puts the CRC in memory, which the backends
+     * leave out, and overrides bit 0, which strips what follows an 802.3
+     * length.
+     */
+    if (s->configuration[18] & BIT(2)) {
+        frame = g_malloc(size + 4);
+        memcpy(frame, buf, size);
+        stl_le_p(frame + size, ~net_crc32_le(frame, size));
+        buf = frame;
+        size += 4;
+    } else if ((s->configuration[18] & BIT(0)) && !type_frame &&
+               ETH_HLEN + type_length < size) {
+        size = ETH_HLEN + type_length;
+    }
+
     if (e100_ext_rfa(s)) {
         /* The data follows the 16 extended bytes. */
-        frame = g_memdup2(buf, size);
+        if (!frame) {
+            frame = g_memdup2(buf, size);
+        }
         size = e100_rx_extended(s, frame, size, &rfd_status, rfd_ext);
         buf = frame;
         rfd_header += sizeof(rfd_ext);
     }
 
+    /*
+     * Table 52 bit 9: the frame does not fit the RFD, so it is not OK.
+     * Unless bad frames are saved (configure byte 6 bit 7) the RFD is used
+     * again and nothing is left in memory.
+     */
     if (size > rfd_size) {
-        logout("Receive buffer (%" PRId16 " bytes) too small for data "
-            "(%zu bytes); data truncated\n", rfd_size, size);
+        rfd_status = (rfd_status & ~STATUS_OK) | RFD_STATUS_NO_SPACE;
+        if (!(s->configuration[6] & BIT(7))) {
+            s->statistics.rx_resource_errors++;
+            return in_size;
+        }
         size = rfd_size;
     }
 #if !defined(CONFIG_PAD_RECEIVED_FRAMES)
@@ -2557,30 +2590,26 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
 #endif
     TRACE(OTHER, logout("command 0x%04x, link 0x%08x, addr 0x%08x, size %u\n",
           rfd_command, rx.link, rx.rx_buf_addr, rfd_size));
-    stw_le_pci_dma(&s->dev, s->ru_base + s->ru_offset +
-                offsetof(eepro100_rx_t, status), rfd_status, attrs);
-    /* The device sets EOF and F with the actual count (manual Figure 25). */
-    stw_le_pci_dma(&s->dev, s->ru_base + s->ru_offset +
-                offsetof(eepro100_rx_t, count), size | 0xc000, attrs);
     /* Early receive interrupt not supported. */
 #if 0
     eepro100_er_interrupt(s);
 #endif
-    /* Receive CRC Transfer not supported. */
-    if (s->configuration[18] & BIT(2)) {
-        missing("Receive CRC Transfer");
-        return -1;
-    }
-    /* TODO: check stripping enable bit. */
-#if 0
-    assert(!(s->configuration[17] & BIT(0)));
-#endif
-    if (frame) {
+    if (rfd_header > sizeof(eepro100_rx_t)) {
         pci_dma_write(&s->dev, s->ru_base + s->ru_offset +
                       sizeof(eepro100_rx_t), rfd_ext, sizeof(rfd_ext));
     }
     pci_dma_write(&s->dev, s->ru_base + s->ru_offset + rfd_header, buf, size);
-    s->statistics.rx_good_frames++;
+    /*
+     * The device sets EOF and F with the actual count (manual Figure 25),
+     * and C last: a processor that polls the RFD may run while this does.
+     */
+    stw_le_pci_dma(&s->dev, s->ru_base + s->ru_offset +
+                offsetof(eepro100_rx_t, count), size | 0xc000, attrs);
+    stw_le_pci_dma(&s->dev, s->ru_base + s->ru_offset +
+                offsetof(eepro100_rx_t, status), rfd_status, attrs);
+    if (rfd_status & STATUS_OK) {
+        s->statistics.rx_good_frames++;
+    }
     eepro100_fr_interrupt(s);
     s->ru_offset = le32_to_cpu(rx.link);
     if (rfd_command & COMMAND_EL) {
@@ -2593,7 +2622,7 @@ static ssize_t nic_receive(NetClientState *nc, const uint8_t * buf, size_t size)
         /* S bit is set. */
         set_ru_state(s, ru_suspended);
     }
-    return size;
+    return in_size;
 }
 
 static void nic_link_status_changed(NetClientState *nc)
