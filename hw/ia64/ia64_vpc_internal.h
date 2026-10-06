@@ -168,6 +168,9 @@ struct IA64VpcMachineClass {
     /* The SCSI seat's I/O and memory BAR bases; 0 = the first WXB root's. */
     uint32_t scsi_seat_io_base;
     uint64_t scsi_seat_mmio_base;
+    /* The parked SCSI adapter's BAR bases; 0 = the second WXB root's. */
+    uint32_t scsi_park_io_base;
+    uint64_t scsi_park_mmio_base;
     /* The graphics I/O BAR base; 0 = IA64_VGA_IO_BASE. */
     uint32_t vga_io_base;
     /*

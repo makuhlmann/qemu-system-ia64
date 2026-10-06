@@ -2732,21 +2732,52 @@ static uint64_t ia64_vpc_scsi_seat_mmio(const IA64VpcMachineState *s)
     return base != 0 ? base : IA64_SCSI_SEAT_MMIO_PCI_BASE;
 }
 
+/* The parked adapter's BAR bases: the board's own, or the second WXB root's. */
+static uint32_t ia64_vpc_scsi_park_io(const IA64VpcMachineState *s)
+{
+    uint32_t base = IA64_VPC_MACHINE_GET_CLASS(s)->scsi_park_io_base;
+
+    return base != 0 ? base : IA64_SCSI_PARK_IO_BASE;
+}
+
+static uint64_t ia64_vpc_scsi_park_mmio(const IA64VpcMachineState *s)
+{
+    uint64_t base = IA64_VPC_MACHINE_GET_CLASS(s)->scsi_park_mmio_base;
+
+    return base != 0 ? base : IA64_SCSI_PARK_MMIO_PCI_BASE;
+}
+
 /*
- * The QLogic is the default adapter and always holds the SCSI seat when it
- * is present, so its BARs come out of the seat's window.
+ * Which adapter holds the board's SCSI seat when both are present: the one
+ * the board itself carries.  The other parks.
+ */
+static bool ia64_vpc_lsi_at_seat(IA64VpcMachineState *s)
+{
+    if (!s->isp_enabled) {
+        return true;
+    }
+    return s->lsi_enabled && IA64_VPC_MACHINE_GET_CLASS(s)->lsi_default;
+}
+
+/*
+ * Each adapter's BARs come out of the windows of the root it sits on: the
+ * seat's when it holds the seat, the park's otherwise.
  */
 static void ia64_vpc_configure_isp(IA64VpcMachineState *s, PCIDevice *pci_dev)
 {
+    bool at_seat = !ia64_vpc_lsi_at_seat(s);
+
     if (pci_dev == NULL) {
         return;
     }
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
-                             ia64_vpc_scsi_seat_io(s) |
+                             (at_seat ? ia64_vpc_scsi_seat_io(s) :
+                                        ia64_vpc_scsi_park_io(s)) |
                              PCI_BASE_ADDRESS_SPACE_IO, 4);
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
-                             ia64_vpc_scsi_seat_mmio(s), 4);
+                             at_seat ? ia64_vpc_scsi_seat_mmio(s) :
+                                       ia64_vpc_scsi_park_mmio(s), 4);
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
                              PCI_COMMAND_MASTER, 2);
@@ -2810,12 +2841,9 @@ static void ia64_vpc_configure_ifb_smbus(PCIDevice *pci_dev)
     pci_default_write_config(pci_dev, PCI_COMMAND, PCI_COMMAND_IO, 2);
 }
 
-/*
- * The LSI holds the seat only when the QLogic is off; with both adapters
- * present it parks on the second WXB root and its BARs follow it there.
- */
 static void ia64_vpc_configure_lsi(IA64VpcMachineState *s, PCIDevice *pci_dev)
 {
+    bool at_seat = ia64_vpc_lsi_at_seat(s);
     uint32_t io_base;
     uint64_t mmio_base;
 
@@ -2823,10 +2851,9 @@ static void ia64_vpc_configure_lsi(IA64VpcMachineState *s, PCIDevice *pci_dev)
         return;
     }
 
-    io_base = s->isp_enabled ? IA64_SCSI_PARK_IO_BASE :
-                               ia64_vpc_scsi_seat_io(s);
-    mmio_base = s->isp_enabled ? IA64_SCSI_PARK_MMIO_PCI_BASE :
-                                 ia64_vpc_scsi_seat_mmio(s);
+    io_base = at_seat ? ia64_vpc_scsi_seat_io(s) : ia64_vpc_scsi_park_io(s);
+    mmio_base = at_seat ? ia64_vpc_scsi_seat_mmio(s) :
+                          ia64_vpc_scsi_park_mmio(s);
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0, io_base, 4);
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1, mmio_base, 4);
@@ -3223,18 +3250,6 @@ static void ia64_vpc_init_isp(IA64VpcMachineState *s, PCIBus *bus, int devfn)
 #endif
 
 /* Where the board seats a built-in device: *bus and *devfn preset to defaults. */
-/*
- * Which adapter holds the board's SCSI seat when both are present: the one
- * the board itself carries.  The other parks.
- */
-static bool ia64_vpc_lsi_at_seat(IA64VpcMachineState *s)
-{
-    if (!s->isp_enabled) {
-        return true;
-    }
-    return s->lsi_enabled && IA64_VPC_MACHINE_GET_CLASS(s)->lsi_default;
-}
-
 static void ia64_vpc_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
                           PCIBus **bus, int *devfn)
 {
@@ -5062,14 +5077,16 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_set_isp);
     object_class_property_set_description(oc, "isp",
         "Set on/off to enable/disable the QLogic ISP12160 SCSI controller "
-        "(default on; it holds the platform's SCSI seat)");
+        "(460gx: default on, it holds the SCSI seat; zx1: default off, it "
+        "parks on PCI0 beside the board's LSI)");
     object_class_property_add_bool(oc, "lsi",
                                    ia64_vpc_get_lsi,
                                    ia64_vpc_set_lsi);
     object_class_property_set_description(oc, "lsi",
-        "Add the LSI 53c895a SCSI controller (default off; it takes the "
-        "SCSI seat when isp=off, and parks on the second expander bus "
-        "otherwise)");
+        "Set on/off to enable/disable the LSI 53c895a SCSI controller (zx1: "
+        "default on, it holds the SCSI seat on rope 1; 460gx: default off, "
+        "it takes the seat when isp=off and parks on the second expander "
+        "bus otherwise)");
     object_class_property_add_bool(oc, "audio",
                                    ia64_vpc_get_audio,
                                    ia64_vpc_set_audio);

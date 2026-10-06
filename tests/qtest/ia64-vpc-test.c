@@ -2225,6 +2225,205 @@ static void test_pdh_clock(void)
     qtest_quit(qts);
 }
 
+/* 2026-10-05 23:59:58, with day register 7. */
+static const uint8_t pdh_clock_late[] = { 0x58, 0x59, 0x23, 0x07,
+                                          0x05, 0x10, 0x26, 0x20 };
+
+static void pdh_clock_set(QTestState *qts, uint64_t rtc, const uint8_t *time)
+{
+    unsigned i;
+
+    qtest_writeb(qts, rtc + 0x0f, 0x00);
+    for (i = 0; i < 8; i++) {
+        qtest_writeb(qts, rtc + i, time[i]);
+    }
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+}
+
+static void pdh_clock_alarm(QTestState *qts, uint64_t rtc, uint8_t s,
+                            uint8_t m, uint8_t h, uint8_t d)
+{
+    qtest_writeb(qts, rtc + 0x08, s);
+    qtest_writeb(qts, rtc + 0x09, m);
+    qtest_writeb(qts, rtc + 0x0a, h);
+    qtest_writeb(qts, rtc + 0x0b, d);
+    qtest_readb(qts, rtc + 0x0e);
+}
+
+/* Steps in 100 ms until TDF; returns the time it took, or 0 for none. */
+static unsigned pdh_clock_wait_alarm(QTestState *qts, uint64_t rtc,
+                                     unsigned limit_ms)
+{
+    unsigned ms;
+
+    for (ms = 100; ms <= limit_ms; ms += 100) {
+        qtest_clock_step(qts, 100 * 1000 * 1000);
+        if (qtest_readb(qts, rtc + 0x0e) & 0x08) {
+            return ms;
+        }
+    }
+    return 0;
+}
+
+/* The DS1501/DS1511 data sheet (19-6820, rev 10/13), registers 08h-13h. */
+static void test_pdh_clock_control(void)
+{
+    const uint64_t rtc = IA64_PDH_DEV5B_BASE + IA64_PDH_RTC;
+    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    uint8_t month, sec;
+    unsigned ms;
+
+    /* The power-on sets KSF (rx2600); a read of control A clears it. */
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x04);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0f), ==, 0x80);
+
+    /* PRS and PAB are storage; KSF clears PAB, and with KIE sets IRQF. */
+    qtest_writeb(qts, rtc + 0x0e, 0x30);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x30);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x30);
+    qtest_writeb(qts, rtc + 0x0e, 0x34);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x24);
+    qtest_writeb(qts, rtc + 0x0f, 0x84);
+    qtest_writeb(qts, rtc + 0x0e, 0xc4);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x05);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+
+    /* 08h-0Dh hold what is written; bit 6 of the alarm hours is 0. */
+    pdh_clock_alarm(qts, rtc, 0x7f, 0x7f, 0x7f, 0x3f);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x08), ==, 0x7f);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x09), ==, 0x7f);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0a), ==, 0x3f);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0b), ==, 0x3f);
+    /* The rx2600's alarm values can never match. */
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 3000), ==, 0);
+
+    /*
+     * The rx2600's watchdog, 04 00: 40 ms.  A timeout sets WDF with WDE 0,
+     * and the watchdog reloads.
+     */
+    qtest_writeb(qts, rtc + 0x0c, 0x04);
+    qtest_writeb(qts, rtc + 0x0d, 0x00);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0c), ==, 0x04);
+    qtest_clock_step(qts, 30 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    qtest_clock_step(qts, 20 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x02);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    qtest_clock_step(qts, 40 * 1000 * 1000);
+    qtest_writeb(qts, rtc + 0x0e, 0x00);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    /* WDE alone: WDF with IRQF, again and again. */
+    qtest_writeb(qts, rtc + 0x0f, 0x82);
+    qtest_clock_step(qts, 40 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x03);
+    qtest_clock_step(qts, 40 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x03);
+    /* WDE with WDS: one shot, which clears WDE. */
+    qtest_writeb(qts, rtc + 0x0f, 0x83);
+    qtest_writeb(qts, rtc + 0x0d, 0x00);
+    qtest_clock_step(qts, 50 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0f), ==, 0x81);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x02);
+    /* 00 00 stops it. */
+    qtest_writeb(qts, rtc + 0x0c, 0x00);
+    qtest_clock_step(qts, 100 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+
+    /*
+     * The day register keeps what is written, steps from 7 to 1 at midnight,
+     * and stays when the date is written.  A day alarm matches it.
+     */
+    pdh_clock_set(qts, rtc, pdh_clock_late);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x03), ==, 0x07);
+    pdh_clock_alarm(qts, rtc, 0x00, 0x00, 0x00, 0x41);
+    qtest_writeb(qts, rtc + 0x0f, 0x88);
+    ms = pdh_clock_wait_alarm(qts, rtc, 3000);
+    g_assert_cmpuint(ms, >, 1000);
+    g_assert_cmpuint(ms, <=, 2000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x00), ==, 0x00);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x03), ==, 0x01);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x04), ==, 0x06);
+    qtest_writeb(qts, rtc + 0x04, 0x20);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x03), ==, 0x01);
+
+    /* A date alarm, with TIE: TDF and IRQF. */
+    pdh_clock_set(qts, rtc, pdh_clock_late);
+    pdh_clock_alarm(qts, rtc, 0x00, 0x00, 0x00, 0x06);
+    qtest_writeb(qts, rtc + 0x0f, 0x88);
+    qtest_clock_step(qts, 1000 * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    ms = pdh_clock_wait_alarm(qts, rtc, 2000);
+    g_assert_cmpuint(ms, >, 0);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x04), ==, 0x06);
+    /* A match while nothing reads the part sets TDF all the same... */
+    pdh_clock_set(qts, rtc, pdh_clock_late);
+    qtest_clock_step(qts, 3000LL * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x08);
+    /* ...but not while TE is 0, nor later for that second. */
+    pdh_clock_set(qts, rtc, pdh_clock_late);
+    qtest_writeb(qts, rtc + 0x0f, 0x08);
+    qtest_clock_step(qts, 3000LL * 1000 * 1000);
+    qtest_writeb(qts, rtc + 0x0f, 0x88);
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 100), ==, 0);
+
+    /* Seconds match: once a minute. */
+    pdh_clock_set(qts, rtc, pdh_clock_late);
+    pdh_clock_alarm(qts, rtc, 0x05, 0x80, 0x80, 0x80);
+    ms = pdh_clock_wait_alarm(qts, rtc, 10000);
+    g_assert_cmpuint(ms, >, 6000);
+    g_assert_cmpuint(ms, <=, 7000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x00), ==, 0x05);
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 2000), ==, 0);
+
+    /*
+     * A mask set that Table 3 does not list gives once a second, but only
+     * while TE is 1, and not for the seconds that passed while it was 0.
+     */
+    pdh_clock_alarm(qts, rtc, 0x80, 0x00, 0x80, 0x00);
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 1100), >, 0);
+    qtest_writeb(qts, rtc + 0x0f, 0x08);
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 3000), ==, 0);
+    qtest_writeb(qts, rtc + 0x0f, 0x88);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x0e), ==, 0x00);
+    g_assert_cmpuint(pdh_clock_wait_alarm(qts, rtc, 1100), >, 0);
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+    pdh_clock_alarm(qts, rtc, 0x00, 0x00, 0x00, 0x00);
+
+    /* BME: the RAM address steps after each data access and wraps. */
+    qtest_writeb(qts, rtc + 0x0f, 0xa0);
+    qtest_writeb(qts, rtc + 0x10, 0xfe);
+    qtest_writeb(qts, rtc + 0x13, 0x11);
+    qtest_writeb(qts, rtc + 0x13, 0x22);
+    qtest_writeb(qts, rtc + 0x13, 0x33);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x10), ==, 0x01);
+    qtest_writeb(qts, rtc + 0x10, 0xfe);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x13), ==, 0x11);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x13), ==, 0x22);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x13), ==, 0x33);
+    qtest_writeb(qts, rtc + 0x0f, 0x80);
+    qtest_writeb(qts, rtc + 0x10, 0xfe);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x13), ==, 0x11);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x13), ==, 0x11);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x10), ==, 0xfe);
+
+    /* EOSC stops the count; clearing it lets the count go on. */
+    month = qtest_readb(qts, rtc + 0x05) & 0x1f;
+    qtest_writeb(qts, rtc + 0x05, 0x80 | month);
+    sec = qtest_readb(qts, rtc + 0x00);
+    qtest_clock_step(qts, 3000LL * 1000 * 1000);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x00), ==, sec);
+    g_assert_cmphex(qtest_readb(qts, rtc + 0x05), ==, 0x80 | month);
+    qtest_writeb(qts, rtc + 0x05, month);
+    qtest_clock_step(qts, 3000LL * 1000 * 1000);
+    g_assert_cmpuint(bcd(qtest_readb(qts, rtc + 0x00)), ==,
+                     (bcd(sec) + 3) % 60);
+
+    qtest_quit(qts);
+}
+
 static void test_pdh_bmc(void)
 {
     const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
@@ -6307,7 +6506,9 @@ static void check_root_window_containment(const char *args)
 /*
  * Rope 1's root and the AGP root own their own windows, cut out of PCI0's,
  * and every BAR the machine assigns lies in its root's: the graphics I/O BAR
- * in the AGP ioa's ports too, also with the other graphics adapters.
+ * in the AGP ioa's ports too, also with the other graphics adapters.  With
+ * the QLogic on as well, the board's LSI keeps rope 1's windows and the
+ * QLogic parks in PCI0's.
  */
 static void test_zx1_root_window_containment(void)
 {
@@ -6315,6 +6516,14 @@ static void test_zx1_root_window_containment(void)
                                zx1_root_windows,
                                G_N_ELEMENTS(zx1_root_windows));
     check_windows_contain_bars("-machine zx1,vga=rage128 -m 256M -S",
+                               zx1_root_windows,
+                               G_N_ELEMENTS(zx1_root_windows));
+    check_windows_contain_bars("-machine zx1,vga=nv15gl -m 256M -S",
+                               zx1_root_windows,
+                               G_N_ELEMENTS(zx1_root_windows));
+    check_windows_contain_bars("-machine zx1,isp=on,audio=on "
+                               "-nic user,model=i82550 "
+                               "-nic user,model=e1000 -m 256M -S",
                                zx1_root_windows,
                                G_N_ELEMENTS(zx1_root_windows));
 }
@@ -7263,6 +7472,159 @@ static void test_e100_packet_transfer(void)
     qtest_memread(qts, IA64_E100_RFD_ADDR + IA64_E100_RFD_DATA,
                   received, sizeof(received));
     g_assert_cmpmem(received, sizeof(received), packet, sizeof(packet));
+
+    qtest_quit(qts);
+    close(sockets[0]);
+}
+
+#define IA64_E100_STATS_ADDR    0x00123000U
+#define IA64_E100_CU_STATSADDR  0x40U
+#define IA64_E100_CU_SHOWSTATS  0x50U
+
+static void e100_configure(QTestState *qts, const uint8_t *config)
+{
+    qtest_writel(qts, IA64_E100_CB_ADDR, 0x8002U << 16);
+    qtest_writel(qts, IA64_E100_CB_ADDR + 4, 0);
+    qtest_memwrite(qts, IA64_E100_CB_ADDR + 8, config, 22);
+    e100_scb_command(qts, IA64_E100_CB_ADDR, IA64_E100_CU_START);
+    g_assert_true(e100_wait_complete(qts, IA64_E100_CB_ADDR));
+}
+
+/* One simplified RFD, the last in the RFA, and one frame on the wire. */
+static void e100_receive_frame(QTestState *qts, int sock, uint16_t rfd_size,
+                               const uint8_t *frame, uint32_t len)
+{
+    uint32_t length = htonl(len);
+
+    qtest_writel(qts, IA64_E100_RFD_ADDR, 0x8000U << 16);
+    qtest_writel(qts, IA64_E100_RFD_ADDR + 4, 0);
+    qtest_writel(qts, IA64_E100_RFD_ADDR + 8, 0xffffffffU);
+    qtest_writel(qts, IA64_E100_RFD_ADDR + 12, (uint32_t)rfd_size << 16);
+    e100_scb_command(qts, IA64_E100_RFD_ADDR, IA64_E100_RU_START);
+    g_assert_cmpint(qemu_write_full(sock, &length, sizeof(length)), ==,
+                    sizeof(length));
+    g_assert_cmpint(qemu_write_full(sock, frame, len), ==, len);
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
+}
+
+static void e100_send_frame(int sock, const uint8_t *frame, uint32_t len)
+{
+    uint32_t length = htonl(len);
+
+    g_assert_cmpint(qemu_write_full(sock, &length, sizeof(length)), ==,
+                    sizeof(length));
+    g_assert_cmpint(qemu_write_full(sock, frame, len), ==, len);
+}
+
+static uint32_t e100_rx_resource_errors(QTestState *qts)
+{
+    e100_scb_command(qts, IA64_E100_STATS_ADDR, IA64_E100_CU_STATSADDR);
+    e100_scb_command(qts, 0, IA64_E100_CU_SHOWSTATS);
+    return qtest_readl(qts, IA64_E100_STATS_ADDR + 48);
+}
+
+static uint32_t eth_fcs(const uint8_t *p, size_t len)
+{
+    uint32_t crc = 0xffffffffU;
+    size_t i;
+    int bit;
+
+    for (i = 0; i < len; i++) {
+        crc ^= p[i];
+        for (bit = 0; bit < 8; bit++) {
+            crc = (crc >> 1) ^ (crc & 1 ? 0xedb88320U : 0);
+        }
+    }
+    return ~crc;
+}
+
+/*
+ * 8255x manual Table 52 and configure bytes 6 and 18: a type frame sets
+ * status bit 5; with CRC transfer the FCS follows the frame; stripping
+ * drops what follows an 802.3 length; a frame that does not fit its RFD
+ * sets bit 9 without OK and, unless bad frames are saved, leaves the RFD
+ * for the next frame.
+ */
+static void test_e100_receive_status(void)
+{
+    static const uint8_t mac[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+    uint8_t config[22] = { [0] = 22, [8] = 0x01 };
+    uint8_t frame[64], got[68];
+    g_autofree char *args = NULL;
+    QTestState *qts;
+    int sockets[2];
+    unsigned i;
+
+    for (i = 0; i < sizeof(frame); i++) {
+        frame[i] = i * 5 + 1;
+    }
+    memcpy(frame, mac, sizeof(mac));
+    frame[12] = 0x08;
+    frame[13] = 0x00;
+    g_assert_cmpint(qemu_socketpair(PF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    qemu_clear_cloexec(sockets[1]);
+    args = g_strdup_printf("-nic socket,fd=%d,model=i82559c,"
+                           "mac=52:54:00:12:34:56", sockets[1]);
+    qts = qtest_initf("-machine 460gx -m 256M %s", args);
+    close(sockets[1]);
+    e100_scb_command(qts, 0, IA64_E100_CU_BASE);
+    e100_scb_command(qts, 0, IA64_E100_RU_BASE);
+    e100_configure(qts, config);
+
+    e100_receive_frame(qts, sockets[0], 1536, frame, sizeof(frame));
+    g_assert_true(e100_wait_complete(qts, IA64_E100_RFD_ADDR));
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR), ==, 0xa020);
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR + 12), ==,
+                    0xc000U | sizeof(frame));
+
+    config[18] = 0x04;
+    e100_configure(qts, config);
+    e100_receive_frame(qts, sockets[0], 1536, frame, sizeof(frame));
+    g_assert_true(e100_wait_complete(qts, IA64_E100_RFD_ADDR));
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR + 12), ==,
+                    0xc000U | (sizeof(frame) + 4));
+    qtest_memread(qts, IA64_E100_RFD_ADDR + IA64_E100_RFD_DATA, got,
+                  sizeof(frame) + 4);
+    g_assert_cmpmem(got, sizeof(frame), frame, sizeof(frame));
+    g_assert_cmphex(ldl_le_p(got + sizeof(frame)), ==,
+                    eth_fcs(frame, sizeof(frame)));
+
+    /* An 802.3 frame with 20 bytes of data, padded to 60 by its sender. */
+    config[18] = 0x01;
+    e100_configure(qts, config);
+    frame[12] = 0x00;
+    frame[13] = 20;
+    e100_receive_frame(qts, sockets[0], 1536, frame, 60);
+    g_assert_true(e100_wait_complete(qts, IA64_E100_RFD_ADDR));
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR), ==, 0xa000);
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR + 12), ==,
+                    0xc000U | 34);
+    frame[12] = 0x08;
+    frame[13] = 0x00;
+
+    /* Too large for a 32-byte RFD: dropped, and the RFD waits. */
+    config[18] = 0;
+    e100_configure(qts, config);
+    e100_receive_frame(qts, sockets[0], 32, frame, sizeof(frame));
+    for (i = 0; i < IA64_E1000_TEST_TIMEOUT_MS &&
+                e100_rx_resource_errors(qts) == 0; i++) {
+        qtest_clock_step(qts, 1000);
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(e100_rx_resource_errors(qts), ==, 1);
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR) & 0x8000, ==, 0);
+
+    /* With bad frames saved, the same RFD keeps the start of the next one. */
+    config[6] = 0x80;
+    e100_configure(qts, config);
+    e100_send_frame(sockets[0], frame, sizeof(frame));
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
+    g_assert_true(e100_wait_complete(qts, IA64_E100_RFD_ADDR));
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR), ==, 0x8220);
+    g_assert_cmphex(qtest_readw(qts, IA64_E100_RFD_ADDR + 12), ==,
+                    0xc000U | 32);
+    qtest_memread(qts, IA64_E100_RFD_ADDR + IA64_E100_RFD_DATA, got, 32);
+    g_assert_cmpmem(got, 32, frame, 32);
 
     qtest_quit(qts);
     close(sockets[0]);
@@ -10812,6 +11174,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens-persist",
                    test_pdh_bmc_tokens_persist);
     qtest_add_func("/ia64-vpc/pdh/clock", test_pdh_clock);
+    qtest_add_func("/ia64-vpc/pdh/clock-control", test_pdh_clock_control);
     qtest_add_func("/ia64-vpc/pdh/dimm-spd", test_pdh_dimm_spd);
     qtest_add_func("/ia64-vpc/pdh/product-area", test_pdh_product_area);
     qtest_add_func("/ia64-vpc/pdh/board-fru-layout",
@@ -10882,6 +11245,8 @@ int main(int argc, char **argv)
                    test_e1000_packet_transfer);
     qtest_add_func("/ia64-vpc/e100/packet-transfer",
                    test_e100_packet_transfer);
+    qtest_add_func("/ia64-vpc/e100/receive-status",
+                   test_e100_receive_status);
     qtest_add_func("/ia64-vpc/e100/ipcb-ip-checksum",
                    test_e100_ipcb_ip_checksum);
     qtest_add_func("/ia64-vpc/lsi/async-nodata-command",
