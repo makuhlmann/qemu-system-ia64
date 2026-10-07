@@ -14624,6 +14624,38 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
  * (fw_phase_platform_init) and before the paths are installed as the GOP
  * handle's device path / ConOut variables (fw_phase_efi_core_init).
  */
+/*
+ * The ATI BIOS POST runs a mach64's accelerator CRTC in every mode, VGA text
+ * included: CRTC_GEN_CNTL.CRTC_ENABLE resets to 0, which holds the CRTC in
+ * reset (RRG-C04300-C, CRTC_GEN_CNTL), and a driver that takes the adapter
+ * over from its POST state refuses it without the bit (XFree86 4.3
+ * atipreinit.c: "Adapter has not been initialised").  No x86 BIOS runs under
+ * this firmware, so it does this part of the POST itself.
+ */
+#define MACH64_MM_CRTC_GEN_CNTL 0x41cU      /* BAR2 block 0, register 07h */
+#define MACH64_CRTC_ENABLE      0x02000000U
+
+static void fw_post_mach64(void)
+{
+    UINTN i;
+
+    for (i = 0; i < FW_ARRAY_SIZE(mPciIoDevices); i++) {
+        const FW_PCI_IO_DEVICE *dev = &mPciIoDevices[i];
+        volatile UINT32 *crtc_gen_cntl;
+        UINT64 mmio;
+
+        if (dev->Protocol != &mPciVgaIoProto ||
+            fw_pci_io_device_id(dev) != PCI_VGA_MACH64_ID) {
+            continue;
+        }
+        mmio = pci_config_read_value(0, dev->Bus, dev->Device, dev->Function,
+                                     PCI_BAR_OFFSET(2), 4) & ~0xfULL;
+        crtc_gen_cntl = (volatile UINT32 *)(UINTN)(mmio +
+                                                   MACH64_MM_CRTC_GEN_CNTL);
+        *crtc_gen_cntl |= MACH64_CRTC_ENABLE;
+    }
+}
+
 static void fw_retarget_vga_device_paths(void)
 {
     UINT32 uid;
@@ -14741,6 +14773,7 @@ static void fw_phase_efi_core_init(void)
     uart_puts("Loaded Image Paths:   ");
     uart_puts(loaded_image_file_path_selftest() ?
               "protocol storage verified\r\n" : "verification failed\r\n");
+    fw_post_mach64();
     efi_init_conout();
     ps2_init_controller();
     efi_init_static_handles();
