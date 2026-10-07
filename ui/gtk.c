@@ -444,21 +444,110 @@ static GdkDevice *gd_get_pointer(GdkDisplay *dpy)
     return gdk_seat_get_pointer(gdk_display_get_default_seat(dpy));
 }
 
+/*
+ * The frame buffer is drawn scaled and, in a larger widget, centred: the
+ * widget coordinates of its top-left corner.
+ */
+static void gd_fb_offset(VirtualConsole *vc, int *x, int *y)
+{
+    int ww_surface = surface_width(vc->gfx.ds) * vc->gfx.scale_x;
+    int wh_surface = surface_height(vc->gfx.ds) * vc->gfx.scale_y;
+    int ww_widget = gtk_widget_get_allocated_width(vc->gfx.drawing_area);
+    int wh_widget = gtk_widget_get_allocated_height(vc->gfx.drawing_area);
+
+    *x = ww_widget > ww_surface ? (ww_widget - ww_surface) / 2 : 0;
+    *y = wh_widget > wh_surface ? (wh_widget - wh_surface) / 2 : 0;
+}
+
+/* Wayland lets no client move the pointer: gdk_device_warp does nothing. */
+static bool gd_can_warp(GdkDisplay *dpy)
+{
+#ifdef GDK_WINDOWING_WAYLAND
+    if (GDK_IS_WAYLAND_DISPLAY(dpy)) {
+        return false;
+    }
+#endif
+    return true;
+}
+
+/*
+ * Keep the pointer inside the drawing area while it is grabbed in relative
+ * mode.  A GDK grab on Windows is a mouse capture, which loses the events
+ * once the pointer is over another program's window with no button down:
+ * the guest pointer stops, the host pointer shows, and the next click goes
+ * to that window.  SDL confines a grabbed pointer the same way.
+ */
+static void gd_clip_pointer(VirtualConsole *vc, bool clip)
+{
+#ifdef G_OS_WIN32
+    GtkDisplayState *s = vc->s;
+    GdkWindow *win, *top;
+    POINT origin;
+    RECT rect, current;
+    gint wx, wy, tx, ty, scale;
+
+    if (!clip || !gtk_widget_get_realized(vc->gfx.drawing_area)) {
+        if (s->ptr_clipped) {
+            ClipCursor(NULL);
+            s->ptr_clipped = FALSE;
+        }
+        return;
+    }
+
+    /* GDK root coordinates are shifted from Win32 screen coordinates. */
+    win = gtk_widget_get_window(vc->gfx.drawing_area);
+    top = gtk_widget_get_window(vc->window ? vc->window : s->window);
+    scale = gdk_window_get_scale_factor(win);
+    gdk_window_get_origin(win, &wx, &wy);
+    gdk_window_get_origin(top, &tx, &ty);
+    origin.x = (wx - tx) * scale;
+    origin.y = (wy - ty) * scale;
+    if (!ClientToScreen(gd_win32_get_hwnd(vc), &origin)) {
+        return;
+    }
+    rect.left = origin.x;
+    rect.top = origin.y;
+    rect.right = origin.x +
+        gtk_widget_get_allocated_width(vc->gfx.drawing_area) * scale;
+    rect.bottom = origin.y +
+        gtk_widget_get_allocated_height(vc->gfx.drawing_area) * scale;
+
+    /* Windows drops the clip on some desktop changes: check it each time. */
+    if (s->ptr_clipped && GetClipCursor(&current) &&
+        EqualRect(&current, &rect)) {
+        return;
+    }
+    ClipCursor(&rect);
+    s->ptr_clipped = TRUE;
+#endif
+}
+
+/*
+ * A display with a host-drawn hardware cursor reports the guest cursor's
+ * position in frame buffer coordinates; the host pointer carries that cursor.
+ * A grabbed pointer is hidden and kept in the middle of the drawing area, so
+ * it is not moved.
+ */
 static void gd_mouse_set(DisplayChangeListener *dcl,
                          int x, int y, bool visible)
 {
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
     GdkDisplay *dpy;
     gint x_root, y_root;
+    int ox, oy;
 
     if (!gtk_widget_get_realized(vc->gfx.drawing_area) ||
-        qemu_input_is_absolute(dcl->con)) {
+        qemu_input_is_absolute(dcl->con) || !visible || !vc->gfx.ds ||
+        vc->s->ptr_owner == vc) {
         return;
     }
 
     dpy = gtk_widget_get_display(vc->gfx.drawing_area);
+    gd_fb_offset(vc, &ox, &oy);
     gdk_window_get_root_coords(gtk_widget_get_window(vc->gfx.drawing_area),
-                               x, y, &x_root, &y_root);
+                               ox + x * vc->gfx.scale_x,
+                               oy + y * vc->gfx.scale_y,
+                               &x_root, &y_root);
     gdk_device_warp(gd_get_pointer(dpy),
                     gtk_widget_get_screen(vc->gfx.drawing_area),
                     x_root, y_root);
@@ -980,31 +1069,15 @@ static gboolean gd_motion_event(GtkWidget *widget, GdkEventMotion *motion,
     GtkDisplayState *s = vc->s;
     int fbx, fby;
     int wx_offset, wy_offset;
-    int wh_surface, ww_surface;
     int ww_widget, wh_widget;
 
     if (!vc->gfx.ds) {
         return TRUE;
     }
 
-    ww_surface = surface_width(vc->gfx.ds) * vc->gfx.scale_x;
-    wh_surface = surface_height(vc->gfx.ds) * vc->gfx.scale_y;
     ww_widget = gtk_widget_get_allocated_width(widget);
     wh_widget = gtk_widget_get_allocated_height(widget);
-
-    /*
-     * `widget` may not have the same size with the frame buffer.
-     * In such cases, some paddings are needed around the `vc`.
-     * To achieve that, `vc` will be displayed at (mx, my)
-     * so that it is displayed at the center of the widget.
-     */
-    wx_offset = wy_offset = 0;
-    if (ww_widget > ww_surface) {
-        wx_offset = (ww_widget - ww_surface) / 2;
-    }
-    if (wh_widget > wh_surface) {
-        wy_offset = (wh_widget - wh_surface) / 2;
-    }
+    gd_fb_offset(vc, &wx_offset, &wy_offset);
 
     /*
      * `motion` is reported in `widget` coordinates
@@ -1036,32 +1109,34 @@ static gboolean gd_motion_event(GtkWidget *widget, GdkEventMotion *motion,
     s->last_y = fby;
     s->last_set = TRUE;
 
-    if (!qemu_input_is_absolute(vc->gfx.dcl.con) && s->ptr_owner == vc) {
-        GdkScreen *screen = gtk_widget_get_screen(vc->gfx.drawing_area);
+    /*
+     * The grab stays set while another program has the focus, and the pointer
+     * still sends motion when it is over this window: leave it free then.
+     */
+    if (!qemu_input_is_absolute(vc->gfx.dcl.con) && s->ptr_owner == vc &&
+        gtk_widget_has_focus(widget)) {
         GdkDisplay *dpy = gtk_widget_get_display(widget);
-        GdkWindow *win = gtk_widget_get_window(widget);
-        GdkMonitor *monitor = gdk_display_get_monitor_at_window(dpy, win);
-        GdkRectangle geometry;
+        int margin_x = ww_widget / 8;
+        int margin_y = wh_widget / 8;
 
-        int xr = (int)motion->x_root;
-        int yr = (int)motion->y_root;
+        gd_clip_pointer(vc, true);
 
-        gdk_monitor_get_geometry(monitor, &geometry);
+        /*
+         * In relative mode a pointer that leaves the drawing area depends on
+         * the grab to deliver its motion, which only X11 does.  Move it back
+         * to the middle of the drawing area once it nears an edge, so that it
+         * never leaves.
+         */
+        if (gd_can_warp(dpy) && margin_x && margin_y &&
+            (motion->x < margin_x || motion->x >= ww_widget - margin_x ||
+             motion->y < margin_y || motion->y >= wh_widget - margin_y)) {
+            gint xr, yr;
 
-        /* In relative mode check to see if client pointer hit
-         * one of the monitor edges, and if so move it back to the
-         * center of the monitor. This is important because the pointer
-         * in the server doesn't correspond 1-for-1, and so
-         * may still be only half way across the screen. Without
-         * this warp, the server pointer would thus appear to hit
-         * an invisible wall */
-        if (xr <= geometry.x || xr - geometry.x >= geometry.width - 1 ||
-            yr <= geometry.y || yr - geometry.y >= geometry.height - 1) {
-            GdkDevice *dev = gdk_event_get_device((GdkEvent *)motion);
-            xr = geometry.x + geometry.width / 2;
-            yr = geometry.y + geometry.height / 2;
-
-            gdk_device_warp(dev, screen, xr, yr);
+            gdk_window_get_root_coords(gtk_widget_get_window(widget),
+                                       ww_widget / 2, wh_widget / 2,
+                                       &xr, &yr);
+            gdk_device_warp(gdk_event_get_device((GdkEvent *)motion),
+                            gtk_widget_get_screen(widget), xr, yr);
             s->last_set = FALSE;
             return FALSE;
         }
@@ -1732,6 +1807,10 @@ static void gd_grab_pointer(VirtualConsole *vc, const char *reason)
     gdk_device_get_position(gd_get_pointer(display),
                             NULL, &vc->s->grab_x_root, &vc->s->grab_y_root);
     vc->s->ptr_owner = vc;
+    if (!qemu_input_is_absolute(vc->gfx.dcl.con) &&
+        gtk_widget_has_focus(vc->gfx.drawing_area)) {
+        gd_clip_pointer(vc, true);
+    }
     gd_update_caption(vc->s);
     trace_gd_grab(vc->label, "ptr", reason);
 }
@@ -1745,6 +1824,7 @@ static void gd_ungrab_pointer(GtkDisplayState *s)
         return;
     }
     s->ptr_owner = NULL;
+    gd_clip_pointer(vc, false);
 
     display = gtk_widget_get_display(vc->gfx.drawing_area);
     gd_grab_update(vc, vc->s->kbd_owner == vc, false);
@@ -1836,6 +1916,9 @@ static gboolean gd_focus_in_event(GtkWidget *widget,
     VirtualConsole *vc = opaque;
 
     win32_kbd_set_window(gd_win32_get_hwnd(vc));
+    if (vc->s->ptr_owner == vc && !qemu_input_is_absolute(vc->gfx.dcl.con)) {
+        gd_clip_pointer(vc, true);
+    }
     return TRUE;
 }
 
@@ -1846,6 +1929,7 @@ static gboolean gd_focus_out_event(GtkWidget *widget,
     GtkDisplayState *s = vc->s;
 
     win32_kbd_set_window(NULL);
+    gd_clip_pointer(vc, false);
     gtk_release_modifiers(s);
     return TRUE;
 }

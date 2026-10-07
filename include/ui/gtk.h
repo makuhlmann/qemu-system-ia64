@@ -133,6 +133,7 @@ struct GtkDisplayState {
     int last_y;
     int grab_x_root;
     int grab_y_root;
+    gboolean ptr_clipped;
     VirtualConsole *kbd_owner;
     VirtualConsole *ptr_owner;
 
