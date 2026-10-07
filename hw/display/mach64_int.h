@@ -78,6 +78,8 @@ struct Mach64VGAState {
     MemoryRegion mm;
     MemoryRegion vga_aper;
     MemoryRegion be_aper;
+    MemoryRegion aper_block0;
+    MemoryRegion aper_block1;
 
     /* Block-0 register file, indexed by Mach64 block index (see mach64_regs.h). */
     uint32_t regs[MACH64_NREGS];

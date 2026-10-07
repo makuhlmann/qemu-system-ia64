@@ -975,6 +975,20 @@ static void mach64_vga_aper_update(Mach64VGAState *s)
                               (s->regs[CONFIG_CNTL] & CFG_MEM_VGA_AP_EN) != 0);
 }
 
+/*
+ * The register blocks also show at the top of the first 8 MB of the linear
+ * aperture, block 0 at 7FFC00h unless BUS_APER_REG_DIS and block 1 at 7FF800h
+ * with BUS_EXT_REG_EN, over the frame buffer (RRG-C04300-C 2.3.1, Table 2-8).
+ */
+static void mach64_aper_regs_update(Mach64VGAState *s)
+{
+    bool regs = !(s->regs[BUS_CNTL] & BUS_APER_REG_DIS);
+
+    memory_region_set_enabled(&s->aper_block0, regs);
+    memory_region_set_enabled(&s->aper_block1,
+                              regs && (s->regs[BUS_CNTL] & BUS_EXT_REG_EN));
+}
+
 static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
 {
     Mach64VGAState *s = opaque;
@@ -1208,6 +1222,10 @@ static void mach64_mm_write(void *opaque, hwaddr addr, uint64_t data,
         s->regs[CONFIG_CNTL] = (s->regs[CONFIG_CNTL] & ~CFG_MEM_AP_SIZE) |
                                CFG_MEM_AP_SIZE_2X8M;
         mach64_vga_aper_update(s);
+        return;
+    case BUS_CNTL:
+        mach64_reg_store(s, reg, byte, size, data);
+        mach64_aper_regs_update(s);
         return;
     case GUI_TRAJ_CNTL:
         mach64_reg_store(s, reg, byte, size, data);
@@ -1459,6 +1477,7 @@ static int mach64_post_load(void *opaque, int version_id)
     mach64_update_shadow(s);
     mach64_update_irq(s);
     mach64_vga_aper_update(s);
+    mach64_aper_regs_update(s);
     graphic_hw_invalidate(s->vga.con);
     return 0;
 }
@@ -1585,6 +1604,14 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
                           "mach64.vram-be", MACH64_LINEAR_APER_SIZE / 2);
     memory_region_add_subregion(&s->linear_aper, MACH64_LINEAR_APER_SIZE / 2,
                                 &s->be_aper);
+    memory_region_init_alias(&s->aper_block1, OBJECT(s), "mach64.aper-block1",
+                             &s->mm, 0, MACH64_REG_BLOCK0_BASE);
+    memory_region_add_subregion_overlap(&s->linear_aper, 0x7ff800,
+                                        &s->aper_block1, 1);
+    memory_region_init_alias(&s->aper_block0, OBJECT(s), "mach64.aper-block0",
+                             &s->mm, MACH64_REG_BLOCK0_BASE, 0x400);
+    memory_region_add_subregion_overlap(&s->linear_aper, 0x7ffc00,
+                                        &s->aper_block0, 1);
 
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->linear_aper);
     pci_register_bar(dev, 1, PCI_BASE_ADDRESS_SPACE_IO, &s->io);
@@ -1634,6 +1661,7 @@ static void mach64_vga_reset(DeviceState *dev)
     s->regs[CONFIG_CNTL] = CFG_MEM_AP_SIZE_2X8M;   /* read-only, RRG 0_37 */
     mach64_update_irq(s);
     mach64_vga_aper_update(s);
+    mach64_aper_regs_update(s);
     mach64_update_shadow(s);
 
     /*

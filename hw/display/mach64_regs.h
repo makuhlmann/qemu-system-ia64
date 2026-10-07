@@ -69,6 +69,8 @@
 #define CLOCK_CNTL_PLL_DATA_MASK  0x00ff0000ul   /* byte 2 */
 #define CLOCK_CNTL_PLL_DATA_SHIFT 16
 #define BUS_CNTL                0x28
+#define BUS_APER_REG_DIS        0x00000010u
+#define BUS_EXT_REG_EN          0x08000000u
 #define LCD_INDEX               0x29
 #define LCD_DATA                0x2a
 #define MEM_CNTL                0x2c
