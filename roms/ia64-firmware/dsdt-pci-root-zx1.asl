@@ -248,15 +248,22 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     // is the VGA owner, so its root decodes the legacy VGA I/O
                     // (the VGA arbiter designates the root that decodes both the
                     // VGA legacy I/O and the 0xA0000 aperture as the VGA owner).
+                    // The rx2600 firmware gives this root its ports untranslated
+                    // (\LBA.IOSP: offset 0, TypeStatic, DenseTranslation).  A
+                    // translation makes acpi.sys export a translator for the
+                    // root, which then has to translate the 1 GiB AGP aperture
+                    // that hpagp adds to the requirements and finds no window
+                    // for it: Code 33 (WSRV03 base/busdrv/acpi/driver/nt/
+                    // translate.c:212,629).
                     QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                        EntireRange, 0, 0x000003B0, 0x000003DF, 0xFFFFC000000,
-                        0x00000030, , , , TypeTranslation, SparseTranslation)
+                        EntireRange, 0, 0x000003B0, 0x000003DF, 0,
+                        0x00000030, , , , TypeStatic, DenseTranslation)
                     // The port space of ropes 4 and 5: the AGP ioa is a
                     // double-wide rope 4 (mio ERS 2.4.1), and the graphics
                     // I/O BAR sits at its start (IA64_ZX1_AGP_IO_BASE).
                     QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
-                        EntireRange, 0, 0x00008000, 0x0000BFFF, 0xFFFFC000000,
-                        0x00004000, , , , TypeTranslation, SparseTranslation)
+                        EntireRange, 0, 0x00008000, 0x0000BFFF, 0,
+                        0x00004000, , , , TypeStatic, DenseTranslation)
                     // Legacy VGA aperture + option-ROM/VBIOS window: real zx1
                     // forwards VGA (and its VBE extension) cycles to the AGP rope.
                     DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,

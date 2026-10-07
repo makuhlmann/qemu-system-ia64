@@ -2147,9 +2147,13 @@ static BOOLEAN test_dsdt_lba0_crs(const TEST_TABLE_CONTEXT *Context)
         if (length > resource_length - offset - 3U) {
             return 0;
         }
+        /*
+         * The Mercury root's ports are untranslated (type flags 0x03, _TRA 0),
+         * as the rx2600 firmware's \LBA.IOSP: a translation made Windows put
+         * a translator on the root, which failed hpagp's AGP aperture.
+         */
         if (descriptor[0] == 0x8aU && length == 43U && descriptor[3] == 1U &&
-            descriptor[5] == 0x33U &&
-            get_u64(descriptor + 30U) == TEST_SPARSE_IO_BASE) {
+            descriptor[5] == 0x03U && get_u64(descriptor + 30U) == 0) {
             if (get_u64(descriptor + 14U) == 0x000003b0U &&
                 get_u64(descriptor + 22U) == 0x000003dfU &&
                 get_u64(descriptor + 38U) == 0x00000030U) {
