@@ -936,6 +936,7 @@ static void fw_maint_set_timeout(void)
         if (choice == 0) {
             UINT16 current = fw_menu_read_timeout();
             UINT32 value = 0;
+            UINTN digits = 0;
             BOOLEAN entered = 0;
 
             fw_maint_frame("Change Auto Boot TimeOut value");
@@ -955,14 +956,22 @@ static void fw_maint_set_timeout(void)
                     break;
                 }
                 if (key.UnicodeChar == '\r' || key.UnicodeChar == '\n') {
+                    entered = digits > 0;
                     break;
+                }
+                if ((key.UnicodeChar == 0x08 || key.UnicodeChar == 0x7f) &&
+                    digits > 0) {
+                    value /= 10U;
+                    digits--;
+                    efi_conout_ascii("\b \b");
+                    continue;
                 }
                 if (key.UnicodeChar >= '0' && key.UnicodeChar <= '9' &&
                     value * 10U + (UINT32)(key.UnicodeChar - '0') <= 65535U) {
                     CHAR8 echo[2];
 
                     value = value * 10U + (UINT32)(key.UnicodeChar - '0');
-                    entered = 1;
+                    digits++;
                     echo[0] = (CHAR8)key.UnicodeChar;
                     echo[1] = 0;
                     efi_conout_ascii(echo);
