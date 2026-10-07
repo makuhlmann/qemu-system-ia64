@@ -125,6 +125,8 @@ typedef struct gf_channel {
         uint32_t notifier;
         uint32_t beta_object;   /* CONTEXT_BETA1 bound via SetContextBeta1 */
     } schs[GEFORCE_SUBCHANNEL_COUNT];
+    /* RAMIN object whose graph options the gdi_ and iifc_ fields hold. */
+    uint32_t opt_object;
 
     bool notify_pending;
     uint32_t notify_type;

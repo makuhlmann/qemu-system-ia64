@@ -617,6 +617,46 @@ static void nv15_surf2d_rebind_keeps_dma(void)
     qtest_quit(qts);
 }
 
+/*
+ * Graph object options (operation, colour format) belong to the object in
+ * RAMIN and are reloaded on every bind (envytools, PGRAPH, "Graph object
+ * options").  The Windows NV4 display driver keeps two IIFC objects, a ROP
+ * one on subchannel 0 and a BLEND_PREMULT one on subchannel 7; rebinding
+ * subchannel 0 must not write the other object's options into the first.
+ */
+#define NV15_RAMIN_IIFC2    0x2900U
+#define NV15_H_IIFC2        0xbeef0008U
+
+static void nv15_iifc_options_stay_per_object(void)
+{
+    QTestState *qts = nv15_start();
+
+    nv_engine_reset_ramht(qts);
+    nv_make_gr_object(qts, NV15_RAMIN_IIFC, NV_CLASS_IIFC);
+    nv_make_gr_object(qts, NV15_RAMIN_IIFC2, NV_CLASS_IIFC);
+    nv_make_gr_object(qts, NV15_RAMIN_RECT, NV_CLASS_RECT);
+    nv_ramht_insert(qts, NV15_H_IIFC, 0, NV_ENGINE_GRAPH, NV15_RAMIN_IIFC);
+    nv_ramht_insert(qts, NV15_H_IIFC2, 0, NV_ENGINE_GRAPH, NV15_RAMIN_IIFC2);
+    nv_ramht_insert(qts, NV15_H_RECT, 0, NV_ENGINE_GRAPH, NV15_RAMIN_RECT);
+
+    nv_method(qts, 0, 0, 0x000, NV15_H_IIFC);
+    nv_method(qts, 0, 0, 0x0f9, 1);                     /* ROP_AND        */
+    nv_method(qts, 0, 0, 0x0fa, 5);                     /* X8R8G8B8       */
+    nv_method(qts, 0, 7, 0x000, NV15_H_IIFC2);
+    nv_method(qts, 0, 7, 0x0f9, 5);                     /* BLEND_PREMULT  */
+    nv_method(qts, 0, 7, 0x0fa, 4);                     /* A8R8G8B8       */
+    nv_method(qts, 0, 0, 0x000, NV15_H_RECT);
+    nv_method(qts, 0, 0, 0x000, NV15_H_IIFC);
+
+    g_assert_cmphex((nv_ramin_r(qts, NV15_RAMIN_IIFC) >> 15) & 7, ==, 1);
+    g_assert_cmphex((nv_ramin_r(qts, NV15_RAMIN_IIFC + 4) >> 8) & 0xff, ==,
+                    5 + 9);
+    g_assert_cmphex((nv_ramin_r(qts, NV15_RAMIN_IIFC2) >> 15) & 7, ==, 5);
+    g_assert_cmphex((nv_ramin_r(qts, NV15_RAMIN_IIFC2 + 4) >> 8) & 0xff, ==,
+                    4 + 9);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -636,6 +676,8 @@ int main(int argc, char **argv)
                        nv15_fifo_dma_channel_switch);
         qtest_add_func("/nv15gl/surf2d-rebind-keeps-dma",
                        nv15_surf2d_rebind_keeps_dma);
+        qtest_add_func("/nv15gl/iifc-options-stay-per-object",
+                       nv15_iifc_options_stay_per_object);
     }
 
     return g_test_run();

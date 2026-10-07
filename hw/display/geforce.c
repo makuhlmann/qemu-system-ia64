@@ -1158,6 +1158,38 @@ static uint32_t nv_beta_load(NV15State *s, uint32_t obj, uint32_t def)
     return def;
 }
 
+/*
+ * Graph object options (operation, colour format, LUT DMA) belong to the
+ * object in RAMIN; PGRAPH reloads them on every bind and subchannel switch,
+ * and NV5+ option methods write them back to the object (envytools, PGRAPH,
+ * "Graph object options").  The driver keeps two IIFC objects: ROP_AND/X8 on
+ * one subchannel, BLEND_PREMULT/A8 on another.
+ */
+static void nv_load_object_options(NV15State *s, gf_channel *ch, uint32_t obj)
+{
+    uint32_t word0 = nv_ramin_read32(s, obj);
+    uint32_t word1 = nv_ramin_read32(s, obj + 0x4);
+    uint8_t cls8 = word0;
+
+    if (cls8 == 0x4a || cls8 == 0x4b) {
+        ch->gdi_operation = (word0 >> 15) & 7;
+        ch->gdi_mono_fmt = word1 & 3;
+    } else if (cls8 == 0x64) {
+        ch->iifc_palette = nv_ramin_read32(s, obj + 0x8) << 4;
+        ch->iifc_operation = (word0 >> 15) & 7;
+        ch->iifc_color_fmt = (word1 >> 8 & 0xFF) - 9;
+        nv2d_update_color_bytes_iifc(s, ch);
+    }
+    ch->opt_object = obj;
+}
+
+static void nv_store_object_option(NV15State *s, uint32_t obj, uint32_t ofs,
+                                   uint32_t mask, uint32_t val)
+{
+    nv_ramin_write32(s, obj + ofs, (nv_ramin_read32(s, obj + ofs) & ~mask) |
+                                   (val & mask));
+}
+
 static int nv_execute_command(NV15State *s, uint32_t chid, uint32_t subc,
                               uint32_t method, uint32_t param)
 {
@@ -1168,19 +1200,6 @@ static int nv_execute_command(NV15State *s, uint32_t chid, uint32_t subc,
         if (ch->schs[subc].engine == 0x01) {
             uint32_t word1 = nv_ramin_read32(s, ch->schs[subc].object + 0x4);
             word1 = (word1 & 0x0000FFFF) | (ch->schs[subc].notifier >> 4 << 16);
-            uint32_t word0 = nv_ramin_read32(s, ch->schs[subc].object);
-            uint8_t cls8 = word0;
-            if (cls8 == 0x4a || cls8 == 0x4b) {
-                word0 = (word0 & 0xFFFC7FFF) | (ch->gdi_operation << 15);
-                word1 = (word1 & 0xFFFFFFFC) | ch->gdi_mono_fmt;
-                nv_ramin_write32(s, ch->schs[subc].object, word0);
-            } else if (cls8 == 0x64) {
-                nv_ramin_write32(s, ch->schs[subc].object + 0x8,
-                                 ch->iifc_palette >> 4);
-                word0 = (word0 & 0xFFFC7FFF) | (ch->iifc_operation << 15);
-                nv_ramin_write32(s, ch->schs[subc].object, word0);
-                word1 = (word1 & 0xFFFF00FF) | ((ch->iifc_color_fmt + 9) << 8);
-            }
             nv_ramin_write32(s, ch->schs[subc].object + 0x4, word1);
         }
         nv_ramht_lookup(s, param, chid, &ch->schs[subc].object,
@@ -1204,19 +1223,14 @@ static int nv_execute_command(NV15State *s, uint32_t chid, uint32_t subc,
                     ch->s2d_ofs_dst = s->graph_offset0;
                 }
             } else if (cls8 == 0x4a || cls8 == 0x4b) {
-                ch->gdi_operation = (word0 >> 15) & 7;
-                ch->gdi_mono_fmt = word1 & 3;
+                nv_load_object_options(s, ch, ch->schs[subc].object);
             } else if (cls8 == 0x62) {
                 uint32_t srcdst =
                     nv_ramin_read32(s, ch->schs[subc].object + 0x8);
                 ch->s2d_img_src = (srcdst & 0xFFFF) << 4;
                 ch->s2d_img_dst = srcdst >> 16 << 4;
             } else if (cls8 == 0x64) {
-                ch->iifc_palette =
-                    nv_ramin_read32(s, ch->schs[subc].object + 0x8) << 4;
-                ch->iifc_operation = (word0 >> 15) & 7;
-                ch->iifc_color_fmt = (word1 >> 8 & 0xFF) - 9;
-                nv2d_update_color_bytes_iifc(s, ch);
+                nv_load_object_options(s, ch, ch->schs[subc].object);
             } else if (cls8 == 0x96 || cls8 == 0x97) {
                 nv3d_execute_d3d(s, ch, word0 & s->class_mask, 0, 0);
             }
@@ -1274,6 +1288,31 @@ static int nv_execute_command(NV15State *s, uint32_t chid, uint32_t subc,
             if (ch->schs[subc].beta_object) {
                 ch->beta = nv_beta_load(s, ch->schs[subc].beta_object,
                                         ch->beta);
+            }
+            if ((cls8 == 0x4a || cls8 == 0x4b || cls8 == 0x64) &&
+                ch->opt_object != ch->schs[subc].object) {
+                nv_load_object_options(s, ch, ch->schs[subc].object);
+            }
+            if (cls8 == 0x64) {
+                uint32_t obj = ch->schs[subc].object;
+                if (method == 0x061) {
+                    nv_store_object_option(s, obj, 0x8, 0xFFFFFFFF,
+                                           param >> 4);
+                } else if (method == 0x0f9) {
+                    nv_store_object_option(s, obj, 0x0, 0x00038000,
+                                           param << 15);
+                } else if (method == 0x0fa) {
+                    nv_store_object_option(s, obj, 0x4, 0x0000FF00,
+                                           (param + 9) << 8);
+                }
+            } else if (cls8 == 0x4a || cls8 == 0x4b) {
+                uint32_t obj = ch->schs[subc].object;
+                if (method == 0x0bf) {
+                    nv_store_object_option(s, obj, 0x0, 0x00038000,
+                                           param << 15);
+                } else if (method == 0x0c1) {
+                    nv_store_object_option(s, obj, 0x4, 0x00000003, param);
+                }
             }
             switch (cls8) {
             case 0x19:
