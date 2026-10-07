@@ -1074,6 +1074,438 @@ static void ia64_int10_ddc(IA64VpcMachineState *s)
 }
 
 /*
+ * mach64 (RAGE XL) block-0 registers, reached through the fixed BAR2 window:
+ * block 0 sits at BAR2 + 400h (RAGE XL RRG, MM offsets 0_xx).
+ */
+#define IA64_M64_BLOCK0                 (IA64_VGA_MMIO_PCI_BASE + 0x400)
+#define IA64_M64_CRTC_H_TOTAL_DISP      0x00
+#define IA64_M64_CRTC_H_SYNC_STRT_WID   0x01
+#define IA64_M64_CRTC_V_TOTAL_DISP      0x02
+#define IA64_M64_CRTC_V_SYNC_STRT_WID   0x03
+#define IA64_M64_CRTC_OFF_PITCH         0x05
+#define IA64_M64_CRTC_GEN_CNTL          0x07
+#define IA64_M64_CLOCK_CNTL             0x24
+#define IA64_M64_DAC_CNTL               0x31
+#define IA64_M64_CONFIG_CNTL            0x37
+
+#define IA64_M64_GEN_DBL_SCAN_EN        0x00000001U
+#define IA64_M64_GEN_INTERLACE_EN       0x00000002U
+#define IA64_M64_GEN_HSYNC_DIS          0x00000004U
+#define IA64_M64_GEN_VSYNC_DIS          0x00000008U
+#define IA64_M64_GEN_DISPLAY_DIS        0x00000040U
+#define IA64_M64_GEN_PIX_WIDTH          0x00000700U
+#define IA64_M64_GEN_EXT_DISP_EN        0x01000000U
+#define IA64_M64_GEN_EN                 0x02000000U
+#define IA64_M64_DAC_8BIT_EN            0x00000100U
+#define IA64_M64_CFG_MEM_VGA_AP_EN      0x00000004U
+#define IA64_M64_PLL_WR_EN              0x00000200U
+#define IA64_M64_PIX_8BPP               2
+#define IA64_M64_PIX_32BPP              6
+
+/* Internal PLL registers (RAGE XL RRG Table 3-3). */
+#define IA64_M64_PLL_REF_DIV            0x02
+#define IA64_M64_PLL_VCLK_POST_DIV      0x06
+#define IA64_M64_PLL_VCLK3_FB_DIV       0x0a
+#define IA64_M64_PLL_EXT_CNTL           0x0b
+#define IA64_M64_PLL_ALT_VCLK3_POST     0x80
+/*
+ * XTALIN in 10 kHz: the RAGE XL takes a 14.3 or a 29.5 MHz crystal (RRG
+ * PLL_REF_DIV); 29.50 MHz is the reference of SeaVGABIOS's mach64 clock
+ * table and the 2003 miniport's default (DDLGetReferenceFreq).
+ */
+#define IA64_M64_REF_FREQ               2950U
+#define IA64_M64_PCLK_MAX               23000U
+
+/* CRT parameter table flags, word 2 (PRG-215R3 Table A-9). */
+#define IA64_M64_CRT_DBL_SCAN           0x0100U
+#define IA64_M64_CRT_INTERLACE          0x0200U
+/*
+ * Bit 5 of each sync-width byte is the register's sync polarity bit
+ * (CRTC_H/V_SYNC_POL, bit 21): the miniports build caller tables that way
+ * (WSRV03/drivers/video/ms/ati/mini/cvtddc.c:369-376).
+ */
+#define IA64_M64_SYNC_NEG               0x20U
+#define IA64_M64_CRT_TABLE_SIZE         30U
+
+typedef struct IA64Mach64Crtc {
+    uint16_t flags;
+    uint8_t h_total;
+    uint8_t h_disp;
+    uint8_t h_sync_strt;
+    uint8_t h_sync_wid;
+    uint16_t v_total;
+    uint16_t v_disp;
+    uint16_t v_sync_strt;
+    uint8_t v_sync_wid;
+    uint8_t clock_cntl;
+    uint16_t dot_clock;
+    uint16_t h_overscan;
+} IA64Mach64Crtc;
+
+static bool ia64_int10_is_mach64(IA64VpcMachineState *s)
+{
+    return object_dynamic_cast(OBJECT(s->vga_dev), "mach64-vga") != NULL;
+}
+
+static uint32_t ia64_m64_read(unsigned reg)
+{
+    return address_space_ldl_le(&address_space_memory,
+                                IA64_M64_BLOCK0 + reg * 4,
+                                MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+static void ia64_m64_write(unsigned reg, uint32_t value)
+{
+    address_space_stl_le(&address_space_memory, IA64_M64_BLOCK0 + reg * 4,
+                         value, MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+static void ia64_m64_mask(unsigned reg, uint32_t off, uint32_t on)
+{
+    ia64_m64_write(reg, (ia64_m64_read(reg) & ~off) | on);
+}
+
+static uint8_t ia64_m64_pll_read(uint8_t index)
+{
+    uint32_t sel = ia64_m64_read(IA64_M64_CLOCK_CNTL) & 0x03;
+
+    ia64_m64_write(IA64_M64_CLOCK_CNTL, sel | (uint32_t)index << 10);
+    return ia64_m64_read(IA64_M64_CLOCK_CNTL) >> 16;
+}
+
+static void ia64_m64_pll_write(uint8_t index, uint8_t value)
+{
+    uint32_t sel = ia64_m64_read(IA64_M64_CLOCK_CNTL) & 0x03;
+
+    ia64_m64_write(IA64_M64_CLOCK_CNTL, sel | (uint32_t)index << 10 |
+                   IA64_M64_PLL_WR_EN | (uint32_t)value << 16);
+    ia64_m64_write(IA64_M64_CLOCK_CNTL, sel);
+}
+
+/* VESA DMT timings for the built-in resolution codes. */
+typedef struct IA64Mach64Dmt {
+    uint16_t width, height, clock;
+    uint16_t hfp, hs, hbp;
+    uint8_t vfp, vs, vbp;
+    bool negative;
+} IA64Mach64Dmt;
+
+static const IA64Mach64Dmt ia64_m64_dmt[] = {
+    {  640,  480,  2518, 16,  96,  48, 10, 2, 33, true },
+    {  800,  600,  4000, 40, 128,  88,  1, 4, 23, false },
+    { 1024,  768,  6500, 24, 136, 160,  3, 6, 29, true },
+    { 1280, 1024, 10800, 48, 112, 248,  1, 3, 38, false },
+    { 1600, 1200, 16200, 64, 192, 304,  1, 3, 46, false },
+};
+
+/* CH codes of functions 00h/02h (PRG-215R3 A.4). */
+static const struct {
+    uint8_t code;
+    uint16_t width, height;
+} ia64_m64_res_codes[] = {
+    { 0x12,  640,  480 }, { 0x6a,  800,  600 }, { 0x55, 1024,  768 },
+    { 0x83, 1280, 1024 }, { 0x84, 1600, 1200 }, { 0xe1,  640,  400 },
+    { 0xe3,  320,  240 }, { 0xe4,  512,  384 }, { 0xe5,  400,  300 },
+};
+
+/*
+ * The DMT timing where one exists, otherwise blanking of a quarter of the
+ * width and a twentieth of the height at 60 Hz: the same choice as the
+ * SeaVGABIOS mach64 backend (qemu-seabios vgasrc/machext.c mach_timing).
+ */
+static void ia64_m64_timing(IA64Mach64Crtc *t, uint16_t w, uint16_t h)
+{
+    uint32_t hfp = 16, hs = w / 8, hbp = w / 8, vfp = 3, vs = 4, vbp = h / 20;
+    uint32_t clock = 0;
+    uint32_t htotal, vtotal;
+    uint8_t pol = 0;
+    size_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(ia64_m64_dmt); i++) {
+        const IA64Mach64Dmt *d = &ia64_m64_dmt[i];
+
+        if (d->width == w && d->height == h) {
+            hfp = d->hfp;
+            hs = d->hs;
+            hbp = d->hbp;
+            vfp = d->vfp;
+            vs = d->vs;
+            vbp = d->vbp;
+            clock = d->clock;
+            pol = d->negative ? IA64_M64_SYNC_NEG : 0;
+            break;
+        }
+    }
+    hs = ROUND_UP(hs, 8);
+    htotal = w + hfp + hs + ROUND_UP(hbp, 8);
+    vtotal = h + vfp + vs + vbp;
+    if (!clock) {
+        clock = htotal * vtotal * 60 / 10000;
+    }
+
+    memset(t, 0, sizeof(*t));
+    t->h_total = htotal / 8 - 1;
+    t->h_disp = w / 8 - 1;
+    t->h_sync_strt = (w + hfp) / 8 - 1;
+    t->h_sync_wid = hs / 8 | pol;
+    t->v_total = vtotal - 1;
+    t->v_disp = h - 1;
+    t->v_sync_strt = h + vfp - 1;
+    t->v_sync_wid = vs | pol;
+    t->clock_cntl = 0xff;
+    t->dot_clock = clock;
+}
+
+/*
+ * VCLK = 2 * XTALIN * FB / (PLL_REF_DIV * post) (RRG VCLK3_FB_DIV); take the
+ * largest post divider that keeps FB in 8 bits, then select VCLK3.
+ */
+static void ia64_m64_set_clock(uint16_t clock)
+{
+    static const uint8_t post_sel[] = { 3, 2, 1, 0 };
+    uint32_t refdiv = ia64_m64_pll_read(IA64_M64_PLL_REF_DIV);
+    size_t i;
+
+    if (!clock || clock > IA64_M64_PCLK_MAX || !refdiv) {
+        return;
+    }
+    for (i = 0; i < G_N_ELEMENTS(post_sel); i++) {
+        uint32_t num = (uint32_t)clock * (1U << post_sel[i]) * refdiv;
+        uint32_t fb = (num + IA64_M64_REF_FREQ) / (2 * IA64_M64_REF_FREQ);
+
+        if (fb > 0xff) {
+            continue;
+        }
+        ia64_m64_pll_write(IA64_M64_PLL_VCLK_POST_DIV,
+                           (ia64_m64_pll_read(IA64_M64_PLL_VCLK_POST_DIV) &
+                            0x3f) | post_sel[i] << 6);
+        ia64_m64_pll_write(IA64_M64_PLL_EXT_CNTL,
+                           ia64_m64_pll_read(IA64_M64_PLL_EXT_CNTL) &
+                           ~IA64_M64_PLL_ALT_VCLK3_POST);
+        ia64_m64_pll_write(IA64_M64_PLL_VCLK3_FB_DIV, fb);
+        ia64_m64_mask(IA64_M64_CLOCK_CNTL, 0x03, 0x03);
+        return;
+    }
+}
+
+static void ia64_m64_load_crtc(const IA64Mach64Crtc *t, uint8_t pixw,
+                               uint16_t pitch)
+{
+    uint32_t gen = ia64_m64_read(IA64_M64_CRTC_GEN_CNTL) &
+                   ~(IA64_M64_GEN_PIX_WIDTH | IA64_M64_GEN_DBL_SCAN_EN |
+                     IA64_M64_GEN_INTERLACE_EN);
+
+    ia64_m64_write(IA64_M64_CRTC_GEN_CNTL, gen | IA64_M64_GEN_DISPLAY_DIS);
+    ia64_m64_write(IA64_M64_CRTC_H_TOTAL_DISP,
+                   t->h_total | (uint32_t)t->h_disp << 16);
+    ia64_m64_write(IA64_M64_CRTC_H_SYNC_STRT_WID,
+                   t->h_sync_strt | (t->h_overscan & 0x0700) |
+                   (uint32_t)(t->h_sync_wid & 0x3f) << 16);
+    ia64_m64_write(IA64_M64_CRTC_V_TOTAL_DISP,
+                   (t->v_total & 0x7ff) | (uint32_t)(t->v_disp & 0x7ff) << 16);
+    ia64_m64_write(IA64_M64_CRTC_V_SYNC_STRT_WID,
+                   (t->v_sync_strt & 0x7ff) |
+                   (uint32_t)(t->v_sync_wid & 0x3f) << 16);
+    ia64_m64_write(IA64_M64_CRTC_OFF_PITCH, (uint32_t)(pitch / 8) << 22);
+    if (t->clock_cntl == 0xff) {
+        ia64_m64_set_clock(t->dot_clock);
+    }
+    if (t->flags & IA64_M64_CRT_DBL_SCAN) {
+        gen |= IA64_M64_GEN_DBL_SCAN_EN;
+    }
+    if (t->flags & IA64_M64_CRT_INTERLACE) {
+        gen |= IA64_M64_GEN_INTERLACE_EN;
+    }
+    ia64_m64_write(IA64_M64_CRTC_GEN_CNTL, gen | (uint32_t)pixw << 8);
+}
+
+static void ia64_m64_enable(bool ext)
+{
+    uint32_t gen = ia64_m64_read(IA64_M64_CRTC_GEN_CNTL) &
+                   ~(IA64_M64_GEN_DISPLAY_DIS | IA64_M64_GEN_HSYNC_DIS |
+                     IA64_M64_GEN_VSYNC_DIS);
+
+    if (ext) {
+        gen |= IA64_M64_GEN_EXT_DISP_EN | IA64_M64_GEN_EN;
+    } else {
+        gen &= ~IA64_M64_GEN_EXT_DISP_EN;
+    }
+    ia64_m64_write(IA64_M64_CRTC_GEN_CNTL, gen);
+}
+
+static void ia64_m64_leave_ext(void)
+{
+    ia64_m64_enable(false);
+    ia64_m64_mask(IA64_M64_DAC_CNTL, IA64_M64_DAC_8BIT_EN, 0);
+    ia64_m64_mask(IA64_M64_CONFIG_CNTL, IA64_M64_CFG_MEM_VGA_AP_EN, 0);
+}
+
+/*
+ * Functions 00h and 02h (PRG-215R3 A.4, A.6).  With CH = 81h the CRT
+ * parameter table (PRG Table A-9) is at DX:BX; both miniports pass
+ * BF00:0000, inside the VGA window, so it is read through the guest's own
+ * memory path and copied before the first register write.
+ */
+static bool ia64_m64_load(IA64VpcMachineState *s, bool enable)
+{
+    uint8_t cl = s->int10_request.cx;
+    uint8_t ch = s->int10_request.cx >> 8;
+    /*
+     * CL[2:0] are CRTC_PIX_WIDTH codes; bits 3 and 5 pick the 32 bpp byte
+     * order (WSRV03/drivers/video/ms/ati/mini/amachcx.h:819).
+     */
+    uint8_t pixw = cl & 0x07;
+    IA64Mach64Crtc t;
+    uint16_t width, pitch;
+    size_t i;
+
+    if (pixw == 0 || pixw > IA64_M64_PIX_32BPP) {
+        return false;
+    }
+    if (ch == 0x81) {
+        uint8_t raw[IA64_M64_CRT_TABLE_SIZE];
+
+        address_space_read(&address_space_memory,
+                           ((hwaddr)s->int10_request.dx << 4) +
+                           s->int10_request.bx,
+                           MEMTXATTRS_UNSPECIFIED, raw, sizeof(raw));
+        if (getenv("IA64_INT10_TRACE")) {
+            uint8_t gr_index = ia64_vga_readb(VGA_GFX_I);
+
+            ia64_vga_writeb(VGA_GFX_I, VGA_GFX_MISC);
+            fprintf(stderr, "int10: mach64 a0%02x cx=%04x table %04x:%04x "
+                    "gr06=%02x:", s->int10_request.ax & 0xff,
+                    s->int10_request.cx, s->int10_request.dx,
+                    s->int10_request.bx, ia64_vga_readb(VGA_GFX_D));
+            ia64_vga_writeb(VGA_GFX_I, gr_index);
+            for (i = 0; i < sizeof(raw); i++) {
+                fprintf(stderr, " %02x", raw[i]);
+            }
+            fprintf(stderr, "\n");
+        }
+        t.flags = lduw_le_p(raw + 0x04);
+        t.h_total = raw[0x06];
+        t.h_disp = raw[0x07];
+        t.h_sync_strt = raw[0x08];
+        t.h_sync_wid = raw[0x09];
+        t.v_total = lduw_le_p(raw + 0x0a);
+        t.v_disp = lduw_le_p(raw + 0x0c);
+        t.v_sync_strt = lduw_le_p(raw + 0x0e);
+        t.v_sync_wid = raw[0x10];
+        t.clock_cntl = raw[0x11];
+        t.dot_clock = lduw_le_p(raw + 0x12);
+        t.h_overscan = lduw_le_p(raw + 0x14);
+    } else {
+        for (i = 0; i < G_N_ELEMENTS(ia64_m64_res_codes); i++) {
+            if (ia64_m64_res_codes[i].code == ch) {
+                break;
+            }
+        }
+        if (i == G_N_ELEMENTS(ia64_m64_res_codes)) {
+            return false;
+        }
+        ia64_m64_timing(&t, ia64_m64_res_codes[i].width,
+                        ia64_m64_res_codes[i].height);
+    }
+
+    width = (t.h_disp + 1) * 8;
+    switch (cl & 0xc0) {
+    case 0x00:
+        pitch = MAX(1024, width);
+        break;
+    case 0x40:
+        pitch = (ia64_m64_read(IA64_M64_CRTC_OFF_PITCH) >> 22) * 8;
+        break;
+    default:
+        pitch = width;
+        break;
+    }
+    ia64_m64_load_crtc(&t, pixw, pitch);
+    if (enable) {
+        ia64_m64_mask(IA64_M64_DAC_CNTL, IA64_M64_DAC_8BIT_EN,
+                      (pixw > IA64_M64_PIX_8BPP || (cl & 0x10)) ?
+                      IA64_M64_DAC_8BIT_EN : 0);
+        ia64_m64_enable(true);
+    }
+    return true;
+}
+
+/*
+ * The mach64 functions of the ATI extended BIOS (PRG-215R3 Appendix A) that
+ * the miniports call beyond the query.  AH: 0 = done, 1 = error.  Returns
+ * false for functions left to the common handler.
+ */
+static bool ia64_int10_mach64_bios(IA64VpcMachineState *s, unsigned fn)
+{
+    uint8_t cl = s->int10_request.cx;
+    uint8_t ah = 0;
+    uint32_t gen;
+
+    switch (fn) {
+    case 0x00:
+    case 0x02:
+        ah = ia64_m64_load(s, fn == 0x02) ? 0 : 1;
+        break;
+    case 0x01:
+        if (cl & 0x01) {
+            ia64_m64_mask(IA64_M64_DAC_CNTL, IA64_M64_DAC_8BIT_EN,
+                          (cl & 0x80) ? IA64_M64_DAC_8BIT_EN : 0);
+            ia64_m64_enable(true);
+        } else {
+            ia64_m64_leave_ext();
+        }
+        /* CL[5] = 0: the CRTC parameters are not doubled by hardware. */
+        s->int10_result.cx &= ~0x0020;
+        break;
+    case 0x05:
+        /* The linear aperture cannot be switched off (PRG A.9). */
+        ia64_m64_mask(IA64_M64_CONFIG_CNTL, IA64_M64_CFG_MEM_VGA_AP_EN,
+                      (cl & 0x04) ? IA64_M64_CFG_MEM_VGA_AP_EN : 0);
+        break;
+    case 0x0c:
+        switch (cl) {
+        case 1:
+            gen = IA64_M64_GEN_HSYNC_DIS;
+            break;
+        case 2:
+            gen = IA64_M64_GEN_VSYNC_DIS;
+            break;
+        case 3:
+            gen = IA64_M64_GEN_HSYNC_DIS | IA64_M64_GEN_VSYNC_DIS;
+            break;
+        case 4:
+            gen = IA64_M64_GEN_DISPLAY_DIS;
+            break;
+        default:
+            gen = 0;
+            break;
+        }
+        ia64_m64_mask(IA64_M64_CRTC_GEN_CNTL, IA64_M64_GEN_DISPLAY_DIS |
+                      IA64_M64_GEN_HSYNC_DIS | IA64_M64_GEN_VSYNC_DIS, gen);
+        break;
+    case 0x0d:
+        gen = ia64_m64_read(IA64_M64_CRTC_GEN_CNTL);
+        s->int10_result.cx = (s->int10_result.cx & 0xff00) |
+                             ((gen & IA64_M64_GEN_HSYNC_DIS) ? 1 : 0) |
+                             ((gen & IA64_M64_GEN_VSYNC_DIS) ? 2 : 0);
+        break;
+    default:
+        return false;
+    }
+    s->int10_result.ax = (s->int10_result.ax & 0x00ff) | (uint16_t)ah << 8;
+    if (getenv("IA64_INT10_TRACE")) {
+        fprintf(stderr, "int10: mach64 a0%02x -> ax=%04x cx=%04x "
+                "gen=%08x htd=%08x vtd=%08x pitch=%08x\n", fn,
+                s->int10_result.ax, s->int10_result.cx,
+                ia64_m64_read(IA64_M64_CRTC_GEN_CNTL),
+                ia64_m64_read(IA64_M64_CRTC_H_TOTAL_DISP),
+                ia64_m64_read(IA64_M64_CRTC_V_TOTAL_DISP),
+                ia64_m64_read(IA64_M64_CRTC_OFF_PITCH));
+    }
+    return true;
+}
+
+/*
  * ATI Accelerator-BIOS INT 10h functions (BIOS prefix 0xA000, "VGA enabled").
  * The native Mach64 miniport calls these to obtain the card's configuration;
  * the function number is the low byte of AX.  The synthesised VBE handler does
@@ -1090,6 +1522,9 @@ static void ia64_int10_ati_bios(IA64VpcMachineState *s)
     unsigned fn = s->int10_request.ax & 0xff;
     uint8_t *q;
 
+    if (ia64_int10_is_mach64(s) && ia64_int10_mach64_bios(s, fn)) {
+        return;
+    }
     switch (fn) {
     case 0x08:  /* BIOS_GET_QUERY_SIZE */
         s->int10_result.cx = 0x20;              /* 32-byte header */
@@ -1150,7 +1585,8 @@ static void ia64_int10_execute(IA64VpcMachineState *s)
         bool handled = (s->int10_request.ax & 0xff00) == 0x4f00 ||
                        (s->int10_request.ax >> 8) == 0x00 ||
                        (s->int10_request.ax >> 8) == 0x0f ||
-                       (s->int10_request.ax >> 8) == 0x1a;
+                       (s->int10_request.ax >> 8) == 0x1a ||
+                       (s->int10_request.ax >> 8) == 0xa0;
         fprintf(stderr, "int10: ax=%04x bx=%04x cx=%04x dx=%04x di=%04x "
                 "es=%04x%s\n", s->int10_request.ax, s->int10_request.bx,
                 s->int10_request.cx, s->int10_request.dx, s->int10_request.di,
@@ -1201,6 +1637,14 @@ static void ia64_int10_execute(IA64VpcMachineState *s)
 
     switch (s->int10_request.ax >> 8) {
     case 0x00:
+        /*
+         * A standard mode set leaves the mach64 accelerator display: the
+         * inbox mach64 miniport's HwResetHw relies on it for the bugcheck
+         * screen (WXPSP1/NT/drivers/video/ms/ati/mini/atimp.c:2648-2651).
+         */
+        if (ia64_int10_is_mach64(s)) {
+            ia64_m64_leave_ext();
+        }
         ia64_int10_set_legacy_mode(s, s->int10_request.ax);
         break;
     case 0x0f:

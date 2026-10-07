@@ -11271,6 +11271,114 @@ static void test_mach64_ddc_edid(void)
     mach64_dev_close(&a);
 }
 
+#define M64_CRTC_H_SYNC_STRT_WID    0x01
+#define M64_CRTC_V_SYNC_STRT_WID    0x03
+#define M64_CLOCK_CNTL              0x24
+#define M64_DAC_CNTL                0x31
+#define M64_CRTC_EXT_DISP_EN        0x01000000u
+#define M64_CRTC_EN                 0x02000000u
+#define M64_CRTC_DIS_BITS           0x0000004cu  /* DISPLAY_DIS, V/HSYNC_DIS */
+#define M64_DAC_8BIT_EN             0x00000100u
+
+static uint8_t m64_pll_rd(Mach64TestDev *a, unsigned index)
+{
+    m64_wr(a, M64_CLOCK_CNTL, (m64_rd(a, M64_CLOCK_CNTL) & 3) | index << 10);
+    return m64_rd(a, M64_CLOCK_CNTL) >> 16;
+}
+
+/*
+ * ATI extended INT 10h A002 (PRG-215R3 A.6) on the own-firmware stub: a CRT
+ * parameter table at DX:BX (CH = 81h, Table A-9) programs the accelerator
+ * CRTC and switches to the extended display; A001 with CL = 0 goes back to
+ * VGA.  The table holds VESA DMT 1024x768 at 60 Hz with negative syncs, the
+ * polarity in bit 5 of each sync-width byte as the miniports build it.
+ */
+static void test_mach64_int10_load_set(void)
+{
+    static const uint8_t table[30] = {
+        0x00, 0x00, 0x80, 0x81, 0x10, 0x00,
+        0xa7, 0x7f, 0x82, 0x31,             /* H total, disp, sync start, wid */
+        0x25, 0x03, 0xff, 0x02, 0x02, 0x03, /* V total, disp, sync start */
+        0x26, 0xff, 0x64, 0x19,             /* V sync wid, CLOCK_CNTL, 65 MHz */
+    };
+    Mach64TestDev a;
+    TestInt10Registers regs = { 0 };
+    uint8_t response[64];
+    uint32_t gen;
+
+    mach64_dev_open(&a);
+    qtest_memwrite(a.qts, 0x50000, table, sizeof(table));
+    regs.ax = 0xa002;
+    regs.cx = 0x8186;           /* table at DX:BX, pitch = width, 32 bpp */
+    regs.dx = 0x5000;
+    regs.bx = 0x0000;
+    g_assert_cmpuint(int10_call(a.qts, &regs, response, sizeof(response)),
+                     ==, 0);
+    g_assert_cmphex(regs.ax, ==, 0x0002);
+
+    gen = m64_rd(&a, M64_CRTC_GEN_CNTL);
+    g_assert_cmphex(gen & (M64_CRTC_EXT_DISP_EN | M64_CRTC_EN), ==,
+                    M64_CRTC_EXT_DISP_EN | M64_CRTC_EN);
+    g_assert_cmphex(gen & M64_CRTC_DIS_BITS, ==, 0);
+    g_assert_cmphex((gen >> 8) & 7, ==, M64_PIX_WIDTH_32BPP);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_H_TOTAL_DISP), ==, 0x007f00a7);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_H_SYNC_STRT_WID), ==, 0x00310082);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_V_TOTAL_DISP), ==, 0x02ff0325);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_V_SYNC_STRT_WID), ==, 0x00260302);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_OFF_PITCH) & ~M64_CRTC_OFFSET_LOCK,
+                    ==, (1024u / 8) << 22);
+    g_assert_cmphex(m64_rd(&a, M64_DAC_CNTL) & M64_DAC_8BIT_EN, ==,
+                    M64_DAC_8BIT_EN);
+    /*
+     * VCLK3: 2 * 29.50 MHz * FB / (PLL_REF_DIV 36h * 4) = 65 MHz gives
+     * FB = 238 with post divider select 2 (RRG VCLK3_FB_DIV).
+     */
+    g_assert_cmphex(m64_rd(&a, M64_CLOCK_CNTL) & 3, ==, 3);
+    g_assert_cmphex(m64_pll_rd(&a, 0x0a), ==, 238);
+    g_assert_cmphex(m64_pll_rd(&a, 0x06) >> 6, ==, 2);
+
+    /* A built-in resolution code (CH = 55h), 16 bpp, pitch 1024. */
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0xa002;
+    regs.cx = 0x5504;
+    int10_call(a.qts, &regs, response, sizeof(response));
+    g_assert_cmphex(regs.ax, ==, 0x0002);
+    gen = m64_rd(&a, M64_CRTC_GEN_CNTL);
+    g_assert_cmphex((gen >> 8) & 7, ==, M64_PIX_WIDTH_16BPP);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_H_TOTAL_DISP), ==, 0x007f00a7);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_V_TOTAL_DISP), ==, 0x02ff0325);
+
+    /* An undefined depth code is an error (AH = 1). */
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0xa002;
+    regs.cx = 0x5507;
+    int10_call(a.qts, &regs, response, sizeof(response));
+    g_assert_cmphex(regs.ax, ==, 0x0102);
+
+    /* A001, CL = 0: back to the VGA display. */
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0xa001;
+    int10_call(a.qts, &regs, response, sizeof(response));
+    g_assert_cmphex(regs.ax, ==, 0x0001);
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_GEN_CNTL) & M64_CRTC_EXT_DISP_EN,
+                    ==, 0);
+
+    /* A standard mode set (bootvid's AX=0012) leaves the extended display. */
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0xa001;
+    regs.cx = 0x0001;
+    int10_call(a.qts, &regs, response, sizeof(response));
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_GEN_CNTL) & M64_CRTC_EXT_DISP_EN,
+                    ==, M64_CRTC_EXT_DISP_EN);
+    memset(&regs, 0, sizeof(regs));
+    regs.ax = 0x0012;
+    int10_call(a.qts, &regs, response, sizeof(response));
+    g_assert_cmphex(m64_rd(&a, M64_CRTC_GEN_CNTL) & M64_CRTC_EXT_DISP_EN,
+                    ==, 0);
+
+    mach64_dev_close(&a);
+}
+
 int main(int argc, char **argv)
 {
     unsigned cpus;
@@ -11475,6 +11583,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/vga-paged-aperture",
                    test_mach64_vga_paged_aperture);
     qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
+    qtest_add_func("/ia64-vpc/mach64/int10-load-set",
+                   test_mach64_int10_load_set);
     qtest_add_func("/ia64-vpc/eepro100/csr-windows",
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/zx1/root-window-containment",
