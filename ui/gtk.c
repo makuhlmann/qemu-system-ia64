@@ -1454,6 +1454,41 @@ static gboolean gd_grab_broken_event(GtkWidget *widget,
     return TRUE;
 }
 
+#ifdef G_OS_WIN32
+/*
+ * Windows layouts type the AltGr character for Ctrl+Alt (the GDK keymap
+ * treats Ctrl+Alt as AltGr), and GTK looks accelerators up with that
+ * character: on a German layout Ctrl-Alt-2 types U+00B2 and misses its
+ * hotkey.  Look the hotkeys up by the character the key types without Ctrl
+ * and Alt.  The AltGr key itself (right Alt) keeps typing its character, so
+ * AltGr+Q still gives '@' and does not quit.
+ */
+static gboolean gd_win32_hotkey_event(GtkWidget *widget, GdkEventKey *key,
+                                      void *opaque)
+{
+    GdkKeymap *keymap;
+    guint keyval;
+
+    if ((key->state & HOTKEY_MODIFIERS) != HOTKEY_MODIFIERS ||
+        (GetKeyState(VK_RMENU) & 0x8000)) {
+        return FALSE;
+    }
+
+    keymap = gdk_keymap_get_for_display(gtk_widget_get_display(widget));
+    if (!gdk_keymap_translate_keyboard_state(keymap, key->hardware_keycode,
+                                             key->state & ~(HOTKEY_MODIFIERS |
+                                                            GDK_MOD2_MASK |
+                                                            GDK_LOCK_MASK),
+                                             key->group, &keyval,
+                                             NULL, NULL, NULL)) {
+        return FALSE;
+    }
+    return gtk_accel_groups_activate(G_OBJECT(widget),
+                                     gdk_keyval_to_lower(keyval),
+                                     HOTKEY_MODIFIERS);
+}
+#endif
+
 static gboolean gd_event(GtkWidget *widget, GdkEvent *event, void *opaque)
 {
     if (event->type == GDK_MOTION_NOTIFY) {
@@ -2252,6 +2287,10 @@ static void gd_connect_signals(GtkDisplayState *s)
 
     g_signal_connect(s->window, "delete-event",
                      G_CALLBACK(gd_window_close), s);
+#ifdef G_OS_WIN32
+    g_signal_connect(s->window, "key-press-event",
+                     G_CALLBACK(gd_win32_hotkey_event), s);
+#endif
 
     g_signal_connect(s->pause_item, "activate",
                      G_CALLBACK(gd_menu_pause), s);
