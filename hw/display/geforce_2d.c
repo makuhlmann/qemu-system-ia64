@@ -203,6 +203,21 @@ void nv_put_pixel_swzs(NV15State *s, gf_channel *ch, uint32_t ofs,
     }
 }
 
+/*
+ * A source in X8R8G8B8 has no alpha: the pre-multiplied blend takes it as
+ * opaque, as the SIFM path does for its X8R8G8B8 (format 4).  Format 5 is
+ * X8R8G8B8 for IFC, SIFC and the IIFC palette; without this an opaque black
+ * pixel reads as fully transparent and the blend drops it.
+ */
+static uint32_t nv_premult_source(uint32_t op, uint32_t color_fmt,
+                                  uint32_t color_bytes, uint32_t srccolor)
+{
+    if (op == 5 && color_fmt == 5 && color_bytes == 4) {
+        return srccolor | 0xFF000000;
+    }
+    return srccolor;
+}
+
 void nv_pixel_operation(NV15State *s, gf_channel *ch, uint32_t op,
                         uint32_t *dstcolor, const uint32_t *srccolor,
                         uint32_t cb, uint32_t px, uint32_t py)
@@ -231,18 +246,6 @@ void nv_pixel_operation(NV15State *s, gf_channel *ch, uint32_t op,
                 uint8_t sg = *srccolor >> 8;
                 uint8_t sr = *srccolor >> 16;
                 uint8_t sa = *srccolor >> 24;
-                /*
-                 * A source with zero alpha but non-zero colour is an opaque
-                 * (non-premultiplied / X8) source blended by a constant
-                 * SourceConstantAlpha (beta) -- AlphaBlend without
-                 * AC_SRC_ALPHA.  Treat it as fully opaque so the over-coverage
-                 * comes from beta; otherwise a per-pixel alpha of 0 keeps the
-                 * whole destination and adds src*beta on top, over-brightening
-                 * and tinting the result.
-                 */
-                if (sa == 0 && (sb | sg | sr)) {
-                    sa = 0xFF;
-                }
                 uint32_t beta = ch->beta;
                 if (beta != 0xFFFFFFFF) {
                     uint8_t bb = beta;
@@ -513,6 +516,8 @@ static void ifc(NV15State *s, gf_channel *ch, uint32_t word)
             if (!chroma_enabled || srccolor != chromacolor) {
                 uint32_t dstcolor = nv_get_pixel(s, ch->s2d_img_dst,
                     ch->ifc_draw_offset, ch->ifc_x, ch->s2d_color_bytes);
+                srccolor = nv_premult_source(ch->ifc_operation,
+                    ch->ifc_color_fmt, ch->ifc_color_bytes, srccolor);
                 if (ch->ifc_color_bytes == 4 && ch->s2d_color_bytes == 2) {
                     dstcolor = color_565_to_888(dstcolor);
                 }
@@ -576,8 +581,10 @@ static void iifc(NV15State *s, gf_channel *ch)
                 uint32_t dstcolor = nv_get_pixel(s, ch->s2d_img_dst,
                     draw_offset, x, ch->s2d_color_bytes);
                 if (ch->iifc_color_bytes == 4) {
-                    uint32_t srccolor = nv_dma_read32(s, ch->iifc_palette,
-                        ch->iifc_palette_ofs + symbol * 4);
+                    uint32_t srccolor = nv_premult_source(
+                        ch->iifc_operation, ch->iifc_color_fmt, 4,
+                        nv_dma_read32(s, ch->iifc_palette,
+                                      ch->iifc_palette_ofs + symbol * 4));
                     if (ch->s2d_color_bytes == 2) {
                         dstcolor = color_565_to_888(dstcolor);
                     }
@@ -657,6 +664,8 @@ static void sifc(NV15State *s, gf_channel *ch)
                                 (uint64_t)ch->sifc_words_count * 4) ?
                            sifc_words8[symbol_offset] : 0;
             }
+            srccolor = nv_premult_source(ch->sifc_operation,
+                ch->sifc_color_fmt, ch->sifc_color_bytes, srccolor);
             if (ch->sifc_color_bytes == 4 && ch->s2d_color_bytes == 2) {
                 dstcolor = color_565_to_888(dstcolor);
             }

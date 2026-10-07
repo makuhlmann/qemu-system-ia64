@@ -657,6 +657,60 @@ static void nv15_iifc_options_stay_per_object(void)
     qtest_quit(qts);
 }
 
+/*
+ * BLEND_PREMULT of an X8R8G8B8 source (IFC colour format 5): the format has
+ * no alpha, so every pixel is opaque, black included.  The SIFM path did this
+ * already; IFC took the zero top byte as alpha and dropped black pixels.
+ */
+#define NV15_RAMIN_BETA     0x2a00U
+#define NV15_H_BETA         0xbeef0009U
+#define NV_CLASS_BETA1      0x72U
+
+static void nv15_ifc_x8_blend_is_opaque(void)
+{
+    QTestState *qts = nv15_start();
+    const uint32_t dst_ofs = 0x00030000U;
+    const uint32_t pitch = 0x0400U;
+    const uint32_t red = 0xffff0000U;
+
+    nv_engine_reset_ramht(qts);
+    nv_make_gr_object(qts, NV15_RAMIN_SURF, NV_CLASS_SURF2D);
+    nv_make_dma_object(qts, NV15_RAMIN_DMA);
+    nv_make_gr_object(qts, NV15_RAMIN_IFC, NV_CLASS_IFC);
+    nv_make_gr_object(qts, NV15_RAMIN_BETA, NV_CLASS_BETA1);
+    nv_ramht_insert(qts, NV15_H_SURF, 0, NV_ENGINE_GRAPH, NV15_RAMIN_SURF);
+    nv_ramht_insert(qts, NV15_H_DMA,  0, NV_ENGINE_GRAPH, NV15_RAMIN_DMA);
+    nv_ramht_insert(qts, NV15_H_IFC,  0, NV_ENGINE_GRAPH, NV15_RAMIN_IFC);
+    nv_ramht_insert(qts, NV15_H_BETA, 0, NV_ENGINE_GRAPH, NV15_RAMIN_BETA);
+
+    qtest_writel(qts, IA64_NV15_FB_BASE + dst_ofs, red);
+    qtest_writel(qts, IA64_NV15_FB_BASE + dst_ofs + 4, red);
+
+    nv_method(qts, 0, 0, 0x000, NV15_H_SURF);
+    nv_method(qts, 0, 0, 0x0c0, 0x0a);                  /* A8R8G8B8         */
+    nv_method(qts, 0, 0, 0x0c1, (pitch << 16) | pitch);
+    nv_method(qts, 0, 0, 0x062, NV15_H_DMA);
+    nv_method(qts, 0, 0, 0x0c3, dst_ofs);
+
+    nv_method(qts, 0, 2, 0x000, NV15_H_BETA);
+    nv_method(qts, 0, 2, 0x0c0, 0xffffffffU);           /* SetBeta 1.0      */
+
+    nv_method(qts, 0, 1, 0x000, NV15_H_IFC);
+    nv_method(qts, 0, 1, 0x0bf, 5);                     /* BLEND_PREMULT    */
+    nv_method(qts, 0, 1, 0x0c0, 5);                     /* X8R8G8B8         */
+    nv_method(qts, 0, 1, 0x0c1, 0);                     /* point 0,0        */
+    nv_method(qts, 0, 1, 0x0c2, (1U << 16) | 2);        /* size out 2x1     */
+    nv_method(qts, 0, 1, 0x0c3, (1U << 16) | 2);        /* size in 2x1      */
+    nv_method(qts, 0, 1, 0x100, 0x00000000U);           /* black            */
+    nv_method(qts, 0, 1, 0x101, 0x00ffffffU);           /* white            */
+
+    g_assert_cmphex(qtest_readl(qts, IA64_NV15_FB_BASE + dst_ofs) & 0xffffff,
+                    ==, 0x000000);
+    g_assert_cmphex(qtest_readl(qts, IA64_NV15_FB_BASE + dst_ofs + 4) &
+                    0xffffff, ==, 0xffffff);
+    qtest_quit(qts);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -678,6 +732,8 @@ int main(int argc, char **argv)
                        nv15_surf2d_rebind_keeps_dma);
         qtest_add_func("/nv15gl/iifc-options-stay-per-object",
                        nv15_iifc_options_stay_per_object);
+        qtest_add_func("/nv15gl/ifc-x8-blend-is-opaque",
+                       nv15_ifc_x8_blend_is_opaque);
     }
 
     return g_test_run();
