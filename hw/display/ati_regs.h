@@ -207,6 +207,8 @@
 #define DST_X_SUB                               0x15a4
 #define DST_Y_SUB                               0x15a8
 #define SRC_OFFSET                              0x15ac
+#define GUI_SCRATCH_REG0                        0x15e0
+#define GUI_SCRATCH_REG5                        0x15f4
 #define SRC_PITCH                               0x15b0
 #define DST_HEIGHT_WIDTH_BW                     0x15b4
 #define CLR_CMP_CNTL                            0x15c0

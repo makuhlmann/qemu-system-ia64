@@ -9376,6 +9376,33 @@ static void test_ati_mm_index_indirect(void)
 }
 
 /*
+ * GUI_SCRATCH_REG0-5 (RAGE 128 PRO RRG): six read/write scratch registers,
+ * 0 at reset.  The r128 DRM frees its DMA buffers by the age the CCE writes
+ * to REG1, so a register that reads back 0 hangs it once every buffer has
+ * been used.
+ */
+#define ATI_GUI_SCRATCH_REG0    0x15e0
+
+static void test_ati_gui_scratch(void)
+{
+    ATITestDev a;
+    unsigned i;
+
+    ati_dev_open(&a, NULL);
+    for (i = 0; i < 6; i++) {
+        g_assert_cmphex(ati_rd(&a, ATI_GUI_SCRATCH_REG0 + i * 4), ==, 0);
+    }
+    for (i = 0; i < 6; i++) {
+        ati_wr(&a, ATI_GUI_SCRATCH_REG0 + i * 4, 0x5a000000 | i);
+    }
+    for (i = 0; i < 6; i++) {
+        g_assert_cmphex(ati_rd(&a, ATI_GUI_SCRATCH_REG0 + i * 4), ==,
+                        0x5a000000 | i);
+    }
+    ati_dev_close(&a);
+}
+
+/*
  * PCI ROM BAR: the machine patches the stock SeaVGABIOS with the ATI tables a
  * native Rage 128 driver validates (ia64_vpc_install_ati_rom_tables): the
  * " 761295520" signature at 0x30, a PCIR structure restated to the
@@ -11367,6 +11394,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ati/dac-load-sense", test_ati_dac_load_sense);
     qtest_add_func("/ia64-vpc/ati/mm-index-indirect",
                    test_ati_mm_index_indirect);
+    qtest_add_func("/ia64-vpc/ati/gui-scratch", test_ati_gui_scratch);
     qtest_add_func("/ia64-vpc/ati/rom-bar-tables", test_ati_rom_bar_tables);
     qtest_add_func("/ia64-vpc/ati/2d-solid-fill", test_ati_2d_solid_fill);
     qtest_add_func("/ia64-vpc/ati/2d-fill-24bpp", test_ati_2d_fill_24bpp);

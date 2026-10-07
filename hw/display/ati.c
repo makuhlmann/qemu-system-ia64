@@ -1253,6 +1253,14 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
     case 0xf00 ... 0xfff:
         val = pci_default_read_config(&s->dev, addr - 0xf00, size);
         break;
+    case GUI_SCRATCH_REG0 ... GUI_SCRATCH_REG5 + 3:
+    {
+        int i = (addr - GUI_SCRATCH_REG0) / 4;
+
+        val = ati_reg_read_offs(s->regs.gui_scratch[i],
+                                addr - (GUI_SCRATCH_REG0 + i * 4), size);
+        break;
+    }
     case CUR_OFFSET ... CUR_OFFSET + 3:
         val = ati_reg_read_offs(s->regs.cur_offset, addr - CUR_OFFSET, size);
         break;
@@ -1514,6 +1522,20 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         }
         ati_reg_write_offs(&s->regs.bios_scratch[i],
                            addr - (BIOS_0_SCRATCH + i * 4), data, size);
+        break;
+    }
+    /*
+     * Six scratch registers written through the command FIFO (RAGE 128 PRO
+     * RRG, GUI_SCRATCH_REG0-5).  The r128 DRM has the CCE write each DMA
+     * buffer's age to REG1 after the buffer and frees buffers by reading it
+     * back; without them no buffer came back once all had been used.
+     */
+    case GUI_SCRATCH_REG0 ... GUI_SCRATCH_REG5 + 3:
+    {
+        int i = (addr - GUI_SCRATCH_REG0) / 4;
+
+        ati_reg_write_offs(&s->regs.gui_scratch[i],
+                           addr - (GUI_SCRATCH_REG0 + i * 4), data, size);
         break;
     }
     case GEN_INT_CNTL:
@@ -2151,6 +2173,30 @@ static const VMStateDescription vmstate_ati_vga_setup_regs = {
     }
 };
 
+static bool ati_gui_scratch_needed(void *opaque)
+{
+    ATIVGARegs *r = opaque;
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(r->gui_scratch); i++) {
+        if (r->gui_scratch[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const VMStateDescription vmstate_ati_vga_gui_scratch = {
+    .name = "ati-vga/regs/gui-scratch",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ati_gui_scratch_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(gui_scratch, ATIVGARegs, 6),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ati_vga_regs = {
     .name = "ati-vga/regs",
     .version_id = 1,
@@ -2218,6 +2264,7 @@ static const VMStateDescription vmstate_ati_vga_regs = {
         &vmstate_ati_vga_init_regs,
         &vmstate_ati_vga_brush_regs,
         &vmstate_ati_vga_setup_regs,
+        &vmstate_ati_vga_gui_scratch,
         NULL
     }
 };

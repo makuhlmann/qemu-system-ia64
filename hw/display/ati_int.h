@@ -49,6 +49,7 @@ typedef struct ATIVGARegs {
     uint32_t pm4_dl_wptr;
     uint32_t crtc_vblank_ack_frame;
     uint32_t bios_scratch[8];
+    uint32_t gui_scratch[6];
     uint32_t gen_int_cntl;
     uint32_t gen_int_status;
     uint32_t crtc_gen_cntl;
