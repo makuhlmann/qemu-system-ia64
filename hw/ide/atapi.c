@@ -1341,12 +1341,9 @@ void ide_atapi_cmd(IDEState *s)
     /*
      * The packet has just been delivered; a device raises BSY while it
      * processes it (ATA/ATAPI-5 packet command protocol), and the vendor
-     * i2000 firmware waits for that before it waits for DRQ.  Same one-shot
-     * latch as ide_bus_exec_cmd applies after the command byte.
+     * i2000 firmware waits for that before it waits for DRQ.
      */
-    if (s->bus->bsy_after_cmd) {
-        s->bsy_latched = true;
-    }
+    ide_bus_open_bsy_window(s);
 
     /* AHCI moves the packet itself and expects the command to run now. */
     if (!s->atapi_dma || s->bus->dma->ops->pio_transfer) {

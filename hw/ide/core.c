@@ -1340,6 +1340,7 @@ void ide_ioport_write(void *opaque, uint32_t addr, uint32_t val)
     default:
     case ATA_IOPORT_WR_COMMAND:
         ide_clear_hob(bus);
+        bus->irq_held = false;
         qemu_irq_lower(bus->irq);
         ide_bus_exec_cmd(bus, val);
         break;
@@ -2151,6 +2152,63 @@ static bool ide_cmd_permitted(IDEState *s, uint32_t cmd)
         && (ide_cmd_table[cmd].flags & (1u << s->drive_kind));
 }
 
+/*
+ * A device sets BSY within 400 ns of a command or a packet and asserts INTRQ
+ * when it clears BSY at completion (ATA/ATAPI-5 9.7).  The emulated command
+ * completes inside the register write, so BSY is never visible -- and the
+ * Intel SDV / HP i2000 firmware probes a drive by polling for BSY to assert
+ * after IDENTIFY (PACKET) DEVICE before it waits for it to clear.  On a bus
+ * that asks for it, each command opens a BSY window: the first status read
+ * inside it reports BSY, and a completion inside it holds INTRQ until the
+ * window closes, at that read or after IDE_BSY_WINDOW_NS.  An interrupt-driven
+ * host reads status only after INTRQ, so it never sees BSY after it; Linux's
+ * ide_intr treats BSY there as another device's interrupt and drops it.
+ */
+#define IDE_BSY_WINDOW_NS (1 * SCALE_MS)
+
+void ide_bus_open_bsy_window(IDEState *s)
+{
+    IDEBus *bus = s->bus;
+
+    if (!bus->bsy_after_cmd) {
+        return;
+    }
+    s->bsy_latched = true;
+    timer_mod(bus->bsy_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + IDE_BSY_WINDOW_NS);
+}
+
+static void ide_bus_close_bsy_window(IDEBus *bus)
+{
+    bus->ifs[0].bsy_latched = false;
+    bus->ifs[1].bsy_latched = false;
+    if (bus->bsy_timer) {
+        timer_del(bus->bsy_timer);
+    }
+    if (bus->irq_held) {
+        bus->irq_held = false;
+        ide_bus_set_irq(bus);
+    }
+}
+
+static void ide_bus_drop_bsy_window(IDEBus *bus)
+{
+    bus->irq_held = false;
+    ide_bus_close_bsy_window(bus);
+}
+
+static void ide_bus_bsy_timer_cb(void *opaque)
+{
+    ide_bus_close_bsy_window(opaque);
+}
+
+void ide_bus_show_bsy_after_cmd(IDEBus *bus)
+{
+    bus->bsy_after_cmd = true;
+    bus->bsy_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, ide_bus_bsy_timer_cb,
+                                  bus);
+}
+
 void ide_bus_exec_cmd(IDEBus *bus, uint32_t val)
 {
     IDEState *s;
@@ -2193,6 +2251,7 @@ void ide_bus_exec_cmd(IDEBus *bus, uint32_t val)
     s->status = READY_STAT | BUSY_STAT;
     s->error = 0;
     s->io_buffer_offset = 0;
+    ide_bus_open_bsy_window(s);
 
     complete = ide_cmd_table[val].handler(s, val);
     if (complete) {
@@ -2205,20 +2264,6 @@ void ide_bus_exec_cmd(IDEBus *bus, uint32_t val)
 
         ide_cmd_done(s);
         ide_bus_set_irq(s->bus);
-    }
-    /*
-     * A device sets BSY within 400 ns of a command being written (ATA-5
-     * 9.7), so software may read the status register right away and see it
-     * busy before the result appears.  The emulated command completes
-     * inside the write, which means BSY is never visible -- and firmware
-     * that probes a drive by waiting for BSY to assert before it waits for
-     * it to clear (the Intel SDV / HP i2000 firmware's IDE driver polls a
-     * thousand times for it after IDENTIFY PACKET DEVICE) concludes there is
-     * no device.  On a bus that asks for it, report BSY once on the first
-     * status read after each command.
-     */
-    if (bus->bsy_after_cmd) {
-        s->bsy_latched = true;
     }
 }
 
@@ -2326,10 +2371,13 @@ uint32_t ide_ioport_read(void *opaque, uint32_t addr)
             if (s->bsy_latched) {
                 /* While BSY is set the other bits are not yet valid. */
                 ret = (ret & ~(DRQ_STAT | ERR_STAT)) | BUSY_STAT;
-                s->bsy_latched = false;
             }
         }
         qemu_irq_lower(bus->irq);
+        /* A read inside the BSY window precedes the INTRQ it holds back. */
+        if (s->bsy_latched) {
+            ide_bus_close_bsy_window(bus);
+        }
         break;
     }
 
@@ -2350,7 +2398,7 @@ uint32_t ide_status_read(void *opaque, uint32_t addr)
         ret = s->status;
         if (s->bsy_latched) {
             ret = (ret & ~(DRQ_STAT | ERR_STAT)) | BUSY_STAT;
-            s->bsy_latched = false;
+            ide_bus_close_bsy_window(bus);
         }
     }
 
@@ -2400,6 +2448,7 @@ void ide_ctrl_write(void *opaque, uint32_t addr, uint32_t val)
     /* Device0 and Device1 each have their own control register,
      * but QEMU models it as just one register in the controller. */
     if (!(bus->cmd & IDE_CTRL_RESET) && (val & IDE_CTRL_RESET)) {
+        ide_bus_drop_bsy_window(bus);
         for (i = 0; i < 2; i++) {
             s = &bus->ifs[i];
             s->status |= BUSY_STAT;
@@ -2592,6 +2641,7 @@ void ide_bus_reset(IDEBus *bus)
 
     bus->unit = 0;
     bus->cmd = 0;
+    ide_bus_drop_bsy_window(bus);
     ide_reset(&bus->ifs[0]);
     ide_reset(&bus->ifs[1]);
     ide_clear_hob(bus);
@@ -2854,16 +2904,10 @@ void ide_bus_init_output_irq(IDEBus *bus, qemu_irq irq_out)
 
 void ide_bus_set_irq(IDEBus *bus)
 {
-    /*
-     * The device is asserting its interrupt, so the command is past the
-     * window in which it holds BSY: whatever the status register now says is
-     * what software must see.  Drop a pending one-shot BSY (see
-     * ide_bus_exec_cmd) rather than injecting it into a later phase -- the
-     * vendor i2000 firmware treats BSY after it has read a data-phase
-     * interrupt reason as a failed command and abandons the transfer.
-     */
-    bus->ifs[0].bsy_latched = false;
-    bus->ifs[1].bsy_latched = false;
+    if (bus->ifs[0].bsy_latched || bus->ifs[1].bsy_latched) {
+        bus->irq_held = true;
+        return;
+    }
     if (!(bus->cmd & IDE_CTRL_DISABLE_IRQ)) {
         qemu_irq_raise(bus->irq);
     }
@@ -3092,6 +3136,28 @@ static const VMStateDescription vmstate_ide_error_status = {
     }
 };
 
+static bool ide_bus_bsy_window_needed(void *opaque)
+{
+    IDEBus *bus = opaque;
+
+    return bus->irq_held || bus->ifs[0].bsy_latched ||
+           bus->ifs[1].bsy_latched;
+}
+
+static const VMStateDescription vmstate_ide_bus_bsy_window = {
+    .name = "ide_bus/bsy_window",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ide_bus_bsy_window_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(irq_held, IDEBus),
+        VMSTATE_BOOL(ifs[0].bsy_latched, IDEBus),
+        VMSTATE_BOOL(ifs[1].bsy_latched, IDEBus),
+        VMSTATE_TIMER_PTR(bsy_timer, IDEBus),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 const VMStateDescription vmstate_ide_bus = {
     .name = "ide_bus",
     .version_id = 1,
@@ -3103,6 +3169,7 @@ const VMStateDescription vmstate_ide_bus = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ide_error_status,
+        &vmstate_ide_bus_bsy_window,
         NULL
     }
 };

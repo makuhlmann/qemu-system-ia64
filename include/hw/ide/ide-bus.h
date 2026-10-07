@@ -26,8 +26,10 @@ struct IDEBus {
     PortioList portio_list;
     PortioList portio2_list;
     VMChangeStateEntry *vmstate;
-    /* Show BSY on the first status read after each command (see core.c). */
+    /* Show the BSY cycle after each command (see ide_bus_open_bsy_window). */
     bool bsy_after_cmd;
+    bool irq_held;
+    QEMUTimer *bsy_timer;
 };
 
 #define TYPE_IDE_BUS "IDE"
@@ -36,6 +38,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IDEBus, IDE_BUS)
 void ide_bus_init(IDEBus *idebus, size_t idebus_size, DeviceState *dev,
                   int bus_id, int max_units);
 IDEDevice *ide_bus_create_drive(IDEBus *bus, int unit, DriveInfo *drive);
+void ide_bus_show_bsy_after_cmd(IDEBus *bus);
 
 int ide_get_geometry(BusState *bus, int unit,
                      int16_t *cyls, int8_t *heads, int8_t *secs);

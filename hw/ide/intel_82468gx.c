@@ -181,9 +181,9 @@ static void ifb_ide_init_bus(PCIIDEState *d, ISABus *isa_bus,
     /*
      * The board's firmware probes each drive by waiting for BSY to assert
      * after IDENTIFY, as the ATA timing lets it; give it the busy cycle it
-     * expects (ide_bus_exec_cmd).
+     * expects (ide_bus_open_bsy_window).
      */
-    bus->bsy_after_cmd = true;
+    ide_bus_show_bsy_after_cmd(bus);
     bmdma_init(bus, &d->bmdma[channel], d);
     ide_bus_register_restart_cb(bus);
 }

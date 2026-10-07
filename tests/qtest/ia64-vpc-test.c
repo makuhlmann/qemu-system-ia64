@@ -5265,6 +5265,81 @@ static void test_460gx_pic_edge_withdrawal(void)
 }
 
 /*
+ * A drive asserts INTRQ when it clears BSY at the end of a command (ATA/ATAPI-5
+ * 9.7).  The 82468GX channels show the BSY cycle the SDV firmware polls for
+ * after each command, so a command that completes at once must hold its
+ * interrupt until that cycle is over: a host that reads status only after
+ * INTRQ -- Linux reads the alternate status first and drops an interrupt
+ * whose drive still reads busy -- must never see BSY after it.  The cycle ends
+ * at the first status read, which still sees BSY, or after a short time.
+ * IRQ 14 reaches the slave 8259, whose IRR shows the asserted line.
+ */
+#define IA64_IDE_PRI_CMD        0x1f0
+#define IA64_IDE_PRI_CTL        0x3f6
+#define IA64_PIC2_CMD           0xa0
+#define IA64_PIC2_DATA          0xa1
+#define IA64_PIC2_IRQ14         0x40
+
+static void ide_pri_outb(QTestState *qts, uint16_t port, uint8_t val)
+{
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port), val);
+}
+
+static uint8_t ide_pri_inb(QTestState *qts, uint16_t port)
+{
+    return qtest_readb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port));
+}
+
+static uint8_t pic_slave_irr(QTestState *qts)
+{
+    ide_pri_outb(qts, IA64_PIC2_CMD, 0x0a);          /* OCW3: read IRR */
+    return ide_pri_inb(qts, IA64_PIC2_CMD);
+}
+
+static void test_460gx_ide_irq_after_bsy(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M "
+                                 "-drive if=ide,index=0,media=disk,"
+                                 "driver=null-co");
+    int pass;
+
+    ia64_cfg_writew(qts, 0, IA64_460GX_IFB_SLOT, IA64_460GX_IFB_IDE_FUNCTION,
+                    INTEL_82468GX_IFB_IDETIM_PRIMARY, 0x8000);
+    pic_master_init(qts);
+    ide_pri_outb(qts, IA64_PIC2_CMD, 0x11);          /* ICW1 */
+    ide_pri_outb(qts, IA64_PIC2_DATA, 0x70);         /* ICW2 */
+    ide_pri_outb(qts, IA64_PIC2_DATA, 0x02);         /* ICW3: on master IR2 */
+    ide_pri_outb(qts, IA64_PIC2_DATA, 0x01);         /* ICW4 */
+    ide_pri_outb(qts, IA64_PIC2_DATA, 0x00);
+
+    ide_pri_outb(qts, IA64_IDE_PRI_CTL, 0x08);       /* nIEN clear */
+    ide_pri_outb(qts, IA64_IDE_PRI_CMD + 6, 0xa0);   /* device 0 */
+    ide_pri_inb(qts, IA64_IDE_PRI_CMD + 7);
+    g_assert_cmphex(pic_slave_irr(qts) & IA64_PIC2_IRQ14, ==, 0);
+
+    for (pass = 0; pass < 2; pass++) {
+        /* CHECK POWER MODE completes inside the command write. */
+        ide_pri_outb(qts, IA64_IDE_PRI_CMD + 7, 0xe5);
+        g_assert_cmphex(pic_slave_irr(qts) & IA64_PIC2_IRQ14, ==, 0);
+        if (pass == 0) {
+            /* A polling host: the first read sees BSY, then the interrupt. */
+            g_assert_cmphex(ide_pri_inb(qts, IA64_IDE_PRI_CTL) & 0x80, ==,
+                            0x80);
+        } else {
+            /* An interrupt-driven host reads nothing until INTRQ. */
+            qtest_clock_step(qts, 2 * 1000 * 1000);
+        }
+        g_assert_cmphex(pic_slave_irr(qts) & IA64_PIC2_IRQ14, ==,
+                        IA64_PIC2_IRQ14);
+        g_assert_cmphex(ide_pri_inb(qts, IA64_IDE_PRI_CTL), ==, 0x50);
+        g_assert_cmphex(ide_pri_inb(qts, IA64_IDE_PRI_CMD + 7), ==, 0x50);
+        g_assert_cmphex(pic_slave_irr(qts) & IA64_PIC2_IRQ14, ==, 0);
+    }
+
+    qtest_quit(qts);
+}
+
+/*
  * The bridge's RTC is a 256-byte part in two 128-byte banks (SSDM 15.5.1).
  * Ports 0x70/0x71 reach the standard bank.  Ports 0x72/0x73 reach the
  * extended bank only while RTCCFG (function 0, config offset C8h) bit 2 is
@@ -11385,6 +11460,8 @@ int main(int argc, char **argv)
                    test_460gx_pit_mode2_out_level);
     qtest_add_func("/ia64-vpc/pci/460gx-pic-edge-withdrawal",
                    test_460gx_pic_edge_withdrawal);
+    qtest_add_func("/ia64-vpc/pci/460gx-ide-irq-after-bsy",
+                   test_460gx_ide_irq_after_bsy);
     qtest_add_func("/ia64-vpc/pci/460gx-root-window-containment",
                    test_460gx_root_window_containment);
     qtest_add_func("/ia64-vpc/pci/460gx-expander-roots",

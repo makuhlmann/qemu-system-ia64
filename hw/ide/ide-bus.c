@@ -44,6 +44,10 @@ static void idebus_unrealize(BusState *bus)
     if (ibus->vmstate) {
         qemu_del_vm_change_state_handler(ibus->vmstate);
     }
+    if (ibus->bsy_timer) {
+        timer_free(ibus->bsy_timer);
+        ibus->bsy_timer = NULL;
+    }
 }
 
 static const TypeInfo ide_bus_info = {
