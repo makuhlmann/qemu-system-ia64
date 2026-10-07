@@ -7478,6 +7478,42 @@ static bool e100_wait_complete(QTestState *qts, uint32_t addr)
     return false;
 }
 
+/*
+ * The CSR bytes beyond the SCB (8255x OSDM Table 11): General Control keeps
+ * bits 1:0 (Table 34), General Status reports the link (Table 36), the
+ * receive byte count reads 0 without early receive, and a word or long access
+ * reaches the same byte registers.
+ */
+static void test_e100_csr_map(void)
+{
+    const uint64_t csr = IA64_E1000_MMIO_BASE;
+    QTestState *qts;
+    int sockets[2];
+
+    g_assert_cmpint(qemu_socketpair(PF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    qemu_clear_cloexec(sockets[1]);
+    qts = qtest_initf("-machine 460gx -m 256M "
+                      "-nic socket,fd=%d,model=i82559c", sockets[1]);
+    close(sockets[1]);
+
+    qtest_writeb(qts, csr + 0x1c, 0xff);
+    g_assert_cmphex(qtest_readb(qts, csr + 0x1c), ==, 0x03);
+    g_assert_cmphex(qtest_readb(qts, csr + 0x1d), ==, 0x07);
+    g_assert_cmphex(qtest_readw(qts, csr + 0x1c), ==, 0x0703);
+    qtest_writew(qts, csr + 0x1c, 0xff00);
+    g_assert_cmphex(qtest_readb(qts, csr + 0x1c), ==, 0x00);
+
+    qtest_writel(qts, csr + 0x14, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, csr + 0x14), ==, 0);
+
+    qtest_writeb(qts, csr + 0x18, 0x10);                /* Early Rx Int */
+    qtest_writeb(qts, csr + 0x19, 0x02);                /* FC threshold */
+    g_assert_cmphex(qtest_readw(qts, csr + 0x18), ==, 0x0210);
+
+    qtest_quit(qts);
+    close(sockets[0]);
+}
+
 static void test_e100_packet_transfer(void)
 {
     static const uint8_t mac[6] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
@@ -11345,6 +11381,7 @@ int main(int argc, char **argv)
                    test_e1000_intx_route);
     qtest_add_func("/ia64-vpc/network/packet-transfer",
                    test_e1000_packet_transfer);
+    qtest_add_func("/ia64-vpc/e100/csr-map", test_e100_csr_map);
     qtest_add_func("/ia64-vpc/e100/packet-transfer",
                    test_e100_packet_transfer);
     qtest_add_func("/ia64-vpc/e100/receive-status",

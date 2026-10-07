@@ -38,6 +38,7 @@
 #include "system/reset.h"
 #include "system/runstate.h"
 #include "qemu/bitops.h"
+#include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
@@ -1906,19 +1907,19 @@ static void eepro100_write_mdi(EEPRO100State *s)
                     data &= ~0x0200;
                 }
                 break;
-            case 1:            /* Status Register */
-                missing("not writable");
+            /*
+             * Registers 1-6 are the generic MDI set and 16-27 the 82555 set
+             * that the 82558 and later embed (8255x OSDM 7.2, Tables 59 and
+             * 60); eepro100_mdi_mask keeps their read-only bits, so a write
+             * to a read-only register changes nothing, as on the PHY.
+             */
+            case 1 ... 6:
+            case 16 ... 27:
                 break;
-            case 2:            /* PHY Identification Register (Word 1) */
-            case 3:            /* PHY Identification Register (Word 2) */
-                missing("not implemented");
-                break;
-            case 4:            /* Auto-Negotiation Advertisement Register */
-            case 5:            /* Auto-Negotiation Link Partner Ability Register */
-                break;
-            case 6:            /* Auto-Negotiation Expansion Register */
             default:
-                missing("not implemented");
+                qemu_log_mask(LOG_UNIMP,
+                              "eepro100: MDI write of reserved PHY register "
+                              "%u, data 0x%04x\n", reg, data);
             }
             s->mdimem[reg] &= eepro100_mdi_mask[reg];
             s->mdimem[reg] |= data & ~eepro100_mdi_mask[reg];
@@ -2067,9 +2068,19 @@ static uint8_t eepro100_read1(EEPRO100State * s, uint32_t addr)
         val = 0x07;
         TRACE(OTHER, logout("addr=General Status val=%02x\n", val));
         break;
+    /* The rest of the CSR map (8255x OSDM Table 11). */
+    case SCBPointer ... SCBPointer + 3:
+    case SCBPort ... SCBPort + 2:
+    case SCBeeprom + 1:
+    case SCBFlow ... SCBFlow + 2:
+    case SCBeepromSemaphore ... SCBeepromSemaphore + 1:
+        break;
+    case SCBflash ... SCBflash + 1:     /* reserved below EEPROM control */
+    case SCBEarlyRx ... SCBEarlyRx + 3: /* RXBC: no early receive */
+        val = 0;
+        break;
     default:
-        logout("addr=%s val=0x%02x\n", regname(addr), val);
-        missing("unknown byte read");
+        qemu_log_mask(LOG_UNIMP, "eepro100: byte read of CSR 0x%02x\n", addr);
     }
     return val;
 }
@@ -2099,8 +2110,7 @@ static uint16_t eepro100_read2(EEPRO100State * s, uint32_t addr)
         TRACE(OTHER, logout("addr=%s val=0x%04x\n", regname(addr), val));
         break;
     default:
-        logout("addr=%s val=0x%04x\n", regname(addr), val);
-        missing("unknown word read");
+        val = eepro100_read1(s, addr) | eepro100_read1(s, addr + 1) << 8;
     }
     return val;
 }
@@ -2132,8 +2142,8 @@ static uint32_t eepro100_read4(EEPRO100State * s, uint32_t addr)
         val = eepro100_read_mdi(s);
         break;
     default:
-        logout("addr=%s val=0x%08x\n", regname(addr), val);
-        missing("unknown longword read");
+        val = eepro100_read2(s, addr) |
+              (uint32_t)eepro100_read2(s, addr + 2) << 16;
     }
     return val;
 }
@@ -2204,9 +2214,23 @@ static void eepro100_write1(EEPRO100State * s, uint32_t addr, uint8_t val)
         TRACE(OTHER, logout("addr=%s val=0x%02x\n", regname(addr), val));
         eepro100_write_mdi(s);
         break;
+    case SCBgctrl:
+        /*
+         * Bit 1 is Deep Power Down on Link Down, bit 0 Clockrun Disable;
+         * bits 7:2 are reserved (8255x OSDM Table 34).
+         */
+        s->mem[SCBgctrl] = val & 0x03;
+        break;
+    case SCBflash ... SCBflash + 1:
+    case SCBeeprom + 1:
+    case SCBEarlyRx ... SCBEarlyRx + 3:
+    case SCBgstat:
+    case SCBeepromSemaphore ... SCBeepromSemaphore + 1:
+        break;
     default:
-        logout("addr=%s val=0x%02x\n", regname(addr), val);
-        missing("unknown byte write");
+        qemu_log_mask(LOG_UNIMP,
+                      "eepro100: byte write of CSR 0x%02x val 0x%02x\n",
+                      addr, val);
     }
 }
 
@@ -2254,8 +2278,8 @@ static void eepro100_write2(EEPRO100State * s, uint32_t addr, uint16_t val)
         TRACE(OTHER, logout("addr=%s val=0x%04x\n", regname(addr), val));
         break;
     default:
-        logout("addr=%s val=0x%04x\n", regname(addr), val);
-        missing("unknown word write");
+        eepro100_write1(s, addr, val);
+        eepro100_write1(s, addr + 1, val >> 8);
     }
 }
 
@@ -2283,8 +2307,8 @@ static void eepro100_write4(EEPRO100State * s, uint32_t addr, uint32_t val)
         eepro100_write_mdi(s);
         break;
     default:
-        logout("addr=%s val=0x%08x\n", regname(addr), val);
-        missing("unknown longword write");
+        eepro100_write2(s, addr, val);
+        eepro100_write2(s, addr + 2, val >> 16);
     }
 }
 
