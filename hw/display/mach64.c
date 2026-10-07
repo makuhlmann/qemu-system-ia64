@@ -1015,6 +1015,19 @@ static uint64_t mach64_mm_read(void *opaque, hwaddr addr, unsigned size)
     case FIFO_STAT:
         val = 0;           /* no entry filled: a wait for room passes */
         break;
+    case CONFIG_CNTL:
+    {
+        /*
+         * CFG_MEM_AP_LOC reports bits 31:22 of the linear aperture, which on
+         * PCI the base address register fixes (RRG-C04300-C, CONFIG_CNTL).
+         */
+        pcibus_t base = pci_get_bar_addr(PCI_DEVICE(s), 0);
+
+        val = (s->regs[CONFIG_CNTL] & ~CFG_MEM_AP_LOC) |
+              (base == PCI_BAR_UNMAPPED ? 0 :
+               ((uint32_t)(base >> 22) << 4) & CFG_MEM_AP_LOC);
+        break;
+    }
     case GUI_TRAJ_CNTL:
         val = mach64_gui_traj_compose(s);
         break;

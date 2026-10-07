@@ -130,6 +130,7 @@
 #define CFG_MEM_AP_SIZE         0x00000003ul   /* bits 1:0, read-only */
 #define CFG_MEM_AP_SIZE_2X8M    0x00000002ul
 #define CFG_MEM_VGA_AP_EN       0x00000004ul   /* bit 2 */
+#define CFG_MEM_AP_LOC          0x00003ff0ul   /* bits 13:4, read-only */
 #define CONFIG_CHIP_ID          0x38
 #define CONFIG_STAT0            0x39
 
