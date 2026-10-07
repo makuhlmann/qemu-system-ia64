@@ -26,6 +26,18 @@ static UINT8                  mUsbOhciDataBuffer[64] __attribute__((aligned(16))
 static UINT8                  mUsbKeyboardReport[OHCI_USB_KEYBOARD_REPORT_SIZE]
     __attribute__((aligned(16)));
 UINT8                         mUsbKeyboardPreviousReport[OHCI_USB_KEYBOARD_REPORT_SIZE];
+static UINT8                  mUsbKeyboardNewUsage;
+static UINT8                  mUsbKeyboardRepeatUsage;
+static BOOLEAN                mUsbKeyboardRepeating;
+static UINT64                 mUsbKeyboardRepeatStart;
+
+/*
+ * SET_IDLE 0 makes the keyboard report only changes, so a held key is
+ * repeated by the host (HID 1.11 §7.2.4): first after the PC typematic
+ * default delay, then at the fastest PC typematic rate.
+ */
+#define USB_KEYBOARD_REPEAT_DELAY_US 500000ULL
+#define USB_KEYBOARD_REPEAT_RATE_US  33000ULL
 
 static volatile UINT32 *usb_ohci_reg(UINTN Offset)
 {
@@ -422,9 +434,51 @@ static UINT16 usb_keyboard_usage_to_scan(UINT8 Usage)
     }
 }
 
+static BOOLEAN usb_keyboard_usage_to_key(UINT8 Usage, UINT8 Modifiers,
+                                         EFI_INPUT_KEY *Key)
+{
+    BOOLEAN shift = (Modifiers & ((1U << 1) | (1U << 5))) != 0;
+    UINT32 state = EFI_SHIFT_STATE_VALID;
+
+    Key->ScanCode = usb_keyboard_usage_to_scan(Usage);
+    Key->UnicodeChar = 0;
+    if (Key->ScanCode == 0) {
+        Key->UnicodeChar = usb_keyboard_usage_to_char(Usage, shift);
+    }
+    if (Key->ScanCode == 0 && Key->UnicodeChar == 0) {
+        return 0;
+    }
+    if ((Modifiers & (1U << 0)) != 0) {
+        state |= EFI_LEFT_CONTROL_PRESSED;
+    }
+    if ((Modifiers & (1U << 1)) != 0) {
+        state |= EFI_LEFT_SHIFT_PRESSED;
+    }
+    if ((Modifiers & (1U << 2)) != 0) {
+        state |= EFI_LEFT_ALT_PRESSED;
+    }
+    if ((Modifiers & (1U << 3)) != 0) {
+        state |= EFI_LEFT_LOGO_PRESSED;
+    }
+    if ((Modifiers & (1U << 4)) != 0) {
+        state |= EFI_RIGHT_CONTROL_PRESSED;
+    }
+    if ((Modifiers & (1U << 5)) != 0) {
+        state |= EFI_RIGHT_SHIFT_PRESSED;
+    }
+    if ((Modifiers & (1U << 6)) != 0) {
+        state |= EFI_RIGHT_ALT_PRESSED;
+    }
+    if ((Modifiers & (1U << 7)) != 0) {
+        state |= EFI_RIGHT_LOGO_PRESSED;
+    }
+    fw_set_mem(&mConInCurrentKeyState, sizeof(mConInCurrentKeyState), 0);
+    mConInCurrentKeyState.KeyShiftState = state;
+    return 1;
+}
+
 BOOLEAN usb_keyboard_report_to_key(EFI_INPUT_KEY *Key)
 {
-    BOOLEAN shift = (mUsbKeyboardReport[0] & ((1U << 1) | (1U << 5))) != 0;
     UINTN i;
 
     for (i = 2; i < OHCI_USB_KEYBOARD_REPORT_SIZE; i++) {
@@ -434,47 +488,28 @@ BOOLEAN usb_keyboard_report_to_key(EFI_INPUT_KEY *Key)
             usb_keyboard_report_has_usage(mUsbKeyboardPreviousReport, usage)) {
             continue;
         }
-
-        Key->ScanCode = usb_keyboard_usage_to_scan(usage);
-        Key->UnicodeChar = 0;
-        if (Key->ScanCode == 0) {
-            Key->UnicodeChar = usb_keyboard_usage_to_char(usage, shift);
-        }
-        if (Key->ScanCode != 0 || Key->UnicodeChar != 0) {
-            UINT8 modifiers = mUsbKeyboardReport[0];
-            UINT32 state = EFI_SHIFT_STATE_VALID;
-
-            if ((modifiers & (1U << 0)) != 0) {
-                state |= EFI_LEFT_CONTROL_PRESSED;
-            }
-            if ((modifiers & (1U << 1)) != 0) {
-                state |= EFI_LEFT_SHIFT_PRESSED;
-            }
-            if ((modifiers & (1U << 2)) != 0) {
-                state |= EFI_LEFT_ALT_PRESSED;
-            }
-            if ((modifiers & (1U << 3)) != 0) {
-                state |= EFI_LEFT_LOGO_PRESSED;
-            }
-            if ((modifiers & (1U << 4)) != 0) {
-                state |= EFI_RIGHT_CONTROL_PRESSED;
-            }
-            if ((modifiers & (1U << 5)) != 0) {
-                state |= EFI_RIGHT_SHIFT_PRESSED;
-            }
-            if ((modifiers & (1U << 6)) != 0) {
-                state |= EFI_RIGHT_ALT_PRESSED;
-            }
-            if ((modifiers & (1U << 7)) != 0) {
-                state |= EFI_RIGHT_LOGO_PRESSED;
-            }
-            fw_set_mem(&mConInCurrentKeyState,
-                       sizeof(mConInCurrentKeyState), 0);
-            mConInCurrentKeyState.KeyShiftState = state;
+        if (usb_keyboard_usage_to_key(usage, mUsbKeyboardReport[0], Key)) {
+            mUsbKeyboardNewUsage = usage;
             return 1;
         }
     }
     return 0;
+}
+
+static EFI_STATUS usb_keyboard_repeat_key(EFI_INPUT_KEY *Key)
+{
+    UINT64 wait = mUsbKeyboardRepeating ? USB_KEYBOARD_REPEAT_RATE_US :
+                                          USB_KEYBOARD_REPEAT_DELAY_US;
+
+    if (mUsbKeyboardRepeatUsage == 0 ||
+        !fw_wait_expired(mUsbKeyboardRepeatStart, wait) ||
+        !usb_keyboard_usage_to_key(mUsbKeyboardRepeatUsage,
+                                   mUsbKeyboardPreviousReport[0], Key)) {
+        return EFI_NOT_READY;
+    }
+    mUsbKeyboardRepeatStart = fw_read_itc();
+    mUsbKeyboardRepeating = 1;
+    return EFI_SUCCESS;
 }
 
 EFI_STATUS __attribute__((noinline, used))
@@ -490,7 +525,7 @@ usb_keyboard_read_key(EFI_INPUT_KEY *Key)
 
     head = usb_ohci_ed_head(&mUsbOhciInterruptEd) & OHCI_DPTR_MASK;
     if (head != usb_ohci_ed_tail(&mUsbOhciInterruptEd)) {
-        return EFI_NOT_READY;
+        return usb_keyboard_repeat_key(Key);
     }
     usb_dma_barrier();
 
@@ -498,12 +533,19 @@ usb_keyboard_read_key(EFI_INPUT_KEY *Key)
     if (cc == OHCI_TD_CC_NOERROR) {
         if (usb_keyboard_report_to_key(Key)) {
             status = EFI_SUCCESS;
+            mUsbKeyboardRepeatUsage = mUsbKeyboardNewUsage;
+            mUsbKeyboardRepeatStart = fw_read_itc();
+            mUsbKeyboardRepeating = 0;
+        } else if (!usb_keyboard_report_has_usage(mUsbKeyboardReport,
+                                                  mUsbKeyboardRepeatUsage)) {
+            mUsbKeyboardRepeatUsage = 0;
         }
         fw_copy_mem(mUsbKeyboardPreviousReport, mUsbKeyboardReport,
                     sizeof(mUsbKeyboardPreviousReport));
     } else {
         fw_set_mem(mUsbKeyboardPreviousReport,
                    sizeof(mUsbKeyboardPreviousReport), 0);
+        mUsbKeyboardRepeatUsage = 0;
     }
     usb_keyboard_submit_interrupt_td();
     return status;
