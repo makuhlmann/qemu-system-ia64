@@ -17,6 +17,7 @@
 #include "qemu/cutils.h"
 #include "mach64_int.h"
 #include "mach64_regs.h"
+#include "vga_regs.h"
 #include "hw/core/qdev-properties.h"
 #include "qemu/timer.h"
 #include "qemu/log.h"
@@ -175,6 +176,129 @@ void mach64_2d_set_dirty(Mach64VGAState *s, uint32_t base, int x, int y,
 }
 
 /*
+ * The accelerator CRTC registers are not the VGA CRTC registers, and
+ * CRTC_EXT_DISP_EN only selects which of the two drives the display (264VT/3D
+ * RAGE RRG p. 1-3, and CRTC_GEN_CNTL p. 4-27).  vbe_update_vgaregs() in vga.c
+ * rewrites these VGA registers while the VBE path drives the extended display,
+ * so keep the guest's values aside and put them back when the VGA display
+ * returns.  The XFree86 4.1 MMIO-only mach64 driver never writes the VGA
+ * registers and relies on this to get the text console back.
+ */
+static const uint8_t mach64_held_gr[] = { VGA_GFX_MODE, VGA_GFX_MISC };
+static const uint8_t mach64_held_cr[] = {
+    VGA_CRTC_H_DISP, VGA_CRTC_OVERFLOW, VGA_CRTC_MAX_SCAN, VGA_CRTC_V_DISP_END,
+    VGA_CRTC_OFFSET, VGA_CRTC_MODE, VGA_CRTC_LINE_COMPARE,
+};
+QEMU_BUILD_BUG_ON(ARRAY_SIZE(mach64_held_gr) !=
+                  ARRAY_SIZE(((Mach64VGAState *)0)->vga_gr));
+QEMU_BUILD_BUG_ON(ARRAY_SIZE(mach64_held_cr) !=
+                  ARRAY_SIZE(((Mach64VGAState *)0)->vga_cr));
+
+static uint8_t *mach64_held_reg(Mach64VGAState *s, uint32_t port)
+{
+    VGACommonState *vga = &s->vga;
+    int i;
+
+    if (!s->vga_held || vga_ioport_invalid(vga, port)) {
+        return NULL;
+    }
+    if (port == VGA_GFX_D) {
+        for (i = 0; i < ARRAY_SIZE(mach64_held_gr); i++) {
+            if (mach64_held_gr[i] == vga->gr_index) {
+                return &s->vga_gr[i];
+            }
+        }
+    } else if (port == VGA_CRT_DC || port == VGA_CRT_DM) {
+        for (i = 0; i < ARRAY_SIZE(mach64_held_cr); i++) {
+            if (mach64_held_cr[i] == vga->cr_index) {
+                return &s->vga_cr[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+static void mach64_vga_hold(Mach64VGAState *s)
+{
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(mach64_held_gr); i++) {
+        s->vga_gr[i] = s->vga.gr[mach64_held_gr[i]];
+    }
+    for (i = 0; i < ARRAY_SIZE(mach64_held_cr); i++) {
+        s->vga_cr[i] = s->vga.cr[mach64_held_cr[i]];
+    }
+    s->vga_held = true;
+}
+
+static void mach64_vga_release(Mach64VGAState *s)
+{
+    VGACommonState *vga = &s->vga;
+    uint8_t gr_index = vga->gr_index;
+    int i;
+
+    s->vga_held = false;
+    for (i = 0; i < ARRAY_SIZE(mach64_held_cr); i++) {
+        vga->cr[mach64_held_cr[i]] = s->vga_cr[i];
+    }
+    /* Through the port, so that vga.c remaps the legacy window for GR6. */
+    for (i = 0; i < ARRAY_SIZE(mach64_held_gr); i++) {
+        vga->gr_index = mach64_held_gr[i];
+        vga_ioport_write(vga, VGA_GFX_D, s->vga_gr[i]);
+    }
+    vga->gr_index = gr_index;
+}
+
+static uint32_t mach64_vga_ioport_read(void *opaque, uint32_t addr)
+{
+    Mach64VGAState *s = container_of(opaque, Mach64VGAState, vga);
+    uint8_t *held = mach64_held_reg(s, addr);
+
+    return held ? *held : vga_ioport_read(opaque, addr);
+}
+
+static void mach64_vga_ioport_write(void *opaque, uint32_t addr, uint32_t val)
+{
+    Mach64VGAState *s = container_of(opaque, Mach64VGAState, vga);
+    VGACommonState *vga = &s->vga;
+    uint8_t *held = mach64_held_reg(s, addr);
+
+    if (held) {
+        if (addr == VGA_GFX_D) {
+            *held = val & gr_mask[vga->gr_index];
+        } else if (!(vga->cr[VGA_CRTC_V_SYNC_END] & VGA_CR11_LOCK_CR0_CR7) ||
+                   vga->cr_index > VGA_CRTC_OVERFLOW) {
+            *held = val;
+        } else if (vga->cr_index == VGA_CRTC_OVERFLOW) {
+            *held = (*held & ~0x10) | (val & 0x10);
+        }
+    }
+    vga_ioport_write(opaque, addr, val);
+    /*
+     * vga.c's legacy mode switch turns the VBE path off on a sequencer reset;
+     * the VGA core then shows the guest's VGA registers.
+     */
+    if (s->vga_held &&
+        !(vga->vbe_regs[VBE_DISPI_INDEX_ENABLE] & VBE_DISPI_ENABLED)) {
+        mach64_vga_release(s);
+    }
+}
+
+static const MemoryRegionPortio mach64_vga_portio_list[] = {
+    { 0x04,  2, 1, .read = mach64_vga_ioport_read,
+                   .write = mach64_vga_ioport_write }, /* 3b4 */
+    { 0x0a,  1, 1, .read = mach64_vga_ioport_read,
+                   .write = mach64_vga_ioport_write }, /* 3ba */
+    { 0x10, 16, 1, .read = mach64_vga_ioport_read,
+                   .write = mach64_vga_ioport_write }, /* 3c0 */
+    { 0x24,  2, 1, .read = mach64_vga_ioport_read,
+                   .write = mach64_vga_ioport_write }, /* 3d4 */
+    { 0x2a,  1, 1, .read = mach64_vga_ioport_read,
+                   .write = mach64_vga_ioport_write }, /* 3da */
+    PORTIO_END_OF_LIST(),
+};
+
+/*
  * Translate the extended-CRTC registers into a linear-framebuffer mode by
  * driving the VGACommonState VBE machinery, exactly as hw/display/ati.c does.
  * When the extended display enable is clear we fall back to the VGA core.
@@ -197,6 +321,9 @@ static void mach64_apply_mode(Mach64VGAState *s)
         s->mode = VGA_MODE;
         vbe_ioport_write_index(vga, 0, VBE_DISPI_INDEX_ENABLE);
         vbe_ioport_write_data(vga, 0, VBE_DISPI_DISABLED);
+        if (s->vga_held) {
+            mach64_vga_release(s);
+        }
         M64_TRACE("  -> VGA_MODE (ext/en not both set)");
         return;
     }
@@ -250,6 +377,10 @@ static void mach64_apply_mode(Mach64VGAState *s)
         pitch_px = h;
     }
 
+    if (!s->vga_held &&
+        !(vga->vbe_regs[VBE_DISPI_INDEX_ENABLE] & VBE_DISPI_ENABLED)) {
+        mach64_vga_hold(s);
+    }
     vbe_ioport_write_index(vga, 0, VBE_DISPI_INDEX_ENABLE);
     vbe_ioport_write_data(vga, 0, VBE_DISPI_DISABLED);
     vga->vbe_regs[VBE_DISPI_INDEX_XRES] = h;
@@ -1506,6 +1637,26 @@ static const VMStateDescription vmstate_mach64_host_data = {
     },
 };
 
+static bool mach64_vga_held_needed(void *opaque)
+{
+    Mach64VGAState *s = opaque;
+
+    return s->vga_held;
+}
+
+static const VMStateDescription vmstate_mach64_vga_held = {
+    .name = "mach64-vga/vga-held",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = mach64_vga_held_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(vga_held, Mach64VGAState),
+        VMSTATE_UINT8_ARRAY(vga_gr, Mach64VGAState, 2),
+        VMSTATE_UINT8_ARRAY(vga_cr, Mach64VGAState, 7),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_mach64_vga = {
     .name = "mach64-vga",
     .version_id = 3,
@@ -1536,6 +1687,10 @@ static const VMStateDescription vmstate_mach64_vga = {
         VMSTATE_UINT32_ARRAY_V(ovl, Mach64VGAState, MACH64_NREGS1, 3),
         VMSTATE_BOOL_V(ovl_locked, Mach64VGAState, 3),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_mach64_vga_held,
+        NULL
     },
 };
 
@@ -1575,7 +1730,11 @@ static void mach64_vga_realize(PCIDevice *dev, Error **errp)
     }
     vga->vbe_legacy_mode_switch = true;
     vga_init(vga, OBJECT(s), pci_address_space(dev),
-             pci_address_space_io(dev), true);
+             pci_address_space_io(dev), false);
+    portio_list_init(&s->vga_port_list, OBJECT(s), mach64_vga_portio_list,
+                     vga, "vga");
+    portio_list_set_flush_coalesced(&s->vga_port_list);
+    portio_list_add(&s->vga_port_list, pci_address_space_io(dev), 0x3b0);
     mach64_vga_hw_ops = vga->hw_ops;
     mach64_hw_ops = *vga->hw_ops;
     mach64_hw_ops.gfx_update = mach64_gfx_update;
@@ -1652,6 +1811,7 @@ static void mach64_vga_reset(DeviceState *dev)
     memset(&s->host_data, 0, sizeof(s->host_data));
     mach64_ovl_reset(s);
     s->mode = VGA_MODE;
+    s->vga_held = false;
     s->cursor_size = 0;
     s->cursor_offset = 0;
     s->lcd_index = 0;

@@ -68,6 +68,15 @@ struct Mach64VGAState {
     uint8_t use_pixman;
     bool cursor_guest_mode;
 
+    /*
+     * The guest's values of the VGA registers that vga.c's VBE path
+     * overwrites while it drives the extended display (mach64.c).
+     */
+    bool vga_held;
+    uint8_t vga_gr[2];
+    uint8_t vga_cr[7];
+    PortioList vga_port_list;
+
     /* Hardware cursor host-overlay bookkeeping (see mach64.c). */
     uint16_t cursor_size;
     uint32_t cursor_offset;

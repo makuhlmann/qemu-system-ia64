@@ -11379,6 +11379,68 @@ static void test_mach64_int10_load_set(void)
     mach64_dev_close(&a);
 }
 
+static void m64_vga_wr(QTestState *qts, uint16_t port, uint8_t index,
+                       uint8_t val)
+{
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port), index);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port + 1),
+                 val);
+}
+
+static uint8_t m64_vga_rd(QTestState *qts, uint16_t port, uint8_t index)
+{
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port), index);
+    return qtest_readb(qts,
+                       IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port + 1));
+}
+
+/*
+ * CRTC_EXT_DISP_EN only selects the accelerator CRTC over the VGA one
+ * (264VT/3D RAGE RRG, CRTC_GEN_CNTL), so the VGA registers keep what the
+ * guest wrote.  The XFree86 4.1 MMIO-only driver never writes them and finds
+ * the text mode again when the bit is cleared.
+ */
+static void test_mach64_ext_disp_keeps_vga(void)
+{
+    const uint32_t gen = M64_CRTC_EN | (M64_PIX_WIDTH_16BPP << 8);
+    Mach64TestDev a;
+    QTestState *qts;
+
+    a.qts = qts = qtest_init("-machine zx1 -m 256M -S");
+    ia64_qpci_init_on_bus(&a.gbus, qts, IA64_MERCURY_BUS);
+    a.dev = qpci_device_find(&a.gbus.bus,
+                             QPCI_DEVFN(IA64_MERCURY_VGA_SLOT, 0));
+    g_assert_nonnull(a.dev);
+    a.mmio = qpci_config_readl(a.dev, PCI_BASE_ADDRESS_2) & 0xfffffff0;
+    g_assert_cmphex(a.mmio, !=, 0);
+
+    /* Mode 3: colour, CR0-7 unlocked, odd/even text at B8000, 80 columns. */
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x3c2), 0x67);
+    m64_vga_wr(qts, 0x3d4, 0x11, 0x0e);
+    m64_vga_wr(qts, 0x3ce, 0x05, 0x10);
+    m64_vga_wr(qts, 0x3ce, 0x06, 0x0e);
+    m64_vga_wr(qts, 0x3d4, 0x01, 0x4f);
+    m64_vga_wr(qts, 0x3d4, 0x13, 0x28);
+
+    m64_wr(&a, M64_CRTC_H_TOTAL_DISP, 0x007f00a7);
+    m64_wr(&a, M64_CRTC_V_TOTAL_DISP, 0x02ff0325);
+    m64_wr(&a, M64_CRTC_OFF_PITCH, (1024u / 8) << 22);
+    m64_wr(&a, M64_CRTC_GEN_CNTL, gen | M64_CRTC_EXT_DISP_EN);
+    g_assert_cmphex(m64_vga_rd(qts, 0x3ce, 0x05), ==, 0x10);
+    g_assert_cmphex(m64_vga_rd(qts, 0x3ce, 0x06), ==, 0x0e);
+    g_assert_cmphex(m64_vga_rd(qts, 0x3d4, 0x01), ==, 0x4f);
+    /* A write while the accelerator CRTC drives the display is kept. */
+    m64_vga_wr(qts, 0x3d4, 0x13, 0x50);
+    g_assert_cmphex(m64_vga_rd(qts, 0x3d4, 0x13), ==, 0x50);
+
+    m64_wr(&a, M64_CRTC_GEN_CNTL, gen);
+    g_assert_cmphex(m64_vga_rd(qts, 0x3ce, 0x05), ==, 0x10);
+    g_assert_cmphex(m64_vga_rd(qts, 0x3ce, 0x06), ==, 0x0e);
+    g_assert_cmphex(m64_vga_rd(qts, 0x3d4, 0x01), ==, 0x4f);
+    g_assert_cmphex(m64_vga_rd(qts, 0x3d4, 0x13), ==, 0x50);
+    mach64_dev_close(&a);
+}
+
 int main(int argc, char **argv)
 {
     unsigned cpus;
@@ -11585,6 +11647,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/mach64/ddc-edid", test_mach64_ddc_edid);
     qtest_add_func("/ia64-vpc/mach64/int10-load-set",
                    test_mach64_int10_load_set);
+    qtest_add_func("/ia64-vpc/mach64/ext-disp-keeps-vga",
+                   test_mach64_ext_disp_keeps_vga);
     qtest_add_func("/ia64-vpc/eepro100/csr-windows",
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/zx1/root-window-containment",
