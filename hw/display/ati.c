@@ -1168,14 +1168,25 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         val = ati_reg_read_offs(s->regs.gpio_monid,
                                 addr - GPIO_MONID, size);
         break;
+    /*
+     * PALETTE_R_INDEX (23:16) "auto-increments on each read from
+     * PALETTE_DATA", which returns the whole entry: R 23:16, G 15:8, B 7:0
+     * (RAGE 128 VR/GL RRG 6-39, 6-40).  The 3C7h port reads back the DAC
+     * state, not the index.
+     */
     case PALETTE_INDEX:
         /* FIXME unaligned access */
-        val = vga_ioport_read(&s->vga, VGA_PEL_IR) << 16;
-        val |= vga_ioport_read(&s->vga, VGA_PEL_IW) & 0xff;
+        val = s->vga.dac_read_index << 16;
+        val |= s->vga.dac_write_index;
         break;
-    case PALETTE_DATA:
-        val = vga_ioport_read(&s->vga, VGA_PEL_D);
+    case PALETTE_DATA: {
+        const uint8_t *entry = &s->vga.palette[s->vga.dac_read_index * 3];
+
+        val = entry[0] << 16 | entry[1] << 8 | entry[2];
+        s->vga.dac_read_index++;
+        s->vga.dac_sub_index = 0;
         break;
+    }
     case PALETTE_30_DATA:
         val = s->regs.palette[vga_ioport_read(&s->vga, VGA_PEL_IR)];
         break;
