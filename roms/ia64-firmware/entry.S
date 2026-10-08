@@ -905,9 +905,12 @@ start_after_pal:
     /*
      * The control registers a processor holds while it runs this image:
      * cr.iva at the image's own IVT, cr.dcr deferring speculative faults,
-     * ar.k0 naming the image base for the SAL runtime.  PAL leaves them at
-     * its own values (the machine's capture IVT, zero); the flat-image
-     * loader used to seed them.  Leaf, clobbers r14 only.
+     * and IOBASE.  "SAL will set up the IOBASE register (AR.k0) that
+     * provides the high order bits of the virtual address of the IA-32 I/O
+     * port block, to the same value as its physical address" on every
+     * processor (SAL 3.2 sec 3.2.1); Linux 2.4 sets it again only on the
+     * boot processor, and its glibc maps user port I/O from AR.k0.  Leaf,
+     * clobbers r14 only.
      */
     .section .text.fw_shadow_control_registers, "ax"
     .type fw_shadow_control_registers, @function
@@ -920,7 +923,7 @@ fw_shadow_control_registers:
     movl r14 = FW_DCR_BOOT
     ;;
     mov cr.dcr = r14
-    movl r14 = __fw_image_start
+    movl r14 = IA64_PCI_IO_BASE
     ;;
     mov ar.k0 = r14
     ;;
