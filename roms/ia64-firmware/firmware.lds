@@ -23,7 +23,6 @@ SECTIONS
         *(.text.flash_entry)
         *(.text.start_after_pal)
         *(.text.start_secondary)
-        *(.text.fw_pal_halt_light)
         *(.text.fw_pal_freq_ratios)
     }
 
@@ -61,6 +60,13 @@ SECTIONS
         *(.text*)
         *(.plt*)
     }
+    /*
+     * The application processors wait in fw_pal_halt_light until the OS
+     * wakes them (SAL 3.2.3), long after ExitBootServices(); the boot-code
+     * range above is EfiBootServicesCode, which the OS may reuse.
+     */
+    ASSERT(fw_pal_halt_light >= __runtime_code_start,
+           "fw_pal_halt_light must be runtime code")
 
     . = ALIGN(0x2000);
     __runtime_data_start = .;
