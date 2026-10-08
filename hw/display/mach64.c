@@ -312,18 +312,16 @@ static unsigned mach64_cursor_pixel(const Mach64VGAState *s, uint32_t srcoff,
 }
 
 /*
- * "for pseudo color modes, the colors are specified in color indices, and for
- * direct color modes ... in 24-bit true color" (PRG sec 6.4.3).
+ * "For controllers with integrated DACs (CT, ET), cursor color 0 going to the
+ * internal DAC is 24 bits (CUR_CLR0_R, CUR_CLR0_G, CUR_CLR0_B) in all display
+ * modes", in bits 31:24, 23:16 and 15:8; the index in bits 7:0 only drives the
+ * VESA feature connector at 4 and 8 bpp (264VT and 3D RAGE RRG, CUR_CLR0; the
+ * RAGE XL RRG has the same fields).  The PRG's "color indices" in pseudo color
+ * modes (sec 6.4.3) is the external-DAC case.
  */
-static uint32_t mach64_cursor_color(Mach64VGAState *s, uint32_t clr)
+static uint32_t mach64_cursor_color(uint32_t clr)
 {
-    unsigned pw = (s->regs[CRTC_GEN_CNTL] & CRTC_PIX_WIDTH) >>
-                  CRTC_PIX_WIDTH_SHIFT;
-
-    if (pw == PIX_WIDTH_8BPP) {
-        return s->vga.last_palette[clr & 0xff] | 0xff000000;
-    }
-    return (clr & 0x00ffffff) | 0xff000000;
+    return (clr >> 8) | 0xff000000;
 }
 
 static void mach64_cursor_define(Mach64VGAState *s)
@@ -353,10 +351,10 @@ static void mach64_cursor_define(Mach64VGAState *s)
             }
             switch (mach64_cursor_pixel(s, srcoff, y, x + hoff)) {
             case MACH64_CUR_CLR0:
-                *px = mach64_cursor_color(s, s->regs[CUR_CLR0]);
+                *px = mach64_cursor_color(s->regs[CUR_CLR0]);
                 break;
             case MACH64_CUR_CLR1:
-                *px = mach64_cursor_color(s, s->regs[CUR_CLR1]);
+                *px = mach64_cursor_color(s->regs[CUR_CLR1]);
                 break;
             case MACH64_CUR_TRANSPARENT:
                 *px = 0;
@@ -421,10 +419,10 @@ static void mach64_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
         }
         switch (mach64_cursor_pixel(s, srcoff, row, i + hoff)) {
         case MACH64_CUR_CLR0:
-            color = mach64_cursor_color(s, s->regs[CUR_CLR0]);
+            color = mach64_cursor_color(s->regs[CUR_CLR0]);
             break;
         case MACH64_CUR_CLR1:
-            color = mach64_cursor_color(s, s->regs[CUR_CLR1]);
+            color = mach64_cursor_color(s->regs[CUR_CLR1]);
             break;
         case MACH64_CUR_TRANSPARENT:
             continue;
