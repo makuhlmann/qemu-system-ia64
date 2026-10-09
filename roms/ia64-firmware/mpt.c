@@ -471,6 +471,8 @@ static void mpt_try_function(const PCI_DEVICE_LOCATION *Location)
 
 UINTN mpt_initialise(void)
 {
+    PCI_DEVICE_LOCATION seat;
+    BOOLEAN seated;
     UINT16 bus;
     UINT8 device;
     UINT8 function;
@@ -479,6 +481,17 @@ UINTN mpt_initialise(void)
         return mMptIocCount;
     }
     mMptTried = 1;
+
+    /* The seat's two functions come first (scsi_seat_location()). */
+    seated = scsi_seat_holds(FW_PCI_LSI53C1030_ID, &seat);
+    if (seated) {
+        mpt_try_function(&seat);
+        seat.Function = 1;
+        if ((UINT32)pci_config_read_value(0, seat.Bus, seat.Device, 1, 0,
+                                          4) == FW_PCI_LSI53C1030_ID) {
+            mpt_try_function(&seat);
+        }
+    }
 
     for (bus = 0; bus < PCI_MAX_BUSES; bus++) {
         for (device = 0; device < PCI_MAX_DEVICES; device++) {
@@ -502,7 +515,8 @@ UINTN mpt_initialise(void)
                      PCI_HEADER_TYPE_MULTI_FUNC) != 0) {
                     function_count = PCI_MAX_FUNCTIONS;
                 }
-                if (id != FW_PCI_LSI53C1030_ID) {
+                if (id != FW_PCI_LSI53C1030_ID ||
+                    (seated && bus == seat.Bus && device == seat.Device)) {
                     continue;
                 }
                 location.Bus = (UINT8)bus;

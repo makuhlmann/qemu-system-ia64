@@ -248,6 +248,27 @@ class Ia64Storage(Ia64FirmwareTest):
         self.run_scenario("scsi-mpt-fn1", media, drive_args=drive_args,
                           machine_options="scsi=lsi53c1030")
 
+    def test_scsi_seat_before_added_adapter(self):
+        """Boot from the seat's disk while an added QLogic carries a disk too.
+
+        The QLogic is probed before the LSI, but the board's seat comes
+        first: a blank disk on an adapter added with -device must not hide
+        the board's boot disk.
+        """
+        app = app_path("storage")
+        media = Path(self.scratch_file("scsi-seat.img"))
+        make_fat_disk(media, app)
+        blank = Path(self.scratch_file("scsi-added-blank.img"))
+        blank.write_bytes(bytes(16 * 1024 * 1024))
+        drive_args = (
+            "-drive", f"file={media},format=raw,if=none,id=testdisk",
+            "-device", "scsi-hd,bus=scsi.0,drive=testdisk",
+            "-device", "isp12160-scsi,id=isp",
+            "-drive", f"file={blank},format=raw,if=none,id=blank",
+            "-device", "scsi-hd,bus=isp.0,drive=blank",
+        )
+        self.run_scenario("scsi-seat-first", media, drive_args=drive_args)
+
     def test_scsi_lsi_fallback(self):
         """Boot from a disk on an added LSI while the QLogic holds the seat.
 

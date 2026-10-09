@@ -126,6 +126,8 @@ typedef struct {
 
 BOOLEAN scsi_device_location(const SCSI_DEVICE *Dev,
                              PCI_DEVICE_LOCATION *Location);
+void scsi_seat_location(PCI_DEVICE_LOCATION *Location);
+BOOLEAN scsi_seat_holds(UINT32 Id, PCI_DEVICE_LOCATION *Location);
 
 /* IDE channel controller configuration (one per ATA channel). */
 typedef struct {

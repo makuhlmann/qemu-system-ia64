@@ -181,6 +181,9 @@ static BOOLEAN isp_find_controller(PCI_DEVICE_LOCATION *Location)
     if (Location == NULL) {
         return 0;
     }
+    if (scsi_seat_holds(FW_PCI_ISP12160_ID, Location)) {
+        return 1;
+    }
 
     for (bus = 0; bus < PCI_MAX_BUSES; bus++) {
         for (device = 0; device < PCI_MAX_DEVICES; device++) {

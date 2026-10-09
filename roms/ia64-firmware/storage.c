@@ -41,6 +41,8 @@
 #define PCI_SUB_CLASS_SCSI           0x00U
 #define PCI_VENDOR_ID_LSI            0x1000U
 #define PCI_LSI_53C895A_ID           ((0x0012U << 16) | PCI_VENDOR_ID_LSI)
+#define FW_PCI_ISP12160_SEAT_ID      0x12161077U
+#define FW_PCI_LSI53C1030_SEAT_ID    ((0x0030U << 16) | PCI_VENDOR_ID_LSI)
 #define PCI_LSI_BAR1_OFFSET          0x14U
 
 #define LSI_REG_SCID                 0x04U
@@ -297,6 +299,37 @@ static BOOLEAN lsi_mmio_bar_address(UINT32 Bar, UINT64 *Address)
     return 1;
 }
 
+/*
+ * The board's own SCSI seat (ia64_vpc_abi.h): device 1 of rope 1's bus on
+ * zx1, where the rx2600 carries its adapter, and device 0 of the first WXB
+ * bus on the i2000.  The adapter there is the board's, and its disks come
+ * before those of an adapter added in a slot.
+ */
+void scsi_seat_location(PCI_DEVICE_LOCATION *Location)
+{
+    BOOLEAN zx1 = fw_platform_is_zx1();
+
+    Location->Bus = zx1 ? IA64_ZX1_SCSI_BUS : IA64_460GX_WXB0_BUS;
+    Location->Device = zx1 ? IA64_ZX1_SCSI_SLOT : IA64_460GX_WXB0_SCSI_SLOT;
+    Location->Function = 0;
+}
+
+/* Does the seat hold an adapter with this vendor and device ID? */
+BOOLEAN scsi_seat_holds(UINT32 Id, PCI_DEVICE_LOCATION *Location)
+{
+    PCI_DEVICE_LOCATION seat;
+
+    scsi_seat_location(&seat);
+    if ((UINT32)pci_config_read_value(0, seat.Bus, seat.Device,
+                                      seat.Function, 0, 4) != Id) {
+        return 0;
+    }
+    if (Location != NULL) {
+        *Location = seat;
+    }
+    return 1;
+}
+
 static BOOLEAN scsi_find_lsi_controller(PCI_DEVICE_LOCATION *Location)
 {
     UINT16 bus;
@@ -306,6 +339,9 @@ static BOOLEAN scsi_find_lsi_controller(PCI_DEVICE_LOCATION *Location)
 
     if (Location == NULL) {
         return 0;
+    }
+    if (scsi_seat_holds(PCI_LSI_53C895A_ID, Location)) {
+        return 1;
     }
 
     for (bus = 0; bus < PCI_MAX_BUSES; bus++) {
@@ -967,11 +1003,13 @@ static void scsi_probe_transport(void)
 }
 
 /*
- * Probe the QLogic the i2000 actually carries first, then the LSI, which is
- * opt-in and there for images installed against it, then the rx2600's
- * 53C1030.  While a guest is being migrated from one adapter to the other
- * both are present with the disk on only one, so an adapter that answers
- * but carries no device must not end the search.
+ * Probe the kind of adapter the board's seat holds first, and within a
+ * kind the seat's adapter first, so that a disk on an adapter added with
+ * -device cannot hide the board's boot disk.  The other kinds follow: the
+ * QLogic the i2000 carries, the LSI, the rx2600's 53C1030.  While a guest
+ * is being migrated from one adapter to the other both are present with
+ * the disk on only one, so an adapter that answers but carries no device
+ * must not end the search.
  */
 static BOOLEAN scsi_probe_one(UINT32 Transport)
 {
@@ -985,21 +1023,46 @@ static BOOLEAN scsi_probe_one(UINT32 Transport)
     return 1;
 }
 
+static BOOLEAN scsi_try_transport(UINT32 Transport)
+{
+    switch (Transport) {
+    case SCSI_TRANSPORT_ISP12160:
+        return isp12160_initialise() &&
+               scsi_probe_one(SCSI_TRANSPORT_ISP12160);
+    case SCSI_TRANSPORT_LSI:
+        return lsi_init_controller() && scsi_probe_one(SCSI_TRANSPORT_LSI);
+    case SCSI_TRANSPORT_MPT:
+        return mpt_initialise() != 0 && scsi_probe_one(SCSI_TRANSPORT_MPT);
+    default:
+        return 0;
+    }
+}
+
 void scsi_probe_devices(void)
 {
+    static const UINT32 order[] = {
+        SCSI_TRANSPORT_ISP12160, SCSI_TRANSPORT_LSI, SCSI_TRANSPORT_MPT,
+    };
+    UINT32 first;
+    UINTN i;
+
     fw_set_mem(mScsiDevices, sizeof(mScsiDevices), 0);
     mBootScsiDevice = NULL;
     mDiskScsiDevice = NULL;
     mScsiTransport = SCSI_TRANSPORT_NONE;
 
-    if (isp12160_initialise() && scsi_probe_one(SCSI_TRANSPORT_ISP12160)) {
+    first = scsi_seat_holds(FW_PCI_ISP12160_SEAT_ID, NULL) ?
+            SCSI_TRANSPORT_ISP12160 :
+            scsi_seat_holds(PCI_LSI_53C895A_ID, NULL) ? SCSI_TRANSPORT_LSI :
+            scsi_seat_holds(FW_PCI_LSI53C1030_SEAT_ID, NULL) ?
+            SCSI_TRANSPORT_MPT : SCSI_TRANSPORT_NONE;
+    if (first != SCSI_TRANSPORT_NONE && scsi_try_transport(first)) {
         return;
     }
-    if (lsi_init_controller() && scsi_probe_one(SCSI_TRANSPORT_LSI)) {
-        return;
-    }
-    if (mpt_initialise() != 0) {
-        scsi_probe_one(SCSI_TRANSPORT_MPT);
+    for (i = 0; i < FW_ARRAY_SIZE(order); i++) {
+        if (order[i] != first && scsi_try_transport(order[i])) {
+            return;
+        }
     }
 }
 
