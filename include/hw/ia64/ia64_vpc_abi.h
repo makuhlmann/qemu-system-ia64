@@ -441,6 +441,13 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_ZX1_ROPE1_IO_BASE        (1U * IA64_ZX1_ROPE_IO_SIZE)
 #define IA64_ZX1_ROPE1_IO_SIZE        IA64_ZX1_ROPE_IO_SIZE
 #define IA64_ZX1_SCSI_IO_BASE         (IA64_ZX1_ROPE1_IO_BASE + 0x100U)
+/*
+ * Function 1 of the rx2600's 53C1030 sits at 2000h (rx2600 capture
+ * 2026-10-03).  The stand-in ACPI PM block (IA64_ACPI_PM_IO_BASE) holds that
+ * port until it moves to the PDH, where the rx2600 has it, so function 1
+ * takes the next free port of rope 1.
+ */
+#define IA64_ZX1_SCSI_FN1_IO_BASE     (IA64_ZX1_ROPE1_IO_BASE + 0x200U)
 #define IA64_ZX1_ROPE1_MMIO_BASE      IA64_U64(0x00000000ef400000)
 #define IA64_ZX1_ROPE1_MMIO_SIZE      IA64_U64(0x0000000000400000)
 #define IA64_ZX1_ROPE1_GSI_BASE       22

@@ -21,6 +21,8 @@
 #include "libqos/libqos-malloc.h"
 
 #define MPT_DEVFN          QPCI_DEVFN(0x10, 0)
+#define MPT_SEAT_BUS       0x20
+#define MPT_SEAT_DEVFN     QPCI_DEVFN(1, 0)
 #define MPT_MMIO_BASE      (IA64_PCI_MMIO_BASE + 0x00200000ULL)
 #define MPT_MMIO_LIMIT     (IA64_PCI_MMIO_BASE + 0x01000000ULL)
 #define MPT_PIO_BASE       0x6000U
@@ -46,6 +48,7 @@ typedef struct MptSpiCase {
     const char *name;
     MptSpiTest *fn;
     bool snapshot;
+    bool seat;          /* the board's controller at 20:01.0 (scsi=) */
 } MptSpiCase;
 
 static uint32_t mptspi_probe_rom_size(QPCIDevice *dev)
@@ -201,6 +204,29 @@ static void mptspi_test_io_unit_policy(void *obj, void *data,
                           pa, sizeof(page), true);
     g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==,
                     MPI_IOCSTATUS_CONFIG_INVALID_DATA);
+    guest_free(alloc, pa);
+}
+
+/*
+ * At the rx2600's seat the first entry of IO Unit page 2's adapter order
+ * names rope 1's bus, 20h, and the controller's own device and function.
+ */
+static void mptspi_test_seat_io_unit_2(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QMptSpi *mpt = obj;
+    uint8_t page[32];
+    uint64_t pa = guest_alloc(alloc, sizeof(page));
+    MPIMsgConfigReply reply;
+
+    mptspi_ioc_init(mpt);
+    reply = mptspi_config(mpt, MPI_CONFIG_ACTION_PAGE_READ_CURRENT,
+                          MPI_CONFIG_PAGETYPE_IO_UNIT, 2, 0,
+                          pa, sizeof(page), false);
+    g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==, MPI_IOCSTATUS_SUCCESS);
+    qtest_memread(mpt->dev.bus->qts, pa, page, sizeof(page));
+    g_assert_cmphex(page[12], ==, MPT_SEAT_BUS);
+    g_assert_cmphex(page[13], ==, MPT_SEAT_DEVFN);
     guest_free(alloc, pa);
 }
 
@@ -1221,8 +1247,9 @@ static void mptspi_run(const void *opaque)
      * only advances while the machine runs.
      */
     g_autoptr(GString) args = g_string_new(
+        c->seat ? "-machine zx1,scsi=lsi53c1030 -m 256M" :
         "-machine zx1 -m 256M -device lsi53c1030,addr=10.0,id=mptspi");
-    QPCIAddress addr = { .devfn = MPT_DEVFN,
+    QPCIAddress addr = { .devfn = c->seat ? MPT_SEAT_DEVFN : MPT_DEVFN,
                          .vendor_id = PCI_VENDOR_ID_LSI_LOGIC,
                          .device_id = PCI_DEVICE_ID_LSI_53C1030 };
     MptSpiSnapshotData *snapshot = NULL;
@@ -1235,7 +1262,9 @@ static void mptspi_run(const void *opaque)
     }
     mpt.qts = qtest_init(args->str);
     qpci_init_generic(&mpt.gbus, mpt.qts, NULL, false);
-    mpt.gbus.ecam_alloc_ptr = IA64_PCI_CONFIG_BASE;
+    /* libqos addresses bus 0 only: start its ECAM at the device's bus. */
+    mpt.gbus.ecam_alloc_ptr = IA64_PCI_CONFIG_BASE +
+                              ((uint64_t)(c->seat ? MPT_SEAT_BUS : 0) << 20);
     mpt.gbus.bus.mmio_alloc_ptr = MPT_MMIO_BASE;
     mpt.gbus.bus.mmio_limit = MPT_MMIO_LIMIT;
     mpt.gbus.bus.pio_alloc_ptr = MPT_PIO_BASE;
@@ -1262,6 +1291,7 @@ static const MptSpiCase mptspi_cases[] = {
     { "config-savevm", mptspi_test_config_savevm, true },
     { "reply-coalescing", mptspi_reply_coalescing, false },
     { "coalescing-savevm", mptspi_coalescing_savevm, true },
+    { "seat-io-unit-2", mptspi_test_seat_io_unit_2, false, true },
 };
 
 int main(int argc, char **argv)

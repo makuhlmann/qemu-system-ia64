@@ -108,6 +108,7 @@ typedef enum IA64VpcScsiModel {
     IA64_VPC_SCSI_NONE,
     IA64_VPC_SCSI_LSI53C895A,
     IA64_VPC_SCSI_ISP12160,
+    IA64_VPC_SCSI_LSI53C1030,
     IA64_VPC_SCSI__MAX,
 } IA64VpcScsiModel;
 
@@ -198,6 +199,8 @@ struct IA64VpcMachineClass {
     /* The SCSI seat's I/O and memory BAR bases; 0 = the first WXB root's. */
     uint32_t scsi_seat_io_base;
     uint64_t scsi_seat_mmio_base;
+    /* The I/O BAR of a two-function seat adapter's function 1. */
+    uint32_t scsi_seat_fn1_io_base;
     /* The graphics I/O BAR base; 0 = IA64_VGA_IO_BASE. */
     uint32_t vga_io_base;
     /*
@@ -334,6 +337,7 @@ struct IA64VpcMachineState {
     PCIDevice *uhci_dev;
     Intel82468GXIFBState *ifb;
     PCIDevice *lsi_dev;
+    PCIDevice *mpt_dev[2];          /* the 53C1030's two functions */
     PCIDevice *vga_dev;
     PCIDevice *nic_devs[MAX_NICS];
     unsigned int nic_count;

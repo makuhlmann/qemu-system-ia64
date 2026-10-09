@@ -602,9 +602,11 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->scsi_default = IA64_VPC_SCSI_LSI53C895A;
     imc->scsi_models = (1U << IA64_VPC_SCSI_NONE) |
                        (1U << IA64_VPC_SCSI_LSI53C895A) |
-                       (1U << IA64_VPC_SCSI_ISP12160);
+                       (1U << IA64_VPC_SCSI_ISP12160) |
+                       (1U << IA64_VPC_SCSI_LSI53C1030);
     imc->scsi_seat_io_base = IA64_ZX1_SCSI_IO_BASE;
     imc->scsi_seat_mmio_base = IA64_ZX1_ROPE1_MMIO_BASE;
+    imc->scsi_seat_fn1_io_base = IA64_ZX1_SCSI_FN1_IO_BASE;
     imc->vga_io_base = IA64_ZX1_AGP_IO_BASE;
     imc->ide_default = true;
     imc->ide_type = "cmd649-ide";

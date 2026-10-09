@@ -170,6 +170,8 @@
  */
 #define IA64_SCSI_SEAT_MMIO_PCI_BASE IA64_WXB0_MMIO_PCI_BASE
 #define IA64_LSI_RAM_BAR_OFFSET      0x00002000ULL
+/* Each 53C1030 function decodes two 64 KiB memory BARs. */
+#define IA64_MPT_FN_MMIO_SIZE        0x00020000ULL
 #define IA64_E1000_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00040000ULL)
 #define IA64_E1000_MMIO_SIZE    0x00020000ULL
 #define IA64_E1000_IO_SIZE      0x00000040U
@@ -2147,6 +2149,7 @@ static const char *const ia64_vpc_scsi_names[IA64_VPC_SCSI__MAX] = {
     [IA64_VPC_SCSI_NONE] = "none",
     [IA64_VPC_SCSI_LSI53C895A] = "lsi53c895a",
     [IA64_VPC_SCSI_ISP12160] = "isp12160",
+    [IA64_VPC_SCSI_LSI53C1030] = "lsi53c1030",
 };
 
 static char *ia64_vpc_get_scsi(Object *obj, Error **errp)
@@ -3633,7 +3636,8 @@ static void ia64_vpc_configure_addon_scsi_on(IA64VpcMachineState *s,
         PCIDevice *pci_dev = bus->devices[devfn];
 
         if (pci_dev == NULL || pci_dev == s->lsi_dev ||
-            pci_dev == s->isp_dev ||
+            pci_dev == s->isp_dev || pci_dev == s->mpt_dev[0] ||
+            pci_dev == s->mpt_dev[1] ||
             pci_get_word(pci_dev->config + PCI_CLASS_DEVICE) !=
             PCI_CLASS_STORAGE_SCSI) {
             continue;
@@ -3691,6 +3695,45 @@ static void ia64_vpc_init_isp(IA64VpcMachineState *s, PCIBus *bus, int devfn)
     scsi_bus_legacy_handle_cmdline(
         SCSI_BUS(qdev_get_child_bus(DEVICE(s->isp_dev), "isp12160-scsi.0")));
 }
+
+/*
+ * Function 0 takes the seat's BARs; function 1 the board's port for it and
+ * the memory after function 0's.
+ */
+static void ia64_vpc_configure_mpt(IA64VpcMachineState *s)
+{
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
+
+    if (s->mpt_dev[0] == NULL) {
+        return;
+    }
+    ia64_vpc_configure_bar_slice(s->mpt_dev[0], ia64_vpc_scsi_seat_mmio(s),
+                                 ia64_vpc_scsi_seat_io(s));
+    ia64_vpc_configure_bar_slice(s->mpt_dev[1], ia64_vpc_scsi_seat_mmio(s) +
+                                 IA64_MPT_FN_MMIO_SIZE,
+                                 imc->scsi_seat_fn1_io_base);
+}
+
+/*
+ * The rx2600's core I/O SCSI: both functions of an LSI 53C1030, each with
+ * its own bus.  Drives given without an interface go to function 0's, the
+ * channel of the real board's internal disks.
+ */
+static bool ia64_vpc_init_mpt(IA64VpcMachineState *s, PCIBus *bus, int devfn,
+                              Error **errp)
+{
+    for (unsigned int fn = 0; fn < ARRAY_SIZE(s->mpt_dev); fn++) {
+        s->mpt_dev[fn] = pci_new_multifunction(
+            PCI_DEVFN(PCI_SLOT(devfn), fn), "lsi53c1030");
+        if (!pci_realize_and_unref(s->mpt_dev[fn], bus, errp)) {
+            return false;
+        }
+    }
+    ia64_vpc_configure_mpt(s);
+    scsi_bus_legacy_handle_cmdline(
+        SCSI_BUS(QLIST_FIRST(&DEVICE(s->mpt_dev[0])->child_bus)));
+    return true;
+}
 #endif
 
 /* Where the board seats a built-in device: *bus and *devfn preset to defaults. */
@@ -3719,6 +3762,9 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_ifb_smbus(
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
     ia64_vpc_configure_lsi(s, s->lsi_dev);
+#ifdef CONFIG_IA64_VPC_STORAGE
+    ia64_vpc_configure_mpt(s);
+#endif
     ia64_vpc_configure_vga(s->vga_dev, ia64_vpc_vga_io(s));
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_nic(s->nic_devs[i], i);
@@ -3734,6 +3780,9 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     ia64_vpc_configure_pci_irq(s,
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
     ia64_vpc_configure_seat_irq(s, s->lsi_dev, IA64_460GX_WXB0_BUS);
+    for (unsigned int fn = 0; fn < ARRAY_SIZE(s->mpt_dev); fn++) {
+        ia64_vpc_configure_seat_irq(s, s->mpt_dev[fn], IA64_460GX_WXB0_BUS);
+    }
     ia64_vpc_configure_pci_irq_on_root(
         s->vga_dev,
         ia64_vpc_root_gsi_base(s, IA64_460GX_GXB_BUS));
@@ -5114,6 +5163,11 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         case IA64_VPC_SCSI_ISP12160:
             ia64_vpc_init_isp(s, scsi_bus, scsi_devfn);
             break;
+        case IA64_VPC_SCSI_LSI53C1030:
+            if (!ia64_vpc_init_mpt(s, scsi_bus, scsi_devfn, errp)) {
+                return false;
+            }
+            break;
         default:
             g_assert_not_reached();
         }
@@ -5493,9 +5547,10 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                   ia64_vpc_get_scsi,
                                   ia64_vpc_set_scsi);
     object_class_property_set_description(oc, "scsi",
-        "The SCSI adapter in the board's SCSI seat: none, lsi53c895a or "
-        "isp12160 (default: isp12160 on 460gx, lsi53c895a on zx1); add "
-        "further adapters with -device");
+        "The SCSI adapter in the board's SCSI seat: none, lsi53c895a, "
+        "isp12160, or on zx1 lsi53c1030, the rx2600's own (default: "
+        "isp12160 on 460gx, lsi53c895a on zx1); add further adapters with "
+        "-device");
     object_class_property_add_bool(oc, "audio",
                                    ia64_vpc_get_audio,
                                    ia64_vpc_set_audio);

@@ -3809,6 +3809,62 @@ static void test_zx1_bus0_population(void)
     qtest_quit(qts);
 }
 
+/*
+ * scsi=lsi53c1030 seats the rx2600's controller at 20:01: both functions,
+ * INTA and INTB on rope 1's two lines, and BARs inside rope 1's windows.
+ * Function 1's port is the model's (IA64_ZX1_SCSI_FN1_IO_BASE).
+ */
+static void test_zx1_mpt_seat(void)
+{
+    static const struct {
+        uint32_t io;
+        uint32_t mem0;
+        uint32_t mem1;
+    } bars[] = {
+        { IA64_ZX1_SCSI_IO_BASE, 0, 0x10000 },
+        { IA64_ZX1_SCSI_FN1_IO_BASE, 0x20000, 0x30000 },
+    };
+    QTestState *qts = qtest_init("-machine zx1,scsi=lsi53c1030 -m 256M -S");
+    uint8_t fn;
+
+    for (fn = 0; fn < 2; fn++) {
+        g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS,
+                                       IA64_ZX1_SCSI_SLOT, fn,
+                                       PCI_VENDOR_ID), ==, 0x00301000);
+        g_assert_cmphex(ia64_cfg_readb(qts, IA64_ZX1_SCSI_BUS,
+                                       IA64_ZX1_SCSI_SLOT, fn,
+                                       PCI_HEADER_TYPE), ==, 0x80);
+        g_assert_cmphex(ia64_cfg_readb(qts, IA64_ZX1_SCSI_BUS,
+                                       IA64_ZX1_SCSI_SLOT, fn,
+                                       PCI_INTERRUPT_PIN), ==, fn + 1);
+        g_assert_cmphex(ia64_cfg_readb(qts, IA64_ZX1_SCSI_BUS,
+                                       IA64_ZX1_SCSI_SLOT, fn,
+                                       PCI_INTERRUPT_LINE), ==,
+                        IA64_ZX1_ROPE1_GSI_BASE + fn);
+        g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS,
+                                       IA64_ZX1_SCSI_SLOT, fn,
+                                       PCI_BASE_ADDRESS_0), ==,
+                        bars[fn].io | PCI_BASE_ADDRESS_SPACE_IO);
+        g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS,
+                                       IA64_ZX1_SCSI_SLOT, fn,
+                                       PCI_BASE_ADDRESS_1), ==,
+                        (IA64_ZX1_ROPE1_MMIO_BASE + bars[fn].mem0) |
+                        PCI_BASE_ADDRESS_MEM_TYPE_64);
+        g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS,
+                                       IA64_ZX1_SCSI_SLOT, fn,
+                                       PCI_BASE_ADDRESS_2), ==, 0);
+        g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS,
+                                       IA64_ZX1_SCSI_SLOT, fn,
+                                       PCI_BASE_ADDRESS_3), ==,
+                        (IA64_ZX1_ROPE1_MMIO_BASE + bars[fn].mem1) |
+                        PCI_BASE_ADDRESS_MEM_TYPE_64);
+        g_assert_cmphex(ia64_cfg_readw(qts, IA64_ZX1_SCSI_BUS,
+                                       IA64_ZX1_SCSI_SLOT, fn,
+                                       PCI_COMMAND) & 0x7, ==, 0x7);
+    }
+    qtest_quit(qts);
+}
+
 static void test_eepro100_csr_windows(void)
 {
     const uint64_t cfg = IA64_PCI_CONFIG_BASE +
@@ -11922,6 +11978,7 @@ int main(int argc, char **argv)
                    test_eepro100_csr_windows);
     qtest_add_func("/ia64-vpc/zx1/root-window-containment",
                    test_zx1_root_window_containment);
+    qtest_add_func("/ia64-vpc/zx1/mpt-seat", test_zx1_mpt_seat);
     qtest_add_func("/ia64-vpc/zx1/bus0-population",
                    test_zx1_bus0_population);
     qtest_add_func("/ia64-vpc/eepro100/board-eeprom",
