@@ -61,7 +61,7 @@ class Ia64Storage(Ia64FirmwareTest):
             else:
                 self.assertNotIn("bmdma_cmd_writeb", trace)
 
-    def run_scsi_layout(self, layout, *, fat32=False):
+    def run_scsi_layout(self, layout, *, fat32=False, machine_options=""):
         app = app_path("storage")
         suffix = "-fat32" if fat32 else ""
         media = Path(self.scratch_file(f"scsi-{layout}{suffix}.img"))
@@ -77,7 +77,10 @@ class Ia64Storage(Ia64FirmwareTest):
                 required.append("short-form-hard-drive-path")
         if fat32:
             required.append("fat32-filesystem")
-        self.run_scenario(f"scsi-{layout}{suffix}", media,
+        name = f"scsi-{layout}{suffix}"
+        if machine_options:
+            name += "-" + machine_options.replace("=", "-")
+        self.run_scenario(name, media, machine_options=machine_options,
                           required_cases=required)
 
     # A hand-attached CMD646 goes to slot 0 of the compatibility bus ("pci").
@@ -224,6 +227,26 @@ class Ia64Storage(Ia64FirmwareTest):
 
     def test_scsi_mbr_fallback(self):
         self.run_scsi_layout("mbr-fallback")
+
+    def test_scsi_lsi53c1030(self):
+        """Boot from a disk on function 0 of the rx2600's 53C1030."""
+        self.run_scsi_layout("gpt", machine_options="scsi=lsi53c1030")
+
+    def test_scsi_lsi53c1030_function1(self):
+        """Boot from a disk on the 53C1030's second function.
+
+        Function 1 is a controller of its own with its own bus, and the
+        boot path has to name it: Pci(1|1) under rope 1's root.
+        """
+        app = app_path("storage")
+        media = Path(self.scratch_file("scsi-mpt-fn1.img"))
+        make_fat_disk(media, app)
+        drive_args = (
+            "-drive", f"file={media},format=raw,if=none,id=testdisk",
+            "-device", "scsi-hd,bus=scsi.1,scsi-id=3,drive=testdisk",
+        )
+        self.run_scenario("scsi-mpt-fn1", media, drive_args=drive_args,
+                          machine_options="scsi=lsi53c1030")
 
     def test_scsi_lsi_fallback(self):
         """Boot from a disk on an added LSI while the QLogic holds the seat.

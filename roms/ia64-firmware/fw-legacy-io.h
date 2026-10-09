@@ -24,7 +24,7 @@ typedef enum {
     FwLsiScriptDeviceError,
 } FW_LSI_SCRIPT_RESULT;
 
-#define FW_SCSI_DEVICE_MAX  7U
+#define FW_SCSI_DEVICE_MAX  16U
 #define FW_SCSI_HOST_ID     7U
 #define FW_SCSI_CDB_MAX     16U
 #define FW_SCSI_BOUNCE_SIZE (64U * 1024U)

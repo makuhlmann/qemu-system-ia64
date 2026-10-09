@@ -45,6 +45,7 @@ static UINT8 mIspToken[ISP12160_QEMU_TOKEN_WORDS * 2]
     __attribute__((aligned(8)));
 
 static UINT64 mIspMmioBase;
+static PCI_DEVICE_LOCATION mIspLocation;
 static UINT16 mIspRequestProducer;
 static UINT16 mIspResponseConsumer;
 static UINT32 mIspHandle;
@@ -317,6 +318,15 @@ UINT64 isp12160_mmio_base(void)
     return mIspMmioBase;
 }
 
+BOOLEAN isp12160_location(PCI_DEVICE_LOCATION *Location)
+{
+    if (!mIspPresent || Location == NULL) {
+        return 0;
+    }
+    *Location = mIspLocation;
+    return 1;
+}
+
 BOOLEAN isp12160_initialise(void)
 {
     PCI_DEVICE_LOCATION location;
@@ -358,6 +368,7 @@ BOOLEAN isp12160_initialise(void)
         return 0;
     }
 
+    mIspLocation = location;
     mIspPresent = 1;
     return 1;
 }

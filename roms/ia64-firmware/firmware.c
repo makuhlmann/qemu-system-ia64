@@ -28,6 +28,7 @@
 #include "fw-acpi.h"
 #include "fw-pe.h"
 #include "fw-storage.h"
+#include "fw-mpt.h"
 #include "fw-fs.h"
 #include "fw-uart.h"
 #include "fw-uga-io.h"
@@ -5577,6 +5578,7 @@ EFI_STATUS bs_exit_boot_services(EFI_HANDLE ImageHandle, UINTN MapKey)
     fw_debug_support_exit_boot_services();
     (void)bs_set_watchdog_timer(0, 0, 0, NULL);
     ahci_stop_all_ports();
+    mpt_stop_all();
     graphics_prepare_os_handoff(fw_handoff_vga_console_primary());
     /*
      * The loader owns RR/TR state by this point and may have installed RID=1

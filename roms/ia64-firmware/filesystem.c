@@ -1428,16 +1428,26 @@ FW_OPTICAL_SETUP_LOADER_DEVICE_PATH FW_DEVICE_PATH_GUEST_ALIGN mOpticalSetupLoad
 };
 
 /*
- * Where a storage controller sits, as an EFI device path pair: the ACPI _UID
- * of the PCI root that carries it, and its device number.  IDE and AHCI are
- * on the compatibility bus.  The SCSI HBA lives at device 1 of rope 1's root
- * on zx1 (ACPI _UID IA64_ZX1_SCSI_BUS), where the rx2600 carries its LSI,
- * and at device 0 of the first WXB expander root (ACPI _UID
- * IA64_460GX_WXB0_BUS) on the i2000, where the board carries its QLogic
- * adapter.  The machine places them by the same ia64_vpc_abi.h seats.
+ * Where a storage controller sits, as an EFI device path triple: the ACPI
+ * _UID of the PCI root that carries it, and its device and function.  IDE
+ * and AHCI are on the compatibility bus.  A SCSI adapter sits on a root
+ * bus whose _UID is its bus number, so its path is where the probe found
+ * it: device 1 of rope 1's root (_UID IA64_ZX1_SCSI_BUS) for the rx2600's
+ * own adapter on zx1, device 0 of the first WXB expander root (_UID
+ * IA64_460GX_WXB0_BUS) for the i2000's QLogic, and the slot of an adapter
+ * added with -device.  The board seats by the same ia64_vpc_abi.h values.
  */
+static BOOLEAN fw_storage_scsi_location(const FW_STORAGE_DEVICE *Device,
+                                        PCI_DEVICE_LOCATION *Location)
+{
+    return Device != NULL && Device->Kind == FW_STORAGE_SCSI &&
+           scsi_device_location(Device->Scsi, Location);
+}
+
 static UINT8 fw_storage_pci_device(const FW_STORAGE_DEVICE *Device)
 {
+    PCI_DEVICE_LOCATION location;
+
     if (Device != NULL && Device->Kind == FW_STORAGE_IDE) {
         return fw_platform_is_zx1() ? IA64_ZX1_IDE_SLOT : 0;
     }
@@ -1445,15 +1455,31 @@ static UINT8 fw_storage_pci_device(const FW_STORAGE_DEVICE *Device)
         return fw_platform_is_zx1() ? IA64_ZX1_AHCI_SLOT :
                                       IA64_460GX_AHCI_SLOT;
     }
+    if (fw_storage_scsi_location(Device, &location)) {
+        return location.Device;
+    }
     return fw_platform_is_zx1() ? IA64_ZX1_SCSI_SLOT :
                                   IA64_460GX_WXB0_SCSI_SLOT;
 }
 
+static UINT8 fw_storage_pci_function(const FW_STORAGE_DEVICE *Device)
+{
+    PCI_DEVICE_LOCATION location;
+
+    return fw_storage_scsi_location(Device, &location) ?
+           location.Function : 0;
+}
+
 static UINT32 fw_storage_pci_root_uid(const FW_STORAGE_DEVICE *Device)
 {
+    PCI_DEVICE_LOCATION location;
+
     if (Device != NULL && (Device->Kind == FW_STORAGE_IDE ||
                            Device->Kind == FW_STORAGE_AHCI)) {
         return 0;
+    }
+    if (fw_storage_scsi_location(Device, &location)) {
+        return location.Bus;
     }
     return fw_platform_is_zx1() ? IA64_ZX1_SCSI_BUS : IA64_460GX_WXB0_BUS;
 }
@@ -1575,27 +1601,36 @@ void fw_update_storage_device_paths(VOID)
     UINT8 disk_pci = fw_storage_pci_device(&mDiskStorageDevice);
     UINT8 raw_pci = fw_storage_pci_device(&mRawStorageDevice);
 
+    UINT8 boot_fn = fw_storage_pci_function(&mBootStorageDevice);
+    UINT8 disk_fn = fw_storage_pci_function(&mDiskStorageDevice);
+    UINT8 raw_fn = fw_storage_pci_function(&mRawStorageDevice);
+
     mBlockDevicePath.Acpi.Uid = fw_storage_pci_root_uid(&mBootStorageDevice);
     mBlockDevicePath.Pci.Device = boot_pci;
+    mBlockDevicePath.Pci.Function = boot_fn;
     fw_set_storage_path_node(&mBlockDevicePath.Atapi, &mBootStorageDevice);
     mRawBlockDevicePath.Acpi.Uid =
         fw_storage_pci_root_uid(&mRawStorageDevice);
     mRawBlockDevicePath.Pci.Device = raw_pci;
+    mRawBlockDevicePath.Pci.Function = raw_fn;
     fw_set_storage_path_node(&mRawBlockDevicePath.Atapi, &mRawStorageDevice);
     mBootFullDevicePath.Acpi.Uid =
         fw_storage_pci_root_uid(&mBootStorageDevice);
     mBootFullDevicePath.Pci.Device = boot_pci;
+    mBootFullDevicePath.Pci.Function = boot_fn;
     fw_set_storage_path_node(&mBootFullDevicePath.Atapi, &mBootStorageDevice);
 
     mOpticalSetupLoaderDevicePath.Acpi.Uid =
         fw_storage_pci_root_uid(&mBootStorageDevice);
     mOpticalSetupLoaderDevicePath.Pci.Device = boot_pci;
+    mOpticalSetupLoaderDevicePath.Pci.Function = boot_fn;
     fw_set_storage_path_node(&mOpticalSetupLoaderDevicePath.Atapi,
                              &mBootStorageDevice);
 
     mDiskBlockDevicePath.Acpi.Uid =
         fw_storage_pci_root_uid(&mDiskStorageDevice);
     mDiskBlockDevicePath.Pci.Device = disk_pci;
+    mDiskBlockDevicePath.Pci.Function = disk_fn;
     fw_set_storage_path_node(&mDiskBlockDevicePath.Atapi,
                              &mDiskStorageDevice);
     if (mBootStorageDevice.Kind == FW_STORAGE_AHCI &&

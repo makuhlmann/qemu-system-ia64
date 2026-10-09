@@ -8,6 +8,7 @@
 #define IA64_FIRMWARE_FW_ISP12160_H
 
 #include "fw-base.h"
+#include "fw-storage.h"
 
 /*
  * Bring the adapter up: find it on the bus, load and start its firmware,
@@ -19,6 +20,7 @@
 BOOLEAN isp12160_initialise(void);
 BOOLEAN isp12160_present(void);
 UINT64 isp12160_mmio_base(void);
+BOOLEAN isp12160_location(PCI_DEVICE_LOCATION *Location);
 
 /*
  * Run one CDB against a target and return its SCSI status byte.  Data

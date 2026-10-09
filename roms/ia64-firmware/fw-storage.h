@@ -40,6 +40,7 @@ typedef struct {
 #define SCSI_BOUNCE_SIZE             (64U * 1024U)
 
 struct SCSI_DEVICE_STRUCT {
+    UINT8   ioc;            /* controller of the transport (MPT function) */
     UINT8   target;
     UINT8   lun;
     UINT8   present;
@@ -122,6 +123,9 @@ typedef struct {
     UINT8 Device;
     UINT8 Function;
 } PCI_DEVICE_LOCATION;
+
+BOOLEAN scsi_device_location(const SCSI_DEVICE *Dev,
+                             PCI_DEVICE_LOCATION *Location);
 
 /* IDE channel controller configuration (one per ATA channel). */
 typedef struct {

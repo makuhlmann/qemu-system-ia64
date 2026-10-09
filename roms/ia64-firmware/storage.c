@@ -9,12 +9,16 @@
 #include "fw-legacy-io.h"
 #include "fw-storage.h"
 #include "fw-isp12160.h"
+#include "fw-mpt.h"
 
 /* --- LSI53C895A SCSI Block I/O driver ----------------------------------- */
 
 /* struct SCSI_DEVICE_STRUCT lives in fw-storage.h. */
 
-#define SCSI_DEVICE_MAX              7U
+/* Wide SCSI: targets 0-15, the host adapter at 7. */
+#define SCSI_DEVICE_MAX              16U
+/* Controllers of one transport: the two functions of each 53C1030. */
+#define SCSI_IOC_MAX                 MPT_MAX_IOCS
 #define SCSI_HOST_ID                 7U
 #define SCSI_CDB_MAX                 16U
 #define SCSI_INQUIRY_LEN             36U
@@ -82,7 +86,8 @@
 
 static UINT64 mLsiMmioBase;
 static UINT8  mLsiPresent;
-static SCSI_DEVICE mScsiDevices[SCSI_DEVICE_MAX];
+static PCI_DEVICE_LOCATION mLsiLocation;
+static SCSI_DEVICE mScsiDevices[SCSI_IOC_MAX][SCSI_DEVICE_MAX];
 SCSI_DEVICE *mBootScsiDevice;
 SCSI_DEVICE *mDiskScsiDevice;
 static UINT32 mLsiScript[LSI_SCRIPT_DWORDS] __attribute__((aligned(8)));
@@ -96,6 +101,7 @@ static UINT8  mScsiBounce[SCSI_BOUNCE_SIZE] __attribute__((aligned(8)));
 #define SCSI_TRANSPORT_NONE     0U
 #define SCSI_TRANSPORT_LSI      1U
 #define SCSI_TRANSPORT_ISP12160 2U
+#define SCSI_TRANSPORT_MPT      3U
 static UINT8 mScsiTransport;
 
 #define AHCI_MAX_PORTS                 6U
@@ -390,6 +396,7 @@ static BOOLEAN lsi_init_controller(void)
                            command);
 
     mLsiMmioBase = mmio_base;
+    mLsiLocation = location;
     mLsiPresent = 1;
 
     lsi_write8(LSI_REG_ISTAT0, LSI_ISTAT0_SRST);
@@ -666,6 +673,11 @@ static BOOLEAN lsi_scsi_command_prepared(SCSI_DEVICE *Dev, UINTN CdbLen,
                                 scsi_cdb_to_device(mLsiCdb), &status) &&
                status == 0;
     }
+    if (mScsiTransport == SCSI_TRANSPORT_MPT) {
+        return mpt_command(Dev->ioc, Dev->target, mLsiCdb, CdbLen, Data,
+                           DataLen, scsi_cdb_to_device(mLsiCdb), &status) &&
+               status == 0;
+    }
     return lsi_run_scsi_script(Dev->target, mLsiCdb, CdbLen, Data, DataLen,
                                &status);
 }
@@ -763,9 +775,10 @@ static BOOLEAN scsi_reset_device(SCSI_DEVICE *Dev,
      * The LSI resets the one target with a BUS DEVICE RESET message.  Of the
      * QLogic's reset commands the ISP12160 model answers only BUS RESET,
      * which would leave a unit attention on every device, the boot disk
-     * included; there the reset is the re-identification below.
+     * included; there, and on the MPT, the reset is the re-identification
+     * below.
      */
-    if (mScsiTransport != SCSI_TRANSPORT_ISP12160 &&
+    if (mScsiTransport == SCSI_TRANSPORT_LSI &&
         lsi_reset_scsi_target(Dev->target, 300000000ULL) !=
             LsiScriptSuccess) {
         return 0;
@@ -844,24 +857,57 @@ const CHAR8 *scsi_transport_name(void)
         return "LSI53C895A";
     case SCSI_TRANSPORT_ISP12160:
         return "ISP12160";
+    case SCSI_TRANSPORT_MPT:
+        return "LSI53C1030";
     default:
         return "none";
     }
 }
 
-static void scsi_probe_transport(void)
+/* Where the adapter that reaches Dev sits on the bus. */
+BOOLEAN scsi_device_location(const SCSI_DEVICE *Dev,
+                             PCI_DEVICE_LOCATION *Location)
+{
+    if (Dev == NULL || Location == NULL) {
+        return 0;
+    }
+    switch (mScsiTransport) {
+    case SCSI_TRANSPORT_LSI:
+        *Location = mLsiLocation;
+        return 1;
+    case SCSI_TRANSPORT_ISP12160:
+        return isp12160_location(Location);
+    case SCSI_TRANSPORT_MPT:
+        return mpt_location(Dev->ioc, Location);
+    default:
+        return 0;
+    }
+}
+
+static UINT64 scsi_transport_mmio_base(UINTN Ioc)
+{
+    switch (mScsiTransport) {
+    case SCSI_TRANSPORT_ISP12160:
+        return isp12160_mmio_base();
+    case SCSI_TRANSPORT_MPT:
+        return mpt_mmio_base(Ioc);
+    default:
+        return mLsiMmioBase;
+    }
+}
+
+static void scsi_probe_ioc(UINTN Ioc)
 {
     UINTN target;
 
     uart_puts("SCSI controller:      ");
     uart_puts(scsi_transport_name());
     uart_puts(" mmio=0x");
-    uart_put_hex64(mScsiTransport == SCSI_TRANSPORT_ISP12160 ?
-                   isp12160_mmio_base() : mLsiMmioBase);
+    uart_put_hex64(scsi_transport_mmio_base(Ioc));
     uart_puts("\r\n");
 
     for (target = 0; target < SCSI_DEVICE_MAX; target++) {
-        SCSI_DEVICE *dev = &mScsiDevices[target];
+        SCSI_DEVICE *dev = &mScsiDevices[Ioc][target];
         UINT8 *inquiry = mScsiBounce;
         UINT8 type;
 
@@ -870,6 +916,7 @@ static void scsi_probe_transport(void)
         }
 
         fw_set_mem(dev, sizeof(*dev), 0);
+        dev->ioc = (UINT8)Ioc;
         dev->target = (UINT8)target;
         dev->lun = 0;
         fw_set_mem(inquiry, SCSI_INQUIRY_LEN, 0);
@@ -908,12 +955,23 @@ static void scsi_probe_transport(void)
     }
 }
 
+/* Every controller of the transport; only the MPT has more than one. */
+static void scsi_probe_transport(void)
+{
+    UINTN iocs = mScsiTransport == SCSI_TRANSPORT_MPT ? mpt_ioc_count() : 1;
+    UINTN ioc;
+
+    for (ioc = 0; ioc < iocs; ioc++) {
+        scsi_probe_ioc(ioc);
+    }
+}
+
 /*
  * Probe the QLogic the i2000 actually carries first, then the LSI, which is
- * opt-in and there for images installed against it.  While a guest is being
- * migrated from one adapter to the other both are present with the disk on
- * only one, so an adapter that answers but carries no device must not end
- * the search.
+ * opt-in and there for images installed against it, then the rx2600's
+ * 53C1030.  While a guest is being migrated from one adapter to the other
+ * both are present with the disk on only one, so an adapter that answers
+ * but carries no device must not end the search.
  */
 static BOOLEAN scsi_probe_one(UINT32 Transport)
 {
@@ -937,8 +995,11 @@ void scsi_probe_devices(void)
     if (isp12160_initialise() && scsi_probe_one(SCSI_TRANSPORT_ISP12160)) {
         return;
     }
-    if (lsi_init_controller()) {
-        scsi_probe_one(SCSI_TRANSPORT_LSI);
+    if (lsi_init_controller() && scsi_probe_one(SCSI_TRANSPORT_LSI)) {
+        return;
+    }
+    if (mpt_initialise() != 0) {
+        scsi_probe_one(SCSI_TRANSPORT_MPT);
     }
 }
 
@@ -1935,9 +1996,11 @@ BOOLEAN fw_scsi_controller_present(VOID)
     return mLsiPresent != 0;
 }
 
+/* The pass-thru drives the LSI, so it sees only devices found through it. */
 BOOLEAN fw_scsi_device_present(UINTN target)
 {
-    return target < SCSI_DEVICE_MAX && mScsiDevices[target].present != 0;
+    return mScsiTransport == SCSI_TRANSPORT_LSI &&
+           target < SCSI_DEVICE_MAX && mScsiDevices[0][target].present != 0;
 }
 
 FW_LSI_SCRIPT_RESULT fw_scsi_execute_buffered(
