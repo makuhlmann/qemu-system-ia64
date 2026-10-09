@@ -53,7 +53,8 @@ struct IA64SBAState {
  * second root bus under the same IOPDIR/GART.  Call before any device is
  * realized on @bus.
  */
-void ia64_sba_attach_bus(IA64SBAState *s, PCIBus *bus);
+/* Inbound DMA as the SBA translates it, for an ioa to decode in front of. */
+MemoryRegion *ia64_sba_dma_region(IA64SBAState *s);
 
 /*
  * Put @mr in rope @rope's 8 KiB slot of the rope guest configuration space.

@@ -300,6 +300,46 @@ void ia64_cpu_set_pmi_pin(CPUState *cs, int level)
     }
 }
 
+/*
+ * An interrupt transaction on the system bus: the address names the target
+ * processor by ID (bits 19:12) and EID (11:4), the data carries the delivery
+ * mode (10:8) and the vector (7:0) (SDM Vol. 2 5.8.4.2, zx1 ioa ERS Figure
+ * 11.4).  A processor's store to the Processor Interrupt Block and a
+ * chipset's message-signalled interrupt both arrive as one.  Reserved
+ * delivery modes and vectors that are not external interrupts are dropped.
+ */
+void ia64_interrupt_transaction(uint64_t address, uint64_t data)
+{
+    CPUState *cs = ia64_cpu_by_sapic_id((address >> 12) & 0xff,
+                                        (address >> 4) & 0xff);
+    uint8_t vector = data & 0xff;
+
+    if (cs == NULL) {
+        return;
+    }
+    switch ((data >> 8) & 7) {
+    case 0:                                     /* INT */
+        if (ia64_external_interrupt_vector_valid(vector)) {
+            ia64_sapic_set_irq(cs, vector);
+        }
+        break;
+    case 2:                                     /* PMI */
+        ia64_cpu_raise_pmi(cs, vector);
+        break;
+    case 4:                                     /* NMI */
+        ia64_sapic_set_irq(cs, 2);
+        break;
+    case 5:                                     /* INIT */
+        ia64_cpu_raise_init(cs);
+        break;
+    case 7:                                     /* ExtINT */
+        ia64_sapic_set_irq(cs, 0);
+        break;
+    default:
+        break;
+    }
+}
+
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector)
 {
     run_on_cpu_data data = RUN_ON_CPU_HOST_INT(vector);

@@ -23,10 +23,12 @@
  *
  * Register values and masks mirror upstream hw/pci-host/hp-zx1-ioa-regs.c; the
  * "straps" property says whether the ioa sits on an AGP or a PCI rope, as the
- * board ties its power-up pins (ERS 3.2.1).  Deliberate simplifications for this machine: the LMMIO/GMMIO/MSI
+ * board ties its power-up pins (ERS 3.2.1).  Deliberate simplifications for this machine: the LMMIO/GMMIO
  * decoders are modelled for driver-visible fidelity but do not themselves route
  * decode -- this machine decodes through the shared PCI window and the ACPI
- * _CRS, and DMA/GART is the SBA's IOPDIR (hp-agp's "shared" path).  The block
+ * _CRS, and DMA/GART is the SBA's IOPDIR (hp-agp's "shared" path).  The MSI
+ * window does route: inbound writes into it become interrupt transactions
+ * (ia64_lba_attach_dma).  The block
  * carries no PCI config space of its own and does no DMA translation; the
  * graphics adapter is a real PCI device on the Mercury root bus
  * (hw/ia64/ia64_mercury.c).  It is described to guests only through the ACPI
@@ -50,6 +52,7 @@
 #include "hw/pci/pci_device.h"
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
+#include "target/ia64/cpu.h"
 
 /* Mercury CSR register offsets (HP zx1 ioa ERS / upstream hp-zx1-ioa-regs.h). */
 #define LBA_FUNCTION_ID          0x000
@@ -151,6 +154,12 @@
 #define LBA_MSI_BASE_WRITE       UINT64_C(0x00000fffffff0001)
 #define LBA_MSI_MASK_RESET       UINT64_C(0x00000ffffff00000)
 #define LBA_MSI_MASK_WRITE       UINT64_C(0x00000fffffff0000)
+/* Range Enable (bit 0 of every BASE register) and the 44-bit address space. */
+#define LBA_RANGE_ENABLE         UINT64_C(1)
+#define LBA_ADDRESS_MASK         UINT64_C(0x00000fffffffffff)
+#define LBA_MSI_WINDOW_MIN       UINT64_C(0x10000)
+
+static void ia64_lba_update_msi(IA64LBAState *s);
 /*
  * Bits 31:19 have no reset value in ERS 9.13; SAL_B sets bit 31 on a PCI
  * rope (FFEB8276) and the rx2600 reads it back (capture 2026-10-03, IOA-3).
@@ -490,9 +499,11 @@ static MemTxResult ia64_lba_write(void *opaque, hwaddr addr, uint64_t value,
         break;
     case LBA_MSI_BASE:
         ia64_lba_latch(&s->msi_base, LBA_MSI_BASE_WRITE, mask, data);
+        ia64_lba_update_msi(s);
         break;
     case LBA_MSI_MASK:
         ia64_lba_latch(&s->msi_mask, LBA_MSI_MASK_WRITE, mask, data);
+        ia64_lba_update_msi(s);
         break;
     case LBA_ROPE_CONFIG:
         ia64_lba_latch(&s->rope_config, ~LBA_ROPE_SINGLE_WIDE, mask, data);
@@ -550,6 +561,107 @@ static const MemoryRegionOps ia64_lba_ops = {
     .valid = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
     .impl = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
 };
+
+/*
+ * Interrupt Space (ERS 9.2, Registers 9.11 and 9.12): a master's write that
+ * falls in the MSI window is a message-signalled interrupt, which the mio
+ * repeats on the processor bus as an interrupt transaction with the same
+ * address and data (mio ERS 3.4.4.1).  A lowest-priority message, whose
+ * address carries the redirection hint, goes to the processor it names: the
+ * mio redirects nothing here.  A read of the window is target-aborted (mio
+ * ERS 2.2).
+ */
+static MemTxResult ia64_lba_msi_read(void *opaque, hwaddr addr,
+                                     uint64_t *data, unsigned size,
+                                     MemTxAttrs attrs)
+{
+    (void)opaque;
+    (void)addr;
+    (void)size;
+    (void)attrs;
+    *data = ~0ULL;
+    return MEMTX_ERROR;
+}
+
+static MemTxResult ia64_lba_msi_write(void *opaque, hwaddr addr,
+                                      uint64_t data, unsigned size,
+                                      MemTxAttrs attrs)
+{
+    IA64LBAState *s = opaque;
+    uint64_t address = s->msi.addr + addr;
+
+    (void)size;
+    (void)attrs;
+    if (((data >> 8) & 7) == 1) {
+        data &= ~(7ULL << 8);
+    }
+    ia64_interrupt_transaction(address, data);
+    return MEMTX_OK;
+}
+
+static const MemoryRegionOps ia64_lba_msi_ops = {
+    .read_with_attrs = ia64_lba_msi_read,
+    .write_with_attrs = ia64_lba_msi_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+    },
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 8,
+    },
+};
+
+/*
+ * Place the window where MSI_BASE and MSI_MASK name it (bits 43:16; the
+ * mask's set bits select the compared address bits) and switch it with
+ * MSI_BASE's Range Enable.
+ */
+static void ia64_lba_update_msi(IA64LBAState *s)
+{
+    uint64_t mask = s->msi_mask & LBA_MSI_MASK_WRITE;
+    uint64_t size = (~mask & LBA_ADDRESS_MASK) + 1;
+
+    if (!s->dma_attached) {
+        return;
+    }
+    memory_region_transaction_begin();
+    memory_region_set_enabled(&s->msi, (s->msi_base & LBA_RANGE_ENABLE) != 0);
+    memory_region_set_size(&s->msi, size);
+    memory_region_set_address(&s->msi, s->msi_base & mask);
+    memory_region_transaction_commit();
+}
+
+static AddressSpace *ia64_lba_dma_as(PCIBus *bus, void *opaque, int devfn)
+{
+    IA64LBAState *s = opaque;
+
+    (void)bus;
+    (void)devfn;
+    return &s->dma_as;
+}
+
+static const PCIIOMMUOps ia64_lba_dma_ops = {
+    .get_address_space = ia64_lba_dma_as,
+};
+
+void ia64_lba_attach_dma(IA64LBAState *s, PCIBus *bus, MemoryRegion *dma)
+{
+    memory_region_init(&s->dma_root, OBJECT(s), "ia64-lba-inbound",
+                       memory_region_size(dma));
+    memory_region_init_alias(&s->dma_sba, OBJECT(s), "ia64-lba-dma", dma, 0,
+                             memory_region_size(dma));
+    memory_region_add_subregion(&s->dma_root, 0, &s->dma_sba);
+    memory_region_init_io(&s->msi, OBJECT(s), &ia64_lba_msi_ops, s,
+                          "ia64-lba-msi", LBA_MSI_WINDOW_MIN);
+    memory_region_add_subregion_overlap(&s->dma_root, 0, &s->msi, 1);
+    address_space_init(&s->dma_as, &s->dma_root, "ia64-lba-inbound");
+    s->dma_attached = true;
+    ia64_lba_update_msi(s);
+    pci_setup_iommu(bus, &ia64_lba_dma_ops, s);
+}
+
 
 void ia64_lba_set_config_bus(IA64LBAState *s, PCIBus *bus)
 {
@@ -631,6 +743,7 @@ static void ia64_lba_reset(DeviceState *dev)
     s->elmmio_mask = LBA_ELMMIO_MASK_RESET;
     s->msi_base = LBA_MSI_BASE_RESET;
     s->msi_mask = LBA_MSI_MASK_RESET;
+    ia64_lba_update_msi(s);
     s->slave_control = LBA_SLAVE_CONTROL_RESET;
     s->bus_mode = s->straps;
     s->rope_config = 0;
@@ -646,10 +759,18 @@ static void ia64_lba_reset(DeviceState *dev)
     s->outbound_err_addr = 0;
 }
 
+static int ia64_lba_post_load(void *opaque, int version_id)
+{
+    (void)version_id;
+    ia64_lba_update_msi(opaque);
+    return 0;
+}
+
 static const VMStateDescription vmstate_ia64_lba = {
     .name = "ia64-zx1-lba",
     .version_id = 5,
     .minimum_version_id = 4,
+    .post_load = ia64_lba_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(bus_number, IA64LBAState),
         VMSTATE_UINT32(config_address, IA64LBAState),

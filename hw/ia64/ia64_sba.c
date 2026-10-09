@@ -734,9 +734,9 @@ static void ia64_sba_exit(PCIDevice *dev)
     g_free(s->unimp_write);
 }
 
-void ia64_sba_attach_bus(IA64SBAState *s, PCIBus *bus)
+MemoryRegion *ia64_sba_dma_region(IA64SBAState *s)
 {
-    pci_setup_iommu(bus, &ia64_sba_iommu_ops, s);
+    return MEMORY_REGION(&s->iommu);
 }
 
 static void ia64_sba_reset(DeviceState *dev)

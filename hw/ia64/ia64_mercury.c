@@ -10,7 +10,8 @@
  * IA64_MERCURY_BUS; the primary host's ECAM config handler dispatches config
  * cycles for that bus number here (ia64_pci.c).  INTx uses the same (slot+pin)%4
  * swizzle and the same four IOSAPIC lines as the primary bus, combined by the
- * machine.  All DMA is deferred to the shared SBA IOMMU (ia64_sba_attach_bus).
+ * machine.  All DMA is deferred to the shared SBA IOMMU, behind the AGP ioa's
+ * MSI window (ia64_lba_attach_dma).
  */
 
 #include "qemu/osdep.h"

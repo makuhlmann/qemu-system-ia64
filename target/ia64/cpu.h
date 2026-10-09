@@ -1700,6 +1700,7 @@ CPUState *ia64_cpu_by_sapic_id(uint8_t id, uint8_t eid);
 void ia64_sapic_set_irq(CPUState *cs, uint8_t vector);
 void ia64_cpu_raise_init(CPUState *cs);
 void ia64_cpu_raise_pmi(CPUState *cs, unsigned vector);
+void ia64_interrupt_transaction(uint64_t address, uint64_t data);
 void ia64_cpu_set_pmi_pin(CPUState *cs, int level);
 void ia64_cpu_set_lint(CPUState *cs, int pin, int level);
 void ia64_lint_lrr_written(CPUIA64State *env, int pin);

@@ -290,12 +290,6 @@
  * adapter where it was.
  */
 
-#define IA64_SAPIC_DELIVERY_INT     0
-#define IA64_SAPIC_DELIVERY_PMI     2
-#define IA64_SAPIC_DELIVERY_NMI     4
-#define IA64_SAPIC_DELIVERY_INIT    5
-#define IA64_SAPIC_DELIVERY_EXTINT  7
-
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 
 typedef struct IA64VbeMode {
@@ -2763,11 +2757,6 @@ static void ia64_vpc_lsapic_write(void *opaque, hwaddr addr,
 {
     IA64VpcMachineState *s = opaque;
     IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
-    CPUState *cs;
-    unsigned delivery;
-    uint8_t id;
-    uint8_t eid;
-    uint8_t vector;
 
     /*
      * The upper half of the Processor Interrupt Block contains the XTP byte.
@@ -2786,49 +2775,8 @@ static void ia64_vpc_lsapic_write(void *opaque, hwaddr addr,
         return;
     }
 
-    /*
-     * The lower half of the Processor Interrupt Block is the IPI delivery
-     * region.  The address selects the target processor and the low data byte
-     * carries the interrupt vector for INT delivery messages.
-     */
-    id = (addr >> 12) & 0xff;
-    eid = (addr >> 4) & 0xff;
-    delivery = (value >> 8) & 7;
-    switch (delivery) {
-    case IA64_SAPIC_DELIVERY_INT:
-        vector = value & 0xff;
-        if (!ia64_external_interrupt_vector_valid(vector)) {
-            return;
-        }
-        break;
-    case IA64_SAPIC_DELIVERY_NMI:
-        vector = 2;
-        break;
-    case IA64_SAPIC_DELIVERY_EXTINT:
-        vector = 0;
-        break;
-    case IA64_SAPIC_DELIVERY_INIT:
-        cs = ia64_cpu_by_sapic_id(id, eid);
-        if (cs != NULL) {
-            ia64_cpu_raise_init(cs);
-        }
-        return;
-    case IA64_SAPIC_DELIVERY_PMI:
-        cs = ia64_cpu_by_sapic_id(id, eid);
-        if (cs != NULL) {
-            ia64_cpu_raise_pmi(cs, value & 0xff);
-        }
-        return;
-    default:
-        return;
-    }
-
-    cs = ia64_cpu_by_sapic_id(id, eid);
-    if (cs == NULL) {
-        return;
-    }
-
-    ia64_sapic_set_irq(cs, vector);
+    /* The lower half of the Processor Interrupt Block is the IPI region. */
+    ia64_interrupt_transaction(addr, value);
 }
 
 static const MemoryRegionOps ia64_vpc_lsapic_ops = {

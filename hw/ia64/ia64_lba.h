@@ -68,6 +68,16 @@ struct IA64LBAState {
     uint64_t completion_msg;            /* COMPL MSG LOG (0x2a0) */
     uint64_t outbound_err_addr;         /* OUT ERR ADDR  (0x070) */
 
+    /*
+     * Inbound memory writes of the rope's masters: the MSI window in front
+     * of the SBA's DMA translation (ERS 9.2).
+     */
+    MemoryRegion dma_root;
+    MemoryRegion dma_sba;
+    MemoryRegion msi;
+    AddressSpace dma_as;
+    bool dma_attached;
+
     /* Offsets already named in the log; see the mio's own pair. */
     unsigned long *unimp_read;
     unsigned long *unimp_write;
@@ -75,6 +85,12 @@ struct IA64LBAState {
 
 /* Wire the root bus whose configuration space CONFIG_ADDRESS/DATA reaches. */
 void ia64_lba_set_config_bus(IA64LBAState *s, PCIBus *bus);
+
+/*
+ * Make this ioa the inbound path of @bus's masters: writes into its MSI
+ * window become interrupt transactions, the rest goes to @dma (the SBA).
+ */
+void ia64_lba_attach_dma(IA64LBAState *s, PCIBus *bus, MemoryRegion *dma);
 
 /*
  * An interrupt input of this ioa's own I/O SAPIC.  The zx1 ioa ERS sec 11.2

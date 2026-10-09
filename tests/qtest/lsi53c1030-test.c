@@ -1202,8 +1202,7 @@ static void mptspi_coalescing_savevm(void *obj, void *data,
  * The header and capabilities of both functions as the rx2600's 53C1030
  * reads them (zx1probe run 2, 20:01.0 and 20:01.1), without the fields
  * firmware writes (command, cache line size, latency, BAR bases, interrupt
- * line).  Until ia64 delivers MSI the list ends at the PM capability; the
- * chip then has MSI at 58h.
+ * line): PM at 50h, then MSI at 58h, 64-bit with one message.
  */
 static uint32_t mptspi_cfg_readl(QTestState *qts, uint8_t fn, uint8_t reg)
 {
@@ -1253,9 +1252,9 @@ static void mptspi_test_config_image(void)
                         0xff, ==, 0x50);
         g_assert_cmphex(mptspi_cfg_readl(qts, fn, PCI_INTERRUPT_LINE) >> 8,
                         ==, 0x121100 | (fn + 1));
-        g_assert_cmphex(mptspi_cfg_readl(qts, fn, 0x50), ==, 0x06020001);
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, 0x50), ==, 0x06025801);
         g_assert_cmphex(mptspi_cfg_readl(qts, fn, 0x54), ==, 0);
-        g_assert_cmphex(mptspi_cfg_readl(qts, fn, 0x58), ==, 0);
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, 0x58), ==, 0x00800005);
         g_assert_cmphex(mptspi_cfg_readl(qts, fn, 0x5c), ==, 0);
 
         for (i = 0; i < G_N_ELEMENTS(bars); i++) {

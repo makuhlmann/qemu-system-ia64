@@ -16,6 +16,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/or-irq.h"
 #include "hw/core/sysbus.h"
+#include "hw/pci/msi.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_bus.h"
 #include "hw/ia64/ia64_expander.h"
@@ -233,6 +234,14 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
         return false;
     }
     /*
+     * A master's writes reach memory through its rope's ioa, which turns
+     * those in its MSI window into interrupt transactions (ioa ERS 9.2).
+     * That is the board's MSI support; the 460GX has none.
+     */
+    ia64_lba_attach_dma(IA64_LBA(s->rope0_lba_dev), pci_bus,
+                        ia64_sba_dma_region(IA64_SBA(s->sba_dev)));
+    msi_nonbroken = true;
+    /*
      * Rope 1's ioa: the rx2600's carries the SCSI and the gigabit LAN on a
      * bus of its own, and its I/O SAPIC takes the PDH UARTs and the SCI on
      * inputs 7 to 9 (the vendor SPCR, HCDP and FADT name GSI 34 to 36, base
@@ -255,7 +264,8 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     }
     s->rope1_bus = ia64_expander_host_bus(s->rope1_host);
     ia64_pci_host_add_secondary_bus(pci_host, s->rope1_bus);
-    ia64_sba_attach_bus(IA64_SBA(s->sba_dev), s->rope1_bus);
+    ia64_lba_attach_dma(IA64_LBA(s->rope1_lba_dev), s->rope1_bus,
+                        ia64_sba_dma_region(IA64_SBA(s->sba_dev)));
     ia64_lba_set_config_bus(IA64_LBA(s->rope1_lba_dev), s->rope1_bus);
     ia64_sba_add_rope(IA64_SBA(s->sba_dev), 0,
                       &IA64_LBA(s->rope0_lba_dev)->csr);
@@ -300,7 +310,8 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
     }
     s->mercury_bus = ia64_mercury_host_bus(s->mercury_host);
     ia64_pci_host_set_mercury_bus(pci_host, s->mercury_bus);
-    ia64_sba_attach_bus(IA64_SBA(s->sba_dev), s->mercury_bus);
+    ia64_lba_attach_dma(IA64_LBA(s->lba_dev), s->mercury_bus,
+                        ia64_sba_dma_region(IA64_SBA(s->sba_dev)));
     /* The Mercury CSR CONFIG_ADDRESS/DATA pair does config on this bus. */
     ia64_lba_set_config_bus(IA64_LBA(s->lba_dev), s->mercury_bus);
     ia64_lba_set_config_bus(IA64_LBA(s->rope0_lba_dev), pci_bus);

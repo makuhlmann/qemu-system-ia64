@@ -8796,6 +8796,42 @@ static uint64_t cpu_sapic_irr_word(QTestState *qts, unsigned word)
 }
 
 /*
+ * With MSI enabled, the 53C1030's doorbell interrupt reaches the processor
+ * as the vector its message data names: rope 1's ioa turns the write into
+ * an interrupt transaction (ioa ERS 9.2).  Processor 0 is ID 0, EID 0.
+ */
+static void test_zx1_mpt_msi(void)
+{
+    const uint64_t bar = IA64_ZX1_ROPE1_MMIO_BASE;
+    const uint8_t vector = 0x51;
+    const uint64_t bit = 1ULL << (vector % 64);
+    QTestState *qts = qtest_init("-machine zx1,scsi=lsi53c1030 -m 256M -S");
+    gint64 deadline = g_get_monotonic_time() + 15 * G_USEC_PER_SEC;
+    uint16_t control;
+
+    ia64_cfg_writel(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT, 0,
+                    0x5c, 0xfee00000);
+    ia64_cfg_writel(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT, 0, 0x60, 0);
+    ia64_cfg_writew(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT, 0,
+                    0x64, vector);
+    control = ia64_cfg_readw(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT, 0,
+                             0x5a);
+    g_assert_cmphex(control, ==, 0x0080);
+    ia64_cfg_writew(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT, 0, 0x5a,
+                    control | 1);
+    g_assert_cmphex(cpu_sapic_irr_word(qts, vector / 64) & bit, ==, 0);
+
+    /* Unmask the doorbell interrupt and start a handshake. */
+    qtest_writel(qts, bar + 0x34, 0x00000008);
+    qtest_writel(qts, bar, 0x42000000 | (3U << 16));
+    while (!(cpu_sapic_irr_word(qts, vector / 64) & bit)) {
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+    qtest_quit(qts);
+}
+
+/*
  * SAPIC delivery from the I/O SAPIC is queued to the target vCPU with
  * async_run_on_cpu(), so an immediate IRR readback races the (idle)
  * qtest vCPU thread draining its work queue.  Pulse a disambiguating
@@ -11979,6 +12015,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/zx1/root-window-containment",
                    test_zx1_root_window_containment);
     qtest_add_func("/ia64-vpc/zx1/mpt-seat", test_zx1_mpt_seat);
+    qtest_add_func("/ia64-vpc/zx1/mpt-msi", test_zx1_mpt_msi);
     qtest_add_func("/ia64-vpc/zx1/bus0-population",
                    test_zx1_bus0_population);
     qtest_add_func("/ia64-vpc/eepro100/board-eeprom",
