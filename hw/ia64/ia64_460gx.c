@@ -520,56 +520,51 @@ static void ia64_460gx_update_low_mmio_window(IA64460GXState *s)
  * the numbers the same firmware gave them.  Bus 0 is the compatibility bus
  * (Table 2-1) whatever its port's pair says, and is never looked up.
  *
- * A bus no port claims falls back to the board's fixed numbering -- the
- * numbers both firmwares give the ports -- so a cycle to those buses keeps
- * working before POST has programmed them.
+ * A bus no port claims reaches no device: it reads as absent.  The vendor
+ * firmware numbers two buses per expander (bus a = 2n, bus b = 2n + 1) and
+ * scans bus 1, Expander 0's bus b, which the i2000 does not populate, before
+ * it numbers the WXB's bus a 2 (SAL_B, POST 41h).
  */
 static PCIDevice *ia64_460gx_cfg_find_device(IA64460GXState *s,
                                              uint8_t bus, uint8_t devfn)
 {
-    PCIDevice *pci_dev;
+    uint8_t cbn;
     unsigned int i;
 
-    if (bus != 0) {
-        uint8_t cbn = ia64_460gx_cbn(s);
+    if (bus == 0) {
+        return pci_find_device(s->compat_bus, 0, devfn);
+    }
+    cbn = ia64_460gx_cbn(s);
+    for (i = 0; i < ARRAY_SIZE(ia64_460gx_expander_ports); i++) {
+        int root_index = ia64_460gx_expander_ports[i].root;
+        bool compat = root_index == IA64_460GX_ROOT_COMPAT;
+        PCIBus *root = compat ? s->compat_bus : s->root_bus[root_index];
+        const uint8_t *cfg = ia64_460gx_chipset_cfg(
+            s, cbn, ia64_460gx_expander_ports[i].dev, 0);
+        uint8_t busno, subno;
 
-        for (i = 0; i < ARRAY_SIZE(ia64_460gx_expander_ports); i++) {
-            int root_index = ia64_460gx_expander_ports[i].root;
-            PCIBus *root = root_index == IA64_460GX_ROOT_COMPAT
-                ? s->compat_bus : s->root_bus[root_index];
-            const uint8_t *cfg = ia64_460gx_chipset_cfg(
-                s, cbn, ia64_460gx_expander_ports[i].dev, 0);
-            uint8_t busno, subno;
-
-            if (root == NULL || cfg == NULL) {
-                continue;
-            }
-            busno = cfg[IA64_460GX_XXB_BUSNO_REG];
-            subno = cfg[IA64_460GX_XXB_SUBNO_REG];
-            if (busno == 0) {
-                continue;
-            }
-            /*
-             * The port's own number is a type 0 cycle whatever SUBNO holds:
-             * firmware writes BUSNO, scans the bus, and only then raises
-             * SUBNO, so the scan must already reach the port's devices.
-             */
-            if (bus == busno) {
-                return pci_find_device(root, pci_bus_num(root), devfn);
-            }
-            if (bus > busno && bus <= subno) {
-                return pci_find_device(root, bus, devfn);
-            }
+        if (root == NULL || cfg == NULL) {
+            continue;
+        }
+        busno = cfg[IA64_460GX_XXB_BUSNO_REG];
+        subno = cfg[IA64_460GX_XXB_SUBNO_REG];
+        /* An expander port still at its reset number claims no bus. */
+        if (busno == 0 && !compat) {
+            continue;
+        }
+        /*
+         * The port's own number is a type 0 cycle whatever SUBNO holds:
+         * firmware writes BUSNO, scans the bus, and only then raises
+         * SUBNO, so the scan must already reach the port's devices.
+         */
+        if (bus == busno) {
+            return pci_find_device(root, pci_bus_num(root), devfn);
+        }
+        if (bus > busno && bus <= subno) {
+            return pci_find_device(root, bus, devfn);
         }
     }
-
-    pci_dev = pci_find_device(s->compat_bus, bus, devfn);
-    for (i = 0; pci_dev == NULL && i < ARRAY_SIZE(s->root_bus); i++) {
-        if (s->root_bus[i] != NULL) {
-            pci_dev = pci_find_device(s->root_bus[i], bus, devfn);
-        }
-    }
-    return pci_dev;
+    return NULL;
 }
 
 /*

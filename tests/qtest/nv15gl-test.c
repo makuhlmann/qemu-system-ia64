@@ -41,9 +41,20 @@
 #define NV15_PMC_BOOT_0       0x0000U
 #define NV15_PMC_BOOT_0_VALUE 0x01500000U
 
+static uint64_t nv15_port_addr(uint32_t port);
+
+/*
+ * The GXB's port claims no bus out of reset (460GX SSDM 2.3.1).  Number it
+ * as our firmware does, on the chipset bus FFh, before reaching the adapter.
+ */
 static QTestState *nv15_start(void)
 {
-    return qtest_init("-machine 460gx,vga=nv15gl -m 256M -S");
+    QTestState *qts = qtest_init("-machine 460gx,vga=nv15gl -m 256M -S");
+
+    qtest_writel(qts, nv15_port_addr(0xcf8),
+                 0x80000000U | (0xffU << 16) | (0x14U << 11) | 0x48);
+    qtest_writew(qts, nv15_port_addr(0xcfc), IA64_460GX_GXB_BUS * 0x0101);
+    return qts;
 }
 
 /* The device realizes and the machine reaches the qtest stub. */

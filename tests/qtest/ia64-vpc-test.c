@@ -5838,11 +5838,52 @@ static uint64_t ia64_cfg_cfc_addr(uint8_t reg)
            ia64_sparse_io_offset(IA64_CFC_PORT + (reg & 3));
 }
 
+/*
+ * Out of reset the expander ports carry no bus number, so no bus behind them
+ * answers a configuration cycle (SSDM 2.3.1) until POST numbers the ports.
+ * Stand in for that step before reaching such a bus: give each port that is
+ * still unnumbered the bus our firmware gives it
+ * (fw_platform_init_expander_ports).  A test that numbers a port itself
+ * keeps its numbers.
+ */
+static void ia64_460gx_number_expanders(QTestState *qts, uint8_t bus)
+{
+    static const struct {
+        uint8_t dev;
+        uint8_t bus;
+    } ports[] = {
+        { 0x12, IA64_460GX_WXB0_BUS },
+        { 0x13, IA64_460GX_WXB1_BUS },
+        { 0x14, IA64_460GX_GXB_BUS },
+    };
+    uint8_t cbn = cf8_readl(qts, 0, IA64_CBN_DEVICE, 0, IA64_CBN_REG);
+    size_t i;
+
+    if (bus == 0 || bus == cbn) {
+        return;
+    }
+    for (i = 0; i < ARRAY_SIZE(ports); i++) {
+        if (cf8_readl(qts, cbn, ports[i].dev, 0, 0x48) & 0xffff) {
+            continue;
+        }
+        cf8_select(qts, cbn, ports[i].dev, 0, 0x48);
+        qtest_writew(qts, ia64_cfg_cfc_addr(0x48), ports[i].bus * 0x0101);
+    }
+}
+
+static void ia64_cfg_ports_select(QTestState *qts, uint8_t bus, uint8_t dev,
+                                  uint8_t fn, uint8_t reg)
+{
+    ia64_460gx_number_expanders(qts, bus);
+    cf8_select(qts, bus, dev, fn, reg);
+}
+
 static uint32_t ia64_cfg_readl(QTestState *qts, uint8_t bus, uint8_t dev,
                                uint8_t fn, uint8_t reg)
 {
     if (ia64_cfg_by_ports(qts)) {
-        return cf8_readl(qts, bus, dev, fn, reg);
+        ia64_cfg_ports_select(qts, bus, dev, fn, reg);
+        return qtest_readl(qts, ia64_cfg_cfc_addr(reg));
     }
     return qtest_readl(qts, ia64_cfg_ecam_addr(bus, dev, fn, reg));
 }
@@ -5851,7 +5892,7 @@ static uint16_t ia64_cfg_readw(QTestState *qts, uint8_t bus, uint8_t dev,
                                uint8_t fn, uint8_t reg)
 {
     if (ia64_cfg_by_ports(qts)) {
-        cf8_select(qts, bus, dev, fn, reg);
+        ia64_cfg_ports_select(qts, bus, dev, fn, reg);
         return qtest_readw(qts, ia64_cfg_cfc_addr(reg));
     }
     return qtest_readw(qts, ia64_cfg_ecam_addr(bus, dev, fn, reg));
@@ -5861,7 +5902,7 @@ static uint8_t ia64_cfg_readb(QTestState *qts, uint8_t bus, uint8_t dev,
                               uint8_t fn, uint8_t reg)
 {
     if (ia64_cfg_by_ports(qts)) {
-        cf8_select(qts, bus, dev, fn, reg);
+        ia64_cfg_ports_select(qts, bus, dev, fn, reg);
         return qtest_readb(qts, ia64_cfg_cfc_addr(reg));
     }
     return qtest_readb(qts, ia64_cfg_ecam_addr(bus, dev, fn, reg));
@@ -5871,7 +5912,8 @@ static void ia64_cfg_writel(QTestState *qts, uint8_t bus, uint8_t dev,
                             uint8_t fn, uint8_t reg, uint32_t value)
 {
     if (ia64_cfg_by_ports(qts)) {
-        cf8_writel(qts, bus, dev, fn, reg, value);
+        ia64_cfg_ports_select(qts, bus, dev, fn, reg);
+        qtest_writel(qts, ia64_cfg_cfc_addr(reg), value);
         return;
     }
     qtest_writel(qts, ia64_cfg_ecam_addr(bus, dev, fn, reg), value);
@@ -5881,7 +5923,7 @@ static void ia64_cfg_writew(QTestState *qts, uint8_t bus, uint8_t dev,
                             uint8_t fn, uint8_t reg, uint16_t value)
 {
     if (ia64_cfg_by_ports(qts)) {
-        cf8_select(qts, bus, dev, fn, reg);
+        ia64_cfg_ports_select(qts, bus, dev, fn, reg);
         qtest_writew(qts, ia64_cfg_cfc_addr(reg), value);
         return;
     }
@@ -5892,7 +5934,7 @@ static void ia64_cfg_writeb(QTestState *qts, uint8_t bus, uint8_t dev,
                             uint8_t fn, uint8_t reg, uint8_t value)
 {
     if (ia64_cfg_by_ports(qts)) {
-        cf8_select(qts, bus, dev, fn, reg);
+        ia64_cfg_ports_select(qts, bus, dev, fn, reg);
         qtest_writeb(qts, ia64_cfg_cfc_addr(reg), value);
         return;
     }
@@ -6166,7 +6208,25 @@ static void test_460gx_config_ports(void)
                     ==, 0x76008086);
     g_assert_cmphex(cf8_readl(qts, 0, IA64_460GX_PID_SLOT, 0, PCI_VENDOR_ID),
                     ==, 0x123d8086);
-    /* Devices behind the expander roots are reachable by bus number too. */
+    /*
+     * A bus no expander port claims reaches no device: the WXB's bus answers
+     * only once its port has a number.  The vendor firmware numbers two buses
+     * per expander and scans bus 1, Expander 0's empty bus b, before it gives
+     * the WXB's port a bus 2.
+     */
+    g_assert_cmphex(cf8_readl(qts, IA64_460GX_WXB0_BUS,
+                              IA64_460GX_WXB0_SCSI_SLOT, 0, PCI_VENDOR_ID),
+                    ==, 0xffffffff);
+    cf8_select(qts, IA64_CBN_BUS, 0x12, 0, 0x48);
+    qtest_writew(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 0x0202);
+    g_assert_cmphex(cf8_readl(qts, 1, IA64_460GX_WXB0_SCSI_SLOT, 0,
+                              PCI_VENDOR_ID), ==, 0xffffffff);
+    g_assert_cmphex(cf8_readl(qts, 2, IA64_460GX_WXB0_SCSI_SLOT, 0,
+                              PCI_VENDOR_ID), ==, 0x12161077);
+    cf8_select(qts, IA64_CBN_BUS, 0x12, 0, 0x48);
+    qtest_writew(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(IA64_CFC_PORT),
+                 IA64_460GX_WXB0_BUS * 0x0101);
     g_assert_cmphex(cf8_readl(qts, IA64_460GX_WXB0_BUS,
                               IA64_460GX_WXB0_SCSI_SLOT, 0, PCI_VENDOR_ID),
                     ==, 0x12161077);
