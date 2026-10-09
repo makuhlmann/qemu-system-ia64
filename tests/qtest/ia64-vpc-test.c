@@ -221,6 +221,21 @@ static uint64_t ia64_sparse_pm_io(uint32_t offset)
            ia64_sparse_io_offset(IA64_ACPI_PM_IO_BASE + offset);
 }
 
+static void vga_index_wr(QTestState *qts, uint16_t port, uint8_t index,
+                         uint8_t val)
+{
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port), index);
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port + 1),
+                 val);
+}
+
+static uint8_t vga_index_rd(QTestState *qts, uint16_t port, uint8_t index)
+{
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port), index);
+    return qtest_readb(qts,
+                       IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port + 1));
+}
+
 /*
  * Configuration space by the machine's own mechanism: CF8/CFC on 460gx (the
  * chipset has nothing else, SSDM 2.3.1), the segment-0 ECAM window on zx1.
@@ -9080,7 +9095,11 @@ static void test_savevm_460gx_restores_ram(void)
 #define ATI_MM_DATA             0x0004
 #define ATI_CLOCK_CNTL_INDEX    0x0008
 #define ATI_CLOCK_CNTL_DATA     0x000c
+#define ATI_CRTC_GEN_CNTL       0x0050
 #define ATI_DAC_CNTL            0x0058
+#define ATI_CRTC_H_TOTAL_DISP   0x0200
+#define ATI_CRTC_V_TOTAL_DISP   0x0208
+#define ATI_CRTC_PITCH          0x022c
 #define ATI_DST_OFFSET          0x1404
 #define ATI_DST_PITCH           0x1408
 #define ATI_DST_Y_X             0x1438
@@ -9092,6 +9111,9 @@ static void test_savevm_460gx_restores_ram(void)
 
 /* Bit / field values. */
 #define ATI_PLL_WR_EN           0x00000080
+#define ATI_CRTC_PIX_WIDTH_16BPP 0x00000400
+#define ATI_CRTC_EXT_DISP_EN    0x01000000
+#define ATI_CRTC_EN             0x02000000
 #define ATI_DAC_CMP_EN          0x00000008
 #define ATI_DAC_CMP_OUTPUT      0x00000080
 #define ATI_MM_INDEX_VRAM       0x80000000
@@ -10033,6 +10055,137 @@ static void test_ati_cce_indirect_buffer(void)
     }
 
     ati_dev_close(&a);
+}
+
+/*
+ * Mode 3 (colour, CR0-7 unlocked, odd/even text at B8000, 80 columns) on the
+ * VGA CRTC, 1024x768 at 16 bpp on the accelerator CRTC.
+ */
+static void ati_ext_disp_setup(ATITestDev *a)
+{
+    QTestState *qts = a->qts;
+
+    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x3c2), 0x67);
+    vga_index_wr(qts, 0x3d4, 0x11, 0x0e);
+    vga_index_wr(qts, 0x3ce, 0x05, 0x10);
+    vga_index_wr(qts, 0x3ce, 0x06, 0x0e);
+    vga_index_wr(qts, 0x3d4, 0x01, 0x4f);
+    vga_index_wr(qts, 0x3d4, 0x13, 0x28);
+
+    ati_wr(a, ATI_CRTC_H_TOTAL_DISP, 0x007f00a7);
+    ati_wr(a, ATI_CRTC_V_TOTAL_DISP, 0x02ff0325);
+    ati_wr(a, ATI_CRTC_PITCH, 1024 / 8);
+}
+
+static void ati_ext_disp(ATITestDev *a, bool on)
+{
+    ati_wr(a, ATI_CRTC_GEN_CNTL, ATI_CRTC_EN | ATI_CRTC_PIX_WIDTH_16BPP |
+                                 (on ? ATI_CRTC_EXT_DISP_EN : 0));
+}
+
+/*
+ * The accelerator CRTC registers are not the VGA CRTC registers, and
+ * CRTC_EXT_DISP_EN only selects which of them drives the display (RAGE 128
+ * PRO RRG 2.1.3-2.1.4 and CRTC_GEN_CNTL), so the VGA registers keep what the
+ * guest wrote.
+ */
+static void test_ati_ext_disp_keeps_vga(void)
+{
+    ATITestDev a;
+    QTestState *qts;
+
+    ati_dev_open(&a, NULL);
+    qts = a.qts;
+    ati_ext_disp_setup(&a);
+
+    ati_ext_disp(&a, true);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x05), ==, 0x10);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x06), ==, 0x0e);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x01), ==, 0x4f);
+    /* A write while the accelerator CRTC drives the display is kept. */
+    vga_index_wr(qts, 0x3d4, 0x13, 0x50);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x13), ==, 0x50);
+    /* So is the guest's value across a new accelerator pitch. */
+    ati_wr(&a, ATI_CRTC_PITCH, 1280 / 8);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x05), ==, 0x10);
+
+    ati_ext_disp(&a, false);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x05), ==, 0x10);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x06), ==, 0x0e);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x01), ==, 0x4f);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x13), ==, 0x50);
+
+    /*
+     * A sequencer reset while the extended display is on ends vga.c's VBE
+     * path; the VGA registers still read what the guest wrote.
+     */
+    ati_ext_disp(&a, true);
+    vga_index_wr(qts, 0x3d4, 0x01, 0x27);
+    vga_index_wr(qts, 0x3c4, 0x00, 0x01);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x05), ==, 0x10);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x06), ==, 0x0e);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x01), ==, 0x27);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x13), ==, 0x50);
+    ati_ext_disp(&a, false);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x06), ==, 0x0e);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x01), ==, 0x27);
+
+    ati_dev_close(&a);
+}
+
+/* The VGA values held during the extended display survive a snapshot. */
+static void test_ati_ext_disp_vga_savevm(void)
+{
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *disk_path = NULL;
+    g_autofree char *quoted_disk_path = NULL;
+    g_autofree char *args = NULL;
+    g_autofree char *response = NULL;
+    g_autoptr(GError) error = NULL;
+    ATITestDev a;
+    QTestState *qts;
+
+    if (!have_qemu_img()) {
+        g_test_skip("qemu-img is required for internal snapshot testing");
+        return;
+    }
+
+    tmpdir = g_dir_make_tmp("ia64-ati-vga-savevm-XXXXXX", &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(tmpdir);
+    disk_path = g_build_filename(tmpdir, "snapshot.qcow2", NULL);
+    g_assert_true(mkimg(disk_path, "qcow2", 64));
+    quoted_disk_path = g_shell_quote(disk_path);
+    args = g_strdup_printf("-drive file=%s,format=qcow2,if=none,id=snap",
+                           quoted_disk_path);
+
+    ati_dev_open(&a, args);
+    qts = a.qts;
+    ati_ext_disp_setup(&a);
+    ati_ext_disp(&a, true);
+    vga_index_wr(qts, 0x3d4, 0x13, 0x50);
+    response = qtest_hmp(qts, "savevm vga-held");
+    g_assert_cmpstr(response, ==, "");
+    g_clear_pointer(&response, g_free);
+
+    /* Leave nothing for a snapshot that restores no held state to find. */
+    ati_ext_disp(&a, false);
+    vga_index_wr(qts, 0x3d4, 0x13, 0x77);
+
+    response = qtest_hmp(qts, "loadvm vga-held");
+    g_assert_cmpstr(response, ==, "");
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x05), ==, 0x10);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x06), ==, 0x0e);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x13), ==, 0x50);
+    ati_ext_disp(&a, false);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x05), ==, 0x10);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x06), ==, 0x0e);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x01), ==, 0x4f);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x13), ==, 0x50);
+
+    ati_dev_close(&a);
+    g_assert_cmpint(g_unlink(disk_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
 /*
@@ -11379,21 +11532,6 @@ static void test_mach64_int10_load_set(void)
     mach64_dev_close(&a);
 }
 
-static void m64_vga_wr(QTestState *qts, uint16_t port, uint8_t index,
-                       uint8_t val)
-{
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port), index);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port + 1),
-                 val);
-}
-
-static uint8_t m64_vga_rd(QTestState *qts, uint16_t port, uint8_t index)
-{
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port), index);
-    return qtest_readb(qts,
-                       IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(port + 1));
-}
-
 /*
  * CRTC_EXT_DISP_EN only selects the accelerator CRTC over the VGA one
  * (264VT/3D RAGE RRG, CRTC_GEN_CNTL), so the VGA registers keep what the
@@ -11416,28 +11554,28 @@ static void test_mach64_ext_disp_keeps_vga(void)
 
     /* Mode 3: colour, CR0-7 unlocked, odd/even text at B8000, 80 columns. */
     qtest_writeb(qts, IA64_LEGACY_IO_BASE + ia64_sparse_io_offset(0x3c2), 0x67);
-    m64_vga_wr(qts, 0x3d4, 0x11, 0x0e);
-    m64_vga_wr(qts, 0x3ce, 0x05, 0x10);
-    m64_vga_wr(qts, 0x3ce, 0x06, 0x0e);
-    m64_vga_wr(qts, 0x3d4, 0x01, 0x4f);
-    m64_vga_wr(qts, 0x3d4, 0x13, 0x28);
+    vga_index_wr(qts, 0x3d4, 0x11, 0x0e);
+    vga_index_wr(qts, 0x3ce, 0x05, 0x10);
+    vga_index_wr(qts, 0x3ce, 0x06, 0x0e);
+    vga_index_wr(qts, 0x3d4, 0x01, 0x4f);
+    vga_index_wr(qts, 0x3d4, 0x13, 0x28);
 
     m64_wr(&a, M64_CRTC_H_TOTAL_DISP, 0x007f00a7);
     m64_wr(&a, M64_CRTC_V_TOTAL_DISP, 0x02ff0325);
     m64_wr(&a, M64_CRTC_OFF_PITCH, (1024u / 8) << 22);
     m64_wr(&a, M64_CRTC_GEN_CNTL, gen | M64_CRTC_EXT_DISP_EN);
-    g_assert_cmphex(m64_vga_rd(qts, 0x3ce, 0x05), ==, 0x10);
-    g_assert_cmphex(m64_vga_rd(qts, 0x3ce, 0x06), ==, 0x0e);
-    g_assert_cmphex(m64_vga_rd(qts, 0x3d4, 0x01), ==, 0x4f);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x05), ==, 0x10);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x06), ==, 0x0e);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x01), ==, 0x4f);
     /* A write while the accelerator CRTC drives the display is kept. */
-    m64_vga_wr(qts, 0x3d4, 0x13, 0x50);
-    g_assert_cmphex(m64_vga_rd(qts, 0x3d4, 0x13), ==, 0x50);
+    vga_index_wr(qts, 0x3d4, 0x13, 0x50);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x13), ==, 0x50);
 
     m64_wr(&a, M64_CRTC_GEN_CNTL, gen);
-    g_assert_cmphex(m64_vga_rd(qts, 0x3ce, 0x05), ==, 0x10);
-    g_assert_cmphex(m64_vga_rd(qts, 0x3ce, 0x06), ==, 0x0e);
-    g_assert_cmphex(m64_vga_rd(qts, 0x3d4, 0x01), ==, 0x4f);
-    g_assert_cmphex(m64_vga_rd(qts, 0x3d4, 0x13), ==, 0x50);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x05), ==, 0x10);
+    g_assert_cmphex(vga_index_rd(qts, 0x3ce, 0x06), ==, 0x0e);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x01), ==, 0x4f);
+    g_assert_cmphex(vga_index_rd(qts, 0x3d4, 0x13), ==, 0x50);
     mach64_dev_close(&a);
 }
 
@@ -11614,6 +11752,10 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/ati/clr-cmp-clear", test_ati_clr_cmp_clear);
     qtest_add_func("/ia64-vpc/ati/cce-indirect-buffer",
                    test_ati_cce_indirect_buffer);
+    qtest_add_func("/ia64-vpc/ati/ext-disp-keeps-vga",
+                   test_ati_ext_disp_keeps_vga);
+    qtest_add_func("/ia64-vpc/ati/ext-disp-vga-savevm",
+                   test_ati_ext_disp_vga_savevm);
     qtest_add_func("/ia64-vpc/agp/gart-dma", test_agp_gart_dma);
     qtest_add_func("/ia64-vpc/agp/gart-dma-moved", test_agp_gart_dma_moved);
     qtest_add_func("/ia64-vpc/mach64/ids", test_mach64_ids);

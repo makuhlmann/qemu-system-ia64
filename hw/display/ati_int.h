@@ -165,6 +165,14 @@ struct ATIVGAState {
     ATIVGARegs regs;
     ATIHostDataState host_data;
     /*
+     * The guest's values of the VGA registers that vga.c's VBE path
+     * overwrites while it drives the extended display (ati.c).
+     */
+    bool vga_held;
+    uint8_t vga_gr[2];
+    uint8_t vga_cr[7];
+    PortioList vga_port_list;
+    /*
      * Indirect-buffer launch state (PM4_IW_INDOFF / PM4_IW_INDSIZE).  Transient
      * scratch consumed the instant INDSIZE is written, so it never spans a
      * savevm; cce_in_indirect breaks a buffer that recursively launches itself.

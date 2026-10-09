@@ -78,9 +78,6 @@
 #define VGA_GFX_MODE           5
 #define VGA_GFX_MISC           6
 #define VGA_GFX_BIT_MASK       8
-#define VGA_CRTC_INDEX         0x3b4
-#define VGA_CRTC_DATA          0x3b5
-#define VGA_CRTC_OFFSET        0x13
 #define VGA_ATTR_INDEX         0x3c0
 #define VGA_INPUT_STATUS1      0x3ba
 #define VGA_PEL_WRITE_INDEX    0x3c8
@@ -537,10 +534,6 @@ static void ati_stride(void)
     g_assert_cmpuint(ati_vbe_read(qts, VBE_DISPI_INDEX_BPP), ==, bpp);
     g_assert_cmpuint(ati_vbe_read(qts, VBE_DISPI_INDEX_VIRT_WIDTH), ==,
                      virtual_width);
-    qtest_writeb(qts, IA64_LEGACY_IO_BASE + VGA_CRTC_INDEX,
-                 VGA_CRTC_OFFSET);
-    g_assert_cmphex(qtest_readb(qts, IA64_LEGACY_IO_BASE + VGA_CRTC_DATA), ==,
-                    (pitch / 8) & 0xff);
 
     /* Leave attribute-controller blanking, as a real VBE client does. */
     qtest_readb(qts, IA64_LEGACY_IO_BASE + VGA_INPUT_STATUS1);

@@ -63,6 +63,128 @@ static void ati_vga_set_offset(VGACommonState *vga, uint32_t offs)
     vga->vbe_start_addr = offs / 4;
 }
 
+/*
+ * The accelerator CRTC registers are not the VGA CRTC registers, and
+ * CRTC_EXT_DISP_EN only selects which of the two drives the display (RAGE 128
+ * PRO RRG 2.1.3-2.1.4 p. 2-2, and CRTC_GEN_CNTL p. 3-62).  vbe_update_vgaregs()
+ * in vga.c rewrites these VGA registers while the VBE path drives the extended
+ * display, so keep the guest's values aside and put them back when the VGA
+ * display returns.
+ */
+static const uint8_t ati_held_gr[] = { VGA_GFX_MODE, VGA_GFX_MISC };
+static const uint8_t ati_held_cr[] = {
+    VGA_CRTC_H_DISP, VGA_CRTC_OVERFLOW, VGA_CRTC_MAX_SCAN, VGA_CRTC_V_DISP_END,
+    VGA_CRTC_OFFSET, VGA_CRTC_MODE, VGA_CRTC_LINE_COMPARE,
+};
+QEMU_BUILD_BUG_ON(ARRAY_SIZE(ati_held_gr) !=
+                  ARRAY_SIZE(((ATIVGAState *)0)->vga_gr));
+QEMU_BUILD_BUG_ON(ARRAY_SIZE(ati_held_cr) !=
+                  ARRAY_SIZE(((ATIVGAState *)0)->vga_cr));
+
+static uint8_t *ati_held_reg(ATIVGAState *s, uint32_t port)
+{
+    VGACommonState *vga = &s->vga;
+    int i;
+
+    if (!s->vga_held || vga_ioport_invalid(vga, port)) {
+        return NULL;
+    }
+    if (port == VGA_GFX_D) {
+        for (i = 0; i < ARRAY_SIZE(ati_held_gr); i++) {
+            if (ati_held_gr[i] == vga->gr_index) {
+                return &s->vga_gr[i];
+            }
+        }
+    } else if (port == VGA_CRT_DC || port == VGA_CRT_DM) {
+        for (i = 0; i < ARRAY_SIZE(ati_held_cr); i++) {
+            if (ati_held_cr[i] == vga->cr_index) {
+                return &s->vga_cr[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+static void ati_vga_hold(ATIVGAState *s)
+{
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(ati_held_gr); i++) {
+        s->vga_gr[i] = s->vga.gr[ati_held_gr[i]];
+    }
+    for (i = 0; i < ARRAY_SIZE(ati_held_cr); i++) {
+        s->vga_cr[i] = s->vga.cr[ati_held_cr[i]];
+    }
+    s->vga_held = true;
+}
+
+static void ati_vga_release(ATIVGAState *s)
+{
+    VGACommonState *vga = &s->vga;
+    uint8_t gr_index = vga->gr_index;
+    int i;
+
+    s->vga_held = false;
+    for (i = 0; i < ARRAY_SIZE(ati_held_cr); i++) {
+        vga->cr[ati_held_cr[i]] = s->vga_cr[i];
+    }
+    /* Through the port, so that vga.c remaps the legacy window for GR6. */
+    for (i = 0; i < ARRAY_SIZE(ati_held_gr); i++) {
+        vga->gr_index = ati_held_gr[i];
+        vga_ioport_write(vga, VGA_GFX_D, s->vga_gr[i]);
+    }
+    vga->gr_index = gr_index;
+}
+
+static uint32_t ati_vga_ioport_read(void *opaque, uint32_t addr)
+{
+    ATIVGAState *s = container_of(opaque, ATIVGAState, vga);
+    uint8_t *held = ati_held_reg(s, addr);
+
+    return held ? *held : vga_ioport_read(opaque, addr);
+}
+
+static void ati_vga_ioport_write(void *opaque, uint32_t addr, uint32_t val)
+{
+    ATIVGAState *s = container_of(opaque, ATIVGAState, vga);
+    VGACommonState *vga = &s->vga;
+    uint8_t *held = ati_held_reg(s, addr);
+
+    if (held) {
+        if (addr == VGA_GFX_D) {
+            *held = val & gr_mask[vga->gr_index];
+        } else if (!(vga->cr[VGA_CRTC_V_SYNC_END] & VGA_CR11_LOCK_CR0_CR7) ||
+                   vga->cr_index > VGA_CRTC_OVERFLOW) {
+            *held = val;
+        } else if (vga->cr_index == VGA_CRTC_OVERFLOW) {
+            *held = (*held & ~0x10) | (val & 0x10);
+        }
+    }
+    vga_ioport_write(opaque, addr, val);
+    /*
+     * vga.c's legacy mode switch turns the VBE path off on a sequencer reset;
+     * the VGA core then shows the guest's VGA registers.
+     */
+    if (s->vga_held &&
+        !(vga->vbe_regs[VBE_DISPI_INDEX_ENABLE] & VBE_DISPI_ENABLED)) {
+        ati_vga_release(s);
+    }
+}
+
+static const MemoryRegionPortio ati_vga_portio_list[] = {
+    { 0x04,  2, 1, .read = ati_vga_ioport_read,
+                   .write = ati_vga_ioport_write }, /* 3b4 */
+    { 0x0a,  1, 1, .read = ati_vga_ioport_read,
+                   .write = ati_vga_ioport_write }, /* 3ba */
+    { 0x10, 16, 1, .read = ati_vga_ioport_read,
+                   .write = ati_vga_ioport_write }, /* 3c0 */
+    { 0x24,  2, 1, .read = ati_vga_ioport_read,
+                   .write = ati_vga_ioport_write }, /* 3d4 */
+    { 0x2a,  1, 1, .read = ati_vga_ioport_read,
+                   .write = ati_vga_ioport_write }, /* 3da */
+    PORTIO_END_OF_LIST(),
+};
+
 static void ati_vga_switch_mode(ATIVGAState *s)
 {
     DPRINTF("%d -> %d\n",
@@ -110,6 +232,10 @@ static void ati_vga_switch_mode(ATIVGAState *s)
                 return;
             }
             DPRINTF("Switching to %dx%d %d %d @ %x\n", h, v, stride, bpp, offs);
+            if (!s->vga_held && !(s->vga.vbe_regs[VBE_DISPI_INDEX_ENABLE] &
+                                  VBE_DISPI_ENABLED)) {
+                ati_vga_hold(s);
+            }
             vbe_ioport_write_index(&s->vga, 0, VBE_DISPI_INDEX_ENABLE);
             vbe_ioport_write_data(&s->vga, 0, VBE_DISPI_DISABLED);
             s->vga.big_endian_fb = (s->regs.config_cntl & APER_0_ENDIAN ||
@@ -136,6 +262,9 @@ static void ati_vga_switch_mode(ATIVGAState *s)
         s->mode = VGA_MODE;
         vbe_ioport_write_index(&s->vga, 0, VBE_DISPI_INDEX_ENABLE);
         vbe_ioport_write_data(&s->vga, 0, VBE_DISPI_DISABLED);
+        if (s->vga_held) {
+            ati_vga_release(s);
+        }
     }
 }
 
@@ -2339,6 +2468,26 @@ static int ati_vga_post_load(void *opaque, int version_id)
     return 0;
 }
 
+static bool ati_vga_held_needed(void *opaque)
+{
+    ATIVGAState *s = opaque;
+
+    return s->vga_held;
+}
+
+static const VMStateDescription vmstate_ati_vga_held = {
+    .name = "ati-vga/vga-held",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ati_vga_held_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_BOOL(vga_held, ATIVGAState),
+        VMSTATE_UINT8_ARRAY(vga_gr, ATIVGAState, 2),
+        VMSTATE_UINT8_ARRAY(vga_cr, ATIVGAState, 7),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_ati_vga = {
     .name = "ati-vga",
     .version_id = 1,
@@ -2356,6 +2505,10 @@ static const VMStateDescription vmstate_ati_vga = {
                        vmstate_ati_bitbang_i2c, bitbang_i2c_interface),
         VMSTATE_TIMER(vblank_timer, ATIVGAState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_ati_vga_held,
+        NULL
     },
 };
 
@@ -2416,7 +2569,11 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
     }
     vga->vbe_legacy_mode_switch = true;
     vga_init(vga, OBJECT(s), pci_address_space(dev),
-             pci_address_space_io(dev), true);
+             pci_address_space_io(dev), false);
+    portio_list_init(&s->vga_port_list, OBJECT(s), ati_vga_portio_list,
+                     vga, "vga");
+    portio_list_set_flush_coalesced(&s->vga_port_list);
+    portio_list_add(&s->vga_port_list, pci_address_space_io(dev), 0x3b0);
     vga->con = graphic_console_init(DEVICE(s), 0, s->vga.hw_ops, vga);
     if (s->cursor_guest_mode) {
         vga->cursor_invalidate = ati_cursor_invalidate;
@@ -2568,6 +2725,7 @@ static void ati_vga_reset(DeviceState *dev)
     /* reset vga */
     vga_common_reset(&s->vga);
     s->mode = VGA_MODE;
+    s->vga_held = false;
 
     s->host_data.active = false;
     s->host_data.next = 0;
