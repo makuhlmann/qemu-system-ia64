@@ -40,6 +40,32 @@
  */
 #define IA64_460GX_INTX_FALLBACK_GSI 60
 
+/*
+ * Devices behind an expander root must have their BARs inside that root's
+ * own producer window, or the guest's PnP resource arbiter cannot assign
+ * them: a boot controller that fails this bugchecks the guest with STOP
+ * 0x7B before it ever reaches the disk.
+ *
+ * The 460GX decodes one n x 32 MB aperture per logical PCI bus out of the
+ * gap below 4 GiB - 32 MiB (SSDM 4.1.3.1), so each root owns a whole number
+ * of those units and nothing is carved out of another root's range: the
+ * compatibility bus takes the unit at the bottom of the gap, graphics takes
+ * the five units its framebuffer and register apertures need, and the two
+ * WXB roots take one unit each at the top.  The DSDT windows in
+ * roms/ia64-firmware/dsdt-pci-root.asl mirror the split exactly.
+ */
+#define IA64_PCI_MMIO_UNIT      0x02000000ULL
+#define IA64_WXB0_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 6 * IA64_PCI_MMIO_UNIT)
+#define IA64_WXB1_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 7 * IA64_PCI_MMIO_UNIT)
+
+/*
+ * SCSI cards added with -device get their BARs from slices of their root's
+ * DSDT windows, as POST would place them (scsi_addon_window).
+ */
+#define IA64_SCSI_ADDON_MAX         4
+#define IA64_SCSI_ADDON_MMIO_SLICE  0x00040000ULL
+#define IA64_SCSI_ADDON_IO_SLICE    0x00000100U
+
 #ifdef CONFIG_IA64_VPC_GRAPHICS
 enum {
     IA64_INT10_REG_AX,
@@ -77,10 +103,17 @@ OBJECT_DECLARE_TYPE(IA64VpcMachineState, IA64VpcMachineClass, IA64_VPC_MACHINE)
 #define TYPE_IA64_460GX_MACHINE MACHINE_TYPE_NAME("460gx")
 #define TYPE_IA64_ZX1_MACHINE   MACHINE_TYPE_NAME("zx1")
 
+/* The controller in the board's SCSI seat (machine option scsi=). */
+typedef enum IA64VpcScsiModel {
+    IA64_VPC_SCSI_NONE,
+    IA64_VPC_SCSI_LSI53C895A,
+    IA64_VPC_SCSI_ISP12160,
+    IA64_VPC_SCSI__MAX,
+} IA64VpcScsiModel;
+
 /* Built-in devices the board seats: see IA64VpcMachineClass.seat. */
 typedef enum IA64VpcSeat {
     IA64_VPC_SEAT_SCSI,        /* the SCSI host bus adapter */
-    IA64_VPC_SEAT_SCSI_PARK,   /* the second adapter, when both are present */
     IA64_VPC_SEAT_VGA,         /* the graphics adapter (the AGP master) */
     IA64_VPC_SEAT_AUDIO,       /* the CS4281; devfn -1 = anywhere */
     IA64_VPC_SEAT_NIC,         /* the first network adapter's slot */
@@ -159,18 +192,12 @@ struct IA64VpcMachineClass {
     bool pci_config_ecam;
     /* Default of the i8042 option. */
     bool i8042_default;
-    /*
-     * The board's own core I/O SCSI adapter holds the seat and is on by
-     * default; the other one is the opt-in.  True selects the LSI, which is
-     * what rx2600/zx2000 carry; false the QLogic ISP12160 of the i2000.
-     */
-    bool lsi_default;
+    /* The controller in the SCSI seat by default, and the ones scsi= takes. */
+    IA64VpcScsiModel scsi_default;
+    uint32_t scsi_models;           /* bit n = IA64VpcScsiModel n */
     /* The SCSI seat's I/O and memory BAR bases; 0 = the first WXB root's. */
     uint32_t scsi_seat_io_base;
     uint64_t scsi_seat_mmio_base;
-    /* The parked SCSI adapter's BAR bases; 0 = the second WXB root's. */
-    uint32_t scsi_park_io_base;
-    uint64_t scsi_park_mmio_base;
     /* The graphics I/O BAR base; 0 = IA64_VGA_IO_BASE. */
     uint32_t vga_io_base;
     /*
@@ -236,6 +263,13 @@ struct IA64VpcMachineClass {
      * lines, or -1 to take the root_gsi_base rule; NULL = that rule always.
      */
     int (*intx_line)(const IA64VpcMachineState *s, PCIDevice *dev, int pin);
+    /*
+     * The I/O and memory bases of IA64_SCSI_ADDON_MAX slices inside root
+     * bus @bus's DSDT windows, for SCSI cards added there; false where the
+     * root has none to spare.  NULL = none anywhere.
+     */
+    bool (*scsi_addon_window)(const IA64VpcMachineState *s, PCIBus *bus,
+                              uint32_t *io_base, uint64_t *mmio_base);
 };
 
 struct IA64VpcMachineState {
@@ -244,8 +278,7 @@ struct IA64VpcMachineState {
     bool i8042_enabled;
     bool ahci_enabled;
     bool audio_enabled;
-    bool isp_enabled;
-    bool lsi_enabled;
+    IA64VpcScsiModel scsi_model;
     /*
      * Where the CPU's firmware identity window sits: the RAM-top shadow
      * (on) or the historical 1 MB home (off).  Off is the microprogram

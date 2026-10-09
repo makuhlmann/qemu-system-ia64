@@ -10031,7 +10031,7 @@ static UINT64 fw_pci_io_expected_bar_length(const FW_PCI_IO_DEVICE *Dev)
  */
 /*
  * Controllers a machine may leave out: IDE and AHCI (ide=, ahci=) and the
- * LSI (lsi=on).  The LSI's seat holds the QLogic ISP12160 by default.  zx1
+ * LSI (scsi=).  The LSI's seat holds the QLogic ISP12160 by default.  zx1
  * has no UHCI; its seat, device 3, holds the board LAN.
  */
 static BOOLEAN fw_pci_io_device_optional(const FW_PCI_IO_DEVICE *Dev)

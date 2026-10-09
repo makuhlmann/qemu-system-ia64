@@ -48,14 +48,6 @@
  */
 #define LONGSPEAK_UART_PIN          7
 #define LONGSPEAK_SCI_PIN           9
-/*
- * A second SCSI adapter parks on PCI0, rope 0, so its BARs come out of rope
- * 0's windows in the DSDT: the ports of the mio's directed range
- * (0xC000-0xFFFF, mio ERS 2.5.4) and PCI0's upper memory window, above the
- * CS4281.
- */
-#define LONGSPEAK_SCSI_PARK_IO_BASE   0x0000e000U
-#define LONGSPEAK_SCSI_PARK_MMIO_BASE (IA64_PCI_MMIO_BASE + 0x01900000ULL)
 
 /*
  * The I/O backplane's PCI and PCI-X ropes, empty here.  SAL_B's table for a
@@ -438,9 +430,6 @@ static void longspeak_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
         *bus = s->rope1_bus;
         *devfn = PCI_DEVFN(IA64_ZX1_SCSI_SLOT, 0);
         break;
-    case IA64_VPC_SEAT_SCSI_PARK:
-        /* The second adapter takes the next free slot of PCI0. */
-        break;
     case IA64_VPC_SEAT_USB:
         *devfn = PCI_DEVFN(IA64_ZX1_USB_SLOT, 0);
         break;
@@ -481,6 +470,24 @@ static int longspeak_intx_line(const IA64VpcMachineState *s, PCIDevice *dev,
         return -1;
     }
     return IA64_ZX1_ROPE1_GSI_BASE + (bus->map_irq(dev, pin) & 1);
+}
+
+/*
+ * SCSI cards added on PCI0, rope 0, take their BARs from rope 0's windows in
+ * the DSDT: the ports of the mio's directed range (0xC000-0xFFFF, mio ERS
+ * 2.5.4) and PCI0's upper memory window, above the CS4281.  Rope 1 holds the
+ * core I/O SCSI alone, as on the rx2600, and the Mercury root the graphics.
+ */
+static bool longspeak_scsi_addon_window(const IA64VpcMachineState *s,
+                                        PCIBus *bus, uint32_t *io_base,
+                                        uint64_t *mmio_base)
+{
+    if (bus != s->host_pci_bus) {
+        return false;
+    }
+    *io_base = 0x0000e000U;
+    *mmio_base = IA64_PCI_MMIO_BASE + 0x01900000ULL;
+    return true;
 }
 
 /*
@@ -592,11 +599,12 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->flash_sector_len = 128 * KiB;
     imc->flash_device_id = 0x0017;
     imc->flash_block_locking = false;
-    imc->lsi_default = true;
+    imc->scsi_default = IA64_VPC_SCSI_LSI53C895A;
+    imc->scsi_models = (1U << IA64_VPC_SCSI_NONE) |
+                       (1U << IA64_VPC_SCSI_LSI53C895A) |
+                       (1U << IA64_VPC_SCSI_ISP12160);
     imc->scsi_seat_io_base = IA64_ZX1_SCSI_IO_BASE;
     imc->scsi_seat_mmio_base = IA64_ZX1_ROPE1_MMIO_BASE;
-    imc->scsi_park_io_base = LONGSPEAK_SCSI_PARK_IO_BASE;
-    imc->scsi_park_mmio_base = LONGSPEAK_SCSI_PARK_MMIO_BASE;
     imc->vga_io_base = IA64_ZX1_AGP_IO_BASE;
     imc->ide_default = true;
     imc->ide_type = "cmd649-ide";
@@ -609,6 +617,7 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->seat = longspeak_seat;
     imc->root_gsi_base = longspeak_root_gsi_base;
     imc->intx_line = longspeak_intx_line;
+    imc->scsi_addon_window = longspeak_scsi_addon_window;
     /* The zx1 machine is the default; "ia64-vpc" is a deprecated alias of it. */
     mc->is_default = true;
     mc->alias = "ia64-vpc";

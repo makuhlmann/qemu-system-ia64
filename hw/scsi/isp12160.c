@@ -12,6 +12,7 @@
 
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/scsi/isp12160.h"
 #include "hw/scsi/isp12160_iocb.h"
 #include "hw/scsi/scsi.h"
@@ -76,6 +77,7 @@ struct ISP12160State {
     SCSIBus scsi_bus;
     ISP12160SCSIRequestList active_requests;
 
+    bool board_bus_name;
     uint16_t variant;
     uint16_t cfg1;
     uint16_t ictrl;
@@ -2160,8 +2162,13 @@ static void isp12160_realize(PCIDevice *pdev, Error **errp)
         s->queue_bh = aio_bh_new_guarded(
             qemu_get_aio_context(), isp12160_scsi_queue_bh, s,
             &DEVICE(pdev)->mem_reentrancy_guard);
+        /*
+         * The board's own adapter keeps the bus name that existing command
+         * lines use; an adapter added with -device takes the usual one.
+         */
         scsi_bus_init_named(&s->scsi_bus, sizeof(s->scsi_bus), DEVICE(pdev),
-                            &isp12160_scsi_bus_info, "isp12160-scsi.0");
+                            &isp12160_scsi_bus_info,
+                            s->board_bus_name ? "isp12160-scsi.0" : NULL);
     }
     isp12160_reset_state(s);
 }
@@ -2258,13 +2265,18 @@ static const TypeInfo isp12160_queue_info = {
     .class_init = isp12160_queue_class_init,
 };
 
+static const Property isp12160_scsi_properties[] = {
+    DEFINE_PROP_BOOL("x-board-bus-name", ISP12160State, board_bus_name, false),
+};
+
 static void isp12160_scsi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     (void)data;
+    device_class_set_props(dc, isp12160_scsi_properties);
     dc->desc = "QEMU ISP12160 SCSI controller";
-    dc->user_creatable = false;
+    dc->user_creatable = true;
     dc->hotpluggable = false;
     dc->vmsd = &vmstate_isp12160_scsi;
 }

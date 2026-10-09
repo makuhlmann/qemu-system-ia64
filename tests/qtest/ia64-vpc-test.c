@@ -200,13 +200,13 @@ static QTestState *ia64_vpc_start_zx1(const char *extra_args)
 }
 
 /*
- * The LSI is opt-in now that the QLogic holds the platform's SCSI seat.
- * Turning the QLogic off puts the LSI back on that seat, so these tests see
- * the bus name and the register addresses the adapter has always had there.
+ * The QLogic holds the platform's SCSI seat; scsi=lsi53c895a puts the LSI
+ * there instead, so these tests see the bus name and the register addresses
+ * the adapter has always had there.
  */
 static QTestState *ia64_vpc_start_lsi(const char *extra_args)
 {
-    return qtest_initf("-machine 460gx,lsi=on,isp=off -m 256M -S %s",
+    return qtest_initf("-machine 460gx,scsi=lsi53c895a -m 256M -S %s",
                        extra_args ?: "");
 }
 
@@ -6658,8 +6658,8 @@ static void check_root_window_containment(const char *args)
  * Rope 1's root and the AGP root own their own windows, cut out of PCI0's,
  * and every BAR the machine assigns lies in its root's: the graphics I/O BAR
  * in the AGP ioa's ports too, also with the other graphics adapters.  With
- * the QLogic on as well, the board's LSI keeps rope 1's windows and the
- * QLogic parks in PCI0's.
+ * a QLogic added as well, the board's LSI keeps rope 1's windows and the
+ * QLogic takes PCI0's.
  */
 static void test_zx1_root_window_containment(void)
 {
@@ -6672,7 +6672,8 @@ static void test_zx1_root_window_containment(void)
     check_windows_contain_bars("-machine zx1,vga=nv15gl -m 256M -S",
                                zx1_root_windows,
                                G_N_ELEMENTS(zx1_root_windows));
-    check_windows_contain_bars("-machine zx1,isp=on,audio=on "
+    check_windows_contain_bars("-machine zx1,audio=on "
+                               "-device isp12160-scsi "
                                "-nic user,model=i82550 "
                                "-nic user,model=e1000 -m 256M -S",
                                zx1_root_windows,
@@ -6682,16 +6683,58 @@ static void test_zx1_root_window_containment(void)
 static void test_460gx_root_window_containment(void)
 {
     /*
-     * Every optional device on, and each display adapter in turn: the
-     * graphics BARs are the largest on the machine and the ones most likely
-     * to grow past the GXB root's window.
+     * Every optional device on, a SCSI card added on each root that takes
+     * one, and each display adapter in turn: the graphics BARs are the
+     * largest on the machine and the ones most likely to grow past the GXB
+     * root's window.
      */
-    check_root_window_containment("-machine 460gx,audio=on,lsi=on,ide=on "
+    check_root_window_containment("-machine 460gx,audio=on,ide=on "
+                                  "-device lsi53c895a,bus=pci "
+                                  "-device lsi53c895a,bus=wxb0 "
+                                  "-device isp12160-scsi,bus=wxb1 "
                                   "-cpu merced -m 256M -S");
     check_root_window_containment("-machine 460gx,vga=mach64 "
                                   "-cpu merced -m 256M -S");
     check_root_window_containment("-machine 460gx,vga=nv15gl "
                                   "-cpu merced -m 256M -S");
+}
+
+/*
+ * A SCSI card added with -device gets BARs from its root's windows and the
+ * line of its slot.  An LSI at device 0 of the second WXB root lands where
+ * the former lsi=on park put it, the layout images were migrated between
+ * the two adapters on.
+ */
+static void test_scsi_addon_resources(void)
+{
+    QTestState *qts = qtest_init("-machine 460gx -cpu merced -m 256M -S "
+                                 "-device lsi53c895a,bus=wxb1,addr=0");
+
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_460GX_WXB1_BUS, 0, 0,
+                                   PCI_VENDOR_ID), ==, 0x00121000);
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_460GX_WXB1_BUS, 0, 0,
+                                   PCI_BASE_ADDRESS_0), ==, 0xe001);
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_460GX_WXB1_BUS, 0, 0,
+                                   PCI_BASE_ADDRESS_1), ==, 0xfc000000);
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_460GX_WXB1_BUS, 0, 0,
+                                   PCI_BASE_ADDRESS_2), ==, 0xfc002000);
+    g_assert_cmphex(ia64_cfg_readw(qts, IA64_460GX_WXB1_BUS, 0, 0,
+                                   PCI_COMMAND) & 0x7, ==, 0x7);
+    g_assert_cmpuint(ia64_cfg_readl(qts, IA64_460GX_WXB1_BUS, 0, 0,
+                                    PCI_INTERRUPT_LINE) & 0xff, !=, 0);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S "
+                     "-device isp12160-scsi,id=isp1,addr=4");
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, 4, 0, PCI_VENDOR_ID), ==,
+                    0x12161077);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, 4, 0, PCI_BASE_ADDRESS_0), ==,
+                    0xe001);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0, 4, 0, PCI_BASE_ADDRESS_1), ==,
+                    0xef900000);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0, 4, 0, PCI_COMMAND) & 0x7, ==,
+                    0x7);
+    qtest_quit(qts);
 }
 
 static void test_iosapic_version_per_machine(void)
@@ -7334,10 +7377,9 @@ static void test_pci_default_layout(void)
                         0x1077);   /* QLogic */
         g_free(scsi);
 
-        /* The second WXB root is the park, and nothing is parked by default. */
+        /* Nothing sits on the second WXB root by default. */
         ia64_qpci_init_on_bus(&wxb1, qts, IA64_460GX_WXB1_BUS);
-        scsi = qpci_device_find(&wxb1.bus,
-                                QPCI_DEVFN(IA64_460GX_WXB1_SCSI_SLOT, 0));
+        scsi = qpci_device_find(&wxb1.bus, QPCI_DEVFN(0, 0));
         g_assert_null(scsi);
     }
     assert_pci_device(&gbus.bus, &expected_i82559);
@@ -11930,6 +11972,8 @@ int main(int argc, char **argv)
                    test_460gx_ide_irq_after_bsy);
     qtest_add_func("/ia64-vpc/pci/460gx-root-window-containment",
                    test_460gx_root_window_containment);
+    qtest_add_func("/ia64-vpc/pci/scsi-addon-resources",
+                   test_scsi_addon_resources);
     qtest_add_func("/ia64-vpc/pci/460gx-expander-roots",
                    test_460gx_expander_roots);
     qtest_add_func("/ia64-vpc/iosapic/version-per-machine",

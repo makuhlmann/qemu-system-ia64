@@ -453,11 +453,6 @@ static void sdv_seat(IA64VpcMachineState *s, IA64VpcSeat seat, PCIBus **bus,
         *bus = s->expander_bus[IA64_460GX_ROOT_WXB0];
         *devfn = PCI_DEVFN(IA64_460GX_WXB0_SCSI_SLOT, 0);
         break;
-    case IA64_VPC_SEAT_SCSI_PARK:
-        /* The second adapter parks on the second WXB bus. */
-        *bus = s->expander_bus[IA64_460GX_ROOT_WXB1];
-        *devfn = PCI_DEVFN(IA64_460GX_WXB1_SCSI_SLOT, 0);
-        break;
     case IA64_VPC_SEAT_VGA:
         /* The i2000 puts its AGP Pro graphics at 03:00.0, behind the GXB. */
         *bus = s->expander_bus[IA64_460GX_ROOT_GXB];
@@ -482,6 +477,32 @@ static unsigned int sdv_root_gsi_base(const IA64VpcMachineState *s,
                                       uint8_t bus)
 {
     return IA64_460GX_INTX_FALLBACK_GSI;
+}
+
+/*
+ * SCSI cards added on a root take their BARs from that root's DSDT windows
+ * (roms/ia64-firmware/dsdt-pci-root.asl): on the compatibility bus the top
+ * of its first I/O range (0x03E0-0xAFFF) and its memory unit above the
+ * CS4281; on a WXB root its I/O segment and memory unit, above the seat on
+ * the first.  At device 0 of the second WXB root an LSI lands where the
+ * former lsi=on park put it.  The GXB root is the graphics adapter's.
+ */
+static bool sdv_scsi_addon_window(const IA64VpcMachineState *s, PCIBus *bus,
+                                  uint32_t *io_base, uint64_t *mmio_base)
+{
+    if (bus == s->host_pci_bus) {
+        *io_base = 0x0000a000U;
+        *mmio_base = IA64_PCI_MMIO_BASE + 0x01900000ULL;
+    } else if (bus == s->expander_bus[IA64_460GX_ROOT_WXB0]) {
+        *io_base = 0x0000b100U;
+        *mmio_base = IA64_WXB0_MMIO_PCI_BASE + 0x00100000ULL;
+    } else if (bus == s->expander_bus[IA64_460GX_ROOT_WXB1]) {
+        *io_base = 0x0000e000U;
+        *mmio_base = IA64_WXB1_MMIO_PCI_BASE;
+    } else {
+        return false;
+    }
+    return true;
 }
 
 /* Concrete: Intel SDV / HP i2000 -- 460GX chipset, Merced. */
@@ -532,6 +553,11 @@ static void sdv_machine_class_init(ObjectClass *oc, const void *data)
     imc->build_isa = sdv_build_isa;
     imc->xtp_cycle = sdv_xtp_cycle;
     imc->seat = sdv_seat;
+    imc->scsi_default = IA64_VPC_SCSI_ISP12160;
+    imc->scsi_models = (1U << IA64_VPC_SCSI_NONE) |
+                       (1U << IA64_VPC_SCSI_LSI53C895A) |
+                       (1U << IA64_VPC_SCSI_ISP12160);
+    imc->scsi_addon_window = sdv_scsi_addon_window;
     imc->root_gsi_base = sdv_root_gsi_base;
     ia64_vpc_add_compat_defaults(mc);
 }

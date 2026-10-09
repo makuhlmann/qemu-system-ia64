@@ -1719,7 +1719,7 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
     /*
      * Read the always-present boot HBA on the core I/O seat, device 1 of
      * rope 1's bus: the LSI (0x1000:0x0012) this board carries, or the
-     * QLogic ISP12160 (0x1077:0x1216) when isp=on,lsi=off puts that one there
+     * QLogic ISP12160 (0x1077:0x1216) when scsi=isp12160 puts that one there
      * instead.  The AHCI controller is opt-in (ahci=off by default), so it
      * must not be assumed present here.
      */

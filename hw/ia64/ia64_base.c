@@ -149,12 +149,8 @@
  * root's and E the second WXB root's; the compatibility bus keeps the rest,
  * including the legacy ports.
  */
-/*
- * The SCSI seat's ports come out of segment B, the first WXB root's; the
- * second adapter parks on the second WXB root and takes segment E.
- */
+/* The SCSI seat's ports come out of segment B, the first WXB root's. */
 #define IA64_SCSI_SEAT_IO_BASE  0x0000b000U
-#define IA64_SCSI_PARK_IO_BASE  0x0000e000U
 /*
  * The vendor ATI Rage 128 vgabios hardcodes its register I/O base at 0xD800 and
  * only falls back to a port-space scan if a signature probe there fails, so the
@@ -169,29 +165,10 @@
 #define IA64_OHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00010000ULL)
 #define IA64_AHCI_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00020000ULL)
 /*
- * Devices behind an expander root must have their BARs inside that root's
- * own producer window, or the guest's PnP resource arbiter cannot assign
- * them: a boot controller that fails this bugchecks the guest with STOP
- * 0x7B before it ever reaches the disk.
- *
- * The 460GX decodes one n x 32 MB aperture per logical PCI bus out of the
- * gap below 4 GiB - 32 MiB (SSDM 4.1.3.1), so each root owns a whole number
- * of those units and nothing is carved out of another root's range: the
- * compatibility bus takes the unit at the bottom of the gap, graphics takes
- * the five units its framebuffer and register apertures need, and the two
- * WXB roots take one unit each at the top.  The DSDT windows in
- * roms/ia64-firmware/dsdt-pci-root.asl mirror the split exactly.
- */
-#define IA64_PCI_MMIO_UNIT      0x02000000ULL
-#define IA64_WXB0_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 6 * IA64_PCI_MMIO_UNIT)
-#define IA64_WXB1_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 7 * IA64_PCI_MMIO_UNIT)
-/*
- * The memory BARs of whichever adapter holds the SCSI seat come out of the
- * first WXB root's aperture, and the parked adapter's out of the second's.
- * The LSI's script RAM BAR sits 8 KiB above its register BAR either way.
+ * The memory BARs of the SCSI seat adapter come out of the first WXB root's
+ * aperture.  The LSI's script RAM BAR sits 8 KiB above its register BAR.
  */
 #define IA64_SCSI_SEAT_MMIO_PCI_BASE IA64_WXB0_MMIO_PCI_BASE
-#define IA64_SCSI_PARK_MMIO_PCI_BASE IA64_WXB1_MMIO_PCI_BASE
 #define IA64_LSI_RAM_BAR_OFFSET      0x00002000ULL
 #define IA64_E1000_MMIO_PCI_BASE (IA64_PCI_MMIO_BASE + 0x00040000ULL)
 #define IA64_E1000_MMIO_SIZE    0x00020000ULL
@@ -2038,6 +2015,14 @@ static const IA64VpcCompatDefault ia64_vpc_compat_defaults[] = {
     { "ati-vga", "guest_hwcursor", "on" },
     /* Same reasoning for the Mach64 hardware cursor. */
     { "mach64-vga", "guest_hwcursor", "on" },
+    /*
+     * Targets on any LSI 53C895A stay connected while their data is
+     * prepared (lsi53c895a.c gives the reason), on the seat and on a card
+     * added with -device alike.  The firmware's SCRIPTS take one message
+     * byte before they wait for the reselection, and a disconnecting target
+     * sends two (SAVE DATA POINTER, DISCONNECT), so its reads fail there.
+     */
+    { "lsi53c895a", "disconnect-on-data-wait", "off" },
 };
 
 void ia64_vpc_add_compat_defaults(MachineClass *mc)
@@ -2158,54 +2143,49 @@ static void ia64_vpc_set_audio(Object *obj, bool value, Error **errp)
     s->audio_enabled = value;
 }
 
-static bool ia64_vpc_get_isp(Object *obj, Error **errp)
+static const char *const ia64_vpc_scsi_names[IA64_VPC_SCSI__MAX] = {
+    [IA64_VPC_SCSI_NONE] = "none",
+    [IA64_VPC_SCSI_LSI53C895A] = "lsi53c895a",
+    [IA64_VPC_SCSI_ISP12160] = "isp12160",
+};
+
+static char *ia64_vpc_get_scsi(Object *obj, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
     (void)errp;
 
-    return s->isp_enabled;
+    return g_strdup(ia64_vpc_scsi_names[s->scsi_model]);
 }
 
-static void ia64_vpc_set_isp(Object *obj, bool value, Error **errp)
+static void ia64_vpc_set_scsi(Object *obj, const char *value, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+    uint32_t models = IA64_VPC_MACHINE_GET_CLASS(s)->scsi_models;
+    g_autoptr(GString) choices = g_string_new(NULL);
+    unsigned int i;
 
+    for (i = 0; i < IA64_VPC_SCSI__MAX; i++) {
+        if (models & (1U << i)) {
+            if (g_strcmp0(value, ia64_vpc_scsi_names[i]) == 0) {
+                break;
+            }
+            g_string_append_printf(choices, "%s%s", choices->len ? ", " : "",
+                                   ia64_vpc_scsi_names[i]);
+        }
+    }
+    if (i == IA64_VPC_SCSI__MAX) {
+        error_setg(errp, "scsi=%s: this board seats one of %s", value,
+                   choices->str);
+        return;
+    }
 #ifndef CONFIG_IA64_VPC_STORAGE
-    if (value) {
+    if (i != IA64_VPC_SCSI_NONE) {
         error_setg(errp, "SCSI support is not present in this build");
         return;
     }
-#else
-    (void)errp;
 #endif
-
-    s->isp_enabled = value;
-}
-
-static bool ia64_vpc_get_lsi(Object *obj, Error **errp)
-{
-    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
-
-    (void)errp;
-
-    return s->lsi_enabled;
-}
-
-static void ia64_vpc_set_lsi(Object *obj, bool value, Error **errp)
-{
-    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
-
-#ifndef CONFIG_IA64_VPC_STORAGE
-    if (value) {
-        error_setg(errp, "SCSI support is not present in this build");
-        return;
-    }
-#else
-    (void)errp;
-#endif
-
-    s->lsi_enabled = value;
+    s->scsi_model = i;
 }
 
 static bool ia64_vpc_get_ide(Object *obj, Error **errp)
@@ -3176,52 +3156,18 @@ static uint64_t ia64_vpc_scsi_seat_mmio(const IA64VpcMachineState *s)
     return base != 0 ? base : IA64_SCSI_SEAT_MMIO_PCI_BASE;
 }
 
-/* The parked adapter's BAR bases: the board's own, or the second WXB root's. */
-static uint32_t ia64_vpc_scsi_park_io(const IA64VpcMachineState *s)
-{
-    uint32_t base = IA64_VPC_MACHINE_GET_CLASS(s)->scsi_park_io_base;
-
-    return base != 0 ? base : IA64_SCSI_PARK_IO_BASE;
-}
-
-static uint64_t ia64_vpc_scsi_park_mmio(const IA64VpcMachineState *s)
-{
-    uint64_t base = IA64_VPC_MACHINE_GET_CLASS(s)->scsi_park_mmio_base;
-
-    return base != 0 ? base : IA64_SCSI_PARK_MMIO_PCI_BASE;
-}
-
-/*
- * Which adapter holds the board's SCSI seat when both are present: the one
- * the board itself carries.  The other parks.
- */
-static bool ia64_vpc_lsi_at_seat(IA64VpcMachineState *s)
-{
-    if (!s->isp_enabled) {
-        return true;
-    }
-    return s->lsi_enabled && IA64_VPC_MACHINE_GET_CLASS(s)->lsi_default;
-}
-
-/*
- * Each adapter's BARs come out of the windows of the root it sits on: the
- * seat's when it holds the seat, the park's otherwise.
- */
+/* The seat adapter's BARs come out of the windows of the seat's root. */
 static void ia64_vpc_configure_isp(IA64VpcMachineState *s, PCIDevice *pci_dev)
 {
-    bool at_seat = !ia64_vpc_lsi_at_seat(s);
-
     if (pci_dev == NULL) {
         return;
     }
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
-                             (at_seat ? ia64_vpc_scsi_seat_io(s) :
-                                        ia64_vpc_scsi_park_io(s)) |
+                             ia64_vpc_scsi_seat_io(s) |
                              PCI_BASE_ADDRESS_SPACE_IO, 4);
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1,
-                             at_seat ? ia64_vpc_scsi_seat_mmio(s) :
-                                       ia64_vpc_scsi_park_mmio(s), 4);
+                             ia64_vpc_scsi_seat_mmio(s), 4);
     pci_default_write_config(pci_dev, PCI_COMMAND,
                              PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
                              PCI_COMMAND_MASTER, 2);
@@ -3287,17 +3233,12 @@ static void ia64_vpc_configure_ifb_smbus(PCIDevice *pci_dev)
 
 static void ia64_vpc_configure_lsi(IA64VpcMachineState *s, PCIDevice *pci_dev)
 {
-    bool at_seat = ia64_vpc_lsi_at_seat(s);
-    uint32_t io_base;
-    uint64_t mmio_base;
+    uint32_t io_base = ia64_vpc_scsi_seat_io(s);
+    uint64_t mmio_base = ia64_vpc_scsi_seat_mmio(s);
 
     if (pci_dev == NULL) {
         return;
     }
-
-    io_base = at_seat ? ia64_vpc_scsi_seat_io(s) : ia64_vpc_scsi_park_io(s);
-    mmio_base = at_seat ? ia64_vpc_scsi_seat_mmio(s) :
-                          ia64_vpc_scsi_park_mmio(s);
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0, io_base, 4);
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_1, mmio_base, 4);
@@ -3622,18 +3563,11 @@ static bool ia64_vpc_enable_vga_legacy_switch(PCIDevice *pci_dev,
  * aligned slice of the per-index memory / I/O window.  The firmware advertises
  * these same windows through the PCI0 _CRS, so keep every BAR inside them.
  */
-static void ia64_vpc_configure_nic(PCIDevice *pci_dev, unsigned int index)
+static void ia64_vpc_configure_bar_slice(PCIDevice *pci_dev,
+                                         uint64_t mmio_cursor,
+                                         uint32_t io_cursor)
 {
-    uint64_t mmio_cursor;
-    uint32_t io_cursor;
     int i;
-
-    if (pci_dev == NULL || index >= MAX_NICS) {
-        return;
-    }
-
-    mmio_cursor = IA64_E1000_MMIO_PCI_BASE + index * IA64_NIC_MMIO_STRIDE;
-    io_cursor = IA64_E1000_IO_BASE + index * IA64_NIC_IO_STRIDE;
 
     for (i = 0; i < PCI_NUM_REGIONS - 1; i++) {
         PCIIORegion *r = &pci_dev->io_regions[i];
@@ -3665,17 +3599,81 @@ static void ia64_vpc_configure_nic(PCIDevice *pci_dev, unsigned int index)
                              PCI_COMMAND_MASTER, 2);
 }
 
+static void ia64_vpc_configure_nic(PCIDevice *pci_dev, unsigned int index)
+{
+    if (pci_dev == NULL || index >= MAX_NICS) {
+        return;
+    }
+    ia64_vpc_configure_bar_slice(pci_dev,
+                                 IA64_E1000_MMIO_PCI_BASE +
+                                 index * IA64_NIC_MMIO_STRIDE,
+                                 IA64_E1000_IO_BASE +
+                                 index * IA64_NIC_IO_STRIDE);
+}
+
 /*
- * Build one SCSI adapter at the bus and device number the caller picked.
- * Both take the drives given without an explicit interface, so the adapter
- * built first -- the one holding the seat -- is the one that gets them.
+ * SCSI cards added with -device on a root bus get what POST would give them:
+ * slices of that root's DSDT windows for their BARs and the interrupt line
+ * of their slot.  A card behind a bridge is the user's to place.
+ */
+static void ia64_vpc_configure_addon_scsi_on(IA64VpcMachineState *s,
+                                             PCIBus *bus)
+{
+    IA64VpcMachineClass *imc = IA64_VPC_MACHINE_GET_CLASS(s);
+    unsigned int index = 0;
+    unsigned int devfn;
+    uint32_t io_base;
+    uint64_t mmio_base;
+
+    if (bus == NULL || imc->scsi_addon_window == NULL ||
+        !imc->scsi_addon_window(s, bus, &io_base, &mmio_base)) {
+        return;
+    }
+    for (devfn = 0; devfn < ARRAY_SIZE(bus->devices); devfn++) {
+        PCIDevice *pci_dev = bus->devices[devfn];
+
+        if (pci_dev == NULL || pci_dev == s->lsi_dev ||
+            pci_dev == s->isp_dev ||
+            pci_get_word(pci_dev->config + PCI_CLASS_DEVICE) !=
+            PCI_CLASS_STORAGE_SCSI) {
+            continue;
+        }
+        if (index == IA64_SCSI_ADDON_MAX) {
+            warn_report_once("more than %d SCSI cards on PCI bus %s: the "
+                             "others get no BARs", IA64_SCSI_ADDON_MAX,
+                             bus->qbus.name);
+            break;
+        }
+        ia64_vpc_configure_bar_slice(pci_dev,
+                                     mmio_base +
+                                     index * IA64_SCSI_ADDON_MMIO_SLICE,
+                                     io_base +
+                                     index * IA64_SCSI_ADDON_IO_SLICE);
+        ia64_vpc_configure_seat_irq(s, pci_dev, pci_bus_num(bus));
+        index++;
+    }
+}
+
+static void ia64_vpc_configure_addon_scsi(IA64VpcMachineState *s)
+{
+    ia64_vpc_configure_addon_scsi_on(s, s->host_pci_bus);
+    ia64_vpc_configure_addon_scsi_on(s, s->rope1_bus);
+    ia64_vpc_configure_addon_scsi_on(s, s->mercury_bus);
+    for (unsigned int i = 0; i < IA64_460GX_EXPANDER_ROOTS; i++) {
+        ia64_vpc_configure_addon_scsi_on(s, s->expander_bus[i]);
+    }
+}
+
+/*
+ * Build the seat adapter at the bus and device number the caller picked.  It
+ * takes the drives given without an explicit interface; an adapter added
+ * with -device does not.
  */
 #ifdef CONFIG_IA64_VPC_STORAGE
 static bool ia64_vpc_init_lsi(IA64VpcMachineState *s, PCIBus *bus, int devfn,
                               Error **errp)
 {
     s->lsi_dev = pci_new(devfn, "lsi53c895a");
-    qdev_prop_set_bit(DEVICE(s->lsi_dev), "disconnect-on-data-wait", false);
     if (!pci_realize_and_unref(s->lsi_dev, bus, errp)) {
         return false;
     }
@@ -3686,7 +3684,9 @@ static bool ia64_vpc_init_lsi(IA64VpcMachineState *s, PCIBus *bus, int devfn,
 
 static void ia64_vpc_init_isp(IA64VpcMachineState *s, PCIBus *bus, int devfn)
 {
-    s->isp_dev = pci_create_simple(bus, devfn, TYPE_ISP12160_SCSI);
+    s->isp_dev = pci_new(devfn, TYPE_ISP12160_SCSI);
+    qdev_prop_set_bit(DEVICE(s->isp_dev), "x-board-bus-name", true);
+    pci_realize_and_unref(s->isp_dev, bus, &error_fatal);
     ia64_vpc_configure_isp(s, s->isp_dev);
     scsi_bus_legacy_handle_cmdline(
         SCSI_BUS(qdev_get_child_bus(DEVICE(s->isp_dev), "isp12160-scsi.0")));
@@ -3733,15 +3733,14 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_IDE_FUNCTION));
     ia64_vpc_configure_pci_irq(s,
         intel_82468gx_ifb_function(s->ifb, IA64_460GX_IFB_SMBUS_FUNCTION));
-    ia64_vpc_configure_seat_irq(s, s->lsi_dev,
-                                s->isp_enabled ? IA64_460GX_WXB1_BUS :
-                                                 IA64_460GX_WXB0_BUS);
+    ia64_vpc_configure_seat_irq(s, s->lsi_dev, IA64_460GX_WXB0_BUS);
     ia64_vpc_configure_pci_irq_on_root(
         s->vga_dev,
         ia64_vpc_root_gsi_base(s, IA64_460GX_GXB_BUS));
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_pci_irq(s, s->nic_devs[i]);
     }
+    ia64_vpc_configure_addon_scsi(s);
 }
 
 #ifdef CONFIG_IA64_VPC_NETWORK
@@ -5091,32 +5090,32 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 #endif
 
     /*
-     * The SCSI HBA.  On the i2000 it belongs at 01:00.0 on the first WXB
-     * bus, and the adapter the real board carries there is the QLogic
-     * ISP12160, so that is what the machine builds by default.  The LSI
-     * 53c895a stays available behind lsi=on for images installed before the
-     * swap: on its own it takes the seat and the addresses it always had,
-     * and alongside the QLogic it parks on the second WXB bus, which is the
-     * layout an image is migrated from one adapter to the other on.
-     *
-     * Whichever adapter holds the seat is created here, before anything
+     * The SCSI HBA the board carries (scsi=): the QLogic ISP12160 at 01:00.0
+     * on the i2000's first WXB bus, the LSI on rx2600/zx2000.  Another model
+     * can take the seat for an image installed against it; further adapters
+     * come from -device.  The seat adapter is created here, before anything
      * else that places itself automatically, so it claims the drives given
      * without an interface and keeps the rest of the map fixed.  Device 4
-     * of the compatibility bus, where the LSI used to live, belongs to the
-     * CS4281 audio.  zx1 keeps device 4 for the seat.
+     * of the 460gx compatibility bus, where the LSI used to live, belongs to
+     * the CS4281 audio.
      */
 #ifdef CONFIG_IA64_VPC_STORAGE
-    if (s->isp_enabled || s->lsi_enabled) {
+    if (s->scsi_model != IA64_VPC_SCSI_NONE) {
         PCIBus *scsi_bus = pci_bus;
         int scsi_devfn = -1;
 
         ia64_vpc_seat(s, IA64_VPC_SEAT_SCSI, &scsi_bus, &scsi_devfn);
-        if (ia64_vpc_lsi_at_seat(s)) {
+        switch (s->scsi_model) {
+        case IA64_VPC_SCSI_LSI53C895A:
             if (!ia64_vpc_init_lsi(s, scsi_bus, scsi_devfn, errp)) {
                 return false;
             }
-        } else {
+            break;
+        case IA64_VPC_SCSI_ISP12160:
             ia64_vpc_init_isp(s, scsi_bus, scsi_devfn);
+            break;
+        default:
+            g_assert_not_reached();
         }
     }
 #endif
@@ -5212,27 +5211,6 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
 
 #ifdef CONFIG_IA64_VPC_NETWORK
     ia64_vpc_init_network(s, pci_bus);
-#endif
-
-    /*
-     * The second SCSI adapter, when both are asked for.  It parks on the
-     * second WXB bus so the seat's addresses and interrupt stay with the
-     * primary; on zx1 it takes the next free slot of the single root.
-     * Created here, after everything that has a fixed seat of its own, so
-     * asking for it cannot move another function's BDF.
-     */
-#ifdef CONFIG_IA64_VPC_STORAGE
-    if (s->isp_enabled && s->lsi_enabled) {
-        PCIBus *park_bus = pci_bus;
-        int park_devfn = -1;
-
-        ia64_vpc_seat(s, IA64_VPC_SEAT_SCSI_PARK, &park_bus, &park_devfn);
-        if (ia64_vpc_lsi_at_seat(s)) {
-            ia64_vpc_init_isp(s, park_bus, park_devfn);
-        } else if (!ia64_vpc_init_lsi(s, park_bus, park_devfn, errp)) {
-            return false;
-        }
-    }
 #endif
 
     /*
@@ -5369,15 +5347,10 @@ static void ia64_vpc_machine_instance_init(Object *obj)
      * that most wants storage is better served booting off the SCSI HBA.
      * Re-enable with ahci=on for SATA-aware guests.  A board without a south
      * bridge has its IDE controller only where the board carries one.
-     *
-     * The SCSI HBA is the one the board carries: the QLogic ISP12160 on the
-     * i2000, the LSI on rx2600/zx2000.  The other is opt-in (isp=on / lsi=on)
-     * for images installed against it, and then parks off the seat.
      */
     s->ahci_enabled = false;
     s->audio_enabled = false;
-    s->isp_enabled = !IA64_VPC_MACHINE_GET_CLASS(s)->lsi_default;
-    s->lsi_enabled = IA64_VPC_MACHINE_GET_CLASS(s)->lsi_default;
+    s->scsi_model = IA64_VPC_MACHINE_GET_CLASS(s)->scsi_default;
     s->ide_enabled = IA64_VPC_MACHINE_GET_CLASS(s)->ide_default;
     s->firmware_ide_dma = true;
 #endif
@@ -5516,21 +5489,13 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                    ia64_vpc_set_i8042);
     object_class_property_set_description(oc, "i8042",
         "Set on/off to enable/disable the i8042 PS/2 controller");
-    object_class_property_add_bool(oc, "isp",
-                                   ia64_vpc_get_isp,
-                                   ia64_vpc_set_isp);
-    object_class_property_set_description(oc, "isp",
-        "Set on/off to enable/disable the QLogic ISP12160 SCSI controller "
-        "(460gx: default on, it holds the SCSI seat; zx1: default off, it "
-        "parks on PCI0 beside the board's LSI)");
-    object_class_property_add_bool(oc, "lsi",
-                                   ia64_vpc_get_lsi,
-                                   ia64_vpc_set_lsi);
-    object_class_property_set_description(oc, "lsi",
-        "Set on/off to enable/disable the LSI 53c895a SCSI controller (zx1: "
-        "default on, it holds the SCSI seat on rope 1; 460gx: default off, "
-        "it takes the seat when isp=off and parks on the second expander "
-        "bus otherwise)");
+    object_class_property_add_str(oc, "scsi",
+                                  ia64_vpc_get_scsi,
+                                  ia64_vpc_set_scsi);
+    object_class_property_set_description(oc, "scsi",
+        "The SCSI adapter in the board's SCSI seat: none, lsi53c895a or "
+        "isp12160 (default: isp12160 on 460gx, lsi53c895a on zx1); add "
+        "further adapters with -device");
     object_class_property_add_bool(oc, "audio",
                                    ia64_vpc_get_audio,
                                    ia64_vpc_set_audio);

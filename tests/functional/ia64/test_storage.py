@@ -226,22 +226,21 @@ class Ia64Storage(Ia64FirmwareTest):
         self.run_scsi_layout("mbr-fallback")
 
     def test_scsi_lsi_fallback(self):
-        """Boot from a disk on the LSI while the QLogic holds the SCSI seat.
+        """Boot from a disk on an added LSI while the QLogic holds the seat.
 
-        The QLogic is the machine's adapter and the one every other SCSI
-        case here runs on, so this covers the opt-in LSI: the probe has to
-        fall through to it rather than stopping at the QLogic, which answers
-        but carries no device.
+        The probe has to fall through to the LSI added with -device rather
+        than stopping at the QLogic, which answers but carries no device.
         """
         app = app_path("storage")
         media = Path(self.scratch_file("scsi-lsi.img"))
         make_fat_disk(media, app)
         drive_args = (
+            "-device", "lsi53c895a,id=lsi",
             "-drive", f"file={media},format=raw,if=none,id=testdisk",
-            "-device", "scsi-hd,bus=scsi.0,drive=testdisk",
+            "-device", "scsi-hd,bus=lsi.0,drive=testdisk",
         )
         self.run_scenario("scsi-lsi", media, drive_args=drive_args,
-                          machine_options="lsi=on")
+                          machine_options="scsi=isp12160")
 
     def test_cmd646_ide_dma(self):
         self.run_ide("dma")
