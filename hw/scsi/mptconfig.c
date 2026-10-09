@@ -1094,6 +1094,9 @@ static int mptsas_write_ioc_1(MPTSASState *s, int address, uint64_t pa,
     return MPI_IOCSTATUS_SUCCESS;
 }
 
+/* SCSI Port page 1 before TargetConfig and IDConfig: header and two dwords. */
+#define MPTSPI_PORT_1_MPI_1_2_BYTES 12
+
 static int mptspi_write_port_1(MPTSASState *s, int address, uint64_t pa,
                                uint32_t dmalen, bool nvram)
 {
@@ -1107,11 +1110,20 @@ static int mptspi_write_port_1(MPTSASState *s, int address, uint64_t pa,
     if (mptspi_port_addr_get(address) < 0) {
         return MPI_IOCSTATUS_CONFIG_INVALID_PAGE;
     }
-    if (dmalen < sizeof(page_data)) {
+    /*
+     * The LSI driver in HP's rx2600 firmware 2.31 writes the page as MPI laid
+     * it out before mpi_cnfg.h 01.02.12, three dwords without TargetConfig
+     * and IDConfig, whatever length the header names; it stops using the
+     * IOC when the write fails.  Take that much: the two later fields then
+     * read as zero, the only values this initiator accepts.
+     */
+    if (dmalen < MPTSPI_PORT_1_MPI_1_2_BYTES) {
         return MPI_IOCSTATUS_CONFIG_INVALID_DATA;
     }
 
-    pci_dma_read(PCI_DEVICE(s), pa, page_data, sizeof(page_data));
+    memset(page_data, 0, sizeof(page_data));
+    pci_dma_read(PCI_DEVICE(s), pa, page_data,
+                 MIN(dmalen, sizeof(page_data)));
     if (page_data[0] != 0x03 || page_data[1] < sizeof(page_data) / 4 ||
         page_data[2] != 1 ||
         (page_data[3] & MPI_CONFIG_PAGETYPE_MASK) !=

@@ -456,6 +456,39 @@ static void mptspi_test_config_and_reset(void *obj, void *data,
     g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==,
                     MPI_IOCSTATUS_SUCCESS);
 
+    /*
+     * HP's rx2600 firmware writes the pre-01.02.12 layout: three dwords
+     * under a header that names four.
+     */
+    stl_le_p(port_page_1 + 4, 0x00200005);
+    stl_le_p(port_page_1 + 8, 0);
+    qtest_memwrite(mpt->dev.bus->qts, page_address, port_page_1, 12);
+    reply = mptspi_config(mpt, MPI_CONFIG_ACTION_PAGE_WRITE_NVRAM,
+                          MPI_CONFIG_PAGETYPE_SCSI_PORT, 1, 0,
+                          page_address, 12, true);
+    g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==,
+                    MPI_IOCSTATUS_SUCCESS);
+    reply = mptspi_config(mpt, MPI_CONFIG_ACTION_PAGE_WRITE_NVRAM,
+                          MPI_CONFIG_PAGETYPE_SCSI_PORT, 1, 0,
+                          page_address, 8, true);
+    g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==,
+                    MPI_IOCSTATUS_CONFIG_INVALID_DATA);
+    reply = mptspi_config(mpt, MPI_CONFIG_ACTION_PAGE_READ_NVRAM,
+                          MPI_CONFIG_PAGETYPE_SCSI_PORT, 1, 0,
+                          page_address, sizeof(port_page_1), false);
+    g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==,
+                    MPI_IOCSTATUS_SUCCESS);
+    qtest_memread(mpt->dev.bus->qts, page_address, port_page_1,
+                  sizeof(port_page_1));
+    g_assert_cmphex(ldl_le_p(port_page_1 + 4), ==, 0x00200005);
+    stl_le_p(port_page_1 + 4, 0x00800007);
+    qtest_memwrite(mpt->dev.bus->qts, page_address, port_page_1, 12);
+    reply = mptspi_config(mpt, MPI_CONFIG_ACTION_PAGE_WRITE_NVRAM,
+                          MPI_CONFIG_PAGETYPE_SCSI_PORT, 1, 0,
+                          page_address, 12, true);
+    g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==,
+                    MPI_IOCSTATUS_SUCCESS);
+
     reply = mptspi_config(mpt, MPI_CONFIG_ACTION_PAGE_HEADER,
                           MPI_CONFIG_PAGETYPE_SCSI_PORT, 2, 0,
                           0, 0, false);
