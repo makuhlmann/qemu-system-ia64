@@ -36,6 +36,7 @@
 
 #define PCI_SUB_CLASS_SCSI           0x00U
 #define PCI_VENDOR_ID_LSI            0x1000U
+#define PCI_LSI_53C895A_ID           ((0x0012U << 16) | PCI_VENDOR_ID_LSI)
 #define PCI_LSI_BAR1_OFFSET          0x14U
 
 #define LSI_REG_SCID                 0x04U
@@ -334,15 +335,13 @@ static BOOLEAN scsi_find_lsi_controller(PCI_DEVICE_LOCATION *Location)
                 sub_class = (UINT8)((class_rev >> 16) & 0xffU);
                 base_class = (UINT8)((class_rev >> 24) & 0xffU);
                 /*
-                 * Match an LSI Logic SCSI controller: this driver speaks
-                 * 53C8xx SCRIPTS, so the vendor has to match.  Accepting any
-                 * mass-storage/SCSI device here used to be harmless because
-                 * the 53C895A was always present and found first; now that
-                 * the QLogic holds the SCSI seat and the LSI is opt-in, that
-                 * matched the QLogic instead and drove SCRIPTS at it, which
-                 * hangs the probe on a machine with no LSI at all.
+                 * Match the 53C895A only: this driver speaks 53C8xx SCRIPTS.
+                 * Matching any mass-storage/SCSI device drove SCRIPTS at the
+                 * QLogic once it held the seat, and matching any LSI device
+                 * would do the same to a Fusion-MPT 53C1030, which has no
+                 * SCRIPTS engine; either hangs the probe.
                  */
-                if ((id & 0xffffU) == PCI_VENDOR_ID_LSI &&
+                if (id == PCI_LSI_53C895A_ID &&
                     base_class == PCI_BASE_CLASS_MASS_STORAGE &&
                     sub_class == PCI_SUB_CLASS_SCSI) {
                     Location->Bus = (UINT8)bus;
