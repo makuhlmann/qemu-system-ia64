@@ -310,7 +310,7 @@ size_t mptsas_config_io_unit_2(MPTSASState *s, uint8_t **data, int address)
     uint8_t devfn = pci->devfn;
     return MPTSAS_CONFIG_PACK(2, MPI_CONFIG_PAGETYPE_IO_UNIT, 0x02,
                               "llbbw*b*b*w*b*b*w*b*b*w*l",
-                              0, 0x100, 0 /* pci bus? */, devfn, 0);
+                              0, 0x100, pci_dev_bus_num(pci), devfn, 0);
 }
 
 static
@@ -331,13 +331,17 @@ size_t mptsas_config_io_unit_4(MPTSASState *s, uint8_t **data, int address)
 static
 size_t mptsas_config_ioc_0(MPTSASState *s, uint8_t **data, int address)
 {
-    PCIDeviceClass *pcic = PCI_DEVICE_GET_CLASS(s);
+    const uint8_t *config = PCI_DEVICE(s)->config;
 
+    /* The function's own header: ClassCode is the 24-bit class register. */
     return MPTSAS_CONFIG_PACK(0, MPI_CONFIG_PAGETYPE_IOC, 0x01,
                               "*l*lwwb*b*b*blww",
-                              pcic->vendor_id, pcic->device_id, pcic->revision,
-                              pcic->class_id, pcic->subsystem_vendor_id,
-                              pcic->subsystem_id);
+                              pci_get_word(config + PCI_VENDOR_ID),
+                              pci_get_word(config + PCI_DEVICE_ID),
+                              config[PCI_REVISION_ID],
+                              pci_get_long(config + PCI_CLASS_REVISION) >> 8,
+                              pci_get_word(config + PCI_SUBSYSTEM_VENDOR_ID),
+                              pci_get_word(config + PCI_SUBSYSTEM_ID));
 }
 
 static

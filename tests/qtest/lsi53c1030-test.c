@@ -230,11 +230,11 @@ static void mptspi_test_facts(void *obj, void *data,
                     0x1000);
     g_assert_cmphex(qpci_config_readl(&mpt->dev, PCI_BASE_ADDRESS_1) &
                     PCI_BASE_ADDRESS_MEM_TYPE_MASK, ==,
-                    PCI_BASE_ADDRESS_MEM_TYPE_32);
-    g_assert_cmphex(qpci_config_readl(&mpt->dev, PCI_BASE_ADDRESS_2) &
+                    PCI_BASE_ADDRESS_MEM_TYPE_64);
+    g_assert_cmphex(qpci_config_readl(&mpt->dev, PCI_BASE_ADDRESS_3) &
                     PCI_BASE_ADDRESS_MEM_TYPE_MASK, ==,
-                    PCI_BASE_ADDRESS_MEM_TYPE_32);
-    diag_bar = qpci_iomap(&mpt->dev, 2, &diag_size);
+                    PCI_BASE_ADDRESS_MEM_TYPE_64);
+    diag_bar = qpci_iomap(&mpt->dev, 3, &diag_size);
     g_assert_cmpuint(diag_size, ==, 0x10000);
     qpci_iounmap(&mpt->dev, diag_bar);
     g_assert_cmpuint(mptspi_probe_rom_size(&mpt->dev), ==, 0);
@@ -251,6 +251,12 @@ static void mptspi_test_facts(void *obj, void *data,
     g_assert_cmpuint(facts_reply.NumberOfPorts, ==, 1);
     g_assert_cmpuint(facts_reply.MaxDevices, ==, 16);
     g_assert_cmpuint(facts_reply.MaxBuses, ==, 1);
+    /* The rx2600's firmware: FwRev=01032300h, MaxQ=255 under mptbase. */
+    g_assert_cmpuint(facts_reply.FWVersionMajor, ==, 0x01);
+    g_assert_cmpuint(facts_reply.FWVersionMinor, ==, 0x03);
+    g_assert_cmpuint(facts_reply.FWVersionUnit, ==, 0x23);
+    g_assert_cmpuint(facts_reply.FWVersionDev, ==, 0x00);
+    g_assert_cmpuint(le16_to_cpu(facts_reply.GlobalCredits), ==, 255);
 
     port_request.Function = MPI_FUNCTION_PORT_FACTS;
     port_request.PortNumber = 0;
@@ -263,6 +269,27 @@ static void mptspi_test_facts(void *obj, void *data,
     g_assert_cmpuint(le16_to_cpu(port_reply.PortSCSIID), ==, 7);
     g_assert_cmphex(le16_to_cpu(port_reply.ProtocolFlags), ==,
                     MPI_PORTFACTS_PROTOCOL_INITIATOR);
+
+    /* IOC page 0 repeats the function's header: a 24-bit ClassCode. */
+    {
+        uint64_t pa = guest_alloc(alloc, 28);
+        MPIMsgConfigReply reply;
+        uint8_t page[28];
+
+        mptspi_ioc_init(mpt);
+        reply = mptspi_config(mpt, MPI_CONFIG_ACTION_PAGE_READ_CURRENT,
+                              MPI_CONFIG_PAGETYPE_IOC, 0, 0, pa,
+                              sizeof(page), false);
+        g_assert_cmphex(le16_to_cpu(reply.IOCStatus), ==,
+                        MPI_IOCSTATUS_SUCCESS);
+        qtest_memread(mpt->dev.bus->qts, pa, page, sizeof(page));
+        g_assert_cmphex(lduw_le_p(page + 12), ==, PCI_VENDOR_ID_LSI_LOGIC);
+        g_assert_cmphex(lduw_le_p(page + 14), ==, PCI_DEVICE_ID_LSI_53C1030);
+        g_assert_cmphex(page[16], ==, 0x07);
+        g_assert_cmphex(ldl_le_p(page + 20), ==, 0x010000);
+        g_assert_cmphex(ldl_le_p(page + 24), ==, 0x10001000);
+        guest_free(alloc, pa);
+    }
 }
 
 static void mptspi_test_config_and_reset(void *obj, void *data,
@@ -1112,6 +1139,80 @@ static void mptspi_coalescing_savevm(void *obj, void *data,
 }
 
 
+/*
+ * The header and capabilities of both functions as the rx2600's 53C1030
+ * reads them (zx1probe run 2, 20:01.0 and 20:01.1), without the fields
+ * firmware writes (command, cache line size, latency, BAR bases, interrupt
+ * line).  Until ia64 delivers MSI the list ends at the PM capability; the
+ * chip then has MSI at 58h.
+ */
+static uint32_t mptspi_cfg_readl(QTestState *qts, uint8_t fn, uint8_t reg)
+{
+    return qtest_readl(qts, IA64_PCI_CONFIG_BASE +
+                       ((uint64_t)(MPT_DEVFN | fn) << 12) + reg);
+}
+
+static void mptspi_cfg_writel(QTestState *qts, uint8_t fn, uint8_t reg,
+                              uint32_t value)
+{
+    qtest_writel(qts, IA64_PCI_CONFIG_BASE +
+                 ((uint64_t)(MPT_DEVFN | fn) << 12) + reg, value);
+}
+
+static void mptspi_test_config_image(void)
+{
+    static const struct {
+        uint8_t reg;
+        uint32_t sized;
+    } bars[] = {
+        { PCI_BASE_ADDRESS_0, 0xffffff01 },     /* I/O, 256 bytes */
+        { PCI_BASE_ADDRESS_1, 0xffff0004 },     /* Memory [0], 64-bit 64 KiB */
+        { PCI_BASE_ADDRESS_2, 0xffffffff },
+        { PCI_BASE_ADDRESS_3, 0xffff0004 },     /* Memory [1], 64-bit 64 KiB */
+        { PCI_BASE_ADDRESS_4, 0xffffffff },
+        { PCI_BASE_ADDRESS_5, 0x00000000 },
+    };
+    QTestState *qts = qtest_init(
+        "-machine zx1 -m 256M -S "
+        "-device lsi53c1030,addr=10.0,multifunction=on "
+        "-device lsi53c1030,addr=10.1,multifunction=on");
+    uint8_t fn;
+    size_t i;
+
+    for (fn = 0; fn < 2; fn++) {
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, PCI_VENDOR_ID), ==,
+                        0x00301000);
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, PCI_COMMAND) >> 16, ==,
+                        0x0230);
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, PCI_REVISION_ID), ==,
+                        0x01000007);
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, PCI_CACHE_LINE_SIZE) &
+                        0xffff0000, ==, 0x00800000);
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, PCI_SUBSYSTEM_VENDOR_ID),
+                        ==, 0x10001000);
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, PCI_CAPABILITY_LIST) &
+                        0xff, ==, 0x50);
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, PCI_INTERRUPT_LINE) >> 8,
+                        ==, 0x121100 | (fn + 1));
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, 0x50), ==, 0x06020001);
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, 0x54), ==, 0);
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, 0x58), ==, 0);
+        g_assert_cmphex(mptspi_cfg_readl(qts, fn, 0x5c), ==, 0);
+
+        for (i = 0; i < G_N_ELEMENTS(bars); i++) {
+            mptspi_cfg_writel(qts, fn, bars[i].reg, 0xffffffff);
+            g_assert_cmphex(mptspi_cfg_readl(qts, fn, bars[i].reg), ==,
+                            bars[i].sized);
+        }
+    }
+
+    /* Only the power state field of PMCSR is writable. */
+    mptspi_cfg_writel(qts, 0, 0x54, 0xffffffff);
+    g_assert_cmphex(mptspi_cfg_readl(qts, 0, 0x54) & 0xffff, ==,
+                    PCI_PM_CTRL_STATE_MASK);
+    qtest_quit(qts);
+}
+
 static void mptspi_run(const void *opaque)
 {
     const MptSpiCase *c = opaque;
@@ -1174,5 +1275,6 @@ int main(int argc, char **argv)
 
         qtest_add_data_func(path, &mptspi_cases[i], mptspi_run);
     }
+    qtest_add_func("/lsi53c1030/config-image", mptspi_test_config_image);
     return g_test_run();
 }

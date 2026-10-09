@@ -57,6 +57,13 @@
      MPI_FW_HEADER_PID_TYPE_SCSI)
 
 #define MPT_FW_VERSION 0x01329200
+/*
+ * The rx2600's 53C1030 firmware: Linux mptbase 2.05.16 prints "FwRev=01032300h,
+ * MaxQ=255" for both IOCs, MaxQ being MIN(1023, GlobalCredits) (Linux 2.4
+ * drivers/message/fusion/mptbase.c, the IOC bring-up of GetIocFacts).
+ */
+#define MPTSPI_FW_VERSION 0x01032300
+#define MPTSPI_GLOBAL_CREDITS 255
 #define MPT_MSG_VERSION 0x0105
 #define MPT_NVDATA_FORMAT_VERSION 0x2d
 #define MPT_NVDATA_VERSION (MPT_NVDATA_FORMAT_VERSION << 8)
@@ -739,12 +746,17 @@ static void mptsas_process_ioc_init(MPTSASState *s, MPIMsgIOCInit *req)
     mptsas_reply(s, (MPIDefaultReply *)&reply);
 }
 
+static uint32_t mptsas_fw_version(MPTSASState *s)
+{
+    return mptsas_is_spi(s) ? MPTSPI_FW_VERSION : MPT_FW_VERSION;
+}
+
 static void mptsas_process_ioc_facts(MPTSASState *s,
                                      MPIMsgIOCFacts *req)
 {
     MPIMsgIOCFactsReply reply;
     uint32_t version = s->fw_image ? ldl_le_p(s->fw_image + 0x24) :
-                                    MPT_FW_VERSION;
+                                    mptsas_fw_version(s);
 
     mptsas_fix_ioc_facts_endianness(req);
 
@@ -769,7 +781,10 @@ static void mptsas_process_ioc_facts(MPTSASState *s,
                                        MPTSPI1030_PRODUCT_ID :
                                        MPTSAS1068_PRODUCT_ID;
     reply.CurrentHostMfaHighAddr     = s->host_mfa_high_addr >> 32;
-    reply.GlobalCredits              = ARRAY_SIZE(s->request_post) - 1;
+    reply.GlobalCredits              = mptsas_is_spi(s) ?
+                                       MPTSPI_GLOBAL_CREDITS :
+                                       MPTSAS_REQUEST_QUEUE_DEPTH_V0;
+    QEMU_BUILD_BUG_ON(ARRAY_SIZE(s->request_post) <= MPTSPI_GLOBAL_CREDITS);
     reply.NumberOfPorts              = mptsas_num_ports(s);
     reply.CurrentSenseBufferHighAddr = s->sense_buffer_high_addr >> 32;
     reply.CurReplyFrameSize          = s->reply_frame_size;
@@ -890,7 +905,7 @@ static void mptsas_fw_image(MPTSASState *s, uint8_t *image)
     stw_le_p(image + 0x20, PCI_VENDOR_ID_LSI_LOGIC);
     stw_le_p(image + 0x22, mptsas_is_spi(s) ? MPTSPI1030_PRODUCT_ID :
                                             MPTSAS1068_PRODUCT_ID);
-    stl_le_p(image + 0x24, MPT_FW_VERSION);
+    stl_le_p(image + 0x24, mptsas_fw_version(s));
     stl_le_p(image + 0x2c, MPI_FW_HEADER_SIZE);
     stl_le_p(image + 0x40, MPI_FW_HEADER_WHAT_SIGNATURE);
     memcpy(image + 0x44, "Fusion-MPT emulation", 20);
@@ -1933,8 +1948,28 @@ static void mptsas_scsi_realize(PCIDevice *dev, Error **errp)
     dev->config[PCI_LATENCY_TIMER] = 0;
     dev->config[PCI_INTERRUPT_PIN] = 0x01;
 
+    /*
+     * The 53C1030's read-only header fields (TRM Ver 2.2 §4.1): status 0230h
+     * (66 MHz capable, medium DEVSEL), and function 1 presenting its
+     * interrupts on INTB.  MIN_GNT and MAX_LAT are what the rx2600's
+     * revision 07h reads, 11h and 12h; the TRM gives 10h and 06h.
+     */
+    if (mptsas_is_spi(s)) {
+        pci_word_test_and_set_mask(dev->config + PCI_STATUS,
+                                   PCI_STATUS_66MHZ |
+                                   PCI_STATUS_DEVSEL_MEDIUM);
+        dev->config[PCI_INTERRUPT_PIN] = PCI_FUNC(dev->devfn) == 1 ? 2 : 1;
+        dev->config[PCI_MIN_GNT] = 0x11;
+        dev->config[PCI_MAX_LAT] = 0x12;
+    }
+
     if (s->msi != ON_OFF_AUTO_OFF) {
-        ret = msi_init(dev, 0, 1, true, false, &err);
+        /*
+         * The 53C1030 keeps MSI at 58h, behind power management at 50h
+         * (the rx2600's config space).
+         */
+        ret = msi_init(dev, mptsas_is_spi(s) ? 0x58 : 0, 1, true, false,
+                       &err);
         /* Any error other than -ENOTSUP(board's MSI support is broken)
          * is a programming error */
         assert(!ret || ret == -ENOTSUP);
@@ -1953,14 +1988,34 @@ static void mptsas_scsi_realize(PCIDevice *dev, Error **errp)
         s->msi_in_use = (ret == 0);
     }
 
+    /*
+     * Power management at 50h, at the head of the list (pci_add_capability
+     * prepends): PMC 0602h, PCI PM 1.1 with D1 and D2.  Only the power state
+     * is writable.
+     */
+    if (mptsas_is_spi(s)) {
+        if (pci_pm_init(dev, 0x50, errp) < 0) {
+            return;
+        }
+        pci_set_word(dev->config + 0x50 + PCI_PM_PMC,
+                     PCI_PM_CAP_D1 | PCI_PM_CAP_D2 | 2);
+        pci_set_word(dev->wmask + 0x50 + PCI_PM_CTRL, PCI_PM_CTRL_STATE_MASK);
+    }
+
+    /*
+     * The 53C1030's Memory [0] (operating registers) and Memory [1]
+     * (diagnostic RAM window) are both 64-bit, 64 KiB BARs at 14h and 1Ch:
+     * the rx2600's Linux sizes them so, although the TRM gives Memory [0] as
+     * 1 KiB.
+     */
     memory_region_init_io(&s->mmio_io, OBJECT(s), &mptsas_mmio_ops, s,
-                          "mptsas-mmio", 0x4000);
+                          "mptsas-mmio", mptsas_is_spi(s) ? 0x10000 : 0x4000);
     memory_region_init_io(&s->port_io, OBJECT(s), &mptsas_port_ops, s,
                           "mptsas-io", 256);
     memory_region_init_io(&s->diag_io, OBJECT(s), &mptsas_diag_ops, s,
                           "mptsas-diag", 0x10000);
 
-    if (s->pci_64bit_bars) {
+    if (s->pci_64bit_bars || mptsas_is_spi(s)) {
         memory_bar_type = PCI_BASE_ADDRESS_SPACE_MEMORY |
                           PCI_BASE_ADDRESS_MEM_TYPE_64;
         diag_bar = 3;
@@ -2013,11 +2068,15 @@ static void mptsas_reset(DeviceState *dev)
     mptsas_hard_reset(s);
 }
 
-static bool mptsas_load_legacy_reply_fifo(uint32_t *fifo, uint16_t *head,
-                                        uint16_t *tail)
+/* A ring from an older stream: 128 entries, wrapping at index 128. */
+static bool mptsas_load_legacy_fifo(uint32_t *fifo, uint16_t *head,
+                                    uint16_t *tail)
 {
     uint32_t pending[MPTSAS_REPLY_QUEUE_DEPTH_V0];
     unsigned count = 0;
+
+    QEMU_BUILD_BUG_ON(MPTSAS_REQUEST_QUEUE_DEPTH_V0 !=
+                      MPTSAS_REPLY_QUEUE_DEPTH_V0);
 
     if (*head > MPTSAS_REPLY_QUEUE_DEPTH_V0 ||
         *tail > MPTSAS_REPLY_QUEUE_DEPTH_V0) {
@@ -2056,12 +2115,17 @@ static int mptsas_post_load(void *opaque, int version_id)
     }
 
     if (version_id == 0 &&
-        (!mptsas_load_legacy_reply_fifo(s->reply_post,
+        (!mptsas_load_legacy_fifo(s->reply_post,
                                         &s->reply_post_head,
                                         &s->reply_post_tail) ||
-         !mptsas_load_legacy_reply_fifo(s->reply_free,
+         !mptsas_load_legacy_fifo(s->reply_free,
                                         &s->reply_free_head,
                                         &s->reply_free_tail))) {
+        return -EINVAL;
+    }
+    if (version_id < 2 &&
+        !mptsas_load_legacy_fifo(s->request_post, &s->request_post_head,
+                                 &s->request_post_tail)) {
         return -EINVAL;
     }
 
@@ -2281,7 +2345,7 @@ static const VMStateDescription vmstate_mptsas_coalescing = {
 
 static const VMStateDescription vmstate_mptsas = {
     .name = "mptsas",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 0,
     .pre_load = mptsas_pre_load,
     .post_load = mptsas_post_load,
@@ -2305,8 +2369,8 @@ static const VMStateDescription vmstate_mptsas = {
         VMSTATE_UINT32(intr_status, MPTSASState),
         VMSTATE_UINT32(intr_mask, MPTSASState),
 
-        VMSTATE_UINT32_ARRAY(request_post, MPTSASState,
-                             MPTSAS_REQUEST_QUEUE_DEPTH + 1),
+        VMSTATE_UINT32_SUB_ARRAY(request_post, MPTSASState, 0,
+                                 MPTSAS_REQUEST_QUEUE_DEPTH_V0 + 1),
         VMSTATE_UINT16(request_post_head, MPTSASState),
         VMSTATE_UINT16(request_post_tail, MPTSASState),
 
@@ -2335,6 +2399,11 @@ static const VMStateDescription vmstate_mptsas = {
                           MPTSAS_REPLY_QUEUE_DEPTH -
                           MPTSAS_REPLY_QUEUE_DEPTH_V0,
                           1, vmstate_info_uint32, uint32_t),
+        VMSTATE_SUB_ARRAY(request_post, MPTSASState,
+                          MPTSAS_REQUEST_QUEUE_DEPTH_V0 + 1,
+                          MPTSAS_REQUEST_QUEUE_DEPTH -
+                          MPTSAS_REQUEST_QUEUE_DEPTH_V0,
+                          2, vmstate_info_uint32, uint32_t),
         VMSTATE_END_OF_LIST()
     },
     .subsections = (const VMStateDescription * const []) {
