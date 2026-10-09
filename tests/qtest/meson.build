@@ -147,7 +147,8 @@ qtests_avr = [ 'boot-serial-test' ]
 
 qtests_ia64 = ['ia64-vpc-test'] + \
   (config_all_devices.has_key('CONFIG_VGA') ? ['display-vga-test'] : []) + \
-  (config_all_devices.has_key('CONFIG_NV15_VGA') ? ['nv15gl-test'] : [])
+  (config_all_devices.has_key('CONFIG_NV15_VGA') ? ['nv15gl-test'] : []) + \
+  (config_all_devices.has_key('CONFIG_MPTSPI_SCSI_PCI') ? ['lsi53c1030-test'] : [])
 
 qtests_hppa = \
   qtests_filter + \

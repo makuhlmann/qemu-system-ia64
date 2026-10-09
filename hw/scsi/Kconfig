@@ -12,11 +12,22 @@ config NCR710_SCSI
     default y if LASI
     select SCSI
 
+config MPT_FUSION
+    bool
+    depends on PCI
+    select SCSI
+
 config MPTSAS_SCSI_PCI
     bool
     default y if PCI_DEVICES
     depends on PCI
-    select SCSI
+    select MPT_FUSION
+
+config MPTSPI_SCSI_PCI
+    bool
+    default y if PCI_DEVICES
+    depends on PCI
+    select MPT_FUSION
 
 config ISP12160
     bool

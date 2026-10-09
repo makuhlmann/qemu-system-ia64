@@ -3,21 +3,53 @@
 
 #include "mpi.h"
 #include "hw/pci/pci_device.h"
+#include "hw/scsi/scsi.h"
+#include "qemu/timer.h"
 
 #define MPTSAS_NUM_PORTS 8
+#define MPTSAS_ENCLOSURE_HANDLE (2 * MPTSAS_NUM_PORTS + 1)
+#define MPTSPI_NUM_PORTS 1
+#define MPTSPI_MAX_TARGETS 16
+#define MPTSPI_HOST_ID 7
+#define MPTSPI_DEFAULT_PORT_CONFIGURATION \
+    (MPTSPI_HOST_ID | \
+     (1U << (MPTSPI_HOST_ID + \
+             MPI_SCSIPORTPAGE1_CFG_SHIFT_PORT_RESPONSE_ID)))
 #define MPTSAS_MAX_FRAMES 2048     /* Firmware limit at 65535 */
 
 #define MPTSAS_REQUEST_QUEUE_DEPTH 128
-#define MPTSAS_REPLY_QUEUE_DEPTH   128
+#define MPTSAS_REPLY_QUEUE_DEPTH_V0 128
+#define MPTSAS_REPLY_QUEUE_DEPTH   256
 
 #define MPTSAS_MAXIMUM_CHAIN_DEPTH 0x22
 
+enum {
+    MPTSAS_CONFIG_MANUFACTURING_1,
+    MPTSAS_CONFIG_MANUFACTURING_4,
+    MPTSAS_CONFIG_IO_UNIT_1,
+    MPTSAS_CONFIG_SAS_IO_UNIT_1,
+    MPTSAS_CONFIG_SAS_IO_UNIT_2,
+    MPTSAS_CONFIG_PAGE_COUNT,
+};
+
+#define MPTSAS_CONFIG_PAGE_DATA_SIZE 256
+#define MPTSAS_CONFIG_PAGE_MASK ((1U << MPTSAS_CONFIG_PAGE_COUNT) - 1)
+
 typedef struct MPTSASRequest MPTSASRequest;
 
+#define TYPE_MPT_FUSION "mpt-fusion"
 #define TYPE_MPTSAS1068 "mptsas1068"
+#define TYPE_LSI53C1030 "lsi53c1030"
 typedef struct MPTSASState MPTSASState;
-DECLARE_INSTANCE_CHECKER(MPTSASState, MPT_SAS,
-                         TYPE_MPTSAS1068)
+DECLARE_INSTANCE_CHECKER(MPTSASState, MPT_FUSION,
+                         TYPE_MPT_FUSION)
+
+#define MPT_SAS(obj) MPT_FUSION(obj)
+
+typedef enum MPTFusionVariant {
+    MPT_FUSION_VARIANT_SAS1068,
+    MPT_FUSION_VARIANT_LSI53C1030,
+} MPTFusionVariant;
 
 enum {
     DOORBELL_NONE,
@@ -30,13 +62,21 @@ struct MPTSASState {
     MemoryRegion mmio_io;
     MemoryRegion port_io;
     MemoryRegion diag_io;
+    MemoryRegion pci_rom;
     QEMUBH *request_bh;
+    QEMUTimer *coalescing_timer;
+    uint32_t coalescing_count;
+    bool reply_irq_ready;
+    uint32_t irq_state;
 
     /* properties */
     OnOffAuto msi;
     uint64_t sas_addr;
+    bool pci_64bit_bars;
+    uint32_t pci_rom_size;
 
     bool msi_in_use;
+    uint8_t variant;
 
     /* Doorbell register */
     uint32_t state;
@@ -78,8 +118,55 @@ struct MPTSASState {
     uint16_t max_buses;
     uint16_t reply_frame_size;
 
+    uint32_t fw_image_size;
+    uint8_t *fw_image;
+    uint8_t config_nvram[MPTSAS_CONFIG_PAGE_COUNT]
+                        [MPTSAS_CONFIG_PAGE_DATA_SIZE];
+    uint8_t config_nvram_written;
+    uint8_t config_current[MPTSAS_CONFIG_PAGE_COUNT]
+                          [MPTSAS_CONFIG_PAGE_DATA_SIZE];
+    uint8_t config_current_written;
+    uint32_t enclosure_status[MPTSAS_NUM_PORTS];
+
+    /* IOC configuration page 1 current values. */
+    uint32_t ioc1_flags;
+    uint32_t ioc1_coalescing_timeout;
+    uint8_t ioc1_coalescing_depth;
+
+    uint32_t spi_port_configuration;
+    uint32_t spi_port_on_bus_timer;
+    bool spi_port1_nvram_written;
+    uint32_t spi_port1_nvram_configuration;
+    uint32_t spi_port1_nvram_on_bus_timer;
+    bool spi_port2_written;
+    uint8_t spi_port2_current[72];
+    bool spi_port2_nvram_written;
+    uint8_t spi_port2_nvram[72];
+    uint32_t spi_requested_params[MPTSPI_MAX_TARGETS];
+    uint32_t spi_configuration[MPTSPI_MAX_TARGETS];
+
     SCSIBus bus;
 };
+
+static inline SCSIBus *mpt_fusion_get_scsi_bus(PCIDevice *dev)
+{
+    return &MPT_FUSION(dev)->bus;
+}
+
+static inline bool mptsas_is_spi(const MPTSASState *s)
+{
+    return s->variant == MPT_FUSION_VARIANT_LSI53C1030;
+}
+
+static inline unsigned int mptsas_num_ports(const MPTSASState *s)
+{
+    return mptsas_is_spi(s) ? MPTSPI_NUM_PORTS : MPTSAS_NUM_PORTS;
+}
+
+static inline unsigned int mptsas_max_devices(const MPTSASState *s)
+{
+    return mptsas_is_spi(s) ? MPTSPI_MAX_TARGETS : MPTSAS_NUM_PORTS;
+}
 
 void mptsas_fix_scsi_io_endianness(MPIMsgSCSIIORequest *req);
 void mptsas_fix_scsi_io_reply_endianness(MPIMsgSCSIIOReply *reply);
@@ -99,7 +186,9 @@ void mptsas_fix_event_notification_endianness(MPIMsgEventNotify *req);
 void mptsas_fix_event_notification_reply_endianness(MPIMsgEventNotifyReply *reply);
 
 void mptsas_reply(MPTSASState *s, MPIDefaultReply *reply);
+void mptsas_coalescing_changed(MPTSASState *s);
 
 void mptsas_process_config(MPTSASState *s, MPIMsgConfig *req);
+unsigned mptsas_first_slot(const MPTSASState *s);
 
 #endif /* MPTSAS_H */
