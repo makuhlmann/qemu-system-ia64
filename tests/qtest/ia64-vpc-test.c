@@ -33,6 +33,7 @@
 #define IA64_IOSAPIC_IOREGSEL        0x00ULL
 #define IA64_IOSAPIC_IOWIN           0x10ULL
 #define IA64_IOSAPIC_EOI             0x40ULL
+#define IA64_IOSAPIC_RESAMPLE_NS     1000
 #define IA64_IOSAPIC_RTE_BASE        0x10U
 #define IA64_IOSAPIC_RTE_LOWEST      BIT(8)
 #define IA64_IOSAPIC_RTE_DELIVERY    BIT(12)
@@ -8564,7 +8565,9 @@ static void test_iosapic_level_remote_irr(void)
     const unsigned pin = 23;
     const uint8_t vector = 0x51;
     const uint32_t rte_low = IA64_IOSAPIC_RTE_BASE + pin * 2;
-    QTestState *qts = ia64_vpc_start("-nic user,model=e1000");
+    /* Without -S: the resample timer runs only on a running clock. */
+    QTestState *qts = qtest_init("-machine 460gx -m 256M "
+                                 "-nic user,model=e1000");
     g_autofree char *iosapic_path =
         find_unattached_child(qts, "ia64-iosapic");
     uint32_t rte;
@@ -8584,8 +8587,17 @@ static void test_iosapic_level_remote_irr(void)
     g_assert_cmphex(rte & IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
     g_assert_cmphex(rte & IA64_IOSAPIC_RTE_DELIVERY, !=, 0);
 
-    /* EOI while the level remains asserted immediately redelivers it. */
+    /*
+     * An EOI while the level remains asserted sends a new message, but not
+     * inside the EOI write: it crosses the buses first (251350-001 2.5.2.1).
+     */
     qtest_writel(qts, IA64_IOSAPIC_BASE + IA64_IOSAPIC_EOI, vector);
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, ==, 0);
+    qtest_clock_step(qts, IA64_IOSAPIC_RESAMPLE_NS - 1);
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, ==, 0);
+    qtest_clock_step(qts, 1);
     g_assert_cmphex(iosapic_read(qts, rte_low) &
                     IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
 
@@ -8593,6 +8605,19 @@ static void test_iosapic_level_remote_irr(void)
     g_assert_cmphex(iosapic_read(qts, rte_low) &
                     IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
     qtest_writel(qts, IA64_IOSAPIC_BASE + IA64_IOSAPIC_EOI, vector);
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, ==, 0);
+    qtest_clock_step(qts, IA64_IOSAPIC_RESAMPLE_NS);
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, ==, 0);
+
+    /* A line that drops before the resample sends nothing. */
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 1);
+    g_assert_cmphex(iosapic_read(qts, rte_low) &
+                    IA64_IOSAPIC_RTE_REMOTE_IRR, !=, 0);
+    qtest_writel(qts, IA64_IOSAPIC_BASE + IA64_IOSAPIC_EOI, vector);
+    qtest_set_irq_in(qts, iosapic_path, NULL, pin, 0);
+    qtest_clock_step(qts, IA64_IOSAPIC_RESAMPLE_NS);
     g_assert_cmphex(iosapic_read(qts, rte_low) &
                     IA64_IOSAPIC_RTE_REMOTE_IRR, ==, 0);
     qtest_quit(qts);

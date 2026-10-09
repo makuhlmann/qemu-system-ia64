@@ -12,6 +12,7 @@
 #include "hw/ia64/ia64_iosapic.h"
 #include "cpu.h"
 #include "migration/vmstate.h"
+#include "qemu/timer.h"
 #include "system/address-spaces.h"
 
 #define IOSAPIC_IOREGSEL   0x00
@@ -60,6 +61,18 @@
 #define IOSAPIC_DELIVERY_INIT   5
 #define IOSAPIC_DELIVERY_EXTINT 7
 
+/*
+ * The message for a level input still asserted at an EOI goes out like any
+ * other: a memory write on the I/O bus to the bridge, then an interrupt
+ * transaction on the system bus (Interrupt Architecture Guide 251350-001
+ * sec 2.2.1, 2.5.2.1), while the processor runs on past its posted EOI
+ * write.  The guide gives no time; 1 us is about that round trip.  Sent
+ * inside the write, the vector would reach the IRR before the handler's
+ * next IVR read, and an input that no handler clears (Linux 2.4 unmasks
+ * PCI entries before request_irq) would hold its processor there for good.
+ */
+#define IOSAPIC_RESAMPLE_NS     1000
+
 struct IA64IOSapicState {
     SysBusDevice parent_obj;
     MemoryRegion mmio;
@@ -73,6 +86,8 @@ struct IA64IOSapicState {
     uint32_t id;
     IA64IOSapicRedirect redirect;
     void *redirect_opaque;
+    QEMUTimer *resample_timer;
+    uint64_t resample_pins;
 };
 
 void ia64_iosapic_set_redirect(DeviceState *dev, IA64IOSapicRedirect redirect,
@@ -193,6 +208,20 @@ static void iosapic_rte_write(IA64IOSapicState *s, int pin, uint32_t val,
     }
 }
 
+static void iosapic_resample(void *opaque)
+{
+    IA64IOSapicState *s = opaque;
+    uint64_t pins = s->resample_pins;
+    unsigned pin;
+
+    s->resample_pins = 0;
+    for (pin = 0; pin < s->num_pins; pin++) {
+        if (pins & (1ULL << pin)) {
+            iosapic_update(s, pin);
+        }
+    }
+}
+
 static void iosapic_eoi(IA64IOSapicState *s, uint8_t vector)
 {
     unsigned pin;
@@ -220,7 +249,13 @@ static void iosapic_eoi(IA64IOSapicState *s, uint8_t vector)
             continue;
         }
         s->rte[pin] &= ~RTE_REMOTE_IRR;
-        iosapic_update(s, pin);
+        if (s->irq_level[pin]) {
+            s->resample_pins |= 1ULL << pin;
+        }
+    }
+    if (s->resample_pins && !timer_pending(s->resample_timer)) {
+        timer_mod(s->resample_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                     IOSAPIC_RESAMPLE_NS);
     }
 }
 
@@ -375,6 +410,7 @@ static void iosapic_realize(DeviceState *dev, Error **errp)
     memory_region_init_io(&s->mmio, OBJECT(dev), &iosapic_ops, s,
                           "iosapic", 0x2000);
     sysbus_init_mmio(SYS_BUS_DEVICE(dev), &s->mmio);
+    s->resample_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, iosapic_resample, s);
 }
 
 static void iosapic_reset(DeviceState *dev)
@@ -390,6 +426,8 @@ static void iosapic_reset(DeviceState *dev)
     }
     s->reg_select = 0;
     s->id = 0;
+    s->resample_pins = 0;
+    timer_del(s->resample_timer);
 }
 
 static int iosapic_post_load(void *opaque, int version_id)
@@ -401,7 +439,8 @@ static int iosapic_post_load(void *opaque, int version_id)
      * Edge inputs are historical events and must not be replayed merely
      * because their input wire was high at the snapshot boundary.  An
      * asserted level input, however, must be re-evaluated if it did not
-     * already have Remote IRR set.
+     * already have Remote IRR set; that also sends a resample that an
+     * EOI before the snapshot left pending.
      */
     for (pin = 0; pin < s->num_pins; pin++) {
         if (s->rte[pin] & RTE_TRIGGER_LEVEL) {
