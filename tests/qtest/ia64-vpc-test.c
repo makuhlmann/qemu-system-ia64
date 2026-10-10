@@ -8798,19 +8798,40 @@ static uint64_t cpu_sapic_irr_word(QTestState *qts, unsigned word)
 /*
  * With MSI enabled, the 53C1030's doorbell interrupt reaches the processor
  * as the vector its message data names: rope 1's ioa turns the write into
- * an interrupt transaction (ioa ERS 9.2).  Processor 0 is ID 0, EID 0.
+ * an interrupt transaction (ioa ERS 9.2), whose address bits 19:12 name the
+ * processor.  Without firmware a processor's LID ID is its index.
  */
-static void test_zx1_mpt_msi(void)
+/* IRR word @word of processor @cpu, from "info registers -a". */
+static uint64_t cpu_n_sapic_irr_word(QTestState *qts, unsigned int cpu,
+                                     unsigned word)
+{
+    g_autofree char *out = qtest_hmp(qts, "info registers -a");
+    g_autofree char *header = g_strdup_printf("CPU#%u", cpu);
+    char *line = strstr(out, header);
+    uint64_t w[4];
+
+    g_assert_nonnull(line);
+    line = strstr(line, "SAPIC IRR:");
+    g_assert_nonnull(line);
+    g_assert_cmpint(sscanf(line, "SAPIC IRR: %" SCNx64 " %" SCNx64
+                           " %" SCNx64 " %" SCNx64,
+                           &w[0], &w[1], &w[2], &w[3]), ==, 4);
+    g_assert_cmpuint(word, <, 4);
+    return w[word];
+}
+
+static void mpt_msi_to(unsigned int cpu)
 {
     const uint64_t bar = IA64_ZX1_ROPE1_MMIO_BASE;
     const uint8_t vector = 0x51;
     const uint64_t bit = 1ULL << (vector % 64);
-    QTestState *qts = qtest_init("-machine zx1,scsi=lsi53c1030 -m 256M -S");
+    QTestState *qts = qtest_init("-machine zx1,scsi=lsi53c1030 -smp 2 "
+                                 "-m 256M -S");
     gint64 deadline = g_get_monotonic_time() + 15 * G_USEC_PER_SEC;
     uint16_t control;
 
     ia64_cfg_writel(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT, 0,
-                    0x5c, 0xfee00000);
+                    0x5c, 0xfee00000 | (cpu << 12));
     ia64_cfg_writel(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT, 0, 0x60, 0);
     ia64_cfg_writew(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT, 0,
                     0x64, vector);
@@ -8819,16 +8840,24 @@ static void test_zx1_mpt_msi(void)
     g_assert_cmphex(control, ==, 0x0080);
     ia64_cfg_writew(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT, 0, 0x5a,
                     control | 1);
-    g_assert_cmphex(cpu_sapic_irr_word(qts, vector / 64) & bit, ==, 0);
+    g_assert_cmphex(cpu_n_sapic_irr_word(qts, cpu, vector / 64) & bit, ==, 0);
 
     /* Unmask the doorbell interrupt and start a handshake. */
     qtest_writel(qts, bar + 0x34, 0x00000008);
     qtest_writel(qts, bar, 0x42000000 | (3U << 16));
-    while (!(cpu_sapic_irr_word(qts, vector / 64) & bit)) {
+    while (!(cpu_n_sapic_irr_word(qts, cpu, vector / 64) & bit)) {
         g_assert_cmpint(g_get_monotonic_time(), <, deadline);
         g_usleep(1000);
     }
+    g_assert_cmphex(cpu_n_sapic_irr_word(qts, 1 - cpu, vector / 64) & bit,
+                    ==, 0);
     qtest_quit(qts);
+}
+
+static void test_zx1_mpt_msi(void)
+{
+    mpt_msi_to(0);
+    mpt_msi_to(1);
 }
 
 /*
