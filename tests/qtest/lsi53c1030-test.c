@@ -10,6 +10,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <glib/gstdio.h>
 #include "hw/pci/pci_ids.h"
 #include "hw/pci/pci_regs.h"
 #include "hw/scsi/mpi.h"
