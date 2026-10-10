@@ -11,9 +11,9 @@ Machine profile
 ---------------
 
 ``ia64-vpc`` defaults to one Madison-class CPU, 2 GiB of RAM, an
-ATI-compatible PCI display, an e1000 network adapter, LSI53C895A SCSI storage,
-ICH9 AHCI, OHCI/UHCI USB, and PS/2 input.  One to eight CPUs are supported, and
-MTTCG can be selected with ``-accel tcg,thread=multi``.  The machine also
+ATI-compatible PCI display, an e1000 network adapter, the rx2600's LSI 53C1030
+SCSI adapter, ICH9 AHCI, OHCI/UHCI USB, and PS/2 input.  One to eight CPUs are
+supported, and MTTCG can be selected with ``-accel tcg,thread=multi``.  The machine also
 provides local SAPIC and I/O SAPIC interrupt controllers, ACPI tables, RTC,
 watchdog, NVRAM, serial I/O, and the firmware debug port.
 
@@ -65,6 +65,12 @@ Machine properties
   ``none`` (the default; ``auto`` is accepted too) keeps them for one run
   only.  Use a separate file for each VM.  ``scripts/ia64-nvram.py``
   identifies a file and converts an older one.
+
+``scsi=lsi53c1030|lsi53c895a|isp12160|none``
+  Select the SCSI adapter in the board's SCSI seat.  ``zx1`` defaults to the
+  rx2600's two-function 53C1030; systems installed on the 53C895A that zx1
+  carried before need ``scsi=lsi53c895a`` or a move to the 53C1030.  ``460gx``
+  defaults to the ``isp12160``.  Further adapters are added with ``-device``.
 
 ``alat=zero|full``
   Select the ALAT model.  ``zero`` is the default.  The full model is not

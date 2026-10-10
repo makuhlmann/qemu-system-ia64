@@ -228,9 +228,9 @@ class Ia64Storage(Ia64FirmwareTest):
     def test_scsi_mbr_fallback(self):
         self.run_scsi_layout("mbr-fallback")
 
-    def test_scsi_lsi53c1030(self):
-        """Boot from a disk on function 0 of the rx2600's 53C1030."""
-        self.run_scsi_layout("gpt", machine_options="scsi=lsi53c1030")
+    def test_scsi_lsi53c895a(self):
+        """Boot from a disk on the 53C895A, zx1's seat before the 53C1030."""
+        self.run_scsi_layout("gpt", machine_options="scsi=lsi53c895a")
 
     def test_scsi_lsi53c1030_function1(self):
         """Boot from a disk on the 53C1030's second function.
@@ -245,15 +245,14 @@ class Ia64Storage(Ia64FirmwareTest):
             "-drive", f"file={media},format=raw,if=none,id=testdisk",
             "-device", "scsi-hd,bus=scsi.1,scsi-id=3,drive=testdisk",
         )
-        self.run_scenario("scsi-mpt-fn1", media, drive_args=drive_args,
-                          machine_options="scsi=lsi53c1030")
+        self.run_scenario("scsi-mpt-fn1", media, drive_args=drive_args)
 
     def test_scsi_seat_before_added_adapter(self):
         """Boot from the seat's disk while an added QLogic carries a disk too.
 
-        The QLogic is probed before the LSI, but the board's seat comes
-        first: a blank disk on an adapter added with -device must not hide
-        the board's boot disk.
+        The QLogic is probed before the LSI adapters, but the board's seat
+        (the 53C1030) comes first: a blank disk on an adapter added with
+        -device must not hide the board's boot disk.
         """
         app = app_path("storage")
         media = Path(self.scratch_file("scsi-seat.img"))

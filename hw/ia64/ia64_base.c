@@ -5496,9 +5496,8 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
                                   ia64_vpc_set_scsi);
     object_class_property_set_description(oc, "scsi",
         "The SCSI adapter in the board's SCSI seat: none, lsi53c895a, "
-        "isp12160, or on zx1 lsi53c1030, the rx2600's own (default: "
-        "isp12160 on 460gx, lsi53c895a on zx1); add further adapters with "
-        "-device");
+        "isp12160, or on zx1 lsi53c1030 (default: isp12160 on 460gx, the "
+        "rx2600's lsi53c1030 on zx1); add further adapters with -device");
     object_class_property_add_bool(oc, "audio",
                                    ia64_vpc_get_audio,
                                    ia64_vpc_set_audio);

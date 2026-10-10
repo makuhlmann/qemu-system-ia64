@@ -610,7 +610,11 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->flash_sector_len = 128 * KiB;
     imc->flash_device_id = 0x0017;
     imc->flash_block_locking = false;
-    imc->scsi_default = IA64_VPC_SCSI_LSI53C895A;
+    /*
+     * The rx2600's core I/O SCSI is a 53C1030 (rx2600 capture 2026-10-03).
+     * Images installed on the 53C895A stand-in boot with scsi=lsi53c895a.
+     */
+    imc->scsi_default = IA64_VPC_SCSI_LSI53C1030;
     imc->scsi_models = (1U << IA64_VPC_SCSI_NONE) |
                        (1U << IA64_VPC_SCSI_LSI53C895A) |
                        (1U << IA64_VPC_SCSI_ISP12160) |

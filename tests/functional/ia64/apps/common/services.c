@@ -1718,10 +1718,10 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
 
     /*
      * Read the always-present boot HBA on the core I/O seat, device 1 of
-     * rope 1's bus: the LSI (0x1000:0x0012) this board carries, or the
-     * QLogic ISP12160 (0x1077:0x1216) when scsi=isp12160 puts that one there
-     * instead.  The AHCI controller is opt-in (ahci=off by default), so it
-     * must not be assumed present here.
+     * rope 1's bus: the 53C1030 (0x1000:0x0030) this board carries, the
+     * 53C895A (0x1000:0x0012) or the QLogic ISP12160 (0x1077:0x1216) when
+     * scsi= puts one of those there instead.  The AHCI controller is opt-in
+     * (ahci=off by default), so it must not be assumed present here.
      */
     return SystemTable->BootServices->LocateProtocol(
                pci_root_guid, NULL, (VOID **)&root) == EFI_SUCCESS &&
@@ -1731,7 +1731,8 @@ static BOOLEAN test_pci_root_io(EFI_SYSTEM_TABLE *SystemTable)
                           ((UINT64)TEST_ZX1_SCSI_BUS << 24) |
                               ((UINT64)TEST_ZX1_SCSI_SLOT << 16), 1,
                           &device_id) == EFI_SUCCESS &&
-           (device_id == 0x00121000U || device_id == 0x12161077U);
+           (device_id == 0x00301000U || device_id == 0x00121000U ||
+            device_id == 0x12161077U);
 }
 
 static BOOLEAN test_pci_root_resources(EFI_SYSTEM_TABLE *SystemTable)
@@ -1819,9 +1820,9 @@ static BOOLEAN test_pci_io_protocol(EFI_SYSTEM_TABLE *SystemTable)
 }
 
 /*
- * The SCSI adapter on zx1's SCSI seat, the LSI 53c895a by default, has a PCI
- * I/O controller at that location, and the controller's device path names
- * the same PCI node.
+ * The SCSI adapter on zx1's SCSI seat, the 53C1030 by default or the 53C895A,
+ * has a PCI I/O controller at that location, and the controller's device
+ * path names the same PCI node.
  */
 static BOOLEAN test_pci_io_scsi_seat(EFI_SYSTEM_TABLE *SystemTable)
 {
@@ -1853,7 +1854,8 @@ static BOOLEAN test_pci_io_scsi_seat(EFI_SYSTEM_TABLE *SystemTable)
             continue;
         }
         if (pci->Pci.Read(pci, EfiPciWidthUint32, 0, 1, &identifier) !=
-                EFI_SUCCESS || identifier != 0x00121000U ||
+                EFI_SUCCESS ||
+            (identifier != 0x00301000U && identifier != 0x00121000U) ||
             bs->HandleProtocol(handles[i], device_path_guid,
                                (VOID **)&node) != EFI_SUCCESS || node == NULL) {
             break;

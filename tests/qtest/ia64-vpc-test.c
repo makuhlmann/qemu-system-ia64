@@ -3787,6 +3787,23 @@ static void test_zx1_bus0_population(void)
     g_assert_cmphex(ia64_cfg_readl(qts, 0, 3, 0, PCI_VENDOR_ID), ==,
                     0x12298086);
     g_assert_cmphex(ia64_cfg_readb(qts, 0, 3, 0, PCI_INTERRUPT_PIN), ==, 1);
+    /* The rx2600's 53C1030 holds the SCSI seat (mpt-seat has the details). */
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
+                                   0, PCI_VENDOR_ID), ==, 0x00301000);
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
+                                   1, PCI_VENDOR_ID), ==, 0x00301000);
+    for (slot = 0; slot < PCI_SLOT_MAX; slot++) {
+        /* A USB controller with programming interface 00h is a UHCI. */
+        if (ia64_cfg_readw(qts, 0, slot, 0, PCI_CLASS_DEVICE) ==
+            PCI_CLASS_SERIAL_USB) {
+            g_assert_cmphex(ia64_cfg_readb(qts, 0, slot, 0, PCI_CLASS_PROG),
+                            !=, 0);
+        }
+    }
+    qtest_quit(qts);
+
+    /* scsi=lsi53c895a keeps the stand-in where images installed on it look. */
+    qts = qtest_init("-machine zx1,scsi=lsi53c895a -m 256M -S");
     g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
                                    0, PCI_VENDOR_ID), ==, 0x00121000);
     g_assert_cmphex(ia64_cfg_readb(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
@@ -3798,14 +3815,8 @@ static void test_zx1_bus0_population(void)
     g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
                                    0, PCI_BASE_ADDRESS_1), ==,
                     IA64_ZX1_ROPE1_MMIO_BASE);
-    for (slot = 0; slot < PCI_SLOT_MAX; slot++) {
-        /* A USB controller with programming interface 00h is a UHCI. */
-        if (ia64_cfg_readw(qts, 0, slot, 0, PCI_CLASS_DEVICE) ==
-            PCI_CLASS_SERIAL_USB) {
-            g_assert_cmphex(ia64_cfg_readb(qts, 0, slot, 0, PCI_CLASS_PROG),
-                            !=, 0);
-        }
-    }
+    g_assert_cmphex(ia64_cfg_readl(qts, IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT,
+                                   1, PCI_VENDOR_ID), ==, 0xffffffff);
     qtest_quit(qts);
 }
 
