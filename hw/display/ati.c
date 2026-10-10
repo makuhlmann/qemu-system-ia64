@@ -1187,7 +1187,7 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
 
     /* Register Aperture 1: the upper half of BAR2 mirrors the register file
      * (RRG 2.2.1; CONFIG_REG_APER_SIZE reports 8 KB, the BAR covers 16). */
-    if (addr >= 0x2000 && addr < 0x4000) {
+    if (ati_is_rage128(s) && addr >= 0x2000 && addr < 0x4000) {
         addr -= 0x2000;
     }
 
@@ -1348,7 +1348,11 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     case MEM_SDRAM_MODE_REG:
         if (!ati_is_rage128(s)) {
-            val = BIT(28) | BIT(20);
+            /*
+             * Bit 30 is RADEON_MEM_CFG_TYPE_DDR (Linux radeon_reg.h), which
+             * radeonfb, X and the DRM test; the rx2600's RV100 reports DDR.
+             */
+            val = BIT(30) | BIT(28) | BIT(20);
         }
         break;
     case RBBM_STATUS:
@@ -1577,7 +1581,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
 {
     ATIVGAState *s = opaque;
 
-    if (addr >= 0x2000 && addr < 0x4000) {
+    if (ati_is_rage128(s) && addr >= 0x2000 && addr < 0x4000) {
         addr -= 0x2000; /* Register Aperture 1 mirror */
     }
 
@@ -2587,8 +2591,9 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
     qdev_realize(DEVICE(&s->i2cddc), BUS(i2cbus), &error_abort);
 
     /* mmio register space */
-    memory_region_init_io(&s->mm, OBJECT(s), &ati_mm_ops, s,
-                          "ati.mmregs", 0x4000);
+    memory_region_init_io(&s->mm, OBJECT(s), &ati_mm_ops, s, "ati.mmregs",
+                          ati_is_rage128(s) ? ATI_RAGE128_MMIO_SIZE :
+                                              ATI_R100_MMIO_SIZE);
     /* io space is alias to beginning of mmregs */
     memory_region_init_alias(&s->io, OBJECT(s), "ati.io", &s->mm, 0, 0x100);
 
@@ -2649,7 +2654,34 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
      * AGP 2.0 with 4x and a read-only SBA_EN (RRG-G04500-C CAPABILITIES_ID,
      * AGP_STATUS, AGP_COMMAND); both have sideband and 32 requests.
      */
-    if (s->agp) {
+    if (s->dev_id == PCI_DEVICE_ID_ATI_RADEON_QY) {
+        /*
+         * The rx2600's RV100 (run 4, iLO MP card): fast back-to-back capable,
+         * medium DEVSEL, MIN_GNT 8, and power management at 50h (PMC 0602h:
+         * PM 1.1 with D1 and D2) as the only capability in the list.  Its AGP
+         * registers at 58h-63h (ID 2, version 2.0) stay outside the list, as
+         * on that PCI card.
+         */
+        static const uint8_t agp_block[12] = {
+            0x02, 0x50, 0x20, 0x00, 0x00, 0x02, 0x00, 0x2f,
+            0x00, 0x02, 0x00, 0x00,
+        };
+
+        pci_set_word(dev->config + PCI_STATUS,
+                     PCI_STATUS_FAST_BACK | PCI_STATUS_DEVSEL_MEDIUM);
+        dev->config[PCI_MIN_GNT] = 8;
+        if (pci_pm_init(dev, 0x50, errp) < 0) {
+            return;
+        }
+        pci_set_word(dev->config + 0x50 + PCI_PM_PMC,
+                     PCI_PM_CAP_D2 | PCI_PM_CAP_D1 | 2);
+        pci_set_word(dev->wmask + 0x50 + PCI_PM_CTRL, PCI_PM_CTRL_STATE_MASK);
+        memcpy(dev->config + 0x58, agp_block, sizeof(agp_block));
+        /* As in an AGP capability, only the command register is writable. */
+        memset(dev->wmask + 0x58, 0, 8);
+    }
+
+    if (s->agp && ati_is_rage128(s)) {
         bool gl = s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_RF;
         int agp = pci_add_capability(dev, PCI_CAP_ID_AGP, 0x50,
                                      PCI_AGP_SIZEOF, errp);

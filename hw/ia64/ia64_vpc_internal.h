@@ -212,6 +212,8 @@ struct IA64VpcMachineClass {
     bool ide_optical;
     /* The board's own graphics adapter ("rage128", "rage128gl", ...). */
     const char *vga_default;
+    /* vga=rv100 is offered: the RV100 of the rx2600's iLO MP card. */
+    bool vga_rv100;
     /* The console is COM1 (3F8h, IRQ 4); a debug port is COM2 (2F8h, IRQ 3). */
     bool legacy_com1_console;
     /*

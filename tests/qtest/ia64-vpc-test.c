@@ -6739,6 +6739,9 @@ static void test_zx1_root_window_containment(void)
     check_windows_contain_bars("-machine zx1,vga=nv15gl -m 256M -S",
                                zx1_root_windows,
                                G_N_ELEMENTS(zx1_root_windows));
+    check_windows_contain_bars("-machine zx1,vga=rv100 -m 256M -S",
+                               zx1_root_windows,
+                               G_N_ELEMENTS(zx1_root_windows));
     check_windows_contain_bars("-machine zx1,audio=on "
                                "-device isp12160-scsi "
                                "-nic user,model=i82550 "

@@ -35,6 +35,16 @@
 
 #define ATI_RAGE128_LINEAR_APER_SIZE (64 * MiB)
 #define ATI_R100_LINEAR_APER_SIZE (128 * MiB)
+/*
+ * The register BAR.  A Rage 128 decodes 16 KiB, its upper 8 KiB a mirror of
+ * the lower (RRG 2.2.1).  The Radeon's is 64 KiB (the rx2600's RV100 sizes
+ * it so) and has registers of its own in 2000h-3FFFh: the setup engine, TCL
+ * and the 3D and 2D caches (Linux radeon_reg.h, RADEON_SE_PORT_DATA0 2000h
+ * to RADEON_RB2D_DSTCACHE_CTLSTAT 342Ch); radeonfb maps 4000h of it
+ * (include/video/radeon.h RADEON_REGSIZE).
+ */
+#define ATI_RAGE128_MMIO_SIZE (16 * KiB)
+#define ATI_R100_MMIO_SIZE (64 * KiB)
 #define ATI_HOST_DATA_ACC_BITS 128
 
 #define TYPE_ATI_VGA "ati-vga"

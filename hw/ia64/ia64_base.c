@@ -272,6 +272,7 @@
 #define IA64_ATI_VENDOR_ID        0x1002U
 #define IA64_ATI_RAGE128_PF_ID    0x5046U
 #define IA64_ATI_RAGE128_RF_ID    0x5246U
+#define IA64_ATI_RV100_ID         0x5159U
 #define IA64_ATI_PLL_XCLK         12000U
 #define IA64_ATI_PLL_REFERENCE_FREQ 2950U
 #define IA64_ATI_PLL_REFERENCE_DIV  65U
@@ -2425,15 +2426,21 @@ static void ia64_vpc_set_vga(Object *obj, const char *value, Error **errp)
 {
     IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
 
-    if (g_strcmp0(value, "rage128") != 0 &&
-        g_strcmp0(value, "rage128gl") != 0 &&
-        g_strcmp0(value, "mach64") != 0 &&
-        g_strcmp0(value, "nv15gl") != 0 &&
-        g_strcmp0(value, "none") != 0 &&
-        g_strcmp0(value, "std") != 0) {
+    if (g_strcmp0(value, "rv100") == 0) {
+        /* No 460GX-era Windows has a Radeon driver; XP 2600 has none. */
+        if (!IA64_VPC_MACHINE_GET_CLASS(s)->vga_rv100) {
+            error_setg(errp, "vga=rv100 is the rx2600's adapter (zx1 only)");
+            return;
+        }
+    } else if (g_strcmp0(value, "rage128") != 0 &&
+               g_strcmp0(value, "rage128gl") != 0 &&
+               g_strcmp0(value, "mach64") != 0 &&
+               g_strcmp0(value, "nv15gl") != 0 &&
+               g_strcmp0(value, "none") != 0 &&
+               g_strcmp0(value, "std") != 0) {
         error_setg(errp,
                    "vga must be 'rage128', 'rage128gl', 'mach64', 'nv15gl', "
-                   "'std' or 'none'");
+                   "'rv100' (zx1), 'std' or 'none'");
         return;
     }
     g_free(s->vga_model);
@@ -3419,10 +3426,22 @@ static void ia64_vpc_configure_vga(PCIDevice *pci_dev, uint32_t io_base)
      * SVID = vendor, SID = device (RAGE 128 PRO Register Reference Guide,
      * configuration space chapter).  Drivers index board tables by it.
      */
-    pci_set_word(pci_dev->config + PCI_SUBSYSTEM_VENDOR_ID,
-                 pci_get_word(pci_dev->config + PCI_VENDOR_ID));
-    pci_set_word(pci_dev->config + PCI_SUBSYSTEM_ID,
-                 pci_get_word(pci_dev->config + PCI_DEVICE_ID));
+    if (pci_get_word(pci_dev->config + PCI_DEVICE_ID) == IA64_ATI_RV100_ID) {
+        /*
+         * The RV100 seat is the rx2600's iLO MP card, subsystem 103C:1292
+         * (run 4), which the chip repeats at 4Ch, its ADAPTER_ID_W register
+         * (include/video/radeon.h, the MMIO copy at 0F4Ch).
+         */
+        pci_set_word(pci_dev->config + PCI_SUBSYSTEM_VENDOR_ID, 0x103c);
+        pci_set_word(pci_dev->config + PCI_SUBSYSTEM_ID, 0x1292);
+        pci_set_word(pci_dev->config + 0x4c, 0x103c);
+        pci_set_word(pci_dev->config + 0x4e, 0x1292);
+    } else {
+        pci_set_word(pci_dev->config + PCI_SUBSYSTEM_VENDOR_ID,
+                     pci_get_word(pci_dev->config + PCI_VENDOR_ID));
+        pci_set_word(pci_dev->config + PCI_SUBSYSTEM_ID,
+                     pci_get_word(pci_dev->config + PCI_DEVICE_ID));
+    }
 
     pci_default_write_config(pci_dev, PCI_BASE_ADDRESS_0,
                              IA64_VGA_FB_PCI_BASE, 4);
@@ -5164,6 +5183,15 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         s->vga_dev = pci_new(PCI_DEVFN(vga_slot, 0), type);
         if (g_strcmp0(vga_model, "rage128gl") == 0) {
             qdev_prop_set_string(DEVICE(s->vga_dev), "model", "rage128gl");
+        } else if (g_strcmp0(vga_model, "rv100") == 0) {
+            /*
+             * The rx2600's iLO MP card (run 4): a 64 MiB framebuffer BAR and
+             * a 128 KiB ROM BAR.
+             */
+            qdev_prop_set_string(DEVICE(s->vga_dev), "model", "rv100");
+            qdev_prop_set_uint64(DEVICE(s->vga_dev), "x-linear-aper-size",
+                                 64 * MiB);
+            qdev_prop_set_uint32(DEVICE(s->vga_dev), "romsize", 128 * KiB);
         }
         if (!pci_realize_and_unref(s->vga_dev, vga_bus, errp)) {
             return false;
@@ -5535,7 +5563,8 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "Display adapter: 'rage128' (ATI Rage 128 Pro, honours -vga), "
         "'rage128gl' (ATI Rage 128 GL AGP), 'mach64' "
         "(ATI Mach64 3D Rage, a PCI 2D adapter with no AGP), 'nv15gl' "
-        "(NVIDIA Quadro2 Pro), 'std' or 'none'. Each board defaults to its "
+        "(NVIDIA Quadro2 Pro), 'rv100' (ATI Radeon 7000/VE of the rx2600's "
+        "iLO MP card, zx1 only), 'std' or 'none'. Each board defaults to its "
         "own adapter (460gx: rage128gl, zx1: mach64)");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,

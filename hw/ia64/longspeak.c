@@ -627,6 +627,7 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->ide_type = "cmd649-ide";
     imc->ide_optical = true;
     imc->vga_default = "mach64";
+    imc->vga_rv100 = true;
     /* Devices 1 to 3 are core I/O on this board; the AHCI takes device 4. */
     imc->ahci_slot = IA64_ZX1_AHCI_SLOT;
     imc->wire_intx = longspeak_wire_intx;
