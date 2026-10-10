@@ -374,6 +374,7 @@ extern FW_PARTITION_RECORD mPartitions[FW_PARTITION_MAX];
 extern FW_PCI_CONTROLLER_DEVICE_PATH mPciAhciDevicePath;
 extern FW_PCI_CONTROLLER_DEVICE_PATH mPciIdeDevicePath;
 extern FW_PCI_CONTROLLER_DEVICE_PATH mPciLsiDevicePath;
+extern FW_PCI_CONTROLLER_DEVICE_PATH mPciMptDevicePath;
 extern FW_PCI_CONTROLLER_DEVICE_PATH mPciOhciDevicePath;
 extern FW_PCI_ROOT_BRIDGE_DEVICE_PATH mPciRootBridgeDevicePath;
 extern FW_PCI_CONTROLLER_DEVICE_PATH mPciUhciDevicePath;

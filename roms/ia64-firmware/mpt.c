@@ -57,6 +57,9 @@
 #define MPT_IOCSTATUS_MASK          0x7fffU
 #define MPT_IOCSTATUS_SUCCESS       0x0000U
 #define MPT_IOCSTATUS_SCSI_RECOVERED 0x0040U
+#define MPT_IOCSTATUS_SCSI_INVALID_BUS 0x0041U
+#define MPT_IOCSTATUS_SCSI_INVALID_TARGETID 0x0042U
+#define MPT_IOCSTATUS_SCSI_NOT_THERE 0x0043U
 #define MPT_IOCSTATUS_SCSI_UNDERRUN 0x0045U
 
 #define MPT_SCSIIO_CONTROL_WRITE    0x01000000U
@@ -548,9 +551,9 @@ BOOLEAN mpt_location(UINTN Ioc, PCI_DEVICE_LOCATION *Location)
     return 1;
 }
 
-BOOLEAN mpt_command(UINTN Ioc, UINT8 Target, const UINT8 *Cdb,
-                    UINTN CdbLength, UINT8 *Data, UINT32 DataLength,
-                    BOOLEAN ToDevice, UINT8 *ScsiStatus)
+MPT_RESULT mpt_execute(UINTN Ioc, UINT8 Target, const UINT8 *Cdb,
+                       UINTN CdbLength, UINT8 *Data, UINT32 DataLength,
+                       BOOLEAN ToDevice, UINT8 *ScsiStatus)
 {
     MPT_IOC *ioc;
     UINT8 *frame;
@@ -558,6 +561,7 @@ BOOLEAN mpt_command(UINTN Ioc, UINT8 Target, const UINT8 *Cdb,
     UINT32 sense;
     UINT32 flags;
     UINT16 status;
+    UINT8 scsi_status;
     UINTN address = (UINTN)Data;
     UINTN i;
 
@@ -566,7 +570,7 @@ BOOLEAN mpt_command(UINTN Ioc, UINT8 Target, const UINT8 *Cdb,
         DataLength > MPT_SGE_LENGTH_MASK ||
         (DataLength != 0 && Data == NULL) ||
         !mpt_addr32(mMptSense[Ioc], &sense)) {
-        return 0;
+        return MptResultError;
     }
     ioc = &mMptIocs[Ioc];
     frame = mMptRequest[Ioc];
@@ -601,22 +605,42 @@ BOOLEAN mpt_command(UINTN Ioc, UINT8 Target, const UINT8 *Cdb,
                            &reply)) {
         /* The controller may still own the frame: drive it no further. */
         ioc->Present = 0;
-        return 0;
+        return MptResultTimeout;
     }
     if (reply == NULL) {
         if (ScsiStatus != NULL) {
             *ScsiStatus = 0;
         }
-        return 1;
+        return MptResultGood;
     }
     status = mpt_load16(reply + MPT_REPLY_IOC_STATUS) & MPT_IOCSTATUS_MASK;
+    scsi_status = reply[MPT_IO_REPLY_SCSI_STATUS];
     if (ScsiStatus != NULL) {
-        *ScsiStatus = reply[MPT_IO_REPLY_SCSI_STATUS];
+        *ScsiStatus = scsi_status;
     }
     mpt_release_reply(ioc, reply);
-    return status == MPT_IOCSTATUS_SUCCESS ||
-           status == MPT_IOCSTATUS_SCSI_RECOVERED ||
-           status == MPT_IOCSTATUS_SCSI_UNDERRUN;
+    switch (status) {
+    case MPT_IOCSTATUS_SUCCESS:
+    case MPT_IOCSTATUS_SCSI_RECOVERED:
+    case MPT_IOCSTATUS_SCSI_UNDERRUN:
+        return scsi_status == 0 ? MptResultGood : MptResultTargetStatus;
+    case MPT_IOCSTATUS_SCSI_INVALID_BUS:
+    case MPT_IOCSTATUS_SCSI_INVALID_TARGETID:
+    case MPT_IOCSTATUS_SCSI_NOT_THERE:
+        return MptResultNoDevice;
+    default:
+        return MptResultError;
+    }
+}
+
+BOOLEAN mpt_command(UINTN Ioc, UINT8 Target, const UINT8 *Cdb,
+                    UINTN CdbLength, UINT8 *Data, UINT32 DataLength,
+                    BOOLEAN ToDevice, UINT8 *ScsiStatus)
+{
+    MPT_RESULT result = mpt_execute(Ioc, Target, Cdb, CdbLength, Data,
+                                    DataLength, ToDevice, ScsiStatus);
+
+    return result == MptResultGood || result == MptResultTargetStatus;
 }
 
 void mpt_stop_all(void)

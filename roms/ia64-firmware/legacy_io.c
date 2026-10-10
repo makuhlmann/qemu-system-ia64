@@ -887,6 +887,9 @@ static EFI_STATUS scsi_reset_target(EFI_SCSI_PASS_THRU_PROTOCOL *This,
         !scsi_target_valid(Target, Lun)) {
         return EFI_INVALID_PARAMETER;
     }
+    if (fw_scsi_pass_thru_is_mpt()) {
+        return EFI_UNSUPPORTED;
+    }
     if (mScsiPassThruBusy) {
         return EFI_DEVICE_ERROR;
     }
@@ -1035,6 +1038,28 @@ BOOLEAN fw_legacy_io_protocols_selftest(VOID)
                 EFI_SUCCESS || id != target || lun != 0 ||
             bs_free_pool(path) != EFI_SUCCESS) {
             return 0;
+        }
+        /* The device the channel lists answers an INQUIRY through it. */
+        {
+            static UINT8 inquiry[36];
+            UINT8 cdb[6] = { 0x12U, 0, 0, 0, sizeof(inquiry), 0 };
+            EFI_SCSI_PASS_THRU_SCSI_REQUEST_PACKET packet;
+
+            fw_set_mem(&packet, sizeof(packet), 0);
+            fw_set_mem(inquiry, sizeof(inquiry), 0xff);
+            packet.Timeout = 30000000ULL;
+            packet.DataBuffer = inquiry;
+            packet.Cdb = cdb;
+            packet.TransferLength = sizeof(inquiry);
+            packet.CdbLength = sizeof(cdb);
+            packet.DataDirection = 0;
+            if (mScsiPassThruProtocol.PassThru(&mScsiPassThruProtocol, target,
+                                               0, &packet, NULL) !=
+                    EFI_SUCCESS ||
+                packet.TargetStatus != 0 || packet.TransferLength < 5U ||
+                (inquiry[0] & 0x1fU) == 0x1fU) {
+                return 0;
+            }
         }
     }
     return 1;

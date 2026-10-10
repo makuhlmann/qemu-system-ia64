@@ -32,6 +32,19 @@ BOOLEAN mpt_command(UINTN Ioc, UINT8 Target, const UINT8 *Cdb,
                     UINTN CdbLength, UINT8 *Data, UINT32 DataLength,
                     BOOLEAN ToDevice, UINT8 *ScsiStatus);
 
+/* The same, with the outcome the SCSI Pass Thru reports. */
+typedef enum {
+    MptResultGood,
+    MptResultTargetStatus,      /* completed; *ScsiStatus is not GOOD */
+    MptResultNoDevice,          /* no target at that ID */
+    MptResultTimeout,
+    MptResultError,
+} MPT_RESULT;
+
+MPT_RESULT mpt_execute(UINTN Ioc, UINT8 Target, const UINT8 *Cdb,
+                       UINTN CdbLength, UINT8 *Data, UINT32 DataLength,
+                       BOOLEAN ToDevice, UINT8 *ScsiStatus);
+
 /*
  * Return every controller to the ready state before the OS takes over, so
  * that none still owns reply frames in firmware memory.

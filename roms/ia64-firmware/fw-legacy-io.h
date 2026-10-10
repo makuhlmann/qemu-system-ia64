@@ -51,6 +51,7 @@ EFI_HANDLE fw_pci_root_handle(VOID);
 BOOLEAN fw_scsi_controller_present(VOID);
 BOOLEAN fw_scsi_device_present(UINTN target);
 EFI_HANDLE fw_scsi_controller_handle(VOID);
+BOOLEAN fw_scsi_pass_thru_is_mpt(VOID);
 FW_LSI_SCRIPT_RESULT fw_scsi_execute_buffered(
     UINT8 target, const UINT8 *cdb, UINTN cdb_length, VOID *data,
     UINT32 data_length, BOOLEAN write_to_device, UINT64 timeout_100ns,

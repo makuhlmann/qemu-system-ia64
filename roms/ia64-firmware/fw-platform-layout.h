@@ -27,6 +27,8 @@ extern char __fw_image_start[];
  */
 #define PCI_LSI_MMIO_BAR              (IA64_PCI_MMIO_BASE + 0x0c000000ULL)
 #define PCI_ZX1_LSI_MMIO_BAR          IA64_ZX1_ROPE1_MMIO_BASE
+/* The 53C1030's Memory [0] there: a 64-bit BAR, its low dword names the type. */
+#define PCI_ZX1_MPT_MMIO_BAR          (IA64_ZX1_ROPE1_MMIO_BASE | 0x4ULL)
 #define PCI_VGA_FB_BAR                (IA64_PCI_MMIO_BASE + 0x02000000ULL)
 #define PCI_VGA_MMIO_BAR              (IA64_PCI_MMIO_BASE + 0x07000000ULL)
 #define PCI_VGA_ATI_ID                0x50461002U

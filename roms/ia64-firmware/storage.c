@@ -2054,16 +2054,52 @@ void storage_invalidate_cache(const FW_STORAGE_DEVICE *Device)
 }
 
 
-BOOLEAN fw_scsi_controller_present(VOID)
+/*
+ * The SCSI Pass Thru serves one channel: function 0 of the 53C1030 in the
+ * board's seat when the probe found its devices there, else the LSI.
+ */
+BOOLEAN fw_scsi_pass_thru_is_mpt(VOID)
 {
-    return mLsiPresent != 0;
+    PCI_DEVICE_LOCATION seat;
+    PCI_DEVICE_LOCATION at;
+
+    if (mScsiTransport != SCSI_TRANSPORT_MPT || !mpt_location(0, &at)) {
+        return 0;
+    }
+    scsi_seat_location(&seat);
+    return at.Bus == seat.Bus && at.Device == seat.Device &&
+           at.Function == seat.Function;
 }
 
-/* The pass-thru drives the LSI, so it sees only devices found through it. */
+BOOLEAN fw_scsi_controller_present(VOID)
+{
+    return fw_scsi_pass_thru_is_mpt() || mLsiPresent != 0;
+}
+
+/* The Pass Thru sees only the devices found through its own channel. */
 BOOLEAN fw_scsi_device_present(UINTN target)
 {
-    return mScsiTransport == SCSI_TRANSPORT_LSI &&
+    UINT32 transport = fw_scsi_pass_thru_is_mpt() ? SCSI_TRANSPORT_MPT :
+                                                    SCSI_TRANSPORT_LSI;
+
+    return mScsiTransport == transport &&
            target < SCSI_DEVICE_MAX && mScsiDevices[0][target].present != 0;
+}
+
+static FW_LSI_SCRIPT_RESULT fw_scsi_mpt_result(MPT_RESULT Result)
+{
+    switch (Result) {
+    case MptResultGood:
+        return FwLsiScriptSuccess;
+    case MptResultTargetStatus:
+        return FwLsiScriptTargetStatus;
+    case MptResultNoDevice:
+        return FwLsiScriptSelectionTimeout;
+    case MptResultTimeout:
+        return FwLsiScriptCommandTimeout;
+    default:
+        return FwLsiScriptDeviceError;
+    }
 }
 
 FW_LSI_SCRIPT_RESULT fw_scsi_execute_buffered(
@@ -2071,7 +2107,7 @@ FW_LSI_SCRIPT_RESULT fw_scsi_execute_buffered(
     UINT32 data_length, BOOLEAN write_to_device, UINT64 timeout_100ns,
     UINT8 *target_status)
 {
-    LSI_SCRIPT_RESULT result;
+    FW_LSI_SCRIPT_RESULT result;
 
     if (cdb == NULL || cdb_length == 0 || cdb_length > sizeof(mLsiCdb) ||
         data_length > sizeof(mScsiBounce) ||
@@ -2087,20 +2123,37 @@ FW_LSI_SCRIPT_RESULT fw_scsi_execute_buffered(
             fw_set_mem(mScsiBounce, data_length, 0);
         }
     }
-    result = lsi_run_scsi_script_timed(
-        target, mLsiCdb, cdb_length,
-        data_length != 0 ? mScsiBounce : NULL, data_length,
-        timeout_100ns, target_status);
+    if (fw_scsi_pass_thru_is_mpt()) {
+        UINT8 status = 0xff;
+
+        result = fw_scsi_mpt_result(mpt_execute(
+            0, target, mLsiCdb, cdb_length,
+            data_length != 0 ? mScsiBounce : NULL, data_length,
+            write_to_device, &status));
+        if (target_status != NULL) {
+            *target_status = status;
+        }
+    } else {
+        result = (FW_LSI_SCRIPT_RESULT)lsi_run_scsi_script_timed(
+            target, mLsiCdb, cdb_length,
+            data_length != 0 ? mScsiBounce : NULL, data_length,
+            timeout_100ns, target_status);
+    }
     if (!write_to_device && data_length != 0 &&
-        (result == LsiScriptSuccess || result == LsiScriptTargetStatus)) {
+        (result == FwLsiScriptSuccess || result == FwLsiScriptTargetStatus)) {
         fw_copy_mem(data, mScsiBounce, data_length);
     }
-    return (FW_LSI_SCRIPT_RESULT)result;
+    return result;
 }
 
+/* The MPT's resets are SCSI task management, which this driver does not use. */
 EFI_STATUS fw_scsi_reset_channel(VOID)
 {
     UINT8 scntl1;
+
+    if (fw_scsi_pass_thru_is_mpt()) {
+        return EFI_UNSUPPORTED;
+    }
 
     lsi_write8(LSI_REG_ISTAT0, LSI_ISTAT0_ABRT);
     scntl1 = lsi_read8(LSI_REG_SCNTL1);

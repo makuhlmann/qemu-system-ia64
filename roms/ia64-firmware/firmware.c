@@ -680,6 +680,7 @@ typedef struct FW_PCI_IO_DEVICE {
 #define FW_HANDLE_PCI_OHCI    ((EFI_HANDLE)(UINTN)0x7102)
 #define FW_HANDLE_PCI_UHCI    ((EFI_HANDLE)(UINTN)0x7103)
 #define FW_HANDLE_PCI_LSI     ((EFI_HANDLE)(UINTN)0x7104)
+#define FW_HANDLE_PCI_MPT     ((EFI_HANDLE)(UINTN)0x7105)
 #define FW_HANDLE_TCG         ((EFI_HANDLE)(UINTN)0x8000)
 #define FW_HANDLE_STORAGE_DRIVER ((EFI_HANDLE)(UINTN)0x9000)
 #define FW_HANDLE_ARCH_PROTOCOLS ((EFI_HANDLE)(UINTN)0xa000)
@@ -697,10 +698,11 @@ static EFI_HANDLE mPciAhciHandle;
 static EFI_HANDLE mPciOhciHandle;
 static EFI_HANDLE mPciUhciHandle;
 static EFI_HANDLE mPciLsiHandle;
+static EFI_HANDLE mPciMptHandle;
 static EFI_HANDLE mTcgHandle;
 EFI_HANDLE mStorageDriverHandle;
 static EFI_HANDLE mArchitecturalHandle;
-#define FW_PCI_IO_DEVICE_COUNT 6U
+#define FW_PCI_IO_DEVICE_COUNT 7U
 static FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT];
 EFI_LOADED_IMAGE_PROTOCOL mLoadedImageProto;
 static IA64_FPSWA_INTERFACE mFpswaProto;
@@ -7817,6 +7819,7 @@ static void efi_init_static_handles(void)
     mPciOhciHandle = FW_HANDLE_PCI_OHCI;
     mPciUhciHandle = FW_HANDLE_PCI_UHCI;
     mPciLsiHandle = FW_HANDLE_PCI_LSI;
+    mPciMptHandle = FW_HANDLE_PCI_MPT;
     mTcgHandle = FW_HANDLE_TCG;
     mStorageDriverHandle = FW_HANDLE_STORAGE_DRIVER;
     mArchitecturalHandle = FW_HANDLE_ARCH_PROTOCOLS;
@@ -9908,6 +9911,7 @@ static EFI_PCI_IO_PROTOCOL mPciAhciIoProto;
 static EFI_PCI_IO_PROTOCOL mPciOhciIoProto;
 static EFI_PCI_IO_PROTOCOL mPciUhciIoProto;
 static EFI_PCI_IO_PROTOCOL mPciLsiIoProto;
+static EFI_PCI_IO_PROTOCOL mPciMptIoProto;
 static EFI_PCI_IO_PROTOCOL mPciVgaIoProto;
 
 static FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
@@ -9942,6 +9946,16 @@ static FW_PCI_IO_DEVICE mPciIoDevices[FW_PCI_IO_DEVICE_COUNT] = {
         IA64_460GX_GXB_BUS, IA64_460GX_GXB_VGA_SLOT, 0,
         FW_PCI_VGA_ATTRIBUTES, PCI_VGA_ATI_ID,
         0, PCI_VGA_FB_BAR | 0x8U, PCI_VGA_ATI_FB_SIZE, "VGA", 0,
+    },
+    {
+        /*
+         * The rx2600's 53C1030 at zx1's SCSI seat, function 0.  Last, as
+         * the self-tests name the VGA and UHCI entries by index.
+         */
+        &mPciMptHandle, &mPciMptIoProto, &mPciMptDevicePath,
+        IA64_ZX1_SCSI_BUS, IA64_ZX1_SCSI_SLOT, 0,
+        FW_PCI_LSI_ATTRIBUTES, 0x00301000U,
+        1, (UINT32)PCI_ZX1_MPT_MMIO_BAR, 0x10000, "MPT", 1,
     },
 };
 
@@ -10033,14 +10047,16 @@ static UINT64 fw_pci_io_expected_bar_length(const FW_PCI_IO_DEVICE *Dev)
  */
 /*
  * Controllers a machine may leave out: IDE and AHCI (ide=, ahci=) and the
- * LSI (scsi=).  The LSI's seat holds the QLogic ISP12160 by default.  zx1
- * has no UHCI; its seat, device 3, holds the board LAN.
+ * LSI and the 53C1030 (scsi=).  The SCSI seat holds the QLogic ISP12160 by
+ * default on 460gx.  zx1 has no UHCI; its seat, device 3, holds the board
+ * LAN.
  */
 static BOOLEAN fw_pci_io_device_optional(const FW_PCI_IO_DEVICE *Dev)
 {
     return Dev->Protocol == &mPciIdeIoProto ||
            Dev->Protocol == &mPciAhciIoProto ||
            Dev->Protocol == &mPciLsiIoProto ||
+           Dev->Protocol == &mPciMptIoProto ||
            (Dev->Protocol == &mPciUhciIoProto && fw_platform_is_zx1());
 }
 
@@ -10789,6 +10805,7 @@ static EFI_PCI_IO_PROTOCOL mPciAhciIoProto = FW_PCI_IO_PROTOCOL_INIT;
 static EFI_PCI_IO_PROTOCOL mPciOhciIoProto = FW_PCI_IO_PROTOCOL_INIT;
 static EFI_PCI_IO_PROTOCOL mPciUhciIoProto = FW_PCI_IO_PROTOCOL_INIT;
 static EFI_PCI_IO_PROTOCOL mPciLsiIoProto = FW_PCI_IO_PROTOCOL_INIT;
+static EFI_PCI_IO_PROTOCOL mPciMptIoProto = FW_PCI_IO_PROTOCOL_INIT;
 static EFI_PCI_IO_PROTOCOL mPciVgaIoProto = FW_PCI_IO_PROTOCOL_INIT;
 
 #undef FW_PCI_IO_PROTOCOL_INIT
@@ -14447,9 +14464,10 @@ EFI_HANDLE fw_pci_root_handle(VOID)
     return mPciRootBridgeHandle;
 }
 
+/* The adapter the SCSI Pass Thru drives: the seat's 53C1030, else the LSI. */
 EFI_HANDLE fw_scsi_controller_handle(VOID)
 {
-    return mPciLsiHandle;
+    return fw_scsi_pass_thru_is_mpt() ? mPciMptHandle : mPciLsiHandle;
 }
 
 
@@ -14758,6 +14776,7 @@ static void fw_retarget_storage_device_paths(void)
     }
     mPciLsiDevicePath.Acpi.Uid = bus;
     mPciLsiDevicePath.Pci.Device = device;
+    mPciMptDevicePath.Acpi.Uid = IA64_ZX1_SCSI_BUS;
     mPciAhciDevicePath.Pci.Device = ahci;
 }
 
