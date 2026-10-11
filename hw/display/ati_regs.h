@@ -360,6 +360,10 @@
 #define CRTC2_EXT_DISP_EN                       0x01000000
 #define CRTC2_EN                                0x02000000
 #define CRTC2_DISP_REQ_EN_B                     0x04000000
+/* Radeon: the cursor mode in bits 22:20 (Linux radeon_reg.h). */
+#define CRTC_CUR_MODE_MASK                      0x00700000
+#define CRTC_CUR_MODE_SHIFT                     20
+#define CRTC_CUR_MODE_24BPP                     2
 
 #define CRTC_PIX_WIDTH_MASK                     0x00000700
 #define CRTC_PIX_WIDTH_4BPP                     0x00000100

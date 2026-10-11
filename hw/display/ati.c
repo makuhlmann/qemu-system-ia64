@@ -268,6 +268,61 @@ static void ati_vga_switch_mode(ATIVGAState *s)
     }
 }
 
+/*
+ * The Radeon's cursor modes (CRTC_GEN_CNTL CRTC_CUR_MODE): 0 is the Rage 128's
+ * AND/XOR image, 16 bytes a row; 2 is A8R8G8B8 with premultiplied alpha,
+ * 256 bytes a row.  XFree86 4.3 loads every cursor in mode 2, a monochrome
+ * one too (radeon_cursor.c, RADEONLoadCursorImage and mono_cursor_color),
+ * and so does Linux KMS (radeon_cursor.c).
+ */
+static bool ati_cursor_argb(const ATIVGAState *s)
+{
+    return !ati_is_rage128(s) &&
+           ((s->regs.crtc_gen_cntl & CRTC_CUR_MODE_MASK) >>
+            CRTC_CUR_MODE_SHIFT) == CRTC_CUR_MODE_24BPP;
+}
+
+static unsigned ati_cursor_stride(const ATIVGAState *s)
+{
+    return ati_cursor_argb(s) ? 64 * 4 : 16;
+}
+
+/* QEMUCursor takes straight alpha. */
+static uint32_t ati_cursor_unpremultiply(uint32_t argb)
+{
+    unsigned a = argb >> 24;
+    uint32_t out = argb & 0xff000000;
+    int sh;
+
+    if (!a) {
+        return 0;
+    }
+    for (sh = 0; sh < 24; sh += 8) {
+        unsigned c = (argb >> sh) & 0xff;
+
+        out |= MIN(255u, (c * 255 + a / 2) / a) << sh;
+    }
+    return out;
+}
+
+static void ati_cursor_define_argb(ATIVGAState *s, uint32_t srcoff,
+                                   unsigned hoff, unsigned voff)
+{
+    unsigned x, y;
+
+    for (y = 0; y < 64; y++) {
+        for (x = 0; x < 64; x++) {
+            uint32_t px = 0;
+
+            if (y + voff < 64 && x + hoff < 64) {
+                px = ldl_le_p(&s->vga.vram_ptr[srcoff + y * 256 +
+                                               (x + hoff) * 4]);
+            }
+            s->cursor->data[y * 64 + x] = ati_cursor_unpremultiply(px);
+        }
+    }
+}
+
 /* Used by host side hardware cursor */
 static void ati_cursor_define(ATIVGAState *s)
 {
@@ -290,7 +345,15 @@ static void ati_cursor_define(ATIVGAState *s)
     hoff = (s->regs.cur_hv_offs >> 16) & 0x3f;
     voff = s->regs.cur_hv_offs & 0x3f;
     srcoff = s->regs.cur_offset & 0x07fffff0;
-    if (srcoff > s->vga.vram_size - 64 * 16) {
+    if (srcoff > s->vga.vram_size - 64 * ati_cursor_stride(s)) {
+        return;
+    }
+    if (!s->cursor) {
+        s->cursor = cursor_alloc(64, 64);
+    }
+    if (ati_cursor_argb(s)) {
+        ati_cursor_define_argb(s, srcoff, hoff, voff);
+        dpy_cursor_define(s->vga.con, s->cursor);
         return;
     }
     for (unsigned i = 0; i < 64; i++) {
@@ -309,9 +372,6 @@ static void ati_cursor_define(ATIVGAState *s)
         }
         stq_be_p(&data[i], and_row);
         stq_be_p(&data[i + 64], xor_row);
-    }
-    if (!s->cursor) {
-        s->cursor = cursor_alloc(64, 64);
     }
     cursor_set_mono(s->cursor, s->regs.cur_color1, s->regs.cur_color0,
                     (uint8_t *)&data[64], 1, (uint8_t *)&data[0]);
@@ -332,14 +392,15 @@ static void ati_cursor_invalidate(VGACommonState *vga)
         vga->hw_cursor_y != (s->regs.cur_hv_pos & 0xffff) ||
         s->cursor_offset != (s->regs.cur_offset & 0x07fffff0) -
         (s->regs.cur_hv_offs >> 16) -
-        (s->regs.cur_hv_offs & 0xffff) * 16) {
+        (s->regs.cur_hv_offs & 0xffff) * ati_cursor_stride(s)) {
         /* Remove old cursor then update and show new one if needed */
         vga_invalidate_scanlines(vga, vga->hw_cursor_y, vga->hw_cursor_y + 63);
         vga->hw_cursor_x = s->regs.cur_hv_pos >> 16;
         vga->hw_cursor_y = s->regs.cur_hv_pos & 0xffff;
         s->cursor_offset = (s->regs.cur_offset & 0x07fffff0) -
                            (s->regs.cur_hv_offs >> 16) -
-                           (s->regs.cur_hv_offs & 0xffff) * 16;
+                           (s->regs.cur_hv_offs & 0xffff) *
+                           ati_cursor_stride(s);
         s->cursor_size = size;
         if (size) {
             vga_invalidate_scanlines(vga,
@@ -374,12 +435,33 @@ static void ati_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
     if ((unsigned)row + voff >= 64) {
         return; /* padding row past the cropped image: fully transparent */
     }
-    srcoff = (s->regs.cur_offset & 0x07fffff0) + row * 16;
-    if (srcoff > s->vga.vram_size - 16) {
+    srcoff = (s->regs.cur_offset & 0x07fffff0) + row * ati_cursor_stride(s);
+    if (srcoff > s->vga.vram_size - ati_cursor_stride(s)) {
         return;
     }
     dp = &dp[vga->hw_cursor_x];
     h = ((s->regs.crtc_h_total_disp >> 16) + 1) * 8;
+    if (ati_cursor_argb(s)) {
+        /* Premultiplied: dst = src + dst * (1 - alpha). */
+        for (unsigned i = 0; i + hoff < 64; i++) {
+            uint32_t px, out = 0xff000000;
+            unsigned a;
+
+            if (vga->hw_cursor_x + i >= h) {
+                return;
+            }
+            px = ldl_le_p(&vga->vram_ptr[srcoff + (i + hoff) * 4]);
+            a = px >> 24;
+            for (int sh = 0; sh < 24; sh += 8) {
+                unsigned c = ((px >> sh) & 0xff) +
+                             (((dp[i] >> sh) & 0xff) * (255 - a) + 127) / 255;
+
+                out |= MIN(255u, c) << sh;
+            }
+            dp[i] = out;
+        }
+        return;
+    }
     abits = ldq_be_p(&vga->vram_ptr[srcoff]);
     xbits = ldq_be_p(&vga->vram_ptr[srcoff + 8]);
     if (hoff) {
@@ -1788,6 +1870,13 @@ static void ati_mm_write(void *opaque, hwaddr addr,
                               s->regs.cur_hv_pos & 0xffff,
                               (s->regs.crtc_gen_cntl & CRTC2_CUR_EN) != 0);
             }
+        }
+        /* A new cursor mode reinterprets the image the host shows. */
+        if (!ati_is_rage128(s) && !s->cursor_guest_mode &&
+            !((val ^ s->regs.crtc_gen_cntl) & CRTC2_CUR_EN) &&
+            ((val ^ s->regs.crtc_gen_cntl) & CRTC_CUR_MODE_MASK) &&
+            (s->regs.crtc_gen_cntl & CRTC2_CUR_EN)) {
+            ati_cursor_define(s);
         }
         if ((val & (CRTC2_EXT_DISP_EN | CRTC2_EN)) !=
             (s->regs.crtc_gen_cntl & (CRTC2_EXT_DISP_EN | CRTC2_EN))) {

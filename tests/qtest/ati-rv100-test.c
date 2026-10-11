@@ -322,6 +322,79 @@ static void test_rv100_pll_post_state(void)
     qtest_quit(qts);
 }
 
+/* The RGB of pixel (x, y) in a 1024x768 screendump. */
+static uint32_t rv100_ppm_pixel(const char *filename, unsigned x, unsigned y)
+{
+    g_autofree char *contents = NULL;
+    g_autoptr(GError) error = NULL;
+    const uint8_t *px;
+    char *end;
+    gsize length;
+
+    g_assert_true(g_file_get_contents(filename, &contents, &length, &error));
+    g_assert_no_error(error);
+    g_assert_true(g_str_has_prefix(contents, "P6\n"));
+    g_assert_cmpuint(g_ascii_strtoull(contents + 3, &end, 10), ==, 1024);
+    g_assert_cmpuint(g_ascii_strtoull(end, &end, 10), ==, 768);
+    g_assert_cmpuint(g_ascii_strtoull(end, &end, 10), ==, 255);
+    end++;
+    g_assert_cmpuint(length - (end - contents), >=, 1024 * 768 * 3);
+    px = (const uint8_t *)end + ((gsize)y * 1024 + x) * 3;
+    return (px[0] << 16) | (px[1] << 8) | px[2];
+}
+
+/*
+ * The Radeon's ARGB cursor (CRTC_CUR_MODE 2, 256 bytes a row, premultiplied
+ * alpha): XFree86 4.3 loads every cursor so, and read as the Rage 128's
+ * AND/XOR image it showed as a black block.  Drawn by the device
+ * (guest_hwcursor) over grey 40h: opaque red and blue stay, green at alpha
+ * 80h blends, alpha 0 leaves the background.
+ */
+static void test_rv100_argb_cursor(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS
+                                 " -global ati-vga.guest_hwcursor=true");
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *ppm = NULL;
+    g_autoptr(GError) error = NULL;
+    uint32_t gen;
+    unsigned x, y;
+
+    g_assert_cmphex(rv100_int10(qts, 0x4f02, 0x4144), ==, 0x004f);
+    for (y = 48; y < 54; y++) {
+        for (x = 96; x < 112; x++) {
+            qtest_writel(qts, fb + (y * 1024 + x) * 4, 0x00404040);
+        }
+    }
+    qtest_writel(qts, fb + 0x400000, 0xffff0000);
+    qtest_writel(qts, fb + 0x400004, 0x80008000);
+    qtest_writel(qts, fb + 0x400008, 0);
+    qtest_writel(qts, fb + 0x400100, 0xff0000ff);
+    qtest_writel(qts, mmio + 0x260, 0x400000);              /* CUR_OFFSET */
+    qtest_writel(qts, mmio + 0x268, 0);                     /* ..._OFF */
+    qtest_writel(qts, mmio + 0x264, (100u << 16) | 50);     /* ..._POSN */
+    gen = qtest_readl(qts, mmio + 0x050);
+    qtest_writel(qts, mmio + 0x050, (gen & ~(7u << 20)) | (2u << 20) |
+                 (1u << 16));
+
+    tmpdir = g_dir_make_tmp("ati-rv100-cursor-XXXXXX", &error);
+    g_assert_no_error(error);
+    ppm = g_build_filename(tmpdir, "cursor.ppm", NULL);
+    qtest_qmp_assert_success(qts, "{'execute':'screendump','arguments':"
+                             " {'filename':%s}}", ppm);
+    g_assert_cmphex(rv100_ppm_pixel(ppm, 100, 50), ==, 0xff0000);
+    g_assert_cmphex(rv100_ppm_pixel(ppm, 101, 50), ==, 0x20a020);
+    g_assert_cmphex(rv100_ppm_pixel(ppm, 102, 50), ==, 0x404040);
+    g_assert_cmphex(rv100_ppm_pixel(ppm, 100, 51), ==, 0x0000ff);
+    g_assert_cmphex(rv100_ppm_pixel(ppm, 99, 50), ==, 0x404040);
+    unlink(ppm);
+    rmdir(tmpdir);
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -360,6 +433,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/vbe-mode-crtc", test_rv100_vbe_mode_crtc);
     qtest_add_func("/ati-rv100/pll-file", test_rv100_pll_file);
     qtest_add_func("/ati-rv100/pll-post-state", test_rv100_pll_post_state);
+    qtest_add_func("/ati-rv100/argb-cursor", test_rv100_argb_cursor);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();
