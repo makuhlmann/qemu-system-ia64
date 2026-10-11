@@ -1338,9 +1338,10 @@ static void ati_unimp(ATIVGAState *s, hwaddr addr, bool write, uint64_t data)
  * model needs no state for: XP 3790's ati2mtag, XFree86 4.3, radeonfb and
  * Linux KMS use them (RV100 plan, M3).  Offsets: Linux include/video/radeon.h
  * and radeon_reg.h.  DISPLAY_BASE_ADDR is the frame buffer's start in the
- * card's address space, against which CRTC_OFFSET counts; all four drivers
+ * card's address space, against which CRTC_OFFSET counts.  ati2mtag and KMS
  * set it to the start of MC_FB_LOCATION (ati2mtag: both F000_0000h on zx1;
- * KMS r100_mc_program; XFree86 RADEONInitMemMapRegisters), so CRTC_OFFSET
+ * KMS r100_mc_program, r100_mc_resume); XFree86 4.3 and radeonfb write it
+ * only for the RS IGPs and leave both at their POST value, 0.  So CRTC_OFFSET
  * alone gives the scan-out offset in VRAM.
  */
 static const uint16_t ati_r100_aux_offs[] = {
@@ -1389,8 +1390,8 @@ static int ati_r100_aux_slot(hwaddr addr)
  * SURFACEn_LOWER_BOUND, _UPPER_BOUND and _INFO at B04h + 10h * n (Linux
  * radeon_reg.h).  The registers are stored; what they set up, tiled access and
  * byte swapping through the apertures, is not modelled.  Little-endian guests
- * leave them 0 (radeonfb radeon_calc_mode_regs, XFree86 4.3 without
- * ColorTiling); KMS uses them for tiled buffers only (r100_set_surface_reg).
+ * leave them 0 (radeonfb_set_par; XFree86 4.3 only saves and restores
+ * SURFACE_CNTL); KMS uses them for tiled buffers only (r100_set_surface_reg).
  */
 static uint32_t *ati_r100_surface_reg(ATIVGAState *s, hwaddr addr)
 {
@@ -1414,7 +1415,7 @@ static void ati_r100_surface_unimp(ATIVGAState *s, hwaddr addr, uint32_t val)
 
 /*
  * The VGA registers in the Radeon's register aperture at 3B0h-3DFh (Linux
- * radeon_reg.h RADEON_ATTRX, RADEON_GENMO_WT, RADEON_CRTC8_INDEX ...): the
+ * radeon_reg.h RADEON_ATTRX, RADEON_GENMO_WT, RADEON_CRTC8_IDX ...): the
  * same registers as the I/O ports, one byte lane each.
  */
 static uint32_t ati_r100_vga_read(ATIVGAState *s, hwaddr addr, unsigned size)
@@ -2018,8 +2019,8 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         } else {
             /*
              * Write 1 acknowledges; SW_INT_FIRE raises SW_INT_TEST, the
-             * DRM's fence and test interrupt (Linux radeon_reg.h,
-             * r100_fence_ring_emit; 2.4 radeon_irq.c radeon_emit_irq).
+             * DRM's fence interrupt (Linux radeon_reg.h, r100.c
+             * r100_fence_ring_emit).
              */
             s->regs.gen_int_status &= ~(data & ((0xfc080effUL |
                                                  ATI_R100_SW_INT_TEST) &
