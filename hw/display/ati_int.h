@@ -9,6 +9,7 @@
 #ifndef ATI_INT_H
 #define ATI_INT_H
 
+#include "qemu/bitmap.h"
 #include "qemu/timer.h"
 #include "qemu/units.h"
 #include "hw/pci/pci_device.h"
@@ -166,6 +167,8 @@ struct ATIVGAState {
     uint16_t cursor_size;
     uint32_t cursor_offset;
     QEMUCursor *cursor;
+    /* Register offsets already reported as unimplemented (-d unimp). */
+    DECLARE_BITMAP(unimp_seen, ATI_R100_MMIO_SIZE / 4);
     QEMUTimer vblank_timer;
     bitbang_i2c_interface bbi2c;
     I2CDDCState i2cddc;

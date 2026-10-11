@@ -1185,6 +1185,28 @@ static uint32_t ati_mm_aper_offset(const ATIVGAState *s, hwaddr addr)
     return offset & (s->vga.vram_size - 1);
 }
 
+/*
+ * A register the model does not implement: reads give 0 and writes are
+ * dropped.  Report each offset once, so a guest run lists what it needs.
+ */
+static void ati_unimp(ATIVGAState *s, hwaddr addr, bool write, uint64_t data)
+{
+    unsigned slot = addr / 4;
+    unsigned reg = addr & ~3ULL;
+
+    if (slot >= ATI_R100_MMIO_SIZE / 4 || test_and_set_bit(slot, s->unimp_seen)) {
+        return;
+    }
+    if (write) {
+        qemu_log_mask(LOG_UNIMP, "ati-vga: unimplemented register 0x%04x %s"
+                      " (first access: write 0x%" PRIx64 ")\n",
+                      reg, ati_reg_name(reg), data);
+    } else {
+        qemu_log_mask(LOG_UNIMP, "ati-vga: unimplemented register 0x%04x %s"
+                      " (first access: read)\n", reg, ati_reg_name(reg));
+    }
+}
+
 static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
 {
     ATIVGAState *s = opaque;
@@ -1560,6 +1582,8 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
                 v &= ~(7u << 20);
             }
             val = ati_reg_read_offs(v, addr & 3, size);
+        } else {
+            ati_unimp(s, addr, false, 0);
         }
         break;
     }
@@ -2235,6 +2259,8 @@ static void ati_mm_write(void *opaque, hwaddr addr,
 
         if (aux >= 0) {
             ati_reg_write_offs(&s->regs.init_aux[aux], addr & 3, data, size);
+        } else {
+            ati_unimp(s, addr, true, data);
         }
         break;
     }
