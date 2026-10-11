@@ -2014,23 +2014,39 @@ static void ia64_ati_write_bios_tables(uint8_t *rom, uint32_t hdr, uint32_t pll,
  * The Radeon legacy BIOS tables, laid out as Linux radeon_combios.c and
  * XFree86 4.3 radeon_driver.c read them: the header's byte at +06h bounds
  * the table pointers it holds (combios_get_table_offset), +30h points to the
- * PLL block and +50h to the connector table.  Every other pointer stays 0,
- * "no table".  PLL block (radeon_combios_get_clock_info; XFree86 and
+ * PLL block and +50h to the connector table; a pointer not named here
+ * stays 0, "no table".  PLL block (radeon_combios_get_clock_info; XFree86 and
  * radeonfb take +08h as the engine and +0Ah as the memory clock): +0Eh
  * reference, +10h reference divider, +12h/+16h pixel PLL range, then the
  * system PLL (+1Ah..+22h) and memory PLL (+26h..+2Eh) in the same order.
  * The connector table (radeon_get_legacy_connector_info, radeonfb
  * radeon_parse_connector_info) lists one chip with one connector: the MP
  * card's VGA connector, CRT on the primary DAC, DDC on GPIO_VGA_DDC
- * (DDC_VGA; the line is not measured, provisional).  The header size, the
- * table revisions and the system and memory PLL values are provisional.
+ * (DDC_VGA; the line is not measured, provisional).
+ *
+ * The init tables a driver runs on a card it initialises itself
+ * (radeon_combios_asic_init; ati2mtag's CAIL NoBios path does so on IA-64
+ * whatever the POST state): ASIC_INIT_1 (+0Ch), PLL_INIT (+46h) and
+ * ASIC_INIT_2 (+4Eh) share one empty table, a 0000h terminator, since the
+ * model needs no register set up.  ati2mtag reads the byte before an init
+ * table first and skips the table when it is 0
+ * (R100cailNoBiosExtendedRegisterInitialization).  MEM_CONFIG (+48h,
+ * radeon_combios.c combios_write_ram_size): revision 0 at table-1, then
+ * (size, MEM_CNTL[15:8]) pairs and a 0; size counts 2 MB steps (Linux
+ * doubles it for a mapping other than 25h, ati2mtag takes the step from
+ * table-2), so 8 is the 16 MB of §1 and 03h is the model's MEM_CNTL; the
+ * RAM reset table two bytes after the terminator is empty (FFh).
+ *
+ * The header size, the table revisions, the system and memory PLL values
+ * and the memory table bytes are provisional.
  */
 #define IA64_RADEON_HDR_SIZE     0x80U
 #define IA64_RADEON_PLL          0x80U
 #define IA64_RADEON_PLL_SIZE     0x40U
 #define IA64_RADEON_CONN         0xc0U
-#define IA64_RADEON_CONN_SIZE    0x08U
-#define IA64_RADEON_TABLES_SIZE  (IA64_RADEON_CONN + IA64_RADEON_CONN_SIZE)
+#define IA64_RADEON_INIT         0xcaU
+#define IA64_RADEON_MEM          0xd0U
+#define IA64_RADEON_TABLES_SIZE  0xd8U
 #define IA64_RADEON_CONN_CRT_VGA_DDC ((2U << 12) | (3U << 8))
 
 static void ia64_ati_write_radeon_tables(uint8_t *rom, uint32_t hdr)
@@ -2061,6 +2077,16 @@ static void ia64_ati_write_radeon_tables(uint8_t *rom, uint32_t hdr)
     conn[0] = 1U << 4;
     conn[1] = 1U;
     stw_le_p(conn + 2, IA64_RADEON_CONN_CRT_VGA_DDC);
+
+    stw_le_p(rom + hdr + 0x0c, hdr + IA64_RADEON_INIT);
+    stw_le_p(rom + hdr + 0x46, hdr + IA64_RADEON_INIT);
+    stw_le_p(rom + hdr + 0x4e, hdr + IA64_RADEON_INIT);
+
+    stw_le_p(rom + hdr + 0x48, hdr + IA64_RADEON_MEM);
+    rom[hdr + IA64_RADEON_MEM - 2] = 2;
+    rom[hdr + IA64_RADEON_MEM] = 8;
+    rom[hdr + IA64_RADEON_MEM + 1] = 0x03;
+    rom[hdr + IA64_RADEON_MEM + 5] = 0xff;
 }
 
 static void ia64_int10_install_ati_bios_info(uint8_t *rom,

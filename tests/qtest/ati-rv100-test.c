@@ -124,13 +124,14 @@ static void test_rv100_register_aperture(void)
  * The Radeon legacy BIOS tables behind the ATI signature: header through 48h
  * with its size byte at +06h, the PLL block through +30h with the MP card's
  * values (reference 27.00 MHz, divider 60, 120-350 MHz), and the connector
- * table through +50h with one VGA connector (CRT, DDC_VGA, primary DAC).  No
- * other table pointer is set.  limit: the bytes a driver maps.
+ * table through +50h with one VGA connector (CRT, DDC_VGA, primary DAC), the
+ * empty init tables and the memory table; no other table pointer is set.
+ * limit: the bytes a driver maps.
  */
 static void check_radeon_tables(const uint8_t *rom, uint32_t limit)
 {
     uint32_t declared = rom[2] * 512U;
-    uint32_t hdr, pll, conn, i;
+    uint32_t hdr, pll, conn, init, mem, i;
     uint8_t sum = 0;
 
     g_assert_cmphex(lduw_le_p(rom), ==, 0xaa55);
@@ -140,11 +141,28 @@ static void check_radeon_tables(const uint8_t *rom, uint32_t limit)
     g_assert_cmphex(rom[hdr + 0x06], ==, 0x80);
     pll = lduw_le_p(rom + hdr + 0x30);
     conn = lduw_le_p(rom + hdr + 0x50);
-    for (i = 0x0c; i < 0x80; i += 2) {
-        if (i != 0x30 && i != 0x50) {
+    for (i = 0x0e; i < 0x80; i += 2) {
+        if (i != 0x30 && i != 0x46 && i != 0x48 && i != 0x4e && i != 0x50) {
             g_assert_cmphex(lduw_le_p(rom + hdr + i), ==, 0);
         }
     }
+    /* ASIC_INIT_1, PLL_INIT and ASIC_INIT_2: one empty table, 0 before it. */
+    init = lduw_le_p(rom + hdr + 0x0c);
+    g_assert_cmphex(init, !=, 0);
+    g_assert_cmphex(lduw_le_p(rom + hdr + 0x46), ==, init);
+    g_assert_cmphex(lduw_le_p(rom + hdr + 0x4e), ==, init);
+    g_assert_cmphex(rom[init - 1], ==, 0);
+    g_assert_cmphex(lduw_le_p(rom + init), ==, 0);
+    g_assert_cmphex(init + 2, <=, limit);
+    /* MEM_CONFIG: step 2 MB, revision 0, 8 x 2 MB at MEM_CNTL[15:8] 03h. */
+    mem = lduw_le_p(rom + hdr + 0x48);
+    g_assert_cmphex(mem + 6, <=, limit);
+    g_assert_cmphex(rom[mem - 2], ==, 2);
+    g_assert_cmphex(rom[mem - 1], ==, 0);
+    g_assert_cmphex(rom[mem], ==, 8);
+    g_assert_cmphex(rom[mem + 1], ==, 0x03);
+    g_assert_cmphex(rom[mem + 2], ==, 0);
+    g_assert_cmphex(rom[mem + 5], ==, 0xff);
     g_assert_cmphex(hdr + 0x80, <=, limit);
     g_assert_cmphex(pll + 0x32, <=, limit);
     g_assert_cmphex(conn + 6, <=, limit);
