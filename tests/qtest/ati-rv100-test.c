@@ -523,6 +523,159 @@ static void test_rv100_mc_fb_location(void)
     qtest_quit(qts);
 }
 
+/*
+ * A CP set-up as the DRMs and ati2mtag make it: a PCI GART of 4 pages at card
+ * address E000_0000h (page table at 100000h in RAM, pages at 200000h), the
+ * ring in its page 0 (RB_BUFSZ 8: 512 dwords), the read pointer written back
+ * to page 1 and the scratch registers behind it.
+ */
+#define RV100_PT        0x00100000u
+#define RV100_PAGES     0x00200000u
+#define RV100_GART      0xe0000000u
+
+static void rv100_cp_setup(QTestState *qts, uint64_t mmio, uint32_t csq_mode)
+{
+    unsigned i;
+
+    /* Memory decode and bus master, as pci.sys and Linux leave the card. */
+    rv100_cfg_writel(qts, PCI_COMMAND,
+                     (rv100_cfg_readl(qts, PCI_COMMAND) & 0xffff) |
+                     PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+    for (i = 0; i < 4; i++) {
+        qtest_writel(qts, RV100_PT + i * 4, RV100_PAGES + i * 0x1000);
+    }
+    qtest_memset(qts, RV100_PAGES, 0, 4 * 0x1000);
+    qtest_writel(qts, mmio + 0x1d8, RV100_PT);              /* AIC_PT_BASE */
+    qtest_writel(qts, mmio + 0x1dc, RV100_GART);            /* AIC_LO_ADDR */
+    qtest_writel(qts, mmio + 0x1e0, RV100_GART + 0x3fff);   /* AIC_HI_ADDR */
+    qtest_writel(qts, mmio + 0x1d0, 1);                     /* AIC_CNTL */
+    qtest_writel(qts, mmio + 0x700, RV100_GART);            /* CP_RB_BASE */
+    qtest_writel(qts, mmio + 0x704, 8);                     /* CP_RB_CNTL */
+    qtest_writel(qts, mmio + 0x70c, RV100_GART + 0x1000);   /* ..._RPTR_ADDR */
+    qtest_writel(qts, mmio + 0x774, RV100_GART + 0x1020);   /* SCRATCH_ADDR */
+    qtest_writel(qts, mmio + 0x770, 0x3);                   /* SCRATCH_UMSK */
+    qtest_writel(qts, mmio + 0x740, csq_mode << 28);        /* CP_CSQ_CNTL */
+    qtest_writel(qts, mmio + 0x16e8, 0x1fff1fff);   /* default scissor */
+    qtest_writel(qts, mmio + 0x16cc, 0xffffffff);   /* DP_WRITE_MASK */
+    qtest_writel(qts, mmio + 0x16c0, 3);            /* DP_CNTL: +x, +y */
+}
+
+/* CNTL_PAINT_MULTI: a 4x1 solid fill at VRAM 100000h, as XP's ring has it. */
+static unsigned rv100_paint_packet(uint32_t *p, uint32_t colour)
+{
+    p[0] = 0xc0049a00;
+    p[1] = 0x00000002 | 0x000000d0 | (6u << 8) | (3u << 12) | 0x00f00000 |
+           (2u << 24) | 0x10000000;
+    p[2] = (4u << 22) | (0x100000 >> 10);
+    p[3] = colour;
+    p[4] = 0;
+    p[5] = (4u << 16) | 1;
+    return 6;
+}
+
+static void rv100_put_dwords(QTestState *qts, uint64_t addr,
+                             const uint32_t *p, unsigned n)
+{
+    unsigned i;
+
+    for (i = 0; i < n; i++) {
+        qtest_writel(qts, addr + i * 4, p[i]);
+    }
+}
+
+/*
+ * D11: the CP fetches its ring through the PCI GART, runs the 2D packet and
+ * a type-0 write to SCRATCH_REG1, writes the read pointer back to
+ * CP_RB_RPTR_ADDR and the scratch register to SCRATCH_ADDR + 4.
+ */
+static void test_rv100_cp_ring_gart(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    uint32_t ring[8];
+    unsigned n, i;
+
+    rv100_cp_setup(qts, mmio, 4);
+    n = rv100_paint_packet(ring, 0x00abcdef);
+    ring[n++] = 0x00000579;                 /* type 0: SCRATCH_REG1 (15E4h) */
+    ring[n++] = 0x12345678;
+    rv100_put_dwords(qts, RV100_PAGES, ring, n);
+    qtest_writel(qts, mmio + 0x714, n);     /* CP_RB_WPTR */
+
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(qtest_readl(qts, fb + 0x100000 + i * 4), ==,
+                        0x00abcdef);
+    }
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100010), !=, 0x00abcdef);
+    g_assert_cmpuint(qtest_readl(qts, mmio + 0x710), ==, n);
+    g_assert_cmpuint(qtest_readl(qts, RV100_PAGES + 0x1000), ==, n);
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x15e4), ==, 0x12345678);
+    g_assert_cmphex(qtest_readl(qts, RV100_PAGES + 0x1024), ==, 0x12345678);
+    qtest_quit(qts);
+}
+
+/* With CP_CSQ_CNTL 0 the CP is off: the ring is not fetched, nothing moves. */
+static void test_rv100_cp_off(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    uint32_t ring[8];
+    unsigned n;
+
+    rv100_cp_setup(qts, mmio, 0);
+    n = rv100_paint_packet(ring, 0x00abcdef);
+    rv100_put_dwords(qts, RV100_PAGES, ring, n);
+    qtest_writel(qts, mmio + 0x714, n);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100000), !=, 0x00abcdef);
+    g_assert_cmpuint(qtest_readl(qts, mmio + 0x710), ==, 0);
+    g_assert_cmpuint(qtest_readl(qts, RV100_PAGES + 0x1000), ==, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * An indirect buffer: the ring writes CP_IB_BASE and CP_IB_BUFSZ (738h,
+ * 73Ch) in one type-0 packet, as the DRMs do; the buffer in GART page 2
+ * holds the fill.  It runs in mode 4 (PRIBM_INDBM), not in mode 2.
+ */
+static void rv100_cp_ib(QTestState *qts, uint64_t mmio, uint32_t csq_mode)
+{
+    uint32_t ib[8], ring[4];
+    unsigned n;
+
+    rv100_cp_setup(qts, mmio, csq_mode);
+    n = rv100_paint_packet(ib, 0x00456789);
+    rv100_put_dwords(qts, RV100_PAGES + 0x2000, ib, n);
+    ring[0] = (1u << 16) | (0x738 >> 2);
+    ring[1] = RV100_GART + 0x2000;
+    ring[2] = n;
+    rv100_put_dwords(qts, RV100_PAGES, ring, 3);
+    qtest_writel(qts, mmio + 0x714, 3);
+}
+
+static void test_rv100_cp_indirect(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+
+    rv100_cp_ib(qts, mmio, 2);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100000), !=, 0x00456789);
+    g_assert_cmpuint(qtest_readl(qts, mmio + 0x710), ==, 3);
+    qtest_quit(qts);
+
+    qts = qtest_init(RV100_ARGS);
+    mmio = rv100_mmio(qts);
+    rv100_cp_ib(qts, mmio, 4);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100000), ==, 0x00456789);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x10000c), ==, 0x00456789);
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -567,6 +720,9 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/vga-mmio", test_rv100_vga_mmio);
     qtest_add_func("/ati-rv100/sw-int", test_rv100_sw_int);
     qtest_add_func("/ati-rv100/mc-fb-location", test_rv100_mc_fb_location);
+    qtest_add_func("/ati-rv100/cp-ring-gart", test_rv100_cp_ring_gart);
+    qtest_add_func("/ati-rv100/cp-off", test_rv100_cp_off);
+    qtest_add_func("/ati-rv100/cp-indirect", test_rv100_cp_indirect);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();

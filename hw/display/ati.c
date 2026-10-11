@@ -746,6 +746,93 @@ static void ati_mm_write(void *opaque, hwaddr addr, uint64_t data,
  */
 #define R128_AGP_OFFSET 0x02000000u
 
+static uint32_t ati_r100_reg(ATIVGAState *s, hwaddr addr);
+
+#define ATI_R100_AIC_CNTL       0x01d0
+#define ATI_R100_AIC_PT_BASE    0x01d8
+#define ATI_R100_AIC_LO_ADDR    0x01dc
+#define ATI_R100_AIC_HI_ADDR    0x01e0
+#define ATI_R100_CP_CSQ_CNTL    0x0740
+#define ATI_R100_SCRATCH_UMSK   0x0770
+#define ATI_R100_SCRATCH_ADDR   0x0774
+
+/*
+ * The Radeon's memory map as its engines see it (D11): VRAM where
+ * MC_FB_LOCATION puts it; the PCI GART from AIC_LO_ADDR to AIC_HI_ADDR while
+ * AIC_CNTL.PCIGART_TRANSLATE_EN (bit 0) is set, through a table of 32-bit bus
+ * addresses of 4 KiB pages at AIC_PT_BASE (Linux radeon_reg.h; r100.c
+ * r100_pci_gart_set_page); and the PCI bus for the rest: the 2.4 DRM writes
+ * a bus address to CP_RB_RPTR_ADDR (radeon_cp.c radeon_cp_init_ring_buffer).
+ * The MP card has no AGP.
+ */
+static dma_addr_t ati_r100_mc_bus(ATIVGAState *s, uint32_t mc)
+{
+    uint32_t lo = ati_r100_reg(s, ATI_R100_AIC_LO_ADDR);
+    uint32_t hi = ati_r100_reg(s, ATI_R100_AIC_HI_ADDR);
+    uint32_t ent;
+
+    if ((ati_r100_reg(s, ATI_R100_AIC_CNTL) & 1) && mc >= lo && mc <= hi) {
+        pci_dma_read(&s->dev,
+                     (ati_r100_reg(s, ATI_R100_AIC_PT_BASE) & ~0xfffu) +
+                     ((mc - lo) >> 12) * 4, &ent, sizeof(ent));
+        return (le32_to_cpu(ent) & ~0xfffu) | (mc & 0xfff);
+    }
+    return mc;
+}
+
+static uint32_t ati_r100_mc_ldl(ATIVGAState *s, uint32_t mc)
+{
+    uint32_t off = ati_mc_vram_offset(s, mc);
+    uint32_t le;
+
+    if (off != UINT32_MAX) {
+        return off <= s->vga.vram_size - 4 ?
+               ldl_le_p(s->vga.vram_ptr + off) : 0;
+    }
+    pci_dma_read(&s->dev, ati_r100_mc_bus(s, mc), &le, sizeof(le));
+    return le32_to_cpu(le);
+}
+
+static void ati_r100_mc_stl(ATIVGAState *s, uint32_t mc, uint32_t val)
+{
+    uint32_t off = ati_mc_vram_offset(s, mc);
+    uint32_t le = cpu_to_le32(val);
+
+    if (off != UINT32_MAX) {
+        if (off <= s->vga.vram_size - 4) {
+            stl_le_p(s->vga.vram_ptr + off, val);
+            memory_region_set_dirty(&s->vga.vram, off, 4);
+        }
+        return;
+    }
+    pci_dma_write(&s->dev, ati_r100_mc_bus(s, mc), &le, sizeof(le));
+}
+
+/*
+ * CP_CSQ_CNTL's mode (bits 31:28): bus master fetches the ring in modes 2
+ * (PRIBM_INDDIS) and 4 (PRIBM_INDBM), indirect buffers in 3 and 4; 0 is
+ * off, and the rest feed the CP through CP_CSQ_APER by PIO, which no driver
+ * here does (radeon_reg.h).
+ */
+static unsigned ati_r100_csq_mode(ATIVGAState *s)
+{
+    return ati_r100_reg(s, ATI_R100_CP_CSQ_CNTL) >> 28;
+}
+
+/*
+ * SCRATCH_REG0-5 written while their SCRATCH_UMSK bit is set are copied to
+ * SCRATCH_ADDR + 4n (address in bits 31:5, r100d.h); the DRMs read their
+ * buffers' ages there, and the 2.4 DRM tests it with 0xdeadbeef
+ * (radeon_cp_init_ring_buffer).
+ */
+static void ati_r100_scratch_wb(ATIVGAState *s, unsigned i)
+{
+    if (ati_r100_reg(s, ATI_R100_SCRATCH_UMSK) & BIT(i)) {
+        ati_r100_mc_stl(s, (ati_r100_reg(s, ATI_R100_SCRATCH_ADDR) &
+                            ~0x1fu) + i * 4, s->regs.gui_scratch[i]);
+    }
+}
+
 uint32_t ati_cce_vm_dword(ATIVGAState *s, uint32_t vm)
 {
     int gart_slot = ati_init_aux_slot(0x017c); /* PCI_GART_PAGE */
@@ -754,6 +841,9 @@ uint32_t ati_cce_vm_dword(ATIVGAState *s, uint32_t vm)
     uint32_t agp_base = agp_slot >= 0 ? s->regs.init_aux[agp_slot] : 0;
     uint32_t le;
 
+    if (!ati_is_rage128(s)) {
+        return ati_r100_mc_ldl(s, vm);
+    }
     if (gart) {
         uint32_t off = vm >= R128_AGP_OFFSET ? vm - R128_AGP_OFFSET : vm;
         uint32_t ent;
@@ -906,6 +996,21 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
     ATICCEReader rd = { s, base, mask, rptr, count, 0 };
     uint32_t gmc;
 
+    if (!ati_is_rage128(s)) {
+        switch (op) {
+        case 0x24: /* LOAD_MICROCODE */
+        case 0x26: /* WAIT_FOR_IDLE: each packet completes before the next */
+            return true;
+        case 0x16: /* the Rage 128's scaler */
+        case 0x17:
+        case 0x96:
+        case 0x97:
+        case 0x23: /* the R100's 3D packets, other formats (radeon_reg.h) */
+        case 0x25:
+        case 0x28:
+            return false;
+        }
+    }
     switch (op) {
     case 0x10: /* NOP: no payload, no effect.  The ring padder and DRM sync
                 * paths emit type-3 NOPs; handle it explicitly so it is not
@@ -1275,6 +1380,36 @@ static void ati_cce_execute(ATIVGAState *s, uint32_t rptr, uint32_t wptr)
     ati_cce_run(s, base, mask, rptr, wptr);
 }
 
+/*
+ * The Radeon's ring: CP_RB_BASE (700h) a card address, CP_RB_CNTL (704h)
+ * with RB_BUFSZ in bits 5:0 for 2 << RB_BUFSZ dwords and RB_NO_UPDATE in bit
+ * 27, CP_RB_RPTR_ADDR (70Ch) for the read pointer's copy in memory
+ * (radeon_reg.h, r100d.h; r100.c r100_cp_init).  It runs when the write
+ * pointer moves, to the end, in the packet engine the Rage 128 uses.
+ */
+static void ati_r100_cp_run(ATIVGAState *s)
+{
+    uint32_t cntl = s->regs.init_aux[ati_init_aux_slot(0x0704)];
+    uint32_t base = s->regs.init_aux[ati_init_aux_slot(0x0700)] & ~3u;
+    uint32_t wb = s->regs.init_aux[ati_init_aux_slot(0x070c)] & ~3u;
+    unsigned bufsz = cntl & 0x3f;
+    unsigned mode = ati_r100_csq_mode(s);
+    uint32_t mask;
+
+    if ((mode != 2 && mode != 4) || bufsz > 20 || s->r100_cp_active) {
+        return;
+    }
+    mask = (2u << bufsz) - 1;
+    s->r100_cp_active = true;
+    ati_cce_run(s, base, mask, s->regs.pm4_dl_rptr & mask,
+                s->regs.pm4_dl_wptr & mask);
+    s->r100_cp_active = false;
+    s->regs.pm4_dl_rptr = s->regs.pm4_dl_wptr & mask;
+    if (!(cntl & BIT(27))) {
+        ati_r100_mc_stl(s, wb, s->regs.pm4_dl_rptr);
+    }
+}
+
 static void ati_pll_write(ATIVGAState *s, uint32_t data)
 {
     unsigned idx = s->regs.clock_cntl_index & 0x3f;
@@ -1350,6 +1485,17 @@ static const uint16_t ati_r100_aux_offs[] = {
     0x0188, /* MC_DEBUG */
     0x018c, /* MEM_IO_OE_CNTL */
     0x01c0, /* MPP_TB_CONFIG */
+    0x01d0, /* AIC_CNTL */
+    0x01d8, /* AIC_PT_BASE */
+    0x01dc, /* AIC_LO_ADDR */
+    0x01e0, /* AIC_HI_ADDR */
+    0x0718, /* CP_RB_WPTR_DELAY */
+    0x0740, /* CP_CSQ_CNTL */
+    0x0744, /* CP_CSQ_MODE */
+    0x0770, /* SCRATCH_UMSK */
+    0x0774, /* SCRATCH_ADDR */
+    0x07d0, /* CP_ME_CNTL */
+    0x1724, /* ISYNC_CNTL */
     0x023c, /* DISPLAY_BASE_ADDR */
     0x027c, /* CRTC_MORE_CNTL */
     0x02f0, /* GRPH_BUFFER_CNTL */
@@ -1367,6 +1513,8 @@ static const uint16_t ati_r100_aux_offs[] = {
 QEMU_BUILD_BUG_ON(ARRAY_SIZE(ati_r100_aux_offs) >
                   ARRAY_SIZE(((ATIVGARegs *)0)->r100_aux));
 
+#define ATI_R100_CP_RB_RPTR_WR  0x071c
+#define ATI_R100_DC_CTLSTAT     0x1714
 #define ATI_R100_SURFACE_CNTL   0x0b00
 #define ATI_R100_SURFACE_SWAP   0x00f00000      /* AP0/AP1 16 and 32 bpp */
 #define ATI_R100_RB3D_DC_CTLSTAT 0x325c
@@ -1384,6 +1532,13 @@ static int ati_r100_aux_slot(hwaddr addr)
         }
     }
     return -1;
+}
+
+static uint32_t ati_r100_reg(ATIVGAState *s, hwaddr addr)
+{
+    int slot = ati_r100_aux_slot(addr);
+
+    return slot >= 0 ? s->regs.r100_aux[slot] : 0;
 }
 
 /*
@@ -1455,7 +1610,8 @@ static bool ati_r100_mm_read(ATIVGAState *s, hwaddr addr, unsigned size,
     } else if ((addr & ~3ULL) == GPIO_CRT2_DDC) {
         *val = ati_reg_read_offs(s->regs.gpio_crt2_ddc, addr & 3, size);
     } else if ((addr & ~3ULL) == ATI_R100_RB2D_DC_CTLSTAT ||
-               (addr & ~3ULL) == ATI_R100_RB3D_DC_CTLSTAT) {
+               (addr & ~3ULL) == ATI_R100_RB3D_DC_CTLSTAT ||
+               (addr & ~3ULL) == ATI_R100_DC_CTLSTAT) {
         /*
          * The destination caches: a flush or free request completes at once,
          * since the 2D engine writes VRAM directly, so the busy bit (31)
@@ -1923,8 +2079,10 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         ati_pll_write(s, cur);
         break;
     }
-    case 0x710 ... 0x713: /* PM4_BUFFER_DL_RPTR */
-        ati_reg_write_offs(&s->regs.pm4_dl_rptr, addr - 0x710, data, size);
+    case 0x710 ... 0x713: /* PM4_BUFFER_DL_RPTR; the Radeon's is read-only */
+        if (ati_is_rage128(s)) {
+            ati_reg_write_offs(&s->regs.pm4_dl_rptr, addr - 0x710, data, size);
+        }
         break;
     case PM4_IW_INDOFF ... PM4_IW_INDOFF + 3:
         /* Indirect-buffer card VM byte offset; INDSIZE below launches it. */
@@ -1932,7 +2090,11 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         break;
     case PM4_IW_INDSIZE ... PM4_IW_INDSIZE + 3:
         ati_reg_write_offs(&s->cce_indsize, addr - PM4_IW_INDSIZE, data, size);
-        ati_cce_execute_indirect(s);
+        /* The Radeon's CP_IB_BASE/CP_IB_BUFSZ: in CP_CSQ_CNTL modes 3 and 4. */
+        if (ati_is_rage128(s) || ati_r100_csq_mode(s) == 3 ||
+            ati_r100_csq_mode(s) == 4) {
+            ati_cce_execute_indirect(s);
+        }
         break;
     case 0x05c: /* CRTC_STATUS: bit 1 is write-1-to-clear */
         if (data & 2) {
@@ -1940,6 +2102,11 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         }
         break;
     case 0x714 ... 0x717: /* PM4_BUFFER_DL_WPTR */
+        if (!ati_is_rage128(s)) {   /* CP_RB_WPTR */
+            ati_reg_write_offs(&s->regs.pm4_dl_wptr, addr - 0x714, data, size);
+            ati_r100_cp_run(s);
+            break;
+        }
         /*
          * CCE ring-buffer submission.  This model executes nothing from the
          * ring yet; consume it instantly so a driver polling the read
@@ -2002,6 +2169,9 @@ static void ati_mm_write(void *opaque, hwaddr addr,
 
         ati_reg_write_offs(&s->regs.gui_scratch[i],
                            addr - (GUI_SCRATCH_REG0 + i * 4), data, size);
+        if (!ati_is_rage128(s)) {
+            ati_r100_scratch_wb(s, i);
+        }
         break;
     }
     case GEN_INT_CNTL:
@@ -2584,8 +2754,17 @@ static bool ati_r100_mm_write(ATIVGAState *s, hwaddr addr, uint64_t data,
         ati_gpio_ddc_write(s, &s->regs.gpio_crt2_ddc, addr - GPIO_CRT2_DDC,
                            data, size, false);
     } else if ((addr & ~3ULL) == ATI_R100_RB2D_DC_CTLSTAT ||
-               (addr & ~3ULL) == ATI_R100_RB3D_DC_CTLSTAT) {
+               (addr & ~3ULL) == ATI_R100_RB3D_DC_CTLSTAT ||
+               (addr & ~3ULL) == ATI_R100_DC_CTLSTAT) {
         /* completes at once, see ati_r100_mm_read() */
+    } else if ((addr & ~3ULL) == ATI_R100_CP_RB_RPTR_WR) {
+        /*
+         * CP_RB_CNTL.RB_RPTR_WR_ENA (bit 31) lets a driver set the read
+         * pointer here (r100.c r100_cp_init).
+         */
+        if (s->regs.init_aux[ati_init_aux_slot(0x0704)] & BIT(31)) {
+            ati_reg_write_offs(&s->regs.pm4_dl_rptr, addr & 3, data, size);
+        }
     } else {
         if ((addr & ~3ULL) == ATI_R100_SURFACE_CNTL &&
             (data << ((addr & 3) * 8)) & ATI_R100_SURFACE_SWAP) {
@@ -2761,7 +2940,7 @@ static const VMStateDescription vmstate_ati_vga_r100_regs = {
     .minimum_version_id = 1,
     .needed = ati_r100_regs_needed,
     .fields = (const VMStateField[]) {
-        VMSTATE_UINT32_ARRAY(r100_aux, ATIVGARegs, 24),
+        VMSTATE_UINT32_ARRAY(r100_aux, ATIVGARegs, 40),
         VMSTATE_UINT32_2DARRAY(surface, ATIVGARegs, 8, 3),
         VMSTATE_UINT32(config_memsize, ATIVGARegs),
         VMSTATE_UINT32(gpio_crt2_ddc, ATIVGARegs),

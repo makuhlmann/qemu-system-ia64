@@ -148,7 +148,7 @@ typedef struct ATIVGARegs {
      * Radeon only: the registers of ati_r100_aux_offs, the surfaces' lower
      * bound, upper bound and info, CONFIG_MEMSIZE and GPIO_CRT2_DDC.
      */
-    uint32_t r100_aux[24];
+    uint32_t r100_aux[40];
     uint32_t surface[8][3];
     uint32_t config_memsize;
     uint32_t gpio_crt2_ddc;
@@ -207,6 +207,8 @@ struct ATIVGAState {
     uint32_t cce_indoff;
     uint32_t cce_indsize;
     bool cce_in_indirect;
+    /* The Radeon CP is running its ring (ati_r100_cp_run); transient. */
+    bool r100_cp_active;
 };
 
 const char *ati_reg_name(int num);
