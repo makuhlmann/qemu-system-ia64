@@ -608,6 +608,30 @@ static const uint16_t ati_init_aux_offs[] = {
     0x0a18, /* BM_CHUNK_0_VAL (bits 21-23 force bus mastering to PCI) */
 };
 
+static int ati_init_aux_slot(hwaddr addr);
+
+/*
+ * The Radeon's engines address the card's memory map, in which
+ * MC_FB_LOCATION (148h) places VRAM: start and top in 64 KiB units (Linux
+ * radeon_reg.h).  XFree86 4.3 counts its 2D offsets from 0 and keeps the
+ * BIOS's map; ati2mtag moves VRAM to its BAR address (F000_0000h on zx1),
+ * KMS to its own (r100_mc_program).  An address outside VRAM goes to AGP or
+ * the PCI GART, which the model does not have (RV100 plan M4b): UINT32_MAX,
+ * which the engines' range checks refuse.  The Rage 128 has no such map.
+ */
+uint32_t ati_mc_vram_offset(ATIVGAState *s, uint32_t mc)
+{
+    uint32_t loc, start, top;
+
+    if (ati_is_rage128(s)) {
+        return mc;
+    }
+    loc = s->regs.init_aux[ati_init_aux_slot(0x0148)];
+    start = loc << 16;
+    top = (loc & 0xffff0000) | 0xffff;
+    return mc >= start && mc <= top ? mc - start : UINT32_MAX;
+}
+
 static int ati_init_aux_slot(hwaddr addr)
 {
     unsigned i;
@@ -3186,6 +3210,15 @@ static void ati_vga_reset(DeviceState *dev)
     s->regs.init_aux[ati_init_aux_slot(0x0034)] = 0x0000001f; /* BUS_CNTL1 */
     /* MEM_CNTL: MEM_LATENCY = 3 clocks, MEM_REFRESH_DIS set out of reset. */
     s->regs.init_aux[ati_init_aux_slot(0x0140)] = 0x08000300;
+    if (!ati_is_rage128(s)) {
+        /*
+         * MC_FB_LOCATION after POST: VRAM from card address 0, where
+         * XFree86 4.3's 2D offsets count from (radeonfb's resume path,
+         * radeon_base.c, also puts it at 0).  Provisional.
+         */
+        s->regs.init_aux[ati_init_aux_slot(0x0148)] =
+            (s->vga.vram_size - 1) & 0xffff0000;
+    }
 
     /* 2D setup engine (caption-gradient colour interpolator). */
     s->regs.scale_3d_cntl = 0;

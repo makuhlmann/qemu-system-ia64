@@ -229,6 +229,7 @@ static inline int ati_sext14(unsigned v)
     return ((int)(v & 0x3fff) ^ 0x2000) - 0x2000;
 }
 
+uint32_t ati_mc_vram_offset(ATIVGAState *s, uint32_t mc);
 void ati_2d_blt(ATIVGAState *s);
 void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx);
 bool ati_host_data_flush(ATIVGAState *s);

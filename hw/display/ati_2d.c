@@ -145,7 +145,7 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     ctx->brush_data[1] = s->regs.brush_data1;
     ctx->brush_x = s->regs.brush_y_x & 7;
     ctx->brush_y = (s->regs.brush_y_x >> 16) & 7;
-    ctx->dst_offset = s->regs.dst_offset;
+    ctx->dst_offset = ati_mc_vram_offset(s, s->regs.dst_offset);
 
     ctx->scissor.width = s->regs.sc_right - s->regs.sc_left + 1;
     ctx->scissor.height = s->regs.sc_bottom - s->regs.sc_top + 1;
@@ -161,7 +161,7 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
                  ati_sext14(s->regs.dst_y) :
                  ati_sext14(s->regs.dst_y) + 1 - ctx->dst.height);
     ctx->dst_stride = s->regs.dst_pitch;
-    ctx->dst_bits = s->vga.vram_ptr + s->regs.dst_offset;
+    ctx->dst_bits = s->vga.vram_ptr + ctx->dst_offset;
     if (ati_is_rage128(s)) {
         /*
          * DST_PITCH is in units of 8 pixels, so the byte stride is
@@ -181,7 +181,8 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
                  ati_sext14(s->regs.src_y) :
                  ati_sext14(s->regs.src_y) + 1 - ctx->dst.height);
     ctx->src_stride = s->regs.src_pitch;
-    ctx->src_bits = s->vga.vram_ptr + s->regs.src_offset;
+    ctx->src_bits = s->vga.vram_ptr +
+                    ati_mc_vram_offset(s, s->regs.src_offset);
     if (ati_is_rage128(s)) {
         ctx->src_stride *= (ctx->bpp == 24) ? 8 : ctx->bpp;
     }

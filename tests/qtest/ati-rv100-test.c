@@ -477,6 +477,52 @@ static void test_rv100_sw_int(void)
     qtest_quit(qts);
 }
 
+/* A 1x4 solid fill at the card address dst, 32 bpp, pitch 256 bytes. */
+static void rv100_fill(QTestState *qts, uint64_t mmio, uint32_t dst,
+                       uint32_t colour)
+{
+    qtest_writel(qts, mmio + 0x16e8, 0x1fff1fff);   /* default scissor */
+    qtest_writel(qts, mmio + 0x16cc, 0xffffffff);   /* DP_WRITE_MASK */
+    qtest_writel(qts, mmio + 0x146c,                /* DP_GUI_MASTER_CNTL */
+                 0x00000002 | 0x000000d0 | (6u << 8) | (3u << 12) |
+                 0x00f00000 | (2u << 24) | 0x10000000);
+    qtest_writel(qts, mmio + 0x142c, (4u << 22) | (dst >> 10));
+    qtest_writel(qts, mmio + 0x147c, colour);       /* DP_BRUSH_FRGD_CLR */
+    qtest_writel(qts, mmio + 0x16c0, 3);            /* DP_CNTL: +x, +y */
+    qtest_writel(qts, mmio + 0x1438, 0);            /* DST_Y_X */
+    qtest_writel(qts, mmio + 0x143c, (1u << 16) | 4); /* DST_HEIGHT_WIDTH */
+}
+
+/*
+ * The 2D engine addresses the card's memory map: MC_FB_LOCATION puts VRAM
+ * at card address 0 after POST (XFree86 4.3's offsets count from there),
+ * and ati2mtag moves it to F000_0000h; a fill lands at its offset in VRAM
+ * either way, and an address outside VRAM writes nothing.
+ */
+static void test_rv100_mc_fb_location(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    unsigned i;
+
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x148), ==, 0x00ff0000);
+    rv100_fill(qts, mmio, 0x100000, 0x00112233);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(qtest_readl(qts, fb + 0x100000 + i * 4), ==,
+                        0x00112233);
+    }
+
+    qtest_writel(qts, mmio + 0x148, 0xf0fff000);    /* VRAM at F000_0000h */
+    rv100_fill(qts, mmio, 0xf0200000, 0x00445566);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x200000), ==, 0x00445566);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x20000c), ==, 0x00445566);
+    rv100_fill(qts, mmio, 0x00100000, 0x00778899);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100000), ==, 0x00112233);
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -520,6 +566,7 @@ int main(int argc, char **argv)
                    test_rv100_stored_registers);
     qtest_add_func("/ati-rv100/vga-mmio", test_rv100_vga_mmio);
     qtest_add_func("/ati-rv100/sw-int", test_rv100_sw_int);
+    qtest_add_func("/ati-rv100/mc-fb-location", test_rv100_mc_fb_location);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();

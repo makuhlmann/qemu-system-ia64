@@ -181,7 +181,7 @@ static uint32_t ati_sample_bilinear(const ATISurface *s, int sw, int sh,
  * prefix that precedes the packet body). */
 static void ati_dst_surface(ATIVGAState *s, unsigned dst_type, ATISurface *d)
 {
-    uint32_t off = s->regs.dst_offset;
+    uint32_t off = ati_mc_vram_offset(s, s->regs.dst_offset);
 
     d->datatype = dst_type;
     d->bypp = ati_datatype_bypp(dst_type);
@@ -307,7 +307,8 @@ void ati_scale_blt(ATIVGAState *s, uint32_t gmc, const uint32_t db[11],
             }
         }
     }
-    ati_set_dirty(s, s->regs.dst_offset + (uint32_t)dst_y * dst.stride,
+    ati_set_dirty(s, ati_mc_vram_offset(s, s->regs.dst_offset) +
+                     (uint32_t)dst_y * dst.stride,
                   (uint32_t)dst_h * dst.stride);
 }
 
@@ -531,7 +532,7 @@ static void ati_raster_tri(ATIVGAState *s, ATISurface *d,
         }
     }
     if (dirty_lo >= 0) {
-        uint32_t base = s->regs.dst_offset;
+        uint32_t base = ati_mc_vram_offset(s, s->regs.dst_offset);
         ati_set_dirty(s, base + (uint32_t)dirty_lo,
                       (uint32_t)(dirty_hi - dirty_lo));
     }
@@ -658,7 +659,8 @@ bool ati_setup_gouraud_fill(ATIVGAState *s)
             }
         }
     }
-    ati_set_dirty(s, s->regs.dst_offset + (uint32_t)y0 * d.stride,
+    ati_set_dirty(s, ati_mc_vram_offset(s, s->regs.dst_offset) +
+                     (uint32_t)y0 * d.stride,
                   (uint32_t)h * d.stride);
     return true;
 }
