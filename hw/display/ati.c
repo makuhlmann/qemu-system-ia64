@@ -920,6 +920,72 @@ bool ati_cce_has(const ATICCEReader *r, unsigned n)
     return r->pos + n <= r->count;
 }
 
+/*
+ * The Radeon's SETTINGS end with the brush, by its type in GUI_CONTROL bits
+ * 7:4, and BRUSH_Y_X only when bit 31 (BRUSH_FLAG) is set (AMD R5xx
+ * Acceleration v1.5, SETTINGS.SETUP_BODY and BRUSH_PACKET).  ati2mtag sends
+ * its patterns with bit 31 clear.
+ */
+static bool ati_r100_cce_brush(ATIVGAState *s, ATICCEReader *rd, uint32_t gmc)
+{
+    static bool colour_logged;
+    unsigned n, i;
+
+    switch ((gmc >> 4) & 0xf) {
+    case 0: /* 8x8 mono pattern, background and foreground */
+        ati_mm_write(s, DP_BRUSH_BKGD_CLR, ati_cce_next(rd), 4);
+        /* fall through */
+    case 1: /* 8x8 mono pattern, foreground only */
+        ati_mm_write(s, DP_BRUSH_FRGD_CLR, ati_cce_next(rd), 4);
+        ati_mm_write(s, BRUSH_DATA0, ati_cce_next(rd), 4);
+        ati_mm_write(s, BRUSH_DATA1, ati_cce_next(rd), 4);
+        break;
+    case 6: /* 32x1 mono pen, background and foreground */
+        ati_mm_write(s, DP_BRUSH_BKGD_CLR, ati_cce_next(rd), 4);
+        /* fall through */
+    case 7: /* 32x1 mono pen, foreground only */
+        ati_mm_write(s, DP_BRUSH_FRGD_CLR, ati_cce_next(rd), 4);
+        ati_mm_write(s, BRUSH_DATA0, ati_cce_next(rd), 4);
+        break;
+    case 10: /* 8x8 colour pattern, 16 dwords per byte of a pixel */
+        switch ((gmc >> 8) & 0xf) {
+        case 2:
+            n = 16;
+            break;
+        case 3:
+        case 4:
+            n = 32;
+            break;
+        case 6:
+            n = 64;
+            break;
+        default:
+            return false;
+        }
+        for (i = 0; i < n; i++) {
+            ati_cce_next(rd);
+        }
+        if (!colour_logged) {
+            colour_logged = true;
+            qemu_log_mask(LOG_UNIMP, "ati-vga: 8x8 colour brush not "
+                          "modelled\n");
+        }
+        break;
+    case 13: /* solid colour */
+    case 14:
+        ati_mm_write(s, DP_BRUSH_FRGD_CLR, ati_cce_next(rd), 4);
+        break;
+    case 15: /* none */
+        break;
+    default:
+        return false;
+    }
+    if (gmc & BIT(31)) {
+        ati_mm_write(s, BRUSH_Y_X, ati_cce_next(rd), 4);
+    }
+    return true;
+}
+
 static bool ati_cce_gmc_prefix(ATIVGAState *s, ATICCEReader *rd,
                                uint32_t *gmc_out)
 {
@@ -933,11 +999,17 @@ static bool ati_cce_gmc_prefix(ATIVGAState *s, ATICCEReader *rd,
         ati_mm_write(s, DST_PITCH_OFFSET, ati_cce_next(rd), 4);
     }
     if (gmc & GMC_SRC_CLIPPING) {
-        return false;   /* not emitted by known clients; layout unverified */
+        if (ati_is_rage128(s)) {
+            return false; /* not emitted by known clients; layout unverified */
+        }
+        ati_mm_write(s, SRC_SC_BOTTOM_RIGHT, ati_cce_next(rd), 4);
     }
     if (gmc & GMC_DST_CLIPPING) {
         ati_mm_write(s, SC_TOP_LEFT, ati_cce_next(rd), 4);
         ati_mm_write(s, SC_BOTTOM_RIGHT, ati_cce_next(rd), 4);
+    }
+    if (!ati_is_rage128(s) && !ati_r100_cce_brush(s, rd, gmc)) {
+        return false;
     }
     *gmc_out = gmc;
     return true;
@@ -960,6 +1032,9 @@ static void ati_cce_host_data(ATIVGAState *s, ATICCEReader *rd)
 static bool ati_cce_paint_brush(ATIVGAState *s, ATICCEReader *rd,
                                 uint32_t gmc)
 {
+    if (!ati_is_rage128(s)) {
+        return true;    /* read with the SETTINGS, ati_r100_cce_brush() */
+    }
     switch ((gmc >> 4) & 0xf) {
     case 0x0: /* 8x8 mono fg/bg */
     case 0x1: /* 8x8 mono fg/leave-alone */

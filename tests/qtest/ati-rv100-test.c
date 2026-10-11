@@ -11,6 +11,7 @@
 #include "hw/pci/pci_regs.h"
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "libqtest.h"
+#include "qobject/qdict.h"
 
 #define RV100_ARGS      "-machine zx1,vga=rv100 -m 256M -S"
 #define RV100_DEVFN     ((IA64_MERCURY_VGA_SLOT << 3) | 0)
@@ -726,6 +727,126 @@ static void test_rv100_cp_indirect(void)
     qtest_quit(qts);
 }
 
+/*
+ * A CNTL_PAINT_MULTI with an 8x8 mono pattern, as ati2mtag sends it: GMC bit
+ * 31 (BRUSH_FLAG) clear, so four brush dwords and no BRUSH_Y_X (AMD R5xx
+ * Acceleration v1.5, SETTINGS).  The 8x2 rectangle gets both colours; read
+ * as five brush dwords it would land elsewhere.
+ */
+static void test_rv100_cp_mono_brush(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    uint32_t ring[16];
+    unsigned n = 0, x, fg = 0, bg = 0;
+
+    rv100_cp_setup(qts, mmio, 8);
+    ring[n++] = 0xc0089a00;                         /* 9 dwords follow */
+    ring[n++] = 0x00000002 | (0u << 4) | (6u << 8) | (3u << 12) |
+                0x00f00000 | (2u << 24) | 0x10000000;
+    ring[n++] = (4u << 22) | (0x100000 >> 10);
+    ring[n++] = 0x00000011;                         /* background */
+    ring[n++] = 0x00000022;                         /* foreground */
+    ring[n++] = 0xaa55aa55;
+    ring[n++] = 0xaa55aa55;
+    ring[n++] = 0;                                  /* x 0, y 0 */
+    ring[n++] = (8u << 16) | 2;                     /* 8 x 2 */
+    ring[n++] = 0x80000000;                         /* type 2 filler */
+    rv100_put_dwords(qts, RV100_PAGES, ring, n);
+    qtest_writel(qts, mmio + 0x714, n);
+
+    for (x = 0; x < 8; x++) {
+        uint32_t px = qtest_readl(qts, fb + 0x100000 + x * 4);
+
+        g_assert_true(px == 0x11 || px == 0x22);
+        fg += px == 0x22;
+        bg += px == 0x11;
+        g_assert_cmphex(qtest_readl(qts, fb + 0x100100 + x * 4), !=, px);
+    }
+    g_assert_cmpuint(fg, ==, 4);
+    g_assert_cmpuint(bg, ==, 4);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100020), ==, 0);
+    g_assert_cmpuint(qtest_readl(qts, mmio + 0x710), ==, n);
+    qtest_quit(qts);
+}
+
+static void rv100_wait_migration(QTestState *qts)
+{
+    for (;;) {
+        QDict *rsp = qtest_qmp(qts, "{ 'execute': 'query-migrate' }");
+        QDict *ret = qdict_get_qdict(rsp, "return");
+        const char *status = qdict_haskey(ret, "status") ?
+                             qdict_get_str(ret, "status") : "none";
+        bool done = !strcmp(status, "completed");
+
+        g_assert_cmpstr(status, !=, "failed");
+        qobject_unref(rsp);
+        if (done) {
+            return;
+        }
+        g_usleep(1000);
+    }
+}
+
+/*
+ * The CP's state migrates: a ring that ran through the PCI GART before the
+ * move continues after it, from the restored read pointer, through the
+ * restored GART and ring registers; the stored Radeon registers come along.
+ */
+static void test_rv100_cp_migration(void)
+{
+    QTestState *src = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(src);
+    uint64_t fb = rv100_cfg_readl(src, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *file = NULL;
+    g_autofree char *uri = NULL;
+    g_autoptr(GError) error = NULL;
+    QTestState *dst;
+    uint32_t ring[8];
+    unsigned n;
+
+    rv100_cp_setup(src, mmio, 8);
+    n = rv100_paint_packet(ring, 0x00abcdef);
+    rv100_put_dwords(src, RV100_PAGES, ring, n);
+    qtest_writel(src, mmio + 0x714, n);
+    qtest_writel(src, mmio + 0x027c, 0x5a00027c);   /* CRTC_MORE_CNTL */
+    qtest_writel(src, mmio + 0x0b0c, 0x00000000);   /* SURFACE0_INFO */
+    qtest_writel(src, mmio + 0x00f8, 0x02000000);   /* CONFIG_MEMSIZE */
+
+    tmpdir = g_dir_make_tmp("ati-rv100-mig-XXXXXX", &error);
+    g_assert_no_error(error);
+    file = g_build_filename(tmpdir, "state", NULL);
+    uri = g_strdup_printf("exec:cat > %s", file);
+    qtest_qmp_assert_success(src, "{ 'execute': 'migrate',"
+                             " 'arguments': { 'uri': %s } }", uri);
+    rv100_wait_migration(src);
+    qtest_quit(src);
+
+    dst = qtest_initf(RV100_ARGS " -incoming 'exec:cat %s'", file);
+    rv100_wait_migration(dst);
+    g_assert_cmphex(qtest_readl(dst, fb + 0x100000), ==, 0x00abcdef);
+    g_assert_cmpuint(qtest_readl(dst, mmio + 0x710), ==, n);
+    g_assert_cmphex(qtest_readl(dst, mmio + 0x0740), ==, 8u << 28);
+    g_assert_cmphex(qtest_readl(dst, mmio + 0x027c), ==, 0x5a00027c);
+    g_assert_cmphex(qtest_readl(dst, mmio + 0x00f8), ==, 0x02000000);
+    g_assert_cmphex(rv100_pll_read(dst, mmio, 0x0a), ==,
+                    (166u << 16) | (166u << 8) | 27);
+
+    /* The ring goes on where it stopped. */
+    n += rv100_paint_packet(ring, 0x00135791);
+    rv100_put_dwords(dst, RV100_PAGES + 6 * 4, ring, 6);
+    qtest_writel(dst, mmio + 0x714, n);
+    g_assert_cmphex(qtest_readl(dst, fb + 0x100000), ==, 0x00135791);
+    g_assert_cmpuint(qtest_readl(dst, RV100_PAGES + 0x1000), ==, n);
+    qtest_quit(dst);
+    unlink(file);
+    rmdir(tmpdir);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -774,6 +895,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/cp-ring-gart", test_rv100_cp_ring_gart);
     qtest_add_func("/ati-rv100/cp-off", test_rv100_cp_off);
     qtest_add_func("/ati-rv100/cp-indirect", test_rv100_cp_indirect);
+    qtest_add_func("/ati-rv100/cp-mono-brush", test_rv100_cp_mono_brush);
+    qtest_add_func("/ati-rv100/cp-migration", test_rv100_cp_migration);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();
