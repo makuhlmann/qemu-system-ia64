@@ -546,12 +546,18 @@ static int ati_init_aux_slot(hwaddr addr)
  * it when the divider update lands; we complete updates instantly, so those
  * reads mask bit 15.
  */
+/* The Rage 128's PLL file ends at 1Fh; the Radeon's runs to 3Fh (P2PLL). */
+static unsigned ati_pll_count(const ATIVGAState *s)
+{
+    return ati_is_rage128(s) ? 32 : ARRAY_SIZE(s->regs.pll_regs);
+}
+
 static uint32_t ati_pll_read(ATIVGAState *s)
 {
     unsigned idx = s->regs.clock_cntl_index & 0x3f;
     uint32_t val;
 
-    if (idx >= ARRAY_SIZE(s->regs.pll_regs)) {
+    if (idx >= ati_pll_count(s)) {
         return 0;
     }
     val = s->regs.pll_regs[idx];
@@ -1166,8 +1172,7 @@ static void ati_pll_write(ATIVGAState *s, uint32_t data)
 {
     unsigned idx = s->regs.clock_cntl_index & 0x3f;
 
-    if ((s->regs.clock_cntl_index & 0x80) &&
-        idx < ARRAY_SIZE(s->regs.pll_regs)) {
+    if ((s->regs.clock_cntl_index & 0x80) && idx < ati_pll_count(s)) {
         s->regs.pll_regs[idx] = data;
     }
 }
@@ -2270,11 +2275,35 @@ static const VMStateDescription vmstate_ati_vga_init_regs = {
     .needed = ati_init_regs_needed,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(clock_cntl_index, ATIVGARegs),
-        VMSTATE_UINT32_ARRAY(pll_regs, ATIVGARegs, 32),
+        VMSTATE_UINT32_SUB_ARRAY(pll_regs, ATIVGARegs, 0, 32),
         VMSTATE_UINT32_ARRAY(init_aux, ATIVGARegs, 40),
         VMSTATE_UINT32(pm4_dl_rptr, ATIVGARegs),
         VMSTATE_UINT32(pm4_dl_wptr, ATIVGARegs),
         VMSTATE_UINT32(crtc_vblank_ack_frame, ATIVGARegs),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static bool ati_pll_hi_needed(void *opaque)
+{
+    ATIVGARegs *r = opaque;
+    unsigned i;
+
+    for (i = 32; i < ARRAY_SIZE(r->pll_regs); i++) {
+        if (r->pll_regs[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const VMStateDescription vmstate_ati_vga_pll_hi = {
+    .name = "ati-vga/regs/pll-hi",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ati_pll_hi_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_SUB_ARRAY(pll_regs, ATIVGARegs, 32, 32),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -2427,6 +2456,7 @@ static const VMStateDescription vmstate_ati_vga_regs = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ati_vga_init_regs,
+        &vmstate_ati_vga_pll_hi,
         &vmstate_ati_vga_brush_regs,
         &vmstate_ati_vga_setup_regs,
         &vmstate_ati_vga_gui_scratch,

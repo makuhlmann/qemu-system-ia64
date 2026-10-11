@@ -197,6 +197,74 @@ static void test_rv100_rom_bar_tables(void)
     qtest_quit(qts);
 }
 
+/* An I/O port at the sparse address the IA-64 HAL builds. */
+static uint64_t rv100_io(uint16_t port)
+{
+    return IA64_PCI_IO_BASE + (((uint64_t)(port >> 2) << 12) | (port & 0xfff));
+}
+
+/* The firmware's INT 10h interface at 1E0h: AX BX CX DX DI ES, then EXEC. */
+static uint16_t rv100_int10(QTestState *qts, uint16_t ax, uint16_t bx)
+{
+    qtest_writew(qts, rv100_io(0x1e0), ax);
+    qtest_writew(qts, rv100_io(0x1e2), bx);
+    qtest_writew(qts, rv100_io(0x1ec), 0x4941);
+    return qtest_readw(qts, rv100_io(0x1e0));
+}
+
+static uint32_t rv100_pll_read(QTestState *qts, uint64_t mmio, uint8_t index)
+{
+    qtest_writel(qts, mmio + 0x08, index);
+    return qtest_readl(qts, mmio + 0x0c);
+}
+
+/*
+ * A VBE mode set programs the RV100's own CRTC and pixel PLL, as the card's
+ * BIOS does: ati2mtag takes a card with H_TOTAL 0 or FFh for one that was
+ * never POSTed.  1024x768 is the DMT timing (1344 x 806, 65.00 MHz): with the
+ * card's 27.00 MHz / 60 the PLL runs at 130 MHz, feedback 289, post /2.
+ */
+static void test_rv100_vbe_mode_crtc(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint32_t htotal;
+
+    g_assert_cmphex(rv100_int10(qts, 0x4f02, 0x4144), ==, 0x004f);
+    htotal = qtest_readl(qts, mmio + 0x200);
+    g_assert_cmphex(htotal, ==, (127u << 16) | 167);
+    g_assert_cmphex(htotal & 0xff, !=, 0);
+    g_assert_cmphex(htotal & 0xff, !=, 0xff);
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x208), ==, (767u << 16) | 805);
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x050), ==,
+                    (1u << 25) | (1u << 24) | (6u << 8));
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x22c) & 0x7ff, ==, 128);
+    g_assert_cmphex(rv100_pll_read(qts, mmio, 0x03) & 0x3ff, ==, 60);
+    g_assert_cmphex(rv100_pll_read(qts, mmio, 0x07) & 0x707ff, ==,
+                    (1u << 16) | 289);
+
+    /* Text mode 3: the CRTC stays on and leaves the extended display. */
+    rv100_int10(qts, 0x0003, 0);
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x050) & (3u << 24), ==, 1u << 25);
+    qtest_quit(qts);
+}
+
+/* The Radeon's PLL file runs to 3Fh: P2PLL_DIV_0 (2Ch), SCLK_MORE_CNTL (35h). */
+static void test_rv100_pll_file(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+
+    qtest_writel(qts, mmio + 0x08, 0x2c | 0x80);
+    qtest_writel(qts, mmio + 0x0c, 0x00030121);
+    qtest_writel(qts, mmio + 0x08, 0x35 | 0x80);
+    qtest_writel(qts, mmio + 0x0c, 0x00000501);
+    g_assert_cmphex(rv100_pll_read(qts, mmio, 0x2c), ==, 0x00030121);
+    g_assert_cmphex(rv100_pll_read(qts, mmio, 0x2b), ==, 0);
+    g_assert_cmphex(rv100_pll_read(qts, mmio, 0x35), ==, 0x00000501);
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -232,6 +300,8 @@ int main(int argc, char **argv)
                    test_rv100_register_aperture);
     qtest_add_func("/ati-rv100/int10-rom-tables", test_rv100_int10_rom_tables);
     qtest_add_func("/ati-rv100/rom-bar-tables", test_rv100_rom_bar_tables);
+    qtest_add_func("/ati-rv100/vbe-mode-crtc", test_rv100_vbe_mode_crtc);
+    qtest_add_func("/ati-rv100/pll-file", test_rv100_pll_file);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();

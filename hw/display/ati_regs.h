@@ -317,9 +317,13 @@
 #define AGP_PLL_CNTL                            0x10
 #define FCP_CNTL                                0x12
 #define PLL_TEST_CNTL                           0x13
+/* Radeon PLL indices 20h-3Fh (Linux radeon_reg.h). */
 #define P2PLL_CNTL                              0x2a
 #define P2PLL_REF_DIV                           0x2b
-#define P2PLL_DIV_0                             0x2b
+#define P2PLL_DIV_0                             0x2c
+#define PIXCLKS_CNTL                            0x2d
+#define HTOTAL2_CNTL                            0x2e
+#define SCLK_MORE_CNTL                          0x35
 #define POWER_MANAGEMENT                        0x2f
 
 #define PPLL_RESET                              0x00000001

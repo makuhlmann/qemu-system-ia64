@@ -617,6 +617,10 @@ static void ia64_vga_load_ega_palette(void)
     }
 }
 
+static void ia64_rv100_set_mode(IA64VpcMachineState *s,
+                                const IA64VbeMode *mode);
+static void ia64_rv100_leave_ext(IA64VpcMachineState *s);
+
 static void ia64_int10_program_legacy_mode(IA64VpcMachineState *s,
                                             const IA64VgaLegacyMode *mode,
                                             bool no_clear)
@@ -629,6 +633,7 @@ static void ia64_int10_program_legacy_mode(IA64VpcMachineState *s,
      * previous packed-pixel framebuffer cannot reinterpret those writes.
      */
     ia64_vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+    ia64_rv100_leave_ext(s);
     ia64_vga_indexed_write(VGA_SEQ_I, VGA_SEQ_D, VGA_SEQ_RESET, 0x01);
     for (i = 0; i < VGA_SEQ_C - 1; i++) {
         ia64_vga_indexed_write(VGA_SEQ_I, VGA_SEQ_D, i + 1,
@@ -678,6 +683,7 @@ static bool ia64_int10_set_legacy_mode(IA64VpcMachineState *s,
 
     if (number == 3) {
         ia64_vbe_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+        ia64_rv100_leave_ext(s);
         s->int10_legacy_mode = number;
         s->int10_legacy_columns = 80;
         return true;
@@ -919,6 +925,7 @@ static void ia64_int10_set_mode(IA64VpcMachineState *s)
     ia64_vga_writeb(VGA_MIS_W, ia64_vga_readb(VGA_MIS_R) | 0x01);
     (void)ia64_vga_readb(VGA_IS1_RC);
     ia64_vga_writeb(VGA_ATT_W, VGA_AR_ENABLE_DISPLAY);
+    ia64_rv100_set_mode(s, mode);
 
     if (getenv("IA64_INT10_TRACE")) {
         fprintf(stderr, "int10: set_mode bx=%04x -> %dx%dx%d img=%u vbemem=%u "
@@ -1496,6 +1503,202 @@ static bool ia64_int10_mach64_bios(IA64VpcMachineState *s, unsigned fn)
                 ia64_m64_read(IA64_M64_CRTC_OFF_PITCH));
     }
     return true;
+}
+
+/*
+ * The RV100's own CRTC and pixel PLL, programmed on a VBE mode set as the
+ * card's BIOS does.  A driver takes a card whose CRTC is untouched for one
+ * its BIOS never POSTed: ati2mtag when the low byte of CRTC_H_TOTAL_DISP is
+ * 0 or FFh (CAILNoBiosInitializeAdapter, which then runs its own NoBios
+ * initialisation from BIOS tables), Linux when CRTC_EN is clear and
+ * CONFIG_MEMSIZE is 0 (radeon_device.c radeon_card_posted).  Register
+ * fields as XFree86 4.3 fills them (radeon_driver.c
+ * RADEONInitCrtcRegisters, for a CRT, without its sync fudge); the timing is
+ * the DMT one above; the pixel clock follows radeonfb (radeon_base.c
+ * radeon_calc_pll_regs) with the card's reference, 27.00 MHz / 60.
+ */
+#define IA64_RV100_CLOCK_CNTL_INDEX     0x0008
+#define IA64_RV100_CLOCK_CNTL_DATA      0x000c
+#define IA64_RV100_CRTC_GEN_CNTL        0x0050
+#define IA64_RV100_CRTC_EXT_CNTL        0x0054
+#define IA64_RV100_CRTC_H_TOTAL_DISP    0x0200
+#define IA64_RV100_CRTC_H_SYNC_STRT_WID 0x0204
+#define IA64_RV100_CRTC_V_TOTAL_DISP    0x0208
+#define IA64_RV100_CRTC_V_SYNC_STRT_WID 0x020c
+#define IA64_RV100_CRTC_OFFSET          0x0224
+#define IA64_RV100_CRTC_PITCH           0x022c
+#define IA64_RV100_GEN_EXT_DISP_EN      (1U << 24)
+#define IA64_RV100_GEN_EN               (1U << 25)
+#define IA64_RV100_EXT_VGA_ATI_LINEAR   (1U << 3)
+#define IA64_RV100_EXT_XCRT_CNT_EN      (1U << 6)
+#define IA64_RV100_EXT_DISPLAY_DIS      (1U << 10)
+#define IA64_RV100_EXT_CRT_ON           (1U << 15)
+#define IA64_RV100_SYNC_POL             (1U << 23)
+#define IA64_RV100_PLL_WR_EN            (1U << 7)
+#define IA64_RV100_PPLL_REF_DIV         0x03
+#define IA64_RV100_PPLL_DIV_3           0x07
+#define IA64_RV100_VCLK_ECP_CNTL        0x08
+
+static hwaddr ia64_rv100_regs(IA64VpcMachineState *s)
+{
+    PCIDevice *dev = s->vga_dev;
+
+    if (dev == NULL ||
+        pci_get_word(dev->config + PCI_VENDOR_ID) != IA64_ATI_VENDOR_ID ||
+        pci_get_word(dev->config + PCI_DEVICE_ID) != IA64_ATI_RV100_ID ||
+        !(pci_get_word(dev->config + PCI_COMMAND) & PCI_COMMAND_MEMORY)) {
+        return 0;
+    }
+    return pci_get_long(dev->config + PCI_BASE_ADDRESS_2) &
+           PCI_BASE_ADDRESS_MEM_MASK;
+}
+
+static void ia64_rv100_write(hwaddr regs, unsigned reg, uint32_t value)
+{
+    address_space_stl_le(&address_space_memory, regs + reg, value,
+                         MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+static uint32_t ia64_rv100_read(hwaddr regs, unsigned reg)
+{
+    return address_space_ldl_le(&address_space_memory, regs + reg,
+                                MEMTXATTRS_UNSPECIFIED, NULL);
+}
+
+static void ia64_rv100_pll_write(hwaddr regs, uint8_t index, uint32_t value)
+{
+    uint32_t sel = ia64_rv100_read(regs, IA64_RV100_CLOCK_CNTL_INDEX) & 0x300;
+
+    ia64_rv100_write(regs, IA64_RV100_CLOCK_CNTL_INDEX,
+                     sel | IA64_RV100_PLL_WR_EN | index);
+    ia64_rv100_write(regs, IA64_RV100_CLOCK_CNTL_DATA, value);
+    ia64_rv100_write(regs, IA64_RV100_CLOCK_CNTL_INDEX, sel);
+}
+
+static void ia64_rv100_set_clock(hwaddr regs, uint32_t clock)
+{
+    /* Post divider and its PPLL_POST3_DIV code (radeon_base.c post_divs). */
+    static const uint8_t post[][2] = {
+        { 1, 0 }, { 2, 1 }, { 4, 2 }, { 8, 3 }, { 3, 4 }, { 16, 5 },
+        { 6, 6 }, { 12, 7 },
+    };
+    size_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(post); i++) {
+        uint32_t vco = clock * post[i][0];
+        uint32_t fb;
+
+        if (vco < IA64_RV100_PLL_MIN_FREQ || vco > IA64_RV100_PLL_MAX_FREQ) {
+            continue;
+        }
+        fb = (IA64_RV100_PLL_REFERENCE_DIV * vco +
+              IA64_RV100_PLL_REFERENCE_FREQ / 2) / IA64_RV100_PLL_REFERENCE_FREQ;
+        ia64_rv100_pll_write(regs, IA64_RV100_PPLL_REF_DIV,
+                             IA64_RV100_PLL_REFERENCE_DIV);
+        ia64_rv100_pll_write(regs, IA64_RV100_PPLL_DIV_3,
+                             (fb & 0x7ff) | (uint32_t)post[i][1] << 16);
+        ia64_rv100_write(regs, IA64_RV100_CLOCK_CNTL_INDEX, 0x300);
+        ia64_rv100_pll_write(regs, IA64_RV100_VCLK_ECP_CNTL, 0x03);
+        return;
+    }
+}
+
+static void ia64_rv100_set_mode(IA64VpcMachineState *s,
+                                const IA64VbeMode *mode)
+{
+    hwaddr regs = ia64_rv100_regs(s);
+    uint32_t hfp = 16, hs = mode->width / 8, hbp = mode->width / 8;
+    uint32_t vfp = 3, vs = 4, vbp = mode->height / 20;
+    uint32_t clock = 0, htotal, vtotal, pitch, format;
+    bool negative = false;
+    size_t i;
+
+    switch (mode->bpp) {
+    case 8:
+        format = 2;
+        break;
+    case 15:
+        format = 3;
+        break;
+    case 16:
+        format = 4;
+        break;
+    case 24:
+        format = 5;
+        break;
+    case 32:
+        format = 6;
+        break;
+    default:
+        return;
+    }
+    if (!regs) {
+        return;
+    }
+    for (i = 0; i < G_N_ELEMENTS(ia64_m64_dmt); i++) {
+        const IA64Mach64Dmt *d = &ia64_m64_dmt[i];
+
+        if (d->width == mode->width && d->height == mode->height) {
+            hfp = d->hfp;
+            hs = d->hs;
+            hbp = d->hbp;
+            vfp = d->vfp;
+            vs = d->vs;
+            vbp = d->vbp;
+            clock = d->clock;
+            negative = d->negative;
+            break;
+        }
+    }
+    htotal = mode->width + hfp + ROUND_UP(hs, 8) + ROUND_UP(hbp, 8);
+    vtotal = mode->height + vfp + vs + vbp;
+    if (!clock) {
+        clock = htotal * vtotal * 60 / 10000;
+    }
+    pitch = DIV_ROUND_UP(mode->width * mode->bpp, mode->bpp * 8);
+
+    ia64_rv100_write(regs, IA64_RV100_CRTC_EXT_CNTL,
+                     IA64_RV100_EXT_VGA_ATI_LINEAR |
+                     IA64_RV100_EXT_XCRT_CNT_EN |
+                     IA64_RV100_EXT_DISPLAY_DIS);
+    ia64_rv100_write(regs, IA64_RV100_CRTC_H_TOTAL_DISP,
+                     ((htotal / 8 - 1) & 0x3ff) |
+                     ((mode->width / 8 - 1) & 0x1ff) << 16);
+    ia64_rv100_write(regs, IA64_RV100_CRTC_H_SYNC_STRT_WID,
+                     ((mode->width + hfp - 8) & 0x1fff) |
+                     (MAX(ROUND_UP(hs, 8) / 8, 1) & 0x3f) << 16 |
+                     (negative ? IA64_RV100_SYNC_POL : 0));
+    ia64_rv100_write(regs, IA64_RV100_CRTC_V_TOTAL_DISP,
+                     ((vtotal - 1) & 0xffff) | (mode->height - 1) << 16);
+    ia64_rv100_write(regs, IA64_RV100_CRTC_V_SYNC_STRT_WID,
+                     ((mode->height + vfp - 1) & 0xfff) |
+                     (MAX(vs, 1) & 0x1f) << 16 |
+                     (negative ? IA64_RV100_SYNC_POL : 0));
+    ia64_rv100_write(regs, IA64_RV100_CRTC_OFFSET, 0);
+    ia64_rv100_write(regs, IA64_RV100_CRTC_PITCH, pitch | pitch << 16);
+    ia64_rv100_set_clock(regs, clock);
+    ia64_rv100_write(regs, IA64_RV100_CRTC_GEN_CNTL,
+                     IA64_RV100_GEN_EXT_DISP_EN | IA64_RV100_GEN_EN |
+                     format << 8);
+    ia64_rv100_write(regs, IA64_RV100_CRTC_EXT_CNTL,
+                     IA64_RV100_EXT_VGA_ATI_LINEAR |
+                     IA64_RV100_EXT_XCRT_CNT_EN | IA64_RV100_EXT_CRT_ON);
+}
+
+/* A VGA mode: the CRTC stays enabled and leaves the extended display. */
+static void ia64_rv100_leave_ext(IA64VpcMachineState *s)
+{
+    hwaddr regs = ia64_rv100_regs(s);
+    uint32_t gen;
+
+    if (!regs) {
+        return;
+    }
+    gen = ia64_rv100_read(regs, IA64_RV100_CRTC_GEN_CNTL);
+    if (gen & IA64_RV100_GEN_EXT_DISP_EN) {
+        ia64_rv100_write(regs, IA64_RV100_CRTC_GEN_CNTL,
+                         gen & ~IA64_RV100_GEN_EXT_DISP_EN);
+    }
 }
 
 /*
