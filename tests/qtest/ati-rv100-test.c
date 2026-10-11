@@ -524,6 +524,41 @@ static void test_rv100_mc_fb_location(void)
 }
 
 /*
+ * The engine's coordinates are 14-bit signed: a fill that starts 5 pixels
+ * left of its surface (x 3FFBh) draws its 3 pixels inside the scissor and
+ * nothing before the row, as XP 3790's glyphs at the edge of a surface do.
+ */
+static void test_rv100_negative_x(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    unsigned i;
+
+    rv100_fill(qts, mmio, 0x100000, 0);
+    qtest_writel(qts, mmio + 0x1438, (1u << 16) | 0x3ffb);  /* DST_Y_X */
+    qtest_writel(qts, mmio + 0x143c, (1u << 16) | 8);       /* DST_H_W */
+    for (i = 0; i < 3; i++) {
+        g_assert_cmphex(qtest_readl(qts, fb + 0x100100 + i * 4), ==,
+                        0x00000000);
+    }
+    qtest_writel(qts, mmio + 0x147c, 0x00556677);
+    qtest_writel(qts, mmio + 0x1438, (1u << 16) | 0x3ffb);
+    qtest_writel(qts, mmio + 0x143c, (1u << 16) | 8);
+    for (i = 0; i < 3; i++) {
+        g_assert_cmphex(qtest_readl(qts, fb + 0x100100 + i * 4), ==,
+                        0x00556677);
+    }
+    g_assert_cmphex(qtest_readl(qts, fb + 0x10010c), !=, 0x00556677);
+    for (i = 1; i <= 5; i++) {
+        g_assert_cmphex(qtest_readl(qts, fb + 0x100100 - i * 4), !=,
+                        0x00556677);
+    }
+    qtest_quit(qts);
+}
+
+/*
  * A CP set-up as the DRMs and ati2mtag make it: a PCI GART of 4 pages at card
  * address E000_0000h (page table at 100000h in RAM, pages at 200000h), the
  * ring in its page 0 (RB_BUFSZ 8: 512 dwords), the read pointer written back
@@ -735,6 +770,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/vga-mmio", test_rv100_vga_mmio);
     qtest_add_func("/ati-rv100/sw-int", test_rv100_sw_int);
     qtest_add_func("/ati-rv100/mc-fb-location", test_rv100_mc_fb_location);
+    qtest_add_func("/ati-rv100/negative-x", test_rv100_negative_x);
     qtest_add_func("/ati-rv100/cp-ring-gart", test_rv100_cp_ring_gart);
     qtest_add_func("/ati-rv100/cp-off", test_rv100_cp_off);
     qtest_add_func("/ati-rv100/cp-indirect", test_rv100_cp_indirect);
