@@ -466,8 +466,13 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
 
     /* =============== basic display parameters =============== */
 
-    /* video input: digital, 8bpc, displayport */
-    edid[20] = 0xa5;
+    if (info->analog) {
+        /* video input: analog, 0.7 V / 0.3 V levels, separate syncs */
+        edid[20] = 0x08;
+    } else {
+        /* video input: digital, 8bpc, displayport */
+        edid[20] = 0xa5;
+    }
 
     /* screen size: undefined */
     edid[21] = width_mm / 10;
@@ -476,8 +481,12 @@ void qemu_edid_generate(uint8_t *edid, size_t size,
     /* display gamma: 2.2 */
     edid[23] = 220 - 100;
 
-    /* supported features bitmap: std sRGB, preferred timing */
-    edid[24] = 0x06;
+    /*
+     * supported features bitmap: std sRGB, preferred timing; bits 4:3 are
+     * the colour encodings on a digital input and the display type on an
+     * analog one, where 01b is RGB colour (VESA E-EDID 1.4).
+     */
+    edid[24] = info->analog ? 0x0e : 0x06;
 
 
     /* =============== chromaticity coordinates =============== */
