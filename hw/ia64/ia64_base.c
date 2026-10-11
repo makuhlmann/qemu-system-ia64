@@ -2055,6 +2055,12 @@ static void ia64_ati_write_radeon_tables(uint8_t *rom, uint32_t hdr)
     uint8_t *conn = rom + hdr + IA64_RADEON_CONN;
 
     memset(rom + hdr, 0, IA64_RADEON_TABLES_SIZE);
+    /*
+     * The header's first byte: its meaning is not known, but ati2mtag's
+     * bGcoGetBiosInfo stops before the PLL block unless it is above 1, and
+     * a real BIOS passes there.  2, provisional.
+     */
+    rom[hdr + 0x00] = 2;
     rom[hdr + 0x06] = IA64_RADEON_HDR_SIZE;
     stw_le_p(rom + hdr + 0x30, hdr + IA64_RADEON_PLL);
     stw_le_p(rom + hdr + 0x50, hdr + IA64_RADEON_CONN);

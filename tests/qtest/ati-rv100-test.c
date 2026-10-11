@@ -142,6 +142,7 @@ static void check_radeon_tables(const uint8_t *rom, uint32_t limit)
     g_assert_cmpmem(rom + 0x30, 10, " 761295520", 10);
     hdr = lduw_le_p(rom + 0x48);
     g_assert_cmphex(hdr, >=, 0x4a);
+    g_assert_cmphex(rom[hdr + 0x00], ==, 2);
     g_assert_cmphex(rom[hdr + 0x06], ==, 0x80);
     pll = lduw_le_p(rom + hdr + 0x30);
     conn = lduw_le_p(rom + hdr + 0x50);
