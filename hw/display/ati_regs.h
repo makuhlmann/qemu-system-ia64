@@ -41,6 +41,7 @@
 #define GPIO_VGA_DDC                            0x0060
 #define GPIO_DVI_DDC                            0x0064
 #define GPIO_MONID                              0x0068
+#define GPIO_CRT2_DDC                           0x006c
 #define I2C_CNTL_1                              0x0094
 #define AMCGPIO_MASK_MIR                        0x009c
 #define AMCGPIO_A_MIR                           0x00a0

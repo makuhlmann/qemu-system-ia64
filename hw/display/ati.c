@@ -23,6 +23,7 @@
 #include "hw/core/qdev-properties.h"
 #include "vga_regs.h"
 #include "qemu/bswap.h"
+#include "qemu/cutils.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/error-report.h"
@@ -1308,6 +1309,143 @@ static void ati_unimp(ATIVGAState *s, hwaddr addr, bool write, uint64_t data)
     }
 }
 
+/*
+ * Radeon registers that drivers program and read back, and whose effect the
+ * model needs no state for: XP 3790's ati2mtag, XFree86 4.3, radeonfb and
+ * Linux KMS use them (RV100 plan, M3).  Offsets: Linux include/video/radeon.h
+ * and radeon_reg.h.  DISPLAY_BASE_ADDR is the frame buffer's start in the
+ * card's address space, against which CRTC_OFFSET counts; all four drivers
+ * set it to the start of MC_FB_LOCATION (ati2mtag: both F000_0000h on zx1;
+ * KMS r100_mc_program; XFree86 RADEONInitMemMapRegisters), so CRTC_OFFSET
+ * alone gives the scan-out offset in VRAM.
+ */
+static const uint16_t ati_r100_aux_offs[] = {
+    0x007c, /* DAC_CNTL2 */
+    0x0094, /* I2C_CNTL_1 */
+    0x0188, /* MC_DEBUG */
+    0x018c, /* MEM_IO_OE_CNTL */
+    0x01c0, /* MPP_TB_CONFIG */
+    0x023c, /* DISPLAY_BASE_ADDR */
+    0x027c, /* CRTC_MORE_CNTL */
+    0x02f0, /* GRPH_BUFFER_CNTL */
+    0x033c, /* CRTC2_DISPLAY_BASE_ADDR */
+    0x03f0, /* GRPH2_BUFFER_CNTL */
+    0x0d04, /* DAC_MACRO_CNTL */
+    0x0d08, /* DISP_PWR_MAN */
+    0x0d60, /* DISP_MERGE_CNTL */
+    0x1720, /* WAIT_UNTIL */
+    0x1c3c, /* RB3D_CNTL */
+    0x3250, /* RB3D_ZCACHE_MODE */
+    0x3258, /* RB3D_DSTCACHE_MODE */
+    0x3428, /* RB2D_DSTCACHE_MODE */
+};
+QEMU_BUILD_BUG_ON(ARRAY_SIZE(ati_r100_aux_offs) >
+                  ARRAY_SIZE(((ATIVGARegs *)0)->r100_aux));
+
+#define ATI_R100_SURFACE_CNTL   0x0b00
+#define ATI_R100_SURFACE_SWAP   0x00f00000      /* AP0/AP1 16 and 32 bpp */
+#define ATI_R100_RB3D_DC_CTLSTAT 0x325c
+#define ATI_R100_RB2D_DC_CTLSTAT 0x342c
+#define ATI_R100_SW_INT_TEST    BIT(25)
+#define ATI_R100_SW_INT_FIRE    BIT(26)
+
+static int ati_r100_aux_slot(hwaddr addr)
+{
+    unsigned i;
+
+    for (i = 0; i < ARRAY_SIZE(ati_r100_aux_offs); i++) {
+        if (ati_r100_aux_offs[i] == (addr & ~3ULL)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/*
+ * SURFACEn_LOWER_BOUND, _UPPER_BOUND and _INFO at B04h + 10h * n (Linux
+ * radeon_reg.h).  The registers are stored; what they set up, tiled access and
+ * byte swapping through the apertures, is not modelled.  Little-endian guests
+ * leave them 0 (radeonfb radeon_calc_mode_regs, XFree86 4.3 without
+ * ColorTiling); KMS uses them for tiled buffers only (r100_set_surface_reg).
+ */
+static uint32_t *ati_r100_surface_reg(ATIVGAState *s, hwaddr addr)
+{
+    unsigned field = (addr & 0xf) / 4;
+
+    if (addr < 0x0b04 || addr > 0x0b7f || field == 0) {
+        return NULL;
+    }
+    return &s->regs.surface[(addr - 0x0b00) / 0x10][field - 1];
+}
+
+static void ati_r100_surface_unimp(ATIVGAState *s, hwaddr addr, uint32_t val)
+{
+    if (s->surface_unimp_seen) {
+        return;
+    }
+    s->surface_unimp_seen = true;
+    qemu_log_mask(LOG_UNIMP, "ati-vga: surface tiling and byte swapping are "
+                  "not modelled (0x%04x = 0x%08x)\n", (unsigned)addr, val);
+}
+
+/*
+ * The VGA registers in the Radeon's register aperture at 3B0h-3DFh (Linux
+ * radeon_reg.h RADEON_ATTRX, RADEON_GENMO_WT, RADEON_CRTC8_INDEX ...): the
+ * same registers as the I/O ports, one byte lane each.
+ */
+static uint32_t ati_r100_vga_read(ATIVGAState *s, hwaddr addr, unsigned size)
+{
+    uint32_t val = 0;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        val |= ati_vga_ioport_read(&s->vga, addr + i) << (i * 8);
+    }
+    return val;
+}
+
+static void ati_r100_vga_write(ATIVGAState *s, hwaddr addr, uint64_t data,
+                               unsigned size)
+{
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        ati_vga_ioport_write(&s->vga, addr + i, (data >> (i * 8)) & 0xff);
+    }
+}
+
+/* The Radeon's registers beyond the Rage 128 set; false if not one. */
+static bool ati_r100_mm_read(ATIVGAState *s, hwaddr addr, unsigned size,
+                             uint32_t *val)
+{
+    uint32_t *reg = ati_r100_surface_reg(s, addr);
+    int aux = ati_r100_aux_slot(addr);
+
+    if (aux >= 0) {
+        *val = ati_reg_read_offs(s->regs.r100_aux[aux], addr & 3, size);
+    } else if (reg) {
+        *val = ati_reg_read_offs(*reg, addr & 3, size);
+    } else if (addr >= 0x3b0 && addr + size <= 0x3e0) {
+        *val = ati_r100_vga_read(s, addr, size);
+    } else if ((addr & ~3ULL) == GPIO_CRT2_DDC) {
+        *val = ati_reg_read_offs(s->regs.gpio_crt2_ddc, addr & 3, size);
+    } else if ((addr & ~3ULL) == ATI_R100_RB2D_DC_CTLSTAT ||
+               (addr & ~3ULL) == ATI_R100_RB3D_DC_CTLSTAT) {
+        /*
+         * The destination caches: a flush or free request completes at once,
+         * since the 2D engine writes VRAM directly, so the busy bit (31)
+         * reads 0 as soon as a driver polls it.
+         */
+        *val = 0;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static bool ati_r100_mm_write(ATIVGAState *s, hwaddr addr, uint64_t data,
+                              unsigned size);
+
 static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
 {
     ATIVGAState *s = opaque;
@@ -1380,18 +1518,17 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         break;
     case GEN_INT_STATUS:
         val = s->regs.gen_int_status;
-        if (ati_is_rage128(s)) {
-            /*
-             * GUI_IDLE_INT_STAT (bit 19) is a level-ish engine-idle status:
-             * it powers up set - the only GEN_INT_STATUS bit that does - and
-             * reasserts whenever the engine is idle (RAGE 128 PRO Register
-             * Reference Guide).  Every operation in this model completes
-             * synchronously, so the engine is always idle; a driver that
-             * acknowledges the bit and waits for it to come back (the XP
-             * display driver's engine-liveness test) must see it set again.
-             */
-            val |= BIT(19);
-        }
+        /*
+         * GUI_IDLE_INT_STAT (bit 19) is a level-ish engine-idle status:
+         * it powers up set - the only GEN_INT_STATUS bit that does - and
+         * reasserts whenever the engine is idle (RAGE 128 PRO Register
+         * Reference Guide; the Radeon's GUI_IDLE_STAT, Linux radeon_reg.h).
+         * Every operation in this model completes synchronously, so the
+         * engine is always idle; a driver that acknowledges the bit and waits
+         * for it to come back (the XP display driver's engine-liveness test)
+         * must see it set again.
+         */
+        val |= BIT(19);
         break;
     case CRTC_GEN_CNTL ... CRTC_GEN_CNTL + 3:
         val = ati_reg_read_offs(s->regs.crtc_gen_cntl,
@@ -1452,7 +1589,8 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         val = s->regs.config_cntl;
         break;
     case CNFG_MEMSIZE:
-        val = s->vga.vram_size;
+        /* On the Radeon the BIOS writes it, and drivers may (r100.c). */
+        val = ati_is_rage128(s) ? s->vga.vram_size : s->regs.config_memsize;
         break;
     case CONFIG_APER_0_BASE:
     case CONFIG_APER_1_BASE:
@@ -1670,6 +1808,9 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
     {
         int aux = ati_init_aux_slot(addr);
 
+        if (!ati_is_rage128(s) && ati_r100_mm_read(s, addr, size, &val)) {
+            break;
+        }
         if (aux >= 0) {
             uint32_t v = s->regs.init_aux[aux];
 
@@ -1848,9 +1989,21 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         }
         break;
     case GEN_INT_STATUS:
-        data &= (ati_is_rage128(s) ?
-                 0x000f040fUL : 0xfc080effUL);
-        s->regs.gen_int_status &= ~data;
+        if (ati_is_rage128(s)) {
+            s->regs.gen_int_status &= ~(data & 0x000f040fUL);
+        } else {
+            /*
+             * Write 1 acknowledges; SW_INT_FIRE raises SW_INT_TEST, the
+             * DRM's fence and test interrupt (Linux radeon_reg.h,
+             * r100_fence_ring_emit; 2.4 radeon_irq.c radeon_emit_irq).
+             */
+            s->regs.gen_int_status &= ~(data & ((0xfc080effUL |
+                                                 ATI_R100_SW_INT_TEST) &
+                                                ~ATI_R100_SW_INT_FIRE));
+            if (data & ATI_R100_SW_INT_FIRE) {
+                s->regs.gen_int_status |= ATI_R100_SW_INT_TEST;
+            }
+        }
         ati_vga_update_irq(s);
         break;
     case CRTC_GEN_CNTL ... CRTC_GEN_CNTL + 3:
@@ -1967,6 +2120,12 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         break;
     case CNFG_CNTL:
         s->regs.config_cntl = data;
+        break;
+    case CNFG_MEMSIZE:
+        if (!ati_is_rage128(s)) {
+            /* CNFG_MEMSIZE_MASK, Linux include/video/radeon.h */
+            s->regs.config_memsize = data & 0x1f000000;
+        }
         break;
     case CRTC_H_TOTAL_DISP:
         s->regs.crtc_h_total_disp = data & 0x07ff07ff;
@@ -2366,6 +2525,9 @@ static void ati_mm_write(void *opaque, hwaddr addr,
     {
         int aux = ati_init_aux_slot(addr);
 
+        if (!ati_is_rage128(s) && ati_r100_mm_write(s, addr, data, size)) {
+            break;
+        }
         if (aux >= 0) {
             ati_reg_write_offs(&s->regs.init_aux[aux], addr & 3, data, size);
         } else {
@@ -2374,6 +2536,39 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         break;
     }
     }
+}
+
+static bool ati_r100_mm_write(ATIVGAState *s, hwaddr addr, uint64_t data,
+                              unsigned size)
+{
+    uint32_t *reg = ati_r100_surface_reg(s, addr);
+    int aux = ati_r100_aux_slot(addr);
+
+    if (aux >= 0) {
+        ati_reg_write_offs(&s->regs.r100_aux[aux], addr & 3, data, size);
+    } else if (reg) {
+        ati_reg_write_offs(reg, addr & 3, data, size);
+        /* INFO: pitch (low bits, tiling) and the swap modes. */
+        if ((addr & 0xf) / 4 == 3 &&
+            (*reg & (0xffff | ATI_R100_SURFACE_SWAP))) {
+            ati_r100_surface_unimp(s, addr & ~3ULL, *reg);
+        }
+    } else if (addr >= 0x3b0 && addr + size <= 0x3e0) {
+        ati_r100_vga_write(s, addr, data, size);
+    } else if ((addr & ~3ULL) == GPIO_CRT2_DDC) {
+        ati_gpio_ddc_write(s, &s->regs.gpio_crt2_ddc, addr - GPIO_CRT2_DDC,
+                           data, size, false);
+    } else if ((addr & ~3ULL) == ATI_R100_RB2D_DC_CTLSTAT ||
+               (addr & ~3ULL) == ATI_R100_RB3D_DC_CTLSTAT) {
+        /* completes at once, see ati_r100_mm_read() */
+    } else {
+        if ((addr & ~3ULL) == ATI_R100_SURFACE_CNTL &&
+            (data << ((addr & 3) * 8)) & ATI_R100_SURFACE_SWAP) {
+            ati_r100_surface_unimp(s, addr & ~3ULL, data);
+        }
+        return false;   /* SURFACE_CNTL itself is an init_aux slot */
+    }
+    return true;
 }
 
 static const MemoryRegionOps ati_mm_ops = {
@@ -2526,6 +2721,29 @@ static const VMStateDescription vmstate_ati_vga_gui_scratch = {
     }
 };
 
+static bool ati_r100_regs_needed(void *opaque)
+{
+    ATIVGARegs *r = opaque;
+
+    return r->config_memsize || r->gpio_crt2_ddc ||
+           !buffer_is_zero(r->r100_aux, sizeof(r->r100_aux)) ||
+           !buffer_is_zero(r->surface, sizeof(r->surface));
+}
+
+static const VMStateDescription vmstate_ati_vga_r100_regs = {
+    .name = "ati-vga/regs/r100",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ati_r100_regs_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_ARRAY(r100_aux, ATIVGARegs, 24),
+        VMSTATE_UINT32_2DARRAY(surface, ATIVGARegs, 8, 3),
+        VMSTATE_UINT32(config_memsize, ATIVGARegs),
+        VMSTATE_UINT32(gpio_crt2_ddc, ATIVGARegs),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_ati_vga_regs = {
     .name = "ati-vga/regs",
     .version_id = 1,
@@ -2595,6 +2813,7 @@ static const VMStateDescription vmstate_ati_vga_regs = {
         &vmstate_ati_vga_brush_regs,
         &vmstate_ati_vga_setup_regs,
         &vmstate_ati_vga_gui_scratch,
+        &vmstate_ati_vga_r100_regs,
         NULL
     }
 };
@@ -2922,6 +3141,9 @@ static void ati_vga_reset(DeviceState *dev)
         /* Nothing drives the DDC lines out of reset: the pull-ups hold them. */
         s->regs.gpio_vga_ddc = 0x300;
         s->regs.gpio_dvi_ddc = 0x300;
+        s->regs.gpio_crt2_ddc = 0x300;
+        /* As the BIOS's POST leaves it. */
+        s->regs.config_memsize = s->vga.vram_size;
     }
 
     s->regs.clock_cntl_index = 0;

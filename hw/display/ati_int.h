@@ -144,6 +144,14 @@ typedef struct ATIVGARegs {
     bool su_gouraud_armed;
     bool su_gouraud_rect_valid;
     int32_t su_gouraud_rect[4];   /* dst x, y, w, h of the active gradient */
+    /*
+     * Radeon only: the registers of ati_r100_aux_offs, the surfaces' lower
+     * bound, upper bound and info, CONFIG_MEMSIZE and GPIO_CRT2_DDC.
+     */
+    uint32_t r100_aux[24];
+    uint32_t surface[8][3];
+    uint32_t config_memsize;
+    uint32_t gpio_crt2_ddc;
 } ATIVGARegs;
 
 typedef struct ATIHostDataState {
@@ -172,6 +180,8 @@ struct ATIVGAState {
     /* PLL indices written since reset, and those reported as unimplemented. */
     uint64_t pll_written;
     uint64_t pll_unimp_seen;
+    /* Surface settings the model does not follow, reported once. */
+    bool surface_unimp_seen;
     QEMUTimer vblank_timer;
     bitbang_i2c_interface bbi2c;
     I2CDDCState i2cddc;

@@ -395,6 +395,88 @@ static void test_rv100_argb_cursor(void)
     qtest_quit(qts);
 }
 
+/*
+ * The Radeon registers that drivers program and read back (RV100 plan, M3):
+ * stored, CONFIG_MEMSIZE writable within its size field, the destination
+ * caches never busy, GPIO_CRT2_DDC an idle line with pull-ups.
+ */
+static void test_rv100_stored_registers(void)
+{
+    static const uint16_t stored[] = {
+        0x007c, 0x0094, 0x0188, 0x018c, 0x01c0, 0x023c, 0x027c, 0x02f0,
+        0x033c, 0x03f0, 0x0d04, 0x0d08, 0x0d60, 0x1720, 0x1c3c, 0x3250,
+        0x3258, 0x3428, 0x0b04, 0x0b08, 0x0b0c, 0x0b74, 0x0b78, 0x0b7c,
+    };
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    size_t i;
+
+    for (i = 0; i < G_N_ELEMENTS(stored); i++) {
+        qtest_writel(qts, mmio + stored[i], 0x5a000000 | stored[i]);
+    }
+    for (i = 0; i < G_N_ELEMENTS(stored); i++) {
+        g_assert_cmphex(qtest_readl(qts, mmio + stored[i]), ==,
+                        0x5a000000 | stored[i]);
+    }
+    qtest_writel(qts, mmio + 0x0b10, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x0b10), ==, 0);
+
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x00f8), ==, 16 * 1024 * 1024);
+    qtest_writel(qts, mmio + 0x00f8, 0x02000fff);
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x00f8), ==, 0x02000000);
+
+    qtest_writel(qts, mmio + 0x342c, 0x0000000f);
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x342c), ==, 0);
+    qtest_writel(qts, mmio + 0x325c, 0x0000000f);
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x325c), ==, 0);
+
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x006c) & 0x300, ==, 0x300);
+    qtest_writel(qts, mmio + 0x006c, 1u << 17);     /* drive SCL low */
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x006c) & 0x300, ==, 0x100);
+    qtest_writel(qts, mmio + 0x006c, 0);
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x006c) & 0x300, ==, 0x300);
+    qtest_quit(qts);
+}
+
+/* The VGA registers in the register aperture are the I/O ports' registers. */
+static void test_rv100_vga_mmio(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+
+    qtest_writeb(qts, mmio + 0x3c4, 0x02);          /* SEQ index: map mask */
+    qtest_writeb(qts, mmio + 0x3c5, 0x05);
+    qtest_writeb(qts, rv100_io(0x3c4), 0x02);
+    g_assert_cmphex(qtest_readb(qts, rv100_io(0x3c5)), ==, 0x05);
+    qtest_writeb(qts, rv100_io(0x3c5), 0x0a);
+    g_assert_cmphex(qtest_readb(qts, mmio + 0x3c5), ==, 0x0a);
+    g_assert_cmphex(qtest_readw(qts, mmio + 0x3c4), ==, 0x0a02);
+    g_assert_cmphex(qtest_readb(qts, mmio + 0x3cc),
+                    ==, qtest_readb(qts, rv100_io(0x3cc)));
+    qtest_quit(qts);
+}
+
+/*
+ * GEN_INT_STATUS: the engine is always idle (GUI_IDLE_STAT, bit 19), and
+ * SW_INT_FIRE raises SW_INT_TEST until it is acknowledged.
+ */
+static void test_rv100_sw_int(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x044) & (1u << 19), !=, 0);
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x044) & (1u << 25), ==, 0);
+    qtest_writel(qts, mmio + 0x040, 1u << 25);      /* SW_INT_ENABLE */
+    qtest_writel(qts, mmio + 0x044, 1u << 26);      /* SW_INT_FIRE */
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x044) & (3u << 25), ==, 1u << 25);
+    qtest_writel(qts, mmio + 0x044, 1u << 25);      /* acknowledge */
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x044) & (3u << 25), ==, 0);
+    qtest_writel(qts, mmio + 0x044, 1u << 19);
+    g_assert_cmphex(qtest_readl(qts, mmio + 0x044) & (1u << 19), !=, 0);
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -434,6 +516,10 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/pll-file", test_rv100_pll_file);
     qtest_add_func("/ati-rv100/pll-post-state", test_rv100_pll_post_state);
     qtest_add_func("/ati-rv100/argb-cursor", test_rv100_argb_cursor);
+    qtest_add_func("/ati-rv100/stored-registers",
+                   test_rv100_stored_registers);
+    qtest_add_func("/ati-rv100/vga-mmio", test_rv100_vga_mmio);
+    qtest_add_func("/ati-rv100/sw-int", test_rv100_sw_int);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();
