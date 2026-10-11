@@ -80,6 +80,10 @@ static void test_rv100_config_image(void)
     rv100_cfg_writel(qts, 0x5c, 0xffffffff);
     g_assert_cmphex(rv100_cfg_readl(qts, 0x58), ==, 0x00205002);
     g_assert_cmphex(rv100_cfg_readl(qts, 0x5c), ==, 0x2f000200);
+    /* AGP_ENABLE does not stick: the card is on PCI (XFree86 4.3's probe). */
+    rv100_cfg_writel(qts, 0x60, 0x00000300);
+    g_assert_cmphex(rv100_cfg_readl(qts, 0x60) & 0x100, ==, 0);
+    rv100_cfg_writel(qts, 0x60, 0x00000200);
 
     for (i = 0; i < G_N_ELEMENTS(bars); i++) {
         uint32_t saved = rv100_cfg_readl(qts, bars[i].reg);

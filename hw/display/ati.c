@@ -2639,6 +2639,8 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
     i2cbus = i2c_init_bus(DEVICE(s), "ati-vga.ddc");
     bitbang_i2c_init(&s->bbi2c, i2cbus);
     i2c_slave_set_address(I2C_SLAVE(&s->i2cddc), 0x50);
+    /* A monitor on the VGA connector takes analog RGB. */
+    s->i2cddc.edid_info.analog = s->ddc_vga;
     qdev_realize(DEVICE(&s->i2cddc), BUS(i2cbus), &error_abort);
 
     /* mmio register space */
@@ -2730,6 +2732,12 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
         memcpy(dev->config + 0x58, agp_block, sizeof(agp_block));
         /* As in an AGP capability, only the command register is writable. */
         memset(dev->wmask + 0x58, 0, 8);
+        /*
+         * but AGP_ENABLE (bit 8) is not: the MP card sits on PCI.  XFree86
+         * 4.3 sets it and reads it back to tell AGP from PCI, and logged
+         * "PCI card detected" on the rx2600 (run 4, video-XFree86.0.log).
+         */
+        dev->wmask[0x61] &= ~0x01;
     }
 
     if (s->agp && ati_is_rage128(s)) {
