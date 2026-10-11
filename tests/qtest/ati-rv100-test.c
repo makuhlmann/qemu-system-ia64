@@ -7,6 +7,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bswap.h"
 #include "hw/pci/pci_regs.h"
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "libqtest.h"
@@ -119,18 +120,107 @@ static void test_rv100_register_aperture(void)
     qtest_quit(qts);
 }
 
+/*
+ * The Radeon legacy BIOS tables behind the ATI signature: header through 48h
+ * with its size byte at +06h, the PLL block through +30h with the MP card's
+ * values (reference 27.00 MHz, divider 60, 120-350 MHz), and the connector
+ * table through +50h with one VGA connector (CRT, DDC_VGA, primary DAC).  No
+ * other table pointer is set.  limit: the bytes a driver maps.
+ */
+static void check_radeon_tables(const uint8_t *rom, uint32_t limit)
+{
+    uint32_t declared = rom[2] * 512U;
+    uint32_t hdr, pll, conn, i;
+    uint8_t sum = 0;
+
+    g_assert_cmphex(lduw_le_p(rom), ==, 0xaa55);
+    g_assert_cmpmem(rom + 0x30, 10, " 761295520", 10);
+    hdr = lduw_le_p(rom + 0x48);
+    g_assert_cmphex(hdr, >=, 0x4a);
+    g_assert_cmphex(rom[hdr + 0x06], ==, 0x80);
+    pll = lduw_le_p(rom + hdr + 0x30);
+    conn = lduw_le_p(rom + hdr + 0x50);
+    for (i = 0x0c; i < 0x80; i += 2) {
+        if (i != 0x30 && i != 0x50) {
+            g_assert_cmphex(lduw_le_p(rom + hdr + i), ==, 0);
+        }
+    }
+    g_assert_cmphex(hdr + 0x80, <=, limit);
+    g_assert_cmphex(pll + 0x32, <=, limit);
+    g_assert_cmphex(conn + 6, <=, limit);
+
+    g_assert_cmpuint(lduw_le_p(rom + pll + 0x08), ==, 16600);
+    g_assert_cmpuint(lduw_le_p(rom + pll + 0x0a), ==, 16600);
+    g_assert_cmpuint(lduw_le_p(rom + pll + 0x0e), ==, 2700);
+    g_assert_cmpuint(lduw_le_p(rom + pll + 0x10), ==, 60);
+    g_assert_cmpuint(ldl_le_p(rom + pll + 0x12), ==, 12000);
+    g_assert_cmpuint(ldl_le_p(rom + pll + 0x16), ==, 35000);
+
+    g_assert_cmphex(rom[conn], ==, 0x10);
+    g_assert_cmphex(rom[conn + 1], ==, 0x01);
+    g_assert_cmphex(lduw_le_p(rom + conn + 2), ==, 0x2300);
+    g_assert_cmphex(lduw_le_p(rom + conn + 4), ==, 0);
+
+    for (i = 0; i < declared; i++) {
+        sum += rom[i];
+    }
+    g_assert_cmphex(sum, ==, 0);
+}
+
+/* The C0000h ROM: ati2mtag maps 800h bytes of it (GetVgaEnabledResources). */
+static void test_rv100_int10_rom_tables(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint8_t rom[0x800];
+
+    qtest_memread(qts, 0xc0000, rom, sizeof(rom));
+    g_assert_cmphex(rom[2], ==, sizeof(rom) / 512);
+    check_radeon_tables(rom, sizeof(rom));
+    qtest_quit(qts);
+}
+
+/* The ROM BAR image, with decode enabled the way pci.sys does it. */
+static void test_rv100_rom_bar_tables(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint32_t bar = rv100_cfg_readl(qts, PCI_ROM_ADDRESS) & PCI_ROM_ADDRESS_MASK;
+    g_autofree uint8_t *rom = g_malloc(0x20000);
+    uint32_t pcir;
+
+    g_assert_cmphex(bar, !=, 0);
+    rv100_cfg_writel(qts, PCI_ROM_ADDRESS, bar | PCI_ROM_ADDRESS_ENABLE);
+    qtest_memread(qts, bar, rom, 0x20000);
+    check_radeon_tables(rom, 0x2000);
+    pcir = lduw_le_p(rom + 0x18);
+    g_assert_cmpmem(rom + pcir, 4, "PCIR", 4);
+    g_assert_cmphex(ldl_le_p(rom + pcir + 4), ==, 0x51591002);
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
-    if (g_test_subprocess()) {
-        QTestState *qts = qtest_init("-machine 460gx,vga=rv100 -S");
+    const char *argv[] = {
+        qtest_qemu_binary(NULL),
+        "-machine", "460gx,vga=rv100",
+        "-m", "256M",
+        "-display", "none",
+        "-S",
+        NULL,
+    };
+    g_autofree char *stderr_text = NULL;
+    g_autoptr(GError) error = NULL;
+    int wait_status;
 
-        qtest_quit(qts);
-        return;
-    }
-    g_test_trap_subprocess(NULL, 0, 0);
-    g_test_trap_assert_failed();
-    g_test_trap_assert_stderr("*vga=rv100 is the rx2600's adapter (zx1 only)*");
+    g_assert_true(g_spawn_sync(NULL, (char **)argv, NULL,
+                               G_SPAWN_STDOUT_TO_DEV_NULL,
+                               NULL, NULL, NULL, &stderr_text,
+                               &wait_status, &error));
+    g_assert_no_error(error);
+    g_assert_true(WIFEXITED(wait_status));
+    g_assert_cmpint(WEXITSTATUS(wait_status), ==, 1);
+    g_assert_nonnull(strstr(stderr_text,
+                            "vga=rv100 is the rx2600's adapter (zx1 only)"));
 }
 
 int main(int argc, char **argv)
@@ -140,6 +230,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/config-image", test_rv100_config_image);
     qtest_add_func("/ati-rv100/register-aperture",
                    test_rv100_register_aperture);
+    qtest_add_func("/ati-rv100/int10-rom-tables", test_rv100_int10_rom_tables);
+    qtest_add_func("/ati-rv100/rom-bar-tables", test_rv100_rom_bar_tables);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();

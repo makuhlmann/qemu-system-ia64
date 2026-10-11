@@ -249,6 +249,12 @@
 #define IA64_INT10_ROM_PRODUCT_OFFSET 0x01a0U
 #define IA64_INT10_ROM_REVISION_OFFSET 0x01c0U
 #define IA64_INT10_ROM_MODES_OFFSET   0x01d0U
+/*
+ * The RV100's BIOS header and tables, after the mode list.  ati2mtag maps
+ * C0000h with a length of 800h (GetVgaEnabledResources) and follows 48h
+ * through that mapping, so they stay below 800h.
+ */
+#define IA64_INT10_ROM_RADEON_OFFSET  0x0400U
 #define IA64_INT10_VECTOR_ADDR  (0x10U * 4U)
 #define IA64_INT10_IO_BASE      0x000001e0U
 #define IA64_INT10_IO_SIZE      0x00000010U
@@ -280,6 +286,19 @@
 #define IA64_ATI_PLL_MAX_FREQ     40000U
 /* The GL's PLLs reach 250 MHz (GCS-C04100 §4.7). */
 #define IA64_ATI_GL_PLL_MAX_FREQ  25000U
+/*
+ * The MP card's RV100 (rx2600 run 4): its BIOS PLL block, as XFree86 4.3
+ * printed it (RADEONGetPLLParameters, radeon_driver.c:1831-1840): reference
+ * 27.00 MHz, divider 60, PLL range 120-350 MHz.  The engine and memory
+ * clocks were not logged; 166 MHz is radeonfb's no-BIOS default for this
+ * family (radeon_base.c, radeon_get_pllinfo, the case that holds the QY),
+ * provisional.
+ */
+#define IA64_RV100_PLL_REFERENCE_FREQ 2700U
+#define IA64_RV100_PLL_REFERENCE_DIV  60U
+#define IA64_RV100_PLL_MIN_FREQ       12000U
+#define IA64_RV100_PLL_MAX_FREQ       35000U
+#define IA64_RV100_XCLK               16600U
 #endif
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
@@ -1788,6 +1807,59 @@ static void ia64_ati_write_bios_tables(uint8_t *rom, uint32_t hdr, uint32_t pll,
     stw_le_p(rom + pll + 0x30, max >> 16);
 }
 
+/*
+ * The Radeon legacy BIOS tables, laid out as Linux radeon_combios.c and
+ * XFree86 4.3 radeon_driver.c read them: the header's byte at +06h bounds
+ * the table pointers it holds (combios_get_table_offset), +30h points to the
+ * PLL block and +50h to the connector table.  Every other pointer stays 0,
+ * "no table".  PLL block (radeon_combios_get_clock_info; XFree86 and
+ * radeonfb take +08h as the engine and +0Ah as the memory clock): +0Eh
+ * reference, +10h reference divider, +12h/+16h pixel PLL range, then the
+ * system PLL (+1Ah..+22h) and memory PLL (+26h..+2Eh) in the same order.
+ * The connector table (radeon_get_legacy_connector_info, radeonfb
+ * radeon_parse_connector_info) lists one chip with one connector: the MP
+ * card's VGA connector, CRT on the primary DAC, DDC on GPIO_VGA_DDC
+ * (DDC_VGA; the line is not measured, provisional).  The header size, the
+ * table revisions and the system and memory PLL values are provisional.
+ */
+#define IA64_RADEON_HDR_SIZE     0x80U
+#define IA64_RADEON_PLL          0x80U
+#define IA64_RADEON_PLL_SIZE     0x40U
+#define IA64_RADEON_CONN         0xc0U
+#define IA64_RADEON_CONN_SIZE    0x08U
+#define IA64_RADEON_TABLES_SIZE  (IA64_RADEON_CONN + IA64_RADEON_CONN_SIZE)
+#define IA64_RADEON_CONN_CRT_VGA_DDC ((2U << 12) | (3U << 8))
+
+static void ia64_ati_write_radeon_tables(uint8_t *rom, uint32_t hdr)
+{
+    uint8_t *pll = rom + hdr + IA64_RADEON_PLL;
+    uint8_t *conn = rom + hdr + IA64_RADEON_CONN;
+
+    memset(rom + hdr, 0, IA64_RADEON_TABLES_SIZE);
+    rom[hdr + 0x06] = IA64_RADEON_HDR_SIZE;
+    stw_le_p(rom + hdr + 0x30, hdr + IA64_RADEON_PLL);
+    stw_le_p(rom + hdr + 0x50, hdr + IA64_RADEON_CONN);
+
+    stw_le_p(pll + 0x08, IA64_RV100_XCLK);
+    stw_le_p(pll + 0x0a, IA64_RV100_XCLK);
+    stw_le_p(pll + 0x0e, IA64_RV100_PLL_REFERENCE_FREQ);
+    stw_le_p(pll + 0x10, IA64_RV100_PLL_REFERENCE_DIV);
+    stl_le_p(pll + 0x12, IA64_RV100_PLL_MIN_FREQ);
+    stl_le_p(pll + 0x16, IA64_RV100_PLL_MAX_FREQ);
+    stw_le_p(pll + 0x1a, IA64_RV100_PLL_REFERENCE_FREQ);
+    stw_le_p(pll + 0x1c, IA64_RV100_PLL_REFERENCE_DIV);
+    stl_le_p(pll + 0x1e, IA64_RV100_PLL_MIN_FREQ);
+    stl_le_p(pll + 0x22, IA64_RV100_PLL_MAX_FREQ);
+    stw_le_p(pll + 0x26, IA64_RV100_PLL_REFERENCE_FREQ);
+    stw_le_p(pll + 0x28, IA64_RV100_PLL_REFERENCE_DIV);
+    stl_le_p(pll + 0x2a, IA64_RV100_PLL_MIN_FREQ);
+    stl_le_p(pll + 0x2e, IA64_RV100_PLL_MAX_FREQ);
+
+    conn[0] = 1U << 4;
+    conn[1] = 1U;
+    stw_le_p(conn + 2, IA64_RADEON_CONN_CRT_VGA_DDC);
+}
+
 static void ia64_int10_install_ati_bios_info(uint8_t *rom,
                                              uint16_t vendor,
                                              uint16_t device)
@@ -1814,6 +1886,17 @@ static void ia64_int10_install_ati_bios_info(uint8_t *rom,
      * published for every ATI adapter, not just Rage128.
      */
     memcpy(rom + IA64_INT10_ROM_ATI_SIG_OFFSET, " 761295520", 10);
+
+    if (device == IA64_ATI_RV100_ID) {
+        /*
+         * Without a header ati2mtag takes the one at 0: its PLL pointer
+         * (+30h) is then the signature's " 7", 3720h, outside the 800h it
+         * maps, and the read faults (STOP 0x50, rv100-plan M1).
+         */
+        stw_le_p(rom + 0x48, IA64_INT10_ROM_RADEON_OFFSET);
+        ia64_ati_write_radeon_tables(rom, IA64_INT10_ROM_RADEON_OFFSET);
+        return;
+    }
 
     if (!ia64_ati_is_rage128(device)) {
         /*
@@ -1871,7 +1954,10 @@ static void ia64_vpc_install_int10(IA64VpcMachineState *s)
     g_assert(IA64_INT10_ROM_REVISION_OFFSET + sizeof(ia64_vbe_revision) <=
              IA64_INT10_ROM_MODES_OFFSET);
     g_assert(IA64_INT10_ROM_MODES_OFFSET +
-             (G_N_ELEMENTS(ia64_vbe_modes) + 1) * 2 < sizeof(rom));
+             (G_N_ELEMENTS(ia64_vbe_modes) + 1) * 2 + 20 <=
+             IA64_INT10_ROM_RADEON_OFFSET);
+    g_assert(IA64_INT10_ROM_RADEON_OFFSET + IA64_RADEON_TABLES_SIZE <
+             sizeof(rom));
     rom[0] = 0x55;
     rom[1] = 0xaa;
     rom[2] = IA64_INT10_ROM_SIZE / 512;
@@ -3208,8 +3294,8 @@ static void ia64_vpc_configure_lsi(IA64VpcMachineState *s, PCIDevice *pci_dev)
 }
 
 /*
- * Give the stock VGA BIOS the ATI data blocks a native Rage 128 driver looks
- * for.  Windows' videoprt reads the image through the PCI ROM BAR, and the
+ * Give the stock VGA BIOS the ATI data blocks a native Rage 128 or RV100
+ * driver looks for.  Windows' videoprt reads the image through the PCI ROM BAR, and the
  * shipped vgabios-ati.bin is a SeaVGABIOS build with none of ATI's tables:
  * the signature " 761295520" that ATI drivers validate the ROM by occurs
  * nowhere in it, so Whistler build 2462's miniport leaves its BIOS table
@@ -3231,15 +3317,17 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
     uint8_t *rom;
     uint64_t rom_size;
     uint32_t declared;
+    bool radeon = device == IA64_ATI_RV100_ID;
+    uint32_t need = radeon ? IA64_RADEON_TABLES_SIZE :
+                    IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE;
     uint32_t hdr;
-    uint32_t pll;
     uint32_t pcir;
     uint32_t i;
     uint8_t checksum = 0;
 
     if (pci_get_word(pci_dev->config + PCI_VENDOR_ID) !=
             IA64_ATI_VENDOR_ID ||
-        !ia64_ati_is_rage128(device)) {
+        !(radeon || ia64_ati_is_rage128(device))) {
         return;
     }
     if (pci_dev->io_regions[PCI_ROM_SLOT].size == 0 || !pci_dev->has_rom) {
@@ -3283,19 +3371,17 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
      * refused, VgaSave at 640x480x4.  The shipped SeaVGABIOS keeps a zero
      * run at 50h-150h (VGA_ATI_TABLES off, roms/config.vga-ati) and leaves
      * 48h to us; take the first zero run below 2000h that holds the
-     * 40h-byte header plus the 32h-byte PLL block (72h), and
-     * only if none exists fall back to appending.
+     * blocks (72h for the Rage 128, D0h for the RV100), and only if none
+     * exists fall back to appending.
      */
     hdr = 0;
-    for (i = 0x50; i + IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE <= 0x2000U &&
-         i + IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE <= declared; i += 16) {
+    for (i = 0x50; i + need <= 0x2000U && i + need <= declared; i += 16) {
         uint32_t z;
 
-        for (z = 0; z < IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE &&
-             rom[i + z] == 0; z++) {
+        for (z = 0; z < need && rom[i + z] == 0; z++) {
             continue;
         }
-        if (z == IA64_ATI_HDR_SIZE + IA64_ATI_PLL_SIZE) {
+        if (z == need) {
             hdr = i;
             break;
         }
@@ -3303,18 +3389,21 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
     if (hdr == 0) {
         hdr = declared;
     }
-    pll = hdr + IA64_ATI_HDR_SIZE;
-    if (pll + IA64_ATI_PLL_SIZE > rom_size) {
+    if (hdr + need > rom_size) {
         return;
     }
 
     memcpy(rom + 0x30, ati_signature, sizeof(ati_signature) - 1);
     stw_le_p(rom + 0x48, hdr);
-    ia64_ati_write_bios_tables(rom, hdr, pll, device);
+    if (radeon) {
+        ia64_ati_write_radeon_tables(rom, hdr);
+    } else {
+        ia64_ati_write_bios_tables(rom, hdr, hdr + IA64_ATI_HDR_SIZE, device);
+    }
 
     /* Grow the declared image so a bounds-checking parser sees the tables. */
-    if (pll + IA64_ATI_PLL_SIZE > declared) {
-        declared = ROUND_UP(pll + IA64_ATI_PLL_SIZE, 512U);
+    if (hdr + need > declared) {
+        declared = ROUND_UP(hdr + need, 512U);
         if (declared > rom_size || declared / 512U > 0xffU) {
             return;
         }
@@ -3330,7 +3419,7 @@ static void ia64_vpc_install_ati_rom_tables(PCIDevice *pci_dev)
          * the PCIR vendor/device ID to match the adapter's configuration
          * header, and a driver that validates the ROM against the device it
          * bound to will reject an image belonging to another chip.  We only
-         * get here for a Rage 128 header, so restate its id.
+         * get here for a Rage 128 or the RV100, so restate its id.
          */
         stw_le_p(rom + pcir + 0x04, IA64_ATI_VENDOR_ID);
         stw_le_p(rom + pcir + 0x06, device);
@@ -5186,12 +5275,15 @@ static bool ia64_vpc_build(MachineState *machine, Error **errp)
         } else if (g_strcmp0(vga_model, "rv100") == 0) {
             /*
              * The rx2600's iLO MP card (run 4): a 64 MiB framebuffer BAR and
-             * a 128 KiB ROM BAR.
+             * a 128 KiB ROM BAR.  Its one connector is a VGA connector; the
+             * monitor's DDC on GPIO_VGA_DDC is the Radeon drivers' line for
+             * it (radeon_combios.c DDC_VGA), not measured on the card.
              */
             qdev_prop_set_string(DEVICE(s->vga_dev), "model", "rv100");
             qdev_prop_set_uint64(DEVICE(s->vga_dev), "x-linear-aper-size",
                                  64 * MiB);
             qdev_prop_set_uint32(DEVICE(s->vga_dev), "romsize", 128 * KiB);
+            qdev_prop_set_bit(DEVICE(s->vga_dev), "ddc-vga", true);
         }
         if (!pci_realize_and_unref(s->vga_dev, vga_bus, errp)) {
             return false;

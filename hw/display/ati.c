@@ -1576,6 +1576,31 @@ static inline void ati_reg_write_offs(uint32_t *reg, int offs,
     }
 }
 
+/*
+ * A Radeon DDC GPIO (GPIO_VGA_DDC, GPIO_DVI_DDC): bits 1:0 the outputs,
+ * 9:8 the line levels, 17:16 the output enables.  The monitor's EDID hangs on
+ * one of them (ddc-vga); the other line has nothing on it, so it reads what
+ * the pull-ups and its own drivers make of it.
+ */
+static void ati_gpio_ddc_write(ATIVGAState *s, uint32_t *reg, int offs,
+                               uint64_t data, unsigned int size, bool monitor)
+{
+    ati_reg_write_offs(reg, offs, data, size);
+    if (monitor) {
+        if ((offs <= 2 && offs + size > 2) || (offs == 0 && (*reg & 0x30000))) {
+            *reg = ati_i2c(&s->bbi2c, *reg, 0);
+        }
+        return;
+    }
+    *reg &= ~0xf00u;
+    if (!(*reg & BIT(17)) || (*reg & BIT(1))) {
+        *reg |= BIT(9);
+    }
+    if (!(*reg & BIT(16)) || (*reg & BIT(0))) {
+        *reg |= BIT(8);
+    }
+}
+
 static void ati_mm_write(void *opaque, hwaddr addr,
                            uint64_t data, unsigned int size)
 {
@@ -1752,18 +1777,14 @@ static void ati_mm_write(void *opaque, hwaddr addr,
      */
     case GPIO_VGA_DDC ... GPIO_VGA_DDC + 3:
         if (!ati_is_rage128(s)) {
-            /* FIXME: Maybe add a property to select VGA or DVI port? */
+            ati_gpio_ddc_write(s, &s->regs.gpio_vga_ddc, addr - GPIO_VGA_DDC,
+                               data, size, s->ddc_vga);
         }
         break;
     case GPIO_DVI_DDC ... GPIO_DVI_DDC + 3:
         if (!ati_is_rage128(s)) {
-            ati_reg_write_offs(&s->regs.gpio_dvi_ddc,
-                               addr - GPIO_DVI_DDC, data, size);
-            if ((addr <= GPIO_DVI_DDC + 2 && addr + size > GPIO_DVI_DDC + 2) ||
-                (addr == GPIO_DVI_DDC && (s->regs.gpio_dvi_ddc & 0x30000))) {
-                s->regs.gpio_dvi_ddc = ati_i2c(&s->bbi2c,
-                                               s->regs.gpio_dvi_ddc, 0);
-            }
+            ati_gpio_ddc_write(s, &s->regs.gpio_dvi_ddc, addr - GPIO_DVI_DDC,
+                               data, size, !s->ddc_vga);
         }
         break;
     case GPIO_MONID ... GPIO_MONID + 3:
@@ -2724,6 +2745,11 @@ static void ati_vga_reset(DeviceState *dev)
     if (!s->cursor_guest_mode && s->vga.con != NULL) {
         dpy_mouse_set(s->vga.con, 0, 0, false);
     }
+    if (!ati_is_rage128(s)) {
+        /* Nothing drives the DDC lines out of reset: the pull-ups hold them. */
+        s->regs.gpio_vga_ddc = 0x300;
+        s->regs.gpio_dvi_ddc = 0x300;
+    }
 
     /*
      * PLL and init-register power-up values from the RAGE 128 PRO Register
@@ -2780,6 +2806,8 @@ static const Property ati_vga_properties[] = {
                        PCI_DEVICE_ID_ATI_RAGE128_PF),
     DEFINE_PROP_BOOL("guest_hwcursor", ATIVGAState, cursor_guest_mode, false),
     DEFINE_PROP_BOOL("agp", ATIVGAState, agp, false),
+    /* Radeon: the monitor's DDC on GPIO_VGA_DDC instead of GPIO_DVI_DDC. */
+    DEFINE_PROP_BOOL("ddc-vga", ATIVGAState, ddc_vga, false),
     /* this is a debug option, prefer PROP_UINT over PROP_BIT for simplicity */
     DEFINE_PROP_UINT8("x-pixman", ATIVGAState, use_pixman, DEFAULT_X_PIXMAN),
     DEFINE_PROP_UINT64("x-linear-aper-size", ATIVGAState, linear_aper_sz, 0),
