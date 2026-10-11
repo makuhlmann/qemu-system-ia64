@@ -299,6 +299,12 @@
 #define IA64_RV100_PLL_MIN_FREQ       12000U
 #define IA64_RV100_PLL_MAX_FREQ       35000U
 #define IA64_RV100_XCLK               16600U
+/*
+ * The engine and memory PLLs' reference divider: the one in the RV100's
+ * POST state (M_SPLL_REF_FB_DIV, ati.c ati_vga_reset), which gives 166 MHz
+ * with feedback 166 and post /2.  Provisional, as the clock.
+ */
+#define IA64_RV100_SPLL_REFERENCE_DIV 27U
 #endif
 #define IA64_PIB_IPI_LIMIT          0x00100000ULL
 #define IA64_PIB_INTA_OFFSET        0x001e0000ULL
@@ -2072,11 +2078,11 @@ static void ia64_ati_write_radeon_tables(uint8_t *rom, uint32_t hdr)
     stl_le_p(pll + 0x12, IA64_RV100_PLL_MIN_FREQ);
     stl_le_p(pll + 0x16, IA64_RV100_PLL_MAX_FREQ);
     stw_le_p(pll + 0x1a, IA64_RV100_PLL_REFERENCE_FREQ);
-    stw_le_p(pll + 0x1c, IA64_RV100_PLL_REFERENCE_DIV);
+    stw_le_p(pll + 0x1c, IA64_RV100_SPLL_REFERENCE_DIV);
     stl_le_p(pll + 0x1e, IA64_RV100_PLL_MIN_FREQ);
     stl_le_p(pll + 0x22, IA64_RV100_PLL_MAX_FREQ);
     stw_le_p(pll + 0x26, IA64_RV100_PLL_REFERENCE_FREQ);
-    stw_le_p(pll + 0x28, IA64_RV100_PLL_REFERENCE_DIV);
+    stw_le_p(pll + 0x28, IA64_RV100_SPLL_REFERENCE_DIV);
     stl_le_p(pll + 0x2a, IA64_RV100_PLL_MIN_FREQ);
     stl_le_p(pll + 0x2e, IA64_RV100_PLL_MAX_FREQ);
 

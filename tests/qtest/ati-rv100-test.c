@@ -178,6 +178,9 @@ static void check_radeon_tables(const uint8_t *rom, uint32_t limit)
     g_assert_cmpuint(lduw_le_p(rom + pll + 0x10), ==, 60);
     g_assert_cmpuint(ldl_le_p(rom + pll + 0x12), ==, 12000);
     g_assert_cmpuint(ldl_le_p(rom + pll + 0x16), ==, 35000);
+    /* The engine and memory PLLs: the POST state's reference divider. */
+    g_assert_cmpuint(lduw_le_p(rom + pll + 0x1c), ==, 27);
+    g_assert_cmpuint(lduw_le_p(rom + pll + 0x28), ==, 27);
 
     g_assert_cmphex(rom[conn], ==, 0x10);
     g_assert_cmphex(rom[conn + 1], ==, 0x01);
@@ -288,6 +291,37 @@ static void test_rv100_pll_file(void)
     qtest_quit(qts);
 }
 
+/*
+ * D9: out of reset the PLL file is the RV100's POST state.  The pixel PLL
+ * has the BIOS divider 60 and drives the display; the engine and memory
+ * clocks come out at the BIOS table's 166 MHz whether a driver computes
+ * 2 * fb * ref / M / post (Linux radeon_clocks.c) or fb * ref / M
+ * (radeonfb's probe); no PLL is in reset or asleep, and the crystal is in use.
+ */
+static void test_rv100_pll_post_state(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint32_t spll = rv100_pll_read(qts, mmio, 0x0a);
+    uint32_t m = spll & 0xff;
+    uint32_t sclk_post = rv100_pll_read(qts, mmio, 0x0d) & 7;
+    uint32_t mclk_post = rv100_pll_read(qts, mmio, 0x12) & 7;
+
+    g_assert_cmphex(rv100_pll_read(qts, mmio, 0x03) & 0x3ff, ==, 60);
+    g_assert_cmphex(rv100_pll_read(qts, mmio, 0x08) & 3, ==, 3);
+    g_assert_cmphex(spll, ==, (166u << 16) | (166u << 8) | 27);
+    g_assert_cmpuint(sclk_post, ==, 2);
+    g_assert_cmpuint(mclk_post, ==, 2);
+    g_assert_cmpuint(2 * ((spll >> 16) & 0xff) * 2700 / m / 2, ==, 16600);
+    g_assert_cmpuint(2 * ((spll >> 8) & 0xff) * 2700 / m / 2, ==, 16600);
+    g_assert_cmpuint(((spll >> 16) & 0xff) * 2700 / m, ==, 16600);
+    g_assert_cmphex(rv100_pll_read(qts, mmio, 0x02) & 3, ==, 0);
+    g_assert_cmphex(rv100_pll_read(qts, mmio, 0x0c) & 3, ==, 0);
+    g_assert_cmphex(rv100_pll_read(qts, mmio, 0x0e) & 3, ==, 0);
+    g_assert_cmphex(rv100_pll_read(qts, mmio, 0x01) & (1u << 4), ==, 0);
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -325,6 +359,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/rom-bar-tables", test_rv100_rom_bar_tables);
     qtest_add_func("/ati-rv100/vbe-mode-crtc", test_rv100_vbe_mode_crtc);
     qtest_add_func("/ati-rv100/pll-file", test_rv100_pll_file);
+    qtest_add_func("/ati-rv100/pll-post-state", test_rv100_pll_post_state);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();

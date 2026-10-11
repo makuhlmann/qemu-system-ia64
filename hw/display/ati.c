@@ -1174,7 +1174,26 @@ static void ati_pll_write(ATIVGAState *s, uint32_t data)
 
     if ((s->regs.clock_cntl_index & 0x80) && idx < ati_pll_count(s)) {
         s->regs.pll_regs[idx] = data;
+        s->pll_written |= BIT_ULL(idx);
     }
+}
+
+/*
+ * A PLL register read that only the reset value answers, and that value is
+ * 0: the model has no state behind it.  Report each index once, as
+ * ati_unimp() does for the register file.
+ */
+static void ati_pll_unimp(ATIVGAState *s, uint32_t val)
+{
+    unsigned idx = s->regs.clock_cntl_index & 0x3f;
+
+    if (val || (s->pll_written & BIT_ULL(idx)) ||
+        (s->pll_unimp_seen & BIT_ULL(idx))) {
+        return;
+    }
+    s->pll_unimp_seen |= BIT_ULL(idx);
+    qemu_log_mask(LOG_UNIMP, "ati-vga: PLL register 0x%02x read before any "
+                  "write: 0\n", idx);
 }
 
 static uint32_t ati_mm_aper_offset(const ATIVGAState *s, hwaddr addr)
@@ -1230,8 +1249,9 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         if ((s->regs.clock_cntl_index & 0x3f) == ATI_PLL_TEST_CNTL) {
             ati_pll_tick_test_count(s);
         }
-        val = ati_reg_read_offs(ati_pll_read(s), addr - CLOCK_CNTL_DATA,
-                                size);
+        val = ati_pll_read(s);
+        ati_pll_unimp(s, val);
+        val = ati_reg_read_offs(val, addr - CLOCK_CNTL_DATA, size);
         break;
     case 0x710 ... 0x713: /* PM4_BUFFER_DL_RPTR */
         val = ati_reg_read_offs(s->regs.pm4_dl_rptr, addr - 0x710, size);
@@ -2815,20 +2835,41 @@ static void ati_vga_reset(DeviceState *dev)
         s->regs.gpio_dvi_ddc = 0x300;
     }
 
-    /*
-     * PLL and init-register power-up values from the RAGE 128 PRO Register
-     * Reference Guide.  PLL indices follow the chip's PLL address space:
-     * 0x01 CLK_PIN_CNTL, 0x02 PPLL_CNTL, 0x0b XPLL_CNTL, 0x0c XDLL_CNTL,
-     * 0x0e MPLL_CNTL, 0x10 AGP_PLL_CNTL.
-     */
     s->regs.clock_cntl_index = 0;
     memset(s->regs.pll_regs, 0, sizeof(s->regs.pll_regs));
-    s->regs.pll_regs[0x01] = 0x000000f7;
-    s->regs.pll_regs[0x02] = 0x0000cc03;
-    s->regs.pll_regs[0x0b] = 0x0000cc03;
-    s->regs.pll_regs[0x0c] = 0x000b000b;
-    s->regs.pll_regs[0x0e] = 0x0000cc03;
-    s->regs.pll_regs[0x10] = 0x7a770000;
+    s->pll_written = 0;
+    if (ati_is_rage128(s)) {
+        /*
+         * PLL power-up values from the RAGE 128 PRO Register Reference
+         * Guide: 0x01 CLK_PIN_CNTL, 0x02 PPLL_CNTL, 0x0b XPLL_CNTL,
+         * 0x0c XDLL_CNTL, 0x0e MPLL_CNTL, 0x10 AGP_PLL_CNTL.
+         */
+        s->regs.pll_regs[0x01] = 0x000000f7;
+        s->regs.pll_regs[0x02] = 0x0000cc03;
+        s->regs.pll_regs[0x0b] = 0x0000cc03;
+        s->regs.pll_regs[0x0c] = 0x000b000b;
+        s->regs.pll_regs[0x0e] = 0x0000cc03;
+        s->regs.pll_regs[0x10] = 0x7a770000;
+    } else {
+        /*
+         * The RV100 as its BIOS leaves it after POST, since no BIOS POSTs it
+         * here: the pixel PLL's reference divider from the BIOS PLL block
+         * (60, as XFree86 4.3 printed it on the rx2600), the display clock
+         * from the pixel PLL (VCLK_ECP_CNTL), and the engine and memory
+         * clocks at the BIOS table's 166 MHz from 27.00 MHz: reference
+         * divider 27 and feedback 166 for both in M_SPLL_REF_FB_DIV, post /2
+         * in SCLK_CNTL and MCLK_CNTL.  Linux reads 2 * fb * ref / M / post
+         * (radeon_clocks.c radeon_legacy_get_engine_clock), radeonfb
+         * fb * ref / M (radeon_base.c radeon_probe_pll_params); post /2 makes
+         * both 166 MHz.  The other indices read 0: PLLs running, not in
+         * reset or asleep.  Provisional, the MP card's values were not read.
+         */
+        s->regs.pll_regs[0x03] = 60;            /* PPLL_REF_DIV */
+        s->regs.pll_regs[0x08] = 0x00000003;    /* VCLK_ECP_CNTL: PPLLCLK */
+        s->regs.pll_regs[0x0a] = (166u << 16) | (166u << 8) | 27;
+        s->regs.pll_regs[0x0d] = 2;             /* SCLK_CNTL */
+        s->regs.pll_regs[0x12] = 2;             /* MCLK_CNTL */
+    }
     memset(s->regs.init_aux, 0, sizeof(s->regs.init_aux));
     s->regs.init_aux[ati_init_aux_slot(0x0030)] = 0x880f0f41; /* BUS_CNTL */
     s->regs.init_aux[ati_init_aux_slot(0x0034)] = 0x0000001f; /* BUS_CNTL1 */

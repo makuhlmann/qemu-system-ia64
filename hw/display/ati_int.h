@@ -169,6 +169,9 @@ struct ATIVGAState {
     QEMUCursor *cursor;
     /* Register offsets already reported as unimplemented (-d unimp). */
     DECLARE_BITMAP(unimp_seen, ATI_R100_MMIO_SIZE / 4);
+    /* PLL indices written since reset, and those reported as unimplemented. */
+    uint64_t pll_written;
+    uint64_t pll_unimp_seen;
     QEMUTimer vblank_timer;
     bitbang_i2c_interface bbi2c;
     I2CDDCState i2cddc;
