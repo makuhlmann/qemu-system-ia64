@@ -616,7 +616,10 @@ static void test_rv100_cp_ring_gart(void)
     qtest_quit(qts);
 }
 
-/* With CP_CSQ_CNTL 0 the CP is off: the ring is not fetched, nothing moves. */
+/*
+ * With CP_CSQ_CNTL 0 the CP is off: the ring is not fetched, nothing moves;
+ * once on, it runs what is queued.
+ */
 static void test_rv100_cp_off(void)
 {
     QTestState *qts = qtest_init(RV100_ARGS);
@@ -633,13 +636,18 @@ static void test_rv100_cp_off(void)
     g_assert_cmphex(qtest_readl(qts, fb + 0x100000), !=, 0x00abcdef);
     g_assert_cmpuint(qtest_readl(qts, mmio + 0x710), ==, 0);
     g_assert_cmpuint(qtest_readl(qts, RV100_PAGES + 0x1000), ==, 0);
+    /* Turned on, the CP fetches what is queued. */
+    qtest_writel(qts, mmio + 0x740, 8u << 28);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100000), ==, 0x00abcdef);
+    g_assert_cmpuint(qtest_readl(qts, mmio + 0x710), ==, n);
     qtest_quit(qts);
 }
 
 /*
  * An indirect buffer: the ring writes CP_IB_BASE and CP_IB_BUFSZ (738h,
  * 73Ch) in one type-0 packet, as the DRMs do; the buffer in GART page 2
- * holds the fill.  It runs in mode 4 (PRIBM_INDBM), not in mode 2.
+ * holds the fill.  It runs in mode 4 (PRIBM_INDBM) and in mode 8, the Rage
+ * 128's 64BM_64VCBM_64INDBM that ati2mtag uses, not in mode 2.
  */
 static void rv100_cp_ib(QTestState *qts, uint64_t mmio, uint32_t csq_mode)
 {
@@ -673,6 +681,13 @@ static void test_rv100_cp_indirect(void)
     rv100_cp_ib(qts, mmio, 4);
     g_assert_cmphex(qtest_readl(qts, fb + 0x100000), ==, 0x00456789);
     g_assert_cmphex(qtest_readl(qts, fb + 0x10000c), ==, 0x00456789);
+    qtest_quit(qts);
+
+    qts = qtest_init(RV100_ARGS);
+    mmio = rv100_mmio(qts);
+    rv100_cp_ib(qts, mmio, 8);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100000), ==, 0x00456789);
+    g_assert_cmpuint(qtest_readl(qts, mmio + 0x710), ==, 3);
     qtest_quit(qts);
 }
 

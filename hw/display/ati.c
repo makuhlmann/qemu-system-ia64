@@ -809,14 +809,30 @@ static void ati_r100_mc_stl(ATIVGAState *s, uint32_t mc, uint32_t val)
 }
 
 /*
- * CP_CSQ_CNTL's mode (bits 31:28): bus master fetches the ring in modes 2
- * (PRIBM_INDDIS) and 4 (PRIBM_INDBM), indirect buffers in 3 and 4; 0 is
- * off, and the rest feed the CP through CP_CSQ_APER by PIO, which no driver
- * here does (radeon_reg.h).
+ * CP_CSQ_CNTL's mode (bits 31:28) is the Rage 128's PM4 mode field: Linux
+ * radeon_reg.h names 0-4 and 15 as r128_reg.h does (0 off, 2 ring by bus
+ * master, 4 ring and indirect buffers by bus master), and ati2mtag uses 8,
+ * the Rage 128's 64BM_64VCBM_64INDBM.  The ring is fetched by bus master in
+ * the even modes 2-8, indirect buffers in 3-8; odd modes and 15 feed the
+ * ring through CP_CSQ_APER by PIO, which no driver here does.
  */
 static unsigned ati_r100_csq_mode(ATIVGAState *s)
 {
     return ati_r100_reg(s, ATI_R100_CP_CSQ_CNTL) >> 28;
+}
+
+static bool ati_r100_csq_ring_bm(ATIVGAState *s)
+{
+    unsigned mode = ati_r100_csq_mode(s);
+
+    return mode >= 2 && mode <= 8 && !(mode & 1);
+}
+
+static bool ati_r100_csq_ind_bm(ATIVGAState *s)
+{
+    unsigned mode = ati_r100_csq_mode(s);
+
+    return mode >= 3 && mode <= 8;
 }
 
 /*
@@ -1393,10 +1409,9 @@ static void ati_r100_cp_run(ATIVGAState *s)
     uint32_t base = s->regs.init_aux[ati_init_aux_slot(0x0700)] & ~3u;
     uint32_t wb = s->regs.init_aux[ati_init_aux_slot(0x070c)] & ~3u;
     unsigned bufsz = cntl & 0x3f;
-    unsigned mode = ati_r100_csq_mode(s);
     uint32_t mask;
 
-    if ((mode != 2 && mode != 4) || bufsz > 20 || s->r100_cp_active) {
+    if (!ati_r100_csq_ring_bm(s) || bufsz > 20 || s->r100_cp_active) {
         return;
     }
     mask = (2u << bufsz) - 1;
@@ -2090,9 +2105,8 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         break;
     case PM4_IW_INDSIZE ... PM4_IW_INDSIZE + 3:
         ati_reg_write_offs(&s->cce_indsize, addr - PM4_IW_INDSIZE, data, size);
-        /* The Radeon's CP_IB_BASE/CP_IB_BUFSZ: in CP_CSQ_CNTL modes 3 and 4. */
-        if (ati_is_rage128(s) || ati_r100_csq_mode(s) == 3 ||
-            ati_r100_csq_mode(s) == 4) {
+        /* The Radeon's CP_IB_BASE/CP_IB_BUFSZ, in CP_CSQ_CNTL modes 3-8. */
+        if (ati_is_rage128(s) || ati_r100_csq_ind_bm(s)) {
             ati_cce_execute_indirect(s);
         }
         break;
@@ -2741,6 +2755,10 @@ static bool ati_r100_mm_write(ATIVGAState *s, hwaddr addr, uint64_t data,
 
     if (aux >= 0) {
         ati_reg_write_offs(&s->regs.r100_aux[aux], addr & 3, data, size);
+        /* A CP turned on fetches what the ring already holds. */
+        if ((addr & ~3ULL) == ATI_R100_CP_CSQ_CNTL) {
+            ati_r100_cp_run(s);
+        }
     } else if (reg) {
         ati_reg_write_offs(reg, addr & 3, data, size);
         /* INFO: pitch (low bits, tiling) and the swap modes. */
