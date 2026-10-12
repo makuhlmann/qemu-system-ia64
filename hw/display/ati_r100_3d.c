@@ -355,6 +355,14 @@ static bool r100_in_gart(ATIVGAState *s, uint64_t address)
            address <= ati_r100_reg(s, R100_AIC_HI_ADDR);
 }
 
+bool ati_r100_gart_contains(ATIVGAState *s, uint64_t address,
+                            uint64_t length)
+{
+    return length && length - 1 <= UINT64_MAX - address &&
+           r100_in_gart(s, address) &&
+           address + length - 1 <= ati_r100_reg(s, R100_AIC_HI_ADDR);
+}
+
 static bool r100_translate_gart(ATIVGAState *s, uint64_t address,
                                 uint64_t length, uint64_t *translated,
                                 uint64_t *span)

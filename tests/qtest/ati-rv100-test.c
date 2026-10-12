@@ -1354,6 +1354,67 @@ static void test_rv100_2d_tiled(void)
 }
 
 /*
+ * The 2D engine reaches linear surfaces in the PCI GART aperture as X.Org's
+ * KMS driver keeps its pixmaps on a card with 32 MB of VRAM or less
+ * (xf86-video-ati radeon_kms.c): a copy from GART memory to VRAM, from VRAM
+ * to GART memory, and a fill into GART memory.  Pitch 256 bytes; the GART
+ * surface starts at E000_0400h (RAM 200400h).
+ */
+static void test_rv100_2d_gart(void)
+{
+    const uint32_t gmc_fill = 0x2 | 0xd0 | (6u << 8) | (3u << 12) |
+                              0x00f00000 | (2u << 24) | 0x10000000;
+    const uint32_t gmc_copy = 0x3 | 0xf0 | (6u << 8) | (3u << 12) |
+                              0x00cc0000 | (2u << 24) | 0x10000000;
+    const uint32_t gart_po = (4u << 22) | ((RV100_GART + 0x400) >> 10);
+    const uint32_t vram_po = (4u << 22) | (0x100000 >> 10);
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    unsigned i;
+
+    rv100_cp_setup(qts, mmio, 0);
+    qtest_memset(qts, fb + 0x100000, 0, 0x1000);
+    for (i = 0; i < 4; i++) {
+        qtest_writel(qts, RV100_PAGES + 0x400 + i * 4, 0x00100000 * (i + 1));
+        qtest_writel(qts, RV100_PAGES + 0x500 + i * 4, 0x00000100 * (i + 1));
+    }
+
+    /* 4x2 at (0, 0) of the GART surface to (8, 1) in VRAM. */
+    rv100_2d_op(qts, mmio, gmc_copy, gart_po, vram_po, 0, (1u << 16) | 8,
+                (2u << 16) | 4);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(qtest_readl(qts, fb + 0x100120 + i * 4), ==,
+                        0x00100000 * (i + 1));
+        g_assert_cmphex(qtest_readl(qts, fb + 0x100220 + i * 4), ==,
+                        0x00000100 * (i + 1));
+    }
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100130), ==, 0);
+
+    /* Back from VRAM (8, 1) to (2, 3) of the GART surface. */
+    rv100_2d_op(qts, mmio, gmc_copy, vram_po, gart_po, (1u << 16) | 8,
+                (3u << 16) | 2, (1u << 16) | 4);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(qtest_readl(qts, RV100_PAGES + 0x708 + i * 4), ==,
+                        0x00100000 * (i + 1));
+    }
+    g_assert_cmphex(qtest_readl(qts, RV100_PAGES + 0x704), ==, 0);
+
+    /* A 3x1 fill at (1, 4) of the GART surface. */
+    qtest_writel(qts, mmio + 0x147c, 0x00c0ffee);   /* DP_BRUSH_FRGD_CLR */
+    rv100_2d_op(qts, mmio, gmc_fill, 0, gart_po, 0, (4u << 16) | 1,
+                (1u << 16) | 3);
+    g_assert_cmphex(qtest_readl(qts, RV100_PAGES + 0x800), ==, 0);
+    for (i = 1; i < 4; i++) {
+        g_assert_cmphex(qtest_readl(qts, RV100_PAGES + 0x800 + i * 4), ==,
+                        0x00c0ffee);
+    }
+    g_assert_cmphex(qtest_readl(qts, RV100_PAGES + 0x810), ==, 0);
+    qtest_quit(qts);
+}
+
+/*
  * x-tiling: SURFACE0-7 show the host a tiled buffer as a linear image
  * (r100_set_surface_reg: INFO = pitch / 16 | mode << 16, inclusive bounds).
  * A 4096-byte-pitch colour surface at 100000h puts linear (72, 21) at
@@ -1497,6 +1558,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/rop3", test_rv100_rop3);
     qtest_add_func("/ati-rv100/scissor", test_rv100_scissor);
     qtest_add_func("/ati-rv100/cp-ring-gart", test_rv100_cp_ring_gart);
+    qtest_add_func("/ati-rv100/2d-gart", test_rv100_2d_gart);
     qtest_add_func("/ati-rv100/cp-off", test_rv100_cp_off);
     qtest_add_func("/ati-rv100/cp-microcode-address",
                    test_rv100_cp_microcode_address);

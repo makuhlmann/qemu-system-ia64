@@ -316,6 +316,8 @@ bool ati_r100_gpu_read(ATIVGAState *s, uint64_t address, void *buf,
                        uint64_t length);
 bool ati_r100_gpu_write(ATIVGAState *s, uint64_t address, const void *buf,
                         uint64_t length, bool dirty);
+bool ati_r100_gart_contains(ATIVGAState *s, uint64_t address,
+                            uint64_t length);
 /* Tile modes as DST_PITCH_OFFSET bits 31:30 hold them (radeon_reg.h). */
 #define ATI_R100_TILE_LINEAR    0
 #define ATI_R100_TILE_MACRO     1

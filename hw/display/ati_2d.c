@@ -75,11 +75,16 @@ typedef struct {
     uint8_t *dst_bits;
     uint32_t dst_offset;
     unsigned dst_tile;
+    /* Radeon: the surface lies outside VRAM, at this card address. */
+    bool dst_gart;
+    uint32_t dst_mc;
 
     QemuRect src;
     int src_stride;
     const uint8_t *src_bits;
     unsigned src_tile;
+    bool src_gart;
+    uint32_t src_mc;
 
     /* The memory dst_bits and src_bits may address: VRAM, or a tile copy. */
     const uint8_t *dst_lo, *dst_hi;
@@ -152,6 +157,8 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     ctx->brush_x = s->regs.brush_y_x & 7;
     ctx->brush_y = (s->regs.brush_y_x >> 16) & 7;
     ctx->dst_offset = ati_mc_vram_offset(s, s->regs.dst_offset);
+    ctx->dst_mc = s->regs.dst_offset;
+    ctx->dst_gart = ctx->dst_offset == UINT32_MAX && !ati_is_rage128(s);
     ctx->dst_tile = s->r100_tiling && !ati_is_rage128(s) ?
                     s->regs.dst_tile & ATI_R100_TILE_BOTH : 0;
     ctx->src_tile = s->r100_tiling && !ati_is_rage128(s) ?
@@ -203,6 +210,9 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     ctx->src_stride = s->regs.src_pitch;
     ctx->src_bits = s->vga.vram_ptr +
                     ati_mc_vram_offset(s, s->regs.src_offset);
+    ctx->src_mc = s->regs.src_offset;
+    ctx->src_gart = ati_mc_vram_offset(s, s->regs.src_offset) == UINT32_MAX &&
+                    !ati_is_rage128(s);
     if (ati_is_rage128(s)) {
         ctx->src_stride *= (ctx->bpp == 24) ? 8 : ctx->bpp;
     }
@@ -785,18 +795,24 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
 }
 
 /*
+ * Staging: a surface the operation cannot address in place is copied into a
+ * linear buffer of whole pitch-wide lines covering the visible rectangle, the
+ * operation runs there unchanged, and the destination lines go back.  Lines
+ * shift up by the rectangle's top; the brush phase moves with them.  The
+ * source is a snapshot taken before anything is written, so an overlapping
+ * copy between staged surfaces reads what was there before.
+ *
  * x-tiling: a tiled destination or source (PITCH_OFFSET bits 31:30 on the
- * Radeon) is copied into a linear buffer of whole pitch-wide lines covering
- * the visible rectangle, the operation runs there unchanged, and the
- * destination lines go back through the tile layout.  Lines shift up by the
- * rectangle's top; the brush phase moves with them.
+ * Radeon) goes through the tile layout.  A linear surface in the PCI GART
+ * aperture goes through the memory controller: with 32 MB of VRAM or less,
+ * X.Org's KMS driver keeps its pixmaps there (xf86-video-ati 6.14.6
+ * radeon_kms.c:784-793) and blits them to the screen.
  */
-typedef struct ATI2DTileCopy {
+typedef struct ATI2DStage {
     uint8_t *dst;
     uint8_t *src;
     QemuRect vis;
-    uint32_t src_offset;
-} ATI2DTileCopy;
+} ATI2DStage;
 
 static void ati_2d_tile_copy(VGACommonState *vga, unsigned tile, unsigned bypp,
                              uint32_t base, int stride, const QemuRect *r,
@@ -825,43 +841,105 @@ static void ati_2d_tile_copy(VGACommonState *vga, unsigned tile, unsigned bypp,
     }
 }
 
-static bool ati_2d_tile_begin(ATI2DCtx *ctx, ATI2DTileCopy *t)
+/* Rows of rectangle r of a linear surface in the PCI GART aperture. */
+static bool ati_2d_gart_rows(ATIVGAState *s, uint32_t mc, unsigned bypp,
+                             int stride, const QemuRect *r, uint8_t *lin,
+                             bool to_card)
+{
+    for (int y = 0; y < r->height; y++) {
+        int x = MAX(r->x, 0);
+        uint64_t addr, len;
+        uint8_t *p;
+
+        if (r->y + y < 0 || r->x + r->width <= x) {
+            continue;
+        }
+        addr = mc + (uint64_t)(r->y + y) * stride + (uint64_t)x * bypp;
+        len = (uint64_t)(r->x + r->width - x) * bypp;
+        p = lin + (ptrdiff_t)y * stride + (ptrdiff_t)x * bypp;
+        if (!ati_r100_gart_contains(s, addr, len) ||
+            !(to_card ? ati_r100_gpu_write(s, addr, p, len, true) :
+                        ati_r100_gpu_read(s, addr, p, len))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* False when the operation draws nothing. */
+static bool ati_2d_stage_begin(ATIVGAState *s, ATI2DCtx *ctx, ATI2DStage *t)
 {
     unsigned bypp = ctx->bpp / 8;
+    bool src_used = !ctx->host_data_active &&
+                    ati_rop3_uses_src(ctx->rop3 >> 16);
+    bool stage_src = (ctx->src_tile && !ctx->host_data_active) ||
+                     (ctx->src_gart && src_used);
     QemuRect vis_src;
 
     t->dst = t->src = NULL;
-    if (!ctx->dst_tile && !ctx->src_tile) {
-        return false;
-    }
-    qemu_rect_intersect(&ctx->dst, &ctx->scissor, &t->vis);
-    if (!t->vis.width || !t->vis.height || bypp == 3 ||
-        ctx->dst_stride <= 0 || (ptrdiff_t)ctx->dst_stride <
-        ((ptrdiff_t)t->vis.x + t->vis.width) * bypp) {
+    if (!ctx->dst_tile && !ctx->dst_gart && !stage_src) {
         return true;
     }
-    t->dst = g_malloc0((size_t)t->vis.height * ctx->dst_stride);
-    ati_2d_tile_copy(ctx->vga, ctx->dst_tile, bypp, ctx->dst_offset,
-                     ctx->dst_stride, &t->vis, t->dst, false, NULL, NULL);
+    qemu_rect_intersect(&ctx->dst, &ctx->scissor, &t->vis);
+    if (!t->vis.width || !t->vis.height || bypp == 3) {
+        return false;
+    }
+    if ((ctx->dst_gart && ctx->dst_tile) ||
+        (ctx->src_gart && ctx->src_tile && src_used)) {
+        qemu_log_mask(LOG_UNIMP, "ati-vga: tiled 2D surface outside VRAM\n");
+        return false;
+    }
     vis_src.x = ctx->src.x + (t->vis.x - ctx->dst.x);
     vis_src.y = ctx->src.y + (t->vis.y - ctx->dst.y);
     vis_src.width = t->vis.width;
     vis_src.height = t->vis.height;
-    ctx->dst_bits = t->dst;
-    ctx->dst_lo = t->dst;
-    ctx->dst_hi = t->dst + (size_t)t->vis.height * ctx->dst_stride;
-    ctx->dst.y -= t->vis.y;
-    ctx->scissor.y -= t->vis.y;
-    ctx->brush_y = (ctx->brush_y + t->vis.y) & 7;
 
-    if (ctx->src_tile && !ctx->host_data_active && ctx->src_stride > 0 &&
+    if (ctx->dst_tile || ctx->dst_gart) {
+        if (ctx->dst_stride <= 0 || (ptrdiff_t)ctx->dst_stride <
+            ((ptrdiff_t)t->vis.x + t->vis.width) * bypp) {
+            return false;
+        }
+        t->dst = g_malloc0((size_t)t->vis.height * ctx->dst_stride);
+        if (ctx->dst_gart) {
+            if (!ati_2d_gart_rows(s, ctx->dst_mc, bypp, ctx->dst_stride,
+                                  &t->vis, t->dst, false)) {
+                qemu_log_mask(LOG_UNIMP, "blt outside vram not implemented\n");
+                g_free(t->dst);
+                t->dst = NULL;
+                return false;
+            }
+        } else {
+            ati_2d_tile_copy(ctx->vga, ctx->dst_tile, bypp, ctx->dst_offset,
+                             ctx->dst_stride, &t->vis, t->dst, false, NULL,
+                             NULL);
+        }
+        ctx->dst_bits = t->dst;
+        ctx->dst_lo = t->dst;
+        ctx->dst_hi = t->dst + (size_t)t->vis.height * ctx->dst_stride;
+        ctx->dst.y -= t->vis.y;
+        ctx->scissor.y -= t->vis.y;
+        ctx->brush_y = (ctx->brush_y + t->vis.y) & 7;
+    }
+
+    if (stage_src && ctx->src_stride > 0 &&
         (ptrdiff_t)ctx->src_stride >=
         ((ptrdiff_t)vis_src.x + vis_src.width) * bypp) {
-        t->src_offset = ctx->src_bits - ctx->vga->vram_ptr;
         t->src = g_malloc0((size_t)vis_src.height * ctx->src_stride);
-        ati_2d_tile_copy(ctx->vga, ctx->src_tile, bypp, t->src_offset,
-                         ctx->src_stride, &vis_src, t->src, false, NULL,
-                         NULL);
+        if (ctx->src_gart) {
+            if (!ati_2d_gart_rows(s, ctx->src_mc, bypp, ctx->src_stride,
+                                  &vis_src, t->src, false)) {
+                qemu_log_mask(LOG_UNIMP, "blt outside vram not implemented\n");
+                g_free(t->dst);
+                g_free(t->src);
+                t->dst = t->src = NULL;
+                return false;
+            }
+        } else {
+            ati_2d_tile_copy(ctx->vga, ctx->src_tile, bypp,
+                             ctx->src_bits - ctx->vga->vram_ptr,
+                             ctx->src_stride, &vis_src, t->src, false, NULL,
+                             NULL);
+        }
         ctx->src_bits = t->src;
         ctx->src_lo = t->src;
         ctx->src_hi = t->src + (size_t)vis_src.height * ctx->src_stride;
@@ -870,11 +948,17 @@ static bool ati_2d_tile_begin(ATI2DCtx *ctx, ATI2DTileCopy *t)
     return true;
 }
 
-static void ati_2d_tile_end(ATI2DCtx *ctx, ATI2DTileCopy *t, bool drawn)
+static void ati_2d_stage_end(ATIVGAState *s, ATI2DCtx *ctx, ATI2DStage *t,
+                             bool drawn)
 {
     hwaddr lo = HWADDR_MAX, hi = 0;
 
-    if (t->dst && drawn) {
+    if (drawn && !t->dst) {
+        ati_set_dirty(ctx);
+    } else if (drawn && ctx->dst_gart) {
+        ati_2d_gart_rows(s, ctx->dst_mc, ctx->bpp / 8, ctx->dst_stride,
+                         &t->vis, t->dst, true);
+    } else if (drawn) {
         ati_2d_tile_copy(ctx->vga, ctx->dst_tile, ctx->bpp / 8,
                          ctx->dst_offset, ctx->dst_stride, &t->vis, t->dst,
                          true, &lo, &hi);
@@ -887,19 +971,17 @@ static void ati_2d_tile_end(ATI2DCtx *ctx, ATI2DTileCopy *t, bool drawn)
 }
 
 /*
- * One operation on the context, through tile copies where needed.  The tile
- * copies rewrite a context (pointers, lines, scissor, brush phase), so they
- * get their own: a host-data blit reuses its context for the next span.
+ * One operation on the context, through staging where needed.  Staging
+ * rewrites a context (pointers, lines, scissor, brush phase), so it gets its
+ * own: a host-data blit reuses its context for the next span.
  */
 static void ati_2d_run(ATIVGAState *s, const ATI2DCtx *ctx)
 {
     ATI2DCtx c = *ctx;
-    ATI2DTileCopy t;
+    ATI2DStage t;
 
-    if (ati_2d_tile_begin(&c, &t)) {
-        ati_2d_tile_end(&c, &t, t.dst && ati_2d_do_blt(&c, s->use_pixman));
-    } else if (ati_2d_do_blt(&c, s->use_pixman)) {
-        ati_set_dirty(&c);
+    if (ati_2d_stage_begin(s, &c, &t)) {
+        ati_2d_stage_end(s, &c, &t, ati_2d_do_blt(&c, s->use_pixman));
     }
 }
 
