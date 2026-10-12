@@ -178,7 +178,7 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
         if (blk == NULL) {
             return false;
         }
-        qdev_prop_set_drive(pdh, "store", blk);
+        ia64_vpc_nvram_attach(pdh, "store", blk);
     }
     pdh_sbd = SYS_BUS_DEVICE(pdh);
     if (!sysbus_realize_and_unref(pdh_sbd, errp)) {

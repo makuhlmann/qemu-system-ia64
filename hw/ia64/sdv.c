@@ -25,6 +25,7 @@
 #include "hw/ia64/ia64_460gx_identity.h"
 #include "hw/ia64/ia64_i2000_hwmon.h"
 #include "hw/ia64/ia64_iosapic.h"
+#include "system/block-backend.h"
 #include "target/ia64/cpu.h"
 #include "ia64_vpc_internal.h"
 
@@ -365,6 +366,8 @@ static ISABus *sdv_build_isa(IA64VpcMachineState *s, PCIBus *pci_bus,
         pci_bus, PCI_DEVFN(IA64_460GX_IFB_SLOT,
                            IA64_460GX_IFB_LPC_FUNCTION),
         SDV_GPIO_INPUTS, s->nvram_battery, IA64_460GX_ACPI_PM_IO_BASE, errp);
+    /* The bridge holds the node itself now; see ia64_vpc_nvram_attach. */
+    g_clear_pointer(&s->nvram_battery, blk_unref);
     if (s->ifb == NULL) {
         return NULL;
     }

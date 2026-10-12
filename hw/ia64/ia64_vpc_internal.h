@@ -396,6 +396,10 @@ void ia64_vpc_rage128_agp(IA64VpcMachineState *s);
  */
 BlockBackend *ia64_vpc_open_pdh_store(const char *path, Error **errp);
 
+/* Give an opened `nvram=` view to @dev's drive property @prop. */
+void ia64_vpc_nvram_attach(DeviceState *dev, const char *prop,
+                           BlockBackend *blk);
+
 /*
  * Put the machine's own options (console, boot timeout, ...) where the
  * project firmware reads them, for a board that keeps its store outside the

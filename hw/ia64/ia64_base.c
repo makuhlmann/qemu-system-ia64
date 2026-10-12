@@ -4958,6 +4958,20 @@ static bool ia64_vpc_read_firmware(IA64VpcMachineState *s,
 }
 
 /*
+ * The property cannot take an anonymous BlockBackend such as blk_new_open()
+ * returns: it puts the device on one of its own over the same node.  The
+ * opener's would stay behind with write permission and no device, and
+ * bdrv_inactivate_all() refuses that at the end of every migration, so drop
+ * it once the device holds the node.
+ */
+void ia64_vpc_nvram_attach(DeviceState *dev, const char *prop,
+                           BlockBackend *blk)
+{
+    qdev_prop_set_drive(dev, prop, blk);
+    blk_unref(blk);
+}
+
+/*
  * The zx1 board keeps its settings in the PDH battery-backed SRAM and in its
  * BMC, so its `nvram=` file is a raw image of that part followed by the BMC's
  * tokens.  A file of just the part was kept before the BMC was, and gains the
@@ -5052,15 +5066,18 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
     {
         DeviceState *dev = qdev_new(TYPE_PFLASH_CFI01);
         MemoryRegion *flash_mr;
-        BlockBackend *flash_blk = NULL;
+        bool persistent = false;
 
         if (s->nvram_path != NULL &&
             !IA64_VPC_MACHINE_GET_CLASS(s)->nvram_is_pdh_store) {
-            flash_blk = ia64_vpc_open_flash_backing(s, s->nvram_path, errp);
-            if (flash_blk == NULL) {
+            BlockBackend *blk = ia64_vpc_open_flash_backing(s, s->nvram_path,
+                                                            errp);
+
+            if (blk == NULL) {
                 return false;
             }
-            qdev_prop_set_drive(dev, "drive", flash_blk);
+            ia64_vpc_nvram_attach(dev, "drive", blk);
+            persistent = true;
         }
 
         qdev_prop_set_uint32(dev, "num-blocks", part / imc->flash_sector_len);
@@ -5104,7 +5121,7 @@ static bool ia64_vpc_load_flash(IA64VpcMachineState *s, Error **errp)
          * (possibly firmware-updated) contents from the backing file, so the
          * image copy would clobber them.
          */
-        if (flash_blk == NULL) {
+        if (!persistent) {
             uint8_t *ram = memory_region_get_ram_ptr(flash_mr);
 
             /* An erased block reads 0xFF; the image takes the top of it. */

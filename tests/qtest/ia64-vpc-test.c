@@ -3086,6 +3086,109 @@ static void test_pdh_bmc_tokens_persist(void)
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
 
+/* Wait for the outgoing or incoming migration of @qts to complete. */
+static void ia64_wait_migration(QTestState *qts)
+{
+    const gint64 deadline = g_get_monotonic_time() + 60 * G_USEC_PER_SEC;
+
+    for (;;) {
+        QDict *rsp = qtest_qmp(qts, "{ 'execute': 'query-migrate' }");
+        QDict *ret = qdict_get_qdict(rsp, "return");
+        g_autofree char *status = g_strdup(qdict_haskey(ret, "status") ?
+                                           qdict_get_str(ret, "status") :
+                                           "none");
+        g_autofree char *reason = g_strdup(qdict_haskey(ret, "error-desc") ?
+                                           qdict_get_str(ret, "error-desc") :
+                                           "");
+
+        qobject_unref(rsp);
+        if (strcmp(status, "failed") == 0) {
+            g_error("migration failed: %s", reason);
+        }
+        if (strcmp(status, "completed") == 0) {
+            return;
+        }
+        g_assert_cmpint(g_get_monotonic_time(), <, deadline);
+        g_usleep(1000);
+    }
+}
+
+static void ia64_migrate_to_file(QTestState *src, const char *file)
+{
+    g_autofree char *uri = g_strdup_printf("file:%s", file);
+
+    qtest_qmp_assert_success(src, "{ 'execute': 'migrate',"
+                             " 'arguments': { 'uri': %s } }", uri);
+    ia64_wait_migration(src);
+}
+
+/*
+ * A zx1 machine with `nvram=` migrates.  The part and the BMC's tokens
+ * travel in the machine's state, not in the file: the destination starts on
+ * a new file, has them, and leaves them in that file when it stops.
+ */
+static void test_pdh_store_migrates(void)
+{
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    const uint8_t write[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_WRITE,
+                              0x00, 0x05, 18 };
+    const uint8_t read[] = { IPMI_NETFN_HP_TOKEN_LUN0, IPMI_HP_TOKEN_READ,
+                             0x00, 0x05 };
+    const uint64_t last = IA64_PDH_BBSRAM_SIZE - 8;
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = g_dir_make_tmp("ia64-vpc-store-mig-XXXXXX",
+                                             &error);
+    g_autofree char *src_path = NULL;
+    g_autofree char *dst_path = NULL;
+    g_autofree char *state = NULL;
+    g_autofree char *incoming = NULL;
+    g_autofree char *quoted_src = NULL;
+    g_autofree char *quoted_dst = NULL;
+    g_autofree char *contents = NULL;
+    gsize length = 0;
+    QTestState *qts;
+    uint8_t rsp[16];
+
+    g_assert_no_error(error);
+    src_path = g_build_filename(tmpdir, "src.nvram", NULL);
+    dst_path = g_build_filename(tmpdir, "dst.nvram", NULL);
+    state = g_build_filename(tmpdir, "state", NULL);
+    quoted_src = g_shell_quote(src_path);
+    quoted_dst = g_shell_quote(dst_path);
+    incoming = g_strdup_printf("file:%s", state);
+
+    qts = qtest_initf("-machine zx1,nvram=%s -m 256M", quoted_src);
+    qtest_writeq(qts, IA64_PDH_BBSRAM_BASE, 0x4e564d2054494e49ULL);
+    qtest_writeq(qts, IA64_PDH_BBSRAM_BASE + last, 0x1122334455667788ULL);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, write, G_N_ELEMENTS(write),
+                                     rsp, sizeof(rsp)), ==, 3);
+    g_assert_cmphex(rsp[2], ==, 0x00);
+    ia64_migrate_to_file(qts, state);
+    qtest_quit(qts);
+
+    qts = qtest_initf("-machine zx1,nvram=%s -m 256M -incoming %s",
+                      quoted_dst, incoming);
+    ia64_wait_migration(qts);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_BBSRAM_BASE), ==,
+                    0x4e564d2054494e49ULL);
+    g_assert_cmphex(qtest_readq(qts, IA64_PDH_BBSRAM_BASE + last), ==,
+                    0x1122334455667788ULL);
+    g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, G_N_ELEMENTS(read),
+                                     rsp, sizeof(rsp)), ==, 4);
+    g_assert_cmpuint(rsp[3], ==, 18);
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(dst_path, &contents, &length, &error));
+    g_assert_cmpuint(length, ==, IA64_PDH_STORE_SIZE);
+    g_assert_cmphex(ldq_le_p(contents), ==, 0x4e564d2054494e49ULL);
+    g_assert_cmphex(ldq_le_p(contents + last), ==, 0x1122334455667788ULL);
+
+    g_assert_cmpint(g_unlink(state), ==, 0);
+    g_assert_cmpint(g_unlink(dst_path), ==, 0);
+    g_assert_cmpint(g_unlink(src_path), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
 #define IA64_ISP_REG_ISTATUS    0x0aU
 #define IA64_ISP_REG_SEMAPHORE  0x0cU
 #define IA64_ISP_REG_MAILBOX0   0x70U
@@ -5553,6 +5656,81 @@ static void test_nvram_rtc_battery(void)
     g_assert_cmpuint(length, ==, image_size + IA64_RTC_BATTERY_SIZE);
 
     g_assert_cmpint(g_unlink(path), ==, 0);
+    g_assert_cmpint(g_unlink(flash), ==, 0);
+    g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
+}
+
+/*
+ * A 460gx machine with `nvram=` migrates: the flash and both RTC banks
+ * travel in the machine's state, and the destination, started on a new
+ * file, leaves them in that file when it stops.
+ */
+static void test_nvram_migrates(void)
+{
+    const uint64_t test_value = 0x1122334455667788ULL;
+    const uint64_t image_size = 0x80000;
+    const uint64_t sector = IA64_NVRAM_BASE - (0x100000000ULL - image_size);
+    g_autoptr(GError) error = NULL;
+    g_autofree char *tmpdir = g_dir_make_tmp("ia64-vpc-nvram-mig-XXXXXX",
+                                             &error);
+    g_autofree char *flash = NULL;
+    g_autofree char *src_path = NULL;
+    g_autofree char *dst_path = NULL;
+    g_autofree char *state = NULL;
+    g_autofree char *incoming = NULL;
+    g_autofree char *quoted_flash = NULL;
+    g_autofree char *quoted_src = NULL;
+    g_autofree char *quoted_dst = NULL;
+    g_autofree char *contents = NULL;
+    const uint8_t *area;
+    gsize length = 0;
+    QTestState *qts;
+    unsigned int i;
+
+    g_assert_no_error(error);
+    flash = ia64_make_nvram_flash_image(tmpdir);
+    quoted_flash = g_shell_quote(flash);
+    src_path = g_build_filename(tmpdir, "src.nvram", NULL);
+    dst_path = g_build_filename(tmpdir, "dst.nvram", NULL);
+    state = g_build_filename(tmpdir, "state", NULL);
+    quoted_src = g_shell_quote(src_path);
+    quoted_dst = g_shell_quote(dst_path);
+    incoming = g_strdup_printf("file:%s", state);
+
+    qts = qtest_initf("-machine 460gx,nvram=%s -bios %s -m 256M",
+                      quoted_src, quoted_flash);
+    ia64_flash_unlock_block(qts, IA64_NVRAM_BASE);
+    for (i = 0; i < 8; i++) {
+        ia64_flash_program_byte(qts, IA64_NVRAM_BASE + i,
+                                (test_value >> (i * 8)) & 0xff);
+    }
+    qtest_writeb(qts, IA64_NVRAM_BASE, 0xff);        /* read array */
+    g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, test_value);
+    rtc_bank_write(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH, 0xa5);
+    rtc_bank_write(qts, IA64_RTC_EXT_INDEX, 0x03, 0x08);
+    ia64_migrate_to_file(qts, state);
+    qtest_quit(qts);
+
+    qts = qtest_initf("-machine 460gx,nvram=%s -bios %s -m 256M -incoming %s",
+                      quoted_dst, quoted_flash, incoming);
+    ia64_wait_migration(qts);
+    g_assert_cmphex(qtest_readq(qts, IA64_NVRAM_BASE), ==, test_value);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_INDEX, IA64_RTC_SCRATCH), ==,
+                    0xa5);
+    g_assert_cmphex(rtc_bank_read(qts, IA64_RTC_EXT_INDEX, 0x03), ==, 0x08);
+    qtest_quit(qts);
+
+    g_assert_true(g_file_get_contents(dst_path, &contents, &length, &error));
+    g_assert_cmpuint(length, ==, image_size + IA64_RTC_BATTERY_SIZE);
+    g_assert_cmphex(ldq_le_p(contents + sector), ==, test_value);
+    area = (const uint8_t *)contents + image_size;
+    g_assert_cmpmem(area, 8, "IFB-RTC1", 8);
+    g_assert_cmphex(area[IA64_RTC_BATTERY_BANKS + IA64_RTC_SCRATCH], ==, 0xa5);
+    g_assert_cmphex(area[IA64_RTC_BATTERY_BANKS + 128 + 0x03], ==, 0x08);
+
+    g_assert_cmpint(g_unlink(state), ==, 0);
+    g_assert_cmpint(g_unlink(dst_path), ==, 0);
+    g_assert_cmpint(g_unlink(src_path), ==, 0);
     g_assert_cmpint(g_unlink(flash), ==, 0);
     g_assert_cmpint(g_rmdir(tmpdir), ==, 0);
 }
@@ -11881,6 +12059,7 @@ int main(int argc, char **argv)
                    test_pdh_bmc_token_checksum);
     qtest_add_func("/ia64-vpc/pdh/bmc-tokens-persist",
                    test_pdh_bmc_tokens_persist);
+    qtest_add_func("/ia64-vpc/pdh/store-migrates", test_pdh_store_migrates);
     qtest_add_func("/ia64-vpc/pdh/clock", test_pdh_clock);
     qtest_add_func("/ia64-vpc/pdh/clock-control", test_pdh_clock_control);
     qtest_add_func("/ia64-vpc/pdh/dimm-spd", test_pdh_dimm_spd);
@@ -12087,6 +12266,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pci/460gx-pcis-window", test_460gx_pcis_window);
     qtest_add_func("/ia64-vpc/pci/460gx-smbus-hwmon", test_460gx_smbus_hwmon);
     qtest_add_func("/ia64-vpc/nvram/rtc-battery", test_nvram_rtc_battery);
+    qtest_add_func("/ia64-vpc/nvram/migrates", test_nvram_migrates);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-gpio",
                    test_460gx_south_bridge_gpio);
     qtest_add_func("/ia64-vpc/pci/460gx-south-bridge-rtc-banks",
