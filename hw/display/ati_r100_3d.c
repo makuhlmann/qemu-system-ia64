@@ -2184,6 +2184,7 @@ static R100Color r100_run_combiner(ATIR100State *r, unsigned int unit,
                                          R100_COMBINER_SCALE_SHIFT, 2);
     unsigned int alpha_scale = 1U << extract32(ablend,
                                                R100_COMBINER_SCALE_SHIFT, 2);
+    float dot = 0.0f;
     unsigned int i;
 
     args[0] = r100_combiner_color_arg(extract32(
@@ -2202,11 +2203,14 @@ static R100Color r100_run_combiner(ATIR100State *r, unsigned int unit,
             args[i].b = 1.0f - args[i].b;
         }
     }
+    /*
+     * DOT3 has no factor 4 of its own: Mesa programs SCALE_4X for GL's
+     * 4 * dot(a - 0.5, b - 0.5) (Mesa 7.11 radeon_texstate.c:460-478).
+     */
     if (operation == R100_COMBINER_OP_DOT3) {
-        float dot = 4.0f * ((args[0].r - 0.5f) * (args[1].r - 0.5f) +
-                            (args[0].g - 0.5f) * (args[1].g - 0.5f) +
-                            (args[0].b - 0.5f) * (args[1].b - 0.5f));
-
+        dot = (args[0].r - 0.5f) * (args[1].r - 0.5f) +
+              (args[0].g - 0.5f) * (args[1].g - 0.5f) +
+              (args[0].b - 0.5f) * (args[1].b - 0.5f);
         result.r = result.g = result.b = dot * scale;
     } else {
         const float a[] = { args[0].r, args[0].g, args[0].b };
@@ -2238,8 +2242,14 @@ static R100Color r100_run_combiner(ATIR100State *r, unsigned int unit,
             alpha[i] = 1.0f - alpha[i];
         }
     }
-    result.a = r100_combiner_component(alpha_operation, alpha[0], alpha[1],
-                                       alpha[2]) * alpha_scale;
+    /* DOT3 replicates into alpha too (radeon_texstate.c:580-583). */
+    if (operation == R100_COMBINER_OP_DOT3 &&
+        !(ablend & R100_DOT_ALPHA_DONT_REPLICATE)) {
+        result.a = dot * alpha_scale;
+    } else {
+        result.a = r100_combiner_component(alpha_operation, alpha[0],
+                                           alpha[1], alpha[2]) * alpha_scale;
+    }
     if (ablend & R100_COMBINER_CLAMP) {
         result.a = r100_clamp_float(result.a, 0.0f, 1.0f);
     }
@@ -2623,7 +2633,7 @@ static bool r100_triangle_visible(ATIR100State *r, double area)
 /*
  * Where a pixel samples: at its centre, x + 0.5, with VTX_PIX_CENTER_OGL;
  * at x itself for Direct3D's integer centres.  Mesa and X.Org set OGL
- * (Mesa 7.11 radeon_state_init.c:967, xf86-video-ati 6.14.6
+ * (Mesa 7.11 radeon_state_init.c:973, xf86-video-ati 6.14.6
  * radeon_commonfuncs.c:800); XP 3790's Direct3D clears it.
  */
 static float r100_pixel_center(ATIR100State *r)

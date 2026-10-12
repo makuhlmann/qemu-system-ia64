@@ -161,6 +161,7 @@
 #define R100_TX_CLAMP_T(mode)  ((uint32_t)(mode) << 27)
 #define R100_TX_BORDER_D3D     (1U << 31)
 #define R100_COMBINER_CLAMP    (1U << 23)
+#define R100_DOT_ALPHA_DONT_REPLICATE (1U << 12)
 #define R100_COORD_XY_PRE_MULT (1U << 0)
 #define R100_COORD_Z_PRE_MULT  (1U << 1)
 #define R100_COORD_ST0_NONPARAM (1U << 8)
@@ -2560,6 +2561,52 @@ static void ati_rv100_pixel_center(void)
     qtest_quit(qts);
 }
 
+/*
+ * Mesa's GL_DOT3_RGBA: DOT3 of two diffuse arguments with SCALE_4X gives
+ * 4 * dot(c - 0.5, c - 0.5) in colour and, unless DOT_ALPHA_DONT_REPLICATE,
+ * in alpha (Mesa 7.11 radeon_texstate.c:460-478, 580-583).
+ */
+static void ati_rv100_dot3(void)
+{
+    enum {
+        WIDTH = 8,
+        HEIGHT = 4,
+    };
+    const uint32_t point[] = {
+        f32_bits(2.0f), f32_bits(1.0f),
+        ati_rv100_rgba_vertex_color(0xffc08080),
+    };
+    const uint32_t dot3_4x = 4U | (4U << 5) | (4U << 18) | (2U << 21) |
+                             R100_COMBINER_CLAMP;
+    const uint64_t pixel = rv100_fb + (WIDTH + 2) * 4;
+    QTestState *qts = rv100_3d_init("");
+
+    qtest_memset(qts, rv100_fb, 0, WIDTH * HEIGHT * 4);
+    qtest_writel(qts, rv100_mmio + R100_RB3D_CNTL, R100_RB_COLOR_ARGB8888);
+    qtest_writel(qts, rv100_mmio + R100_RB3D_COLOROFFSET, 0);
+    qtest_writel(qts, rv100_mmio + R100_RB3D_COLORPITCH, WIDTH);
+    qtest_writel(qts, rv100_mmio + R100_RE_TOP_LEFT, 0);
+    qtest_writel(qts, rv100_mmio + R100_RE_WIDTH_HEIGHT,
+                 (HEIGHT - 1) << 16 | (WIDTH - 1));
+    qtest_writel(qts, rv100_mmio + R100_SE_CNTL,
+                 R100_SE_GL | (2U << 8) | (2U << 10));
+    qtest_writel(qts, rv100_mmio + R100_PP_CNTL, R100_TX_BLEND0_ENABLE);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXCBLEND_0, dot3_4x);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXABLEND_0,
+                 (2U << 21) | R100_COMBINER_CLAMP);
+    ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR, R100_VF_POINT_LIST,
+                             point, ARRAY_SIZE(point), 1);
+    g_assert_cmphex(qtest_readl(qts, pixel), ==, 0x41414141);
+
+    qtest_writel(qts, rv100_mmio + R100_PP_TXABLEND_0,
+                 (1U << 17) | R100_DOT_ALPHA_DONT_REPLICATE |
+                 R100_COMBINER_CLAMP);
+    ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR, R100_VF_POINT_LIST,
+                             point, ARRAY_SIZE(point), 1);
+    g_assert_cmphex(qtest_readl(qts, pixel), ==, 0xff414141);
+    qtest_quit(qts);
+}
+
 static void display_wait_for_migration_status(QTestState *qts,
                                               const char *wanted)
 {
@@ -2613,5 +2660,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100-3d/vertex-layout", ati_rv100_vertex_layout);
     qtest_add_func("/ati-rv100-3d/perspective", ati_rv100_perspective);
     qtest_add_func("/ati-rv100-3d/pixel-center", ati_rv100_pixel_center);
+    qtest_add_func("/ati-rv100-3d/dot3", ati_rv100_dot3);
     return g_test_run();
 }

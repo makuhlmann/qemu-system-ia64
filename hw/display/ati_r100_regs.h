@@ -65,6 +65,7 @@
 #define R100_DEPTH_FORMAT_32BIT_INT_Z            4
 #define R100_DEPTH_FORMAT_MASK                   0xfU
 #define R100_DIS_OUT_OF_PCI_GART_ACCESS          BIT(1)
+#define R100_DOT_ALPHA_DONT_REPLICATE            BIT(12)
 #define R100_FOG_COLOR_MASK                      0x00ffffffU
 #define R100_FOG_SOURCE_MASK                     (3U << 25)
 #define R100_FOG_TABLE                           BIT(24)
