@@ -11,6 +11,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <glib/gstdio.h>
 #include "qemu/bswap.h"
 #include "hw/pci/pci_regs.h"
 #include "hw/ia64/ia64_vpc_abi.h"
