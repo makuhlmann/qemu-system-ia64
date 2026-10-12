@@ -746,66 +746,31 @@ static void ati_mm_write(void *opaque, hwaddr addr, uint64_t data,
  */
 #define R128_AGP_OFFSET 0x02000000u
 
-static uint32_t ati_r100_reg(ATIVGAState *s, hwaddr addr);
-
-#define ATI_R100_AIC_CNTL       0x01d0
-#define ATI_R100_AIC_PT_BASE    0x01d8
-#define ATI_R100_AIC_LO_ADDR    0x01dc
-#define ATI_R100_AIC_HI_ADDR    0x01e0
 #define ATI_R100_CP_CSQ_CNTL    0x0740
 #define ATI_R100_SCRATCH_UMSK   0x0770
 #define ATI_R100_SCRATCH_ADDR   0x0774
 
 /*
  * The Radeon's memory map as its engines see it (D11): VRAM where
- * MC_FB_LOCATION puts it; the PCI GART from AIC_LO_ADDR to AIC_HI_ADDR while
- * AIC_CNTL.PCIGART_TRANSLATE_EN (bit 0) is set, through a table of 32-bit bus
- * addresses of 4 KiB pages at AIC_PT_BASE (Linux radeon_reg.h; r100.c
- * r100_pci_gart_set_page); and the PCI bus for the rest: the 2.4 DRM writes
- * a bus address to CP_RB_RPTR_ADDR (radeon_cp.c radeon_cp_init_ring_buffer).
- * The MP card has no AGP.
+ * MC_FB_LOCATION puts it, the AIC PCI GART, and the PCI bus for the rest
+ * (the 2.4 DRM writes a bus address to CP_RB_RPTR_ADDR, radeon_cp.c
+ * radeon_cp_init_ring_buffer); ati_r100_gpu_read/write() decode it.
  */
-static dma_addr_t ati_r100_mc_bus(ATIVGAState *s, uint32_t mc)
-{
-    uint32_t lo = ati_r100_reg(s, ATI_R100_AIC_LO_ADDR);
-    uint32_t hi = ati_r100_reg(s, ATI_R100_AIC_HI_ADDR);
-    uint32_t ent;
-
-    if ((ati_r100_reg(s, ATI_R100_AIC_CNTL) & 1) && mc >= lo && mc <= hi) {
-        pci_dma_read(&s->dev,
-                     (ati_r100_reg(s, ATI_R100_AIC_PT_BASE) & ~0xfffu) +
-                     ((mc - lo) >> 12) * 4, &ent, sizeof(ent));
-        return (le32_to_cpu(ent) & ~0xfffu) | (mc & 0xfff);
-    }
-    return mc;
-}
-
 static uint32_t ati_r100_mc_ldl(ATIVGAState *s, uint32_t mc)
 {
-    uint32_t off = ati_mc_vram_offset(s, mc);
     uint32_t le;
 
-    if (off != UINT32_MAX) {
-        return off <= s->vga.vram_size - 4 ?
-               ldl_le_p(s->vga.vram_ptr + off) : 0;
+    if (!ati_r100_gpu_read(s, mc, &le, sizeof(le))) {
+        return 0;
     }
-    pci_dma_read(&s->dev, ati_r100_mc_bus(s, mc), &le, sizeof(le));
     return le32_to_cpu(le);
 }
 
 static void ati_r100_mc_stl(ATIVGAState *s, uint32_t mc, uint32_t val)
 {
-    uint32_t off = ati_mc_vram_offset(s, mc);
     uint32_t le = cpu_to_le32(val);
 
-    if (off != UINT32_MAX) {
-        if (off <= s->vga.vram_size - 4) {
-            stl_le_p(s->vga.vram_ptr + off, val);
-            memory_region_set_dirty(&s->vga.vram, off, 4);
-        }
-        return;
-    }
-    pci_dma_write(&s->dev, ati_r100_mc_bus(s, mc), &le, sizeof(le));
+    ati_r100_gpu_write(s, mc, &le, sizeof(le), true);
 }
 
 /*
@@ -1080,6 +1045,22 @@ static bool ati_cce_settings(ATIVGAState *s, ATICCEReader *rd, uint32_t op,
     return true;
 }
 
+/* Hand a 3D packet's payload to the 3D engine. */
+static bool ati_r100_cce_3d(ATIVGAState *s, ATICCEReader *rd, uint32_t op)
+{
+    g_autofree uint32_t *payload = NULL;
+    unsigned int i;
+
+    if (rd->count > (1U << 14)) {
+        return false;
+    }
+    payload = g_new(uint32_t, rd->count ? rd->count : 1);
+    for (i = 0; i < rd->count; i++) {
+        payload[i] = ati_cce_next(rd);
+    }
+    return ati_r100_3d_packet3(s, op, payload, rd->count);
+}
+
 static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
                                   uint32_t mask, uint32_t rptr,
                                   uint32_t count, uint32_t op)
@@ -1096,10 +1077,17 @@ static bool ati_cce_execute_type3(ATIVGAState *s, uint32_t base,
         case 0x17:
         case 0x96:
         case 0x97:
-        case 0x23: /* the R100's 3D packets, other formats (radeon_reg.h) */
+            return false;
+        case 0x23: /* the R100's 3D packets (radeon_reg.h), ati_r100_3d.c */
         case 0x25:
         case 0x28:
-            return false;
+        case 0x29:
+        case 0x2a:
+        case 0x2f:
+        case 0x34:
+        case 0x35:
+        case 0x36:
+            return ati_r100_cce_3d(s, &rd, op);
         }
     }
     switch (op) {
@@ -1595,7 +1583,6 @@ static const uint16_t ati_r100_aux_offs[] = {
     0x0d08, /* DISP_PWR_MAN */
     0x0d60, /* DISP_MERGE_CNTL */
     0x1720, /* WAIT_UNTIL */
-    0x1c3c, /* RB3D_CNTL */
     0x3250, /* RB3D_ZCACHE_MODE */
     0x3258, /* RB3D_DSTCACHE_MODE */
     0x3428, /* RB2D_DSTCACHE_MODE */
@@ -1624,11 +1611,16 @@ static int ati_r100_aux_slot(hwaddr addr)
     return -1;
 }
 
-static uint32_t ati_r100_reg(ATIVGAState *s, hwaddr addr)
+/* A Radeon register the model only stores (r100_aux or init_aux), by offset. */
+uint32_t ati_r100_reg(ATIVGAState *s, hwaddr addr)
 {
     int slot = ati_r100_aux_slot(addr);
 
-    return slot >= 0 ? s->regs.r100_aux[slot] : 0;
+    if (slot >= 0) {
+        return s->regs.r100_aux[slot];
+    }
+    slot = ati_init_aux_slot(addr);
+    return slot >= 0 ? s->regs.init_aux[slot] : 0;
 }
 
 /*
@@ -2079,7 +2071,8 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
     {
         int aux = ati_init_aux_slot(addr);
 
-        if (!ati_is_rage128(s) && ati_r100_mm_read(s, addr, size, &val)) {
+        if (!ati_is_rage128(s) && (ati_r100_3d_read(s, addr, size, &val) ||
+                                   ati_r100_mm_read(s, addr, size, &val))) {
             break;
         }
         if (aux >= 0) {
@@ -2151,6 +2144,10 @@ static void ati_mm_write(void *opaque, hwaddr addr,
 
     if (ati_is_rage128(s) && addr >= 0x2000 && addr < 0x4000) {
         addr -= 0x2000; /* Register Aperture 1 mirror */
+    }
+    if (!ati_is_rage128(s)) {
+        /* The 3D engine's cached draw state follows the registers. */
+        s->r100.generation++;
     }
 
     if (addr < CUR_OFFSET || addr > CUR_CLR1 || ATI_DEBUG_HW_CURSOR) {
@@ -2809,7 +2806,8 @@ static void ati_mm_write(void *opaque, hwaddr addr,
     {
         int aux = ati_init_aux_slot(addr);
 
-        if (!ati_is_rage128(s) && ati_r100_mm_write(s, addr, data, size)) {
+        if (!ati_is_rage128(s) && (ati_r100_3d_write(s, addr, data, size) ||
+                                   ati_r100_mm_write(s, addr, data, size))) {
             break;
         }
         if (aux >= 0) {
@@ -3171,7 +3169,7 @@ static int ati_vga_post_load(void *opaque, int version_id)
     }
     ati_vga_update_irq(s);
     graphic_hw_invalidate(s->vga.con);
-    return 0;
+    return ati_is_rage128(s) ? 0 : ati_r100_3d_post_load(s);
 }
 
 static bool ati_vga_held_needed(void *opaque)
@@ -3190,6 +3188,23 @@ static const VMStateDescription vmstate_ati_vga_held = {
         VMSTATE_BOOL(vga_held, ATIVGAState),
         VMSTATE_UINT8_ARRAY(vga_gr, ATIVGAState, 2),
         VMSTATE_UINT8_ARRAY(vga_cr, ATIVGAState, 7),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool ati_vga_r100_3d_needed(void *opaque)
+{
+    return !ati_is_rage128(opaque);
+}
+
+static const VMStateDescription vmstate_ati_vga_r100_3d = {
+    .name = "ati-vga/r100",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = ati_vga_r100_3d_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_STRUCT(r100, ATIVGAState, 1, vmstate_ati_r100_3d,
+                       ATIR100State),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -3214,6 +3229,7 @@ static const VMStateDescription vmstate_ati_vga = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_ati_vga_held,
+        &vmstate_ati_vga_r100_3d,
         NULL
     },
 };
@@ -3441,6 +3457,7 @@ static void ati_vga_reset(DeviceState *dev)
         s->regs.gpio_crt2_ddc = 0x300;
         /* As the BIOS's POST leaves it. */
         s->regs.config_memsize = s->vga.vram_size;
+        ati_r100_3d_reset(s);
     }
 
     s->regs.clock_cntl_index = 0;
@@ -3530,6 +3547,8 @@ static const Property ati_vga_properties[] = {
     DEFINE_PROP_BOOL("agp", ATIVGAState, agp, false),
     /* Radeon: the monitor's DDC on GPIO_VGA_DDC instead of GPIO_DVI_DDC. */
     DEFINE_PROP_BOOL("ddc-vga", ATIVGAState, ddc_vga, false),
+    /* Radeon: the 3D engine draws (off until its review, RV100 plan D4). */
+    DEFINE_PROP_BOOL("x-r100-3d", ATIVGAState, r100_3d, false),
     /* this is a debug option, prefer PROP_UINT over PROP_BIT for simplicity */
     DEFINE_PROP_UINT8("x-pixman", ATIVGAState, use_pixman, DEFAULT_X_PIXMAN),
     DEFINE_PROP_UINT64("x-linear-aper-size", ATIVGAState, linear_aper_sz, 0),

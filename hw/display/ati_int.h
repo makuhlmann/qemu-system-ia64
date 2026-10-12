@@ -154,6 +154,49 @@ typedef struct ATIVGARegs {
     uint32_t gpio_crt2_ddc;
 } ATIVGARegs;
 
+/*
+ * The RV100's 3D engine (ati_r100_3d.c): its register context at 1C00h-1DFFh,
+ * the setup-engine registers outside it, the fog table, the vertex arrays of
+ * 3D_LOAD_VBPNTR and the vertices written to SE_PORT_DATA.
+ */
+#define ATI_R100_CONTEXT_DWORDS 128
+#define ATI_R100_FOG_TABLE_ENTRIES 256
+#define ATI_R100_MAX_VERTEX_DWORDS 4096
+#define ATI_R100_MAX_VERTEX_ARRAYS 12
+
+typedef struct ATIR100VertexArray {
+    uint32_t address;
+    uint16_t stride;
+    uint8_t components;
+    uint8_t reserved;
+} ATIR100VertexArray;
+
+typedef struct ATIR100State {
+    uint32_t context[ATI_R100_CONTEXT_DWORDS];
+    uint32_t re_top_left;
+    uint32_t re_misc;
+    uint32_t se_vtx_fmt;
+    uint32_t se_vf_cntl;
+    uint32_t se_cntl_status;
+    uint8_t fog_table[ATI_R100_FOG_TABLE_ENTRIES];
+    uint8_t fog_table_index;
+    ATIR100VertexArray vertex_array[ATI_R100_MAX_VERTEX_ARRAYS];
+    uint32_t vertex_array_count;
+    uint32_t port_data[ATI_R100_MAX_VERTEX_DWORDS];
+    uint32_t port_data_count;
+    uint32_t port_data_expected;
+    uint64_t submitted_primitives;
+    uint64_t rejected_commands;
+    /*
+     * Transient: the work limits of the draw in progress, and a counter that
+     * invalidates the cached draw state when a register changes.
+     */
+    uint64_t draw_budget_remaining;
+    uint64_t command_work_remaining;
+    bool command_budget_exhausted;
+    uint64_t generation;
+} ATIR100State;
+
 typedef struct ATIHostDataState {
     bool active;
     uint32_t row;
@@ -209,6 +252,8 @@ struct ATIVGAState {
     bool cce_in_indirect;
     /* The Radeon CP is running its ring (ati_r100_cp_run); transient. */
     bool r100_cp_active;
+    ATIR100State r100;
+    bool r100_3d;           /* x-r100-3d: the 3D engine draws */
 };
 
 const char *ati_reg_name(int num);
@@ -232,6 +277,32 @@ static inline int ati_sext14(unsigned v)
 }
 
 uint32_t ati_mc_vram_offset(ATIVGAState *s, uint32_t mc);
+uint32_t ati_r100_reg(ATIVGAState *s, hwaddr addr);
+
+/* RV100 3D engine (ati_r100_3d.c). */
+bool ati_r100_3d_read(ATIVGAState *s, hwaddr addr, unsigned int size,
+                      uint32_t *val);
+bool ati_r100_3d_write(ATIVGAState *s, hwaddr addr, uint64_t data,
+                       unsigned int size);
+bool ati_r100_3d_packet3(ATIVGAState *s, unsigned int opcode,
+                         const uint32_t *payload, unsigned int count);
+void ati_r100_3d_reset(ATIVGAState *s);
+int ati_r100_3d_post_load(ATIVGAState *s);
+extern const VMStateDescription vmstate_ati_r100_3d;
+bool ati_r100_gpu_vram_offset(ATIVGAState *s, uint64_t address,
+                              uint64_t length, uint64_t *offset);
+bool ati_r100_gpu_access_valid(ATIVGAState *s, uint64_t address,
+                               uint64_t length, bool is_write);
+bool ati_r100_gpu_ranges_overlap(ATIVGAState *s, uint64_t first,
+                                 uint64_t first_length, uint64_t second,
+                                 uint64_t second_length, bool *overlap);
+bool ati_r100_gpu_read(ATIVGAState *s, uint64_t address, void *buf,
+                       uint64_t length);
+bool ati_r100_gpu_write(ATIVGAState *s, uint64_t address, const void *buf,
+                        uint64_t length, bool dirty);
+bool ati_2d_tile_offset(const ATIVGAState *s, uint32_t base, uint32_t pitch,
+                        unsigned int cpp, unsigned int tile, uint32_t xbyte,
+                        uint32_t y, uint64_t *offset);
 void ati_2d_blt(ATIVGAState *s);
 void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx);
 bool ati_host_data_flush(ATIVGAState *s);

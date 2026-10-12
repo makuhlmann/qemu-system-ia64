@@ -916,6 +916,120 @@ static void test_rv100_cp_migration(void)
     rmdir(tmpdir);
 }
 
+static uint32_t f32_bits(float value)
+{
+    uint32_t bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+/* SE_VTX_FMT, SE_VF_CNTL, then the vertex dwords through SE_PORT_DATA0. */
+static void rv100_draw_port(QTestState *qts, uint64_t mmio, uint32_t format,
+                            uint32_t vf_cntl, const uint32_t *data, unsigned n)
+{
+    unsigned i;
+
+    qtest_writel(qts, mmio + 0x2080, format);
+    qtest_writel(qts, mmio + 0x2084, vf_cntl);
+    for (i = 0; i < n; i++) {
+        qtest_writel(qts, mmio + 0x2000, data[i]);
+    }
+}
+
+/*
+ * SE_PORT_DATA0-31 hold one vertex batch of at most 4096 dwords: data with
+ * no vertex count in SE_VF_CNTL, or with a count above that, is dropped,
+ * and the card goes on drawing.
+ */
+static void test_rv100_3d_port_bounds(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    static const uint32_t vf_cntl[] = {
+        0,
+        (0xffffu << 16) | (3u << 4) | 4,    /* 65535 vertices, triangles */
+    };
+    unsigned i, j;
+
+    for (j = 0; j < ARRAY_SIZE(vf_cntl); j++) {
+        qtest_writel(qts, mmio + 0x2080, 1u << 3);  /* SE_VTX_FMT: PKCOLOR */
+        qtest_writel(qts, mmio + 0x2084, vf_cntl[j]);
+        for (i = 0; i < 5000; i++) {
+            qtest_writel(qts, mmio + 0x2000 + (i & 31) * 4, i);
+        }
+        g_assert_cmphex(qtest_readl(qts, mmio + 0x2080), ==, 1u << 3);
+        g_assert_cmphex(qtest_readl(qts, mmio + 0x2084), ==, vf_cntl[j]);
+    }
+    rv100_fill(qts, mmio, 0x100000, 0x00112233);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100000), ==, 0x00112233);
+    qtest_quit(qts);
+}
+
+/*
+ * x-r100-3d=on: a rectangle list through SE_PORT_DATA0 (colours in RGBA
+ * order) and a triangle list in a 3D_DRAW_IMMD packet on the CP ring
+ * (colours in ARGB order) land in an ARGB8888 colour buffer at card
+ * address 0.  The rectangle's fourth corner is implied; its right and
+ * bottom edges are exclusive.
+ */
+static void test_rv100_3d_draw(void)
+{
+    const uint32_t rect[] = {
+        f32_bits(4.0f), f32_bits(24.0f), 0xff563412,
+        f32_bits(24.0f), f32_bits(24.0f), 0xff563412,
+        f32_bits(24.0f), f32_bits(4.0f), 0xff563412,
+    };
+    QTestState *qts = qtest_init(RV100_ARGS " -global ati-vga.x-r100-3d=on");
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    uint32_t ring[16];
+    unsigned n = 0, i;
+
+#define PIXEL(x, y) (fb + ((y) * 64 + (x)) * 4)
+    qtest_memset(qts, fb, 0, 64 * 64 * 4);
+    qtest_writel(qts, mmio + 0x1c40, 0);                /* RB3D_COLOROFFSET */
+    qtest_writel(qts, mmio + 0x1c48, 64);               /* RB3D_COLORPITCH */
+    qtest_writel(qts, mmio + 0x26c0, 0);                /* RE_TOP_LEFT */
+    qtest_writel(qts, mmio + 0x1c44, (63u << 16) | 63); /* RE_WIDTH_HEIGHT */
+    qtest_writel(qts, mmio + 0x1c3c, 6u << 10);         /* RB3D_CNTL ARGB8888 */
+
+    rv100_draw_port(qts, mmio, 1u << 3,
+                    (3u << 16) | (1u << 6) | (3u << 4) | 8, rect, 9);
+    g_assert_cmphex(qtest_readl(qts, PIXEL(4, 4)), ==, 0xff123456);
+    g_assert_cmphex(qtest_readl(qts, PIXEL(23, 23)), ==, 0xff123456);
+    g_assert_cmphex(qtest_readl(qts, PIXEL(24, 10)), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, PIXEL(10, 24)), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, PIXEL(3, 3)), ==, 0);
+
+    rv100_cp_setup(qts, mmio, 8);
+    ring[n++] = 0xc0000000 | (10u << 16) | (0x29 << 8); /* 3D_DRAW_IMMD */
+    ring[n++] = 1u << 3;                                /* PKCOLOR */
+    ring[n++] = (3u << 16) | (3u << 4) | 4;             /* triangle list */
+    ring[n++] = f32_bits(32.0f);
+    ring[n++] = f32_bits(24.0f);
+    ring[n++] = 0xff654321;
+    ring[n++] = f32_bits(52.0f);
+    ring[n++] = f32_bits(4.0f);
+    ring[n++] = 0xff654321;
+    ring[n++] = f32_bits(52.0f);
+    ring[n++] = f32_bits(24.0f);
+    ring[n++] = 0xff654321;
+    rv100_put_dwords(qts, RV100_PAGES, ring, n);
+    qtest_writel(qts, mmio + 0x714, n);                 /* CP_RB_WPTR */
+    g_assert_cmpuint(qtest_readl(qts, mmio + 0x710), ==, n);
+    for (i = 48; i < 52; i++) {
+        g_assert_cmphex(qtest_readl(qts, PIXEL(i, 22)), ==, 0xff654321);
+    }
+    g_assert_cmphex(qtest_readl(qts, PIXEL(34, 6)), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, PIXEL(10, 10)), ==, 0xff123456);
+#undef PIXEL
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -968,6 +1082,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/cp-indirect", test_rv100_cp_indirect);
     qtest_add_func("/ati-rv100/cp-mono-brush", test_rv100_cp_mono_brush);
     qtest_add_func("/ati-rv100/cp-migration", test_rv100_cp_migration);
+    qtest_add_func("/ati-rv100/3d-port-bounds", test_rv100_3d_port_bounds);
+    qtest_add_func("/ati-rv100/3d-draw", test_rv100_3d_draw);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();
