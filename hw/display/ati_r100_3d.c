@@ -1257,12 +1257,18 @@ static R100DrawState *r100_draw_state(ATIVGAState *s, R100DrawState *draw)
          ((draw->color_rop ^ (draw->color_rop >> 1)) & 5)) ||
         ((draw->rb_cntl & R100_RB3D_PLANE_MASK_ENABLE) &&
          (draw->plane_mask & draw->color_mask) != draw->color_mask);
+    /*
+     * RE_WIDTH_HEIGHT is the inclusive bottom-right corner, not a size: the
+     * DRM writes (x2 - 1, y2 - 1) of each clip rectangle beside its top-left
+     * (Linux 2.4 radeon_state.c:51-54) and the KMS command checker reads it
+     * as the last line (Linux r100.c:1721-1722).
+     */
     top_left = r->re_top_left;
     width_height = r100_context_read(r, R100_RE_WIDTH_HEIGHT);
     draw->clip_left = top_left & 0xffff;
     draw->clip_top = top_left >> 16;
-    draw->clip_right = draw->clip_left + (width_height & 0x7ff);
-    draw->clip_bottom = draw->clip_top + ((width_height >> 16) & 0x7ff);
+    draw->clip_right = width_height & 0x7ff;
+    draw->clip_bottom = (width_height >> 16) & 0x7ff;
     depth->zcntl = r100_context_read(r, R100_RB3D_ZSTENCILCNTL);
     depth->pitch = r100_context_read(r, R100_RB3D_DEPTHPITCH) & 0x1ff8U;
     depth->offset = r100_context_read(r, R100_RB3D_DEPTHOFFSET);
@@ -2647,12 +2653,11 @@ static void r100_draw_triangle(ATIVGAState *s, const R100Vertex *v0,
                                R100DirtyBatch *batch, R100DrawState *draw)
 {
     ATIR100State *r = &s->r100;
-    uint32_t top_left = r->re_top_left;
-    uint32_t width_height = r100_context_read(r, R100_RE_WIDTH_HEIGHT);
-    int clip_left = top_left & 0xffff;
-    int clip_top = top_left >> 16;
-    int clip_right = clip_left + (width_height & 0x7ff);
-    int clip_bottom = clip_top + ((width_height >> 16) & 0x7ff);
+    const R100DrawState *clip = r100_draw_state(s, draw);
+    int clip_left = clip->clip_left;
+    int clip_top = clip->clip_top;
+    int clip_right = clip->clip_right;
+    int clip_bottom = clip->clip_bottom;
     R100Edge area_edge = r100_triangle_edge(v0, v1, false);
     double area = r100_edge_value(&area_edge, v2->x, v2->y);
     bool reverse = area < 0.0;

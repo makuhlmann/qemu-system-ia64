@@ -1102,6 +1102,11 @@ static void ati_rv100_fixed_function(void)
         f32_bits(0.0f), f32_bits(32.0f), UINT32_MAX,
         f32_bits(20.0f), f32_bits(32.0f), UINT32_MAX,
     };
+    const uint32_t scissored_rectangle[] = {
+        f32_bits(0.0f), f32_bits(48.0f), 0xff00ff00,
+        f32_bits(48.0f), f32_bits(48.0f), 0xff00ff00,
+        f32_bits(48.0f), f32_bits(0.0f), 0xff00ff00,
+    };
     const uint32_t unsupported_depth[] = {
         f32_bits(42.0f), f32_bits(18.0f), f32_bits(0.5f), UINT32_MAX,
     };
@@ -1761,12 +1766,16 @@ static void ati_rv100_fixed_function(void)
     qtest_writel(qts, mmio + R100_SE_CNTL,
                  (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10));
 
-    /* Point and line paths obey the same render-engine scissor as triangles. */
+    /*
+     * Point and line paths obey the same render-engine scissor as triangles.
+     * RE_WIDTH_HEIGHT holds the inclusive bottom-right corner (Linux 2.4
+     * radeon_state.c radeon_emit_clip_rect), not a size as upstream's case.
+     */
     qtest_writel(qts, mmio + R100_PP_CNTL, 0);
     qtest_writel(qts, mmio + R100_RB3D_COLOROFFSET, 0);
     qtest_writel(qts, mmio + R100_RB3D_COLORPITCH, WIDTH);
     qtest_writel(qts, mmio + R100_RE_TOP_LEFT, (30U << 16) | 10U);
-    qtest_writel(qts, mmio + R100_RE_WIDTH_HEIGHT, (4U << 16) | 4U);
+    qtest_writel(qts, mmio + R100_RE_WIDTH_HEIGHT, (34U << 16) | 14U);
     ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
                              R100_VF_POINT_LIST, clipped_point,
                              ARRAY_SIZE(clipped_point), 1);
@@ -1781,6 +1790,17 @@ static void ati_rv100_fixed_function(void)
                                 (32 * WIDTH + 12) * 4), ==, UINT32_MAX);
     g_assert_cmphex(qtest_readl(qts, color_base +
                                 (32 * WIDTH + 15) * 4), ==, 0);
+    ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
+                             R100_VF_RECTANGLE_LIST, scissored_rectangle,
+                             ARRAY_SIZE(scissored_rectangle), 3);
+    for (y = 28; y < 38; y++) {
+        for (x = 8; x < 18; x++) {
+            g_assert_cmphex(qtest_readl(qts, color_base +
+                                            (y * WIDTH + x) * 4), ==,
+                            x >= 10 && x <= 14 && y >= 30 && y <= 34 ?
+                            0xff00ff00 : 0);
+        }
+    }
 
     /* Malformed guest floats are rejected before any float-to-int cast. */
     qtest_writel(qts, mmio + R100_RE_TOP_LEFT, 0);
