@@ -2631,11 +2631,16 @@ static bool r100_edge_contains(const R100Edge *edge, double value)
     return value > 0.0 || (value == 0.0 && edge->inclusive);
 }
 
+/*
+ * area > 0 is what FFACE_CULL_DIR calls counter-clockwise: Mesa sets CCW for
+ * GL_CCW with the viewport's Y flipped and inverts it for an unflipped FBO
+ * (Mesa 7.11 radeon_state.c radeonFrontFace).
+ */
 static bool r100_triangle_visible(ATIR100State *r, double area)
 {
     uint32_t se_cntl = r100_context_read(r, R100_SE_CNTL);
     bool ccw_front = !!(se_cntl & BIT(0));
-    bool front = (area < 0.0f) == ccw_front;
+    bool front = (area > 0.0) == ccw_front;
     unsigned int mode = front ? extract32(se_cntl, 3, 2) :
                                 extract32(se_cntl, 1, 2);
 

@@ -1050,6 +1050,51 @@ static void test_rv100_3d_draw(void)
     qtest_quit(qts);
 }
 
+/*
+ * Face culling as Mesa's R100 driver uses it (radeonFrontFace,
+ * radeonCullFace): with Y down, (4,4) (4,20) (20,4) is counter-clockwise for
+ * FFACE_CULL_DIR. SE_CNTL bit 0 picks the front winding, bits 2:1 and 4:3
+ * cull (0) or draw (3) back and front faces.
+ */
+static void test_rv100_3d_cull(void)
+{
+    static const struct {
+        uint32_t se_cntl;
+        bool drawn;
+    } cases[] = {
+        { 1 | (0u << 1) | (3u << 3), true },    /* CCW front, cull back */
+        { 0 | (0u << 1) | (3u << 3), false },   /* CW front, cull back */
+        { 1 | (3u << 1) | (0u << 3), false },   /* CCW front, cull front */
+        { 0 | (3u << 1) | (0u << 3), true },    /* CW front, cull front */
+    };
+    const uint32_t tri[] = {
+        f32_bits(4.0f), f32_bits(4.0f), 0xff00ff00,
+        f32_bits(4.0f), f32_bits(20.0f), 0xff00ff00,
+        f32_bits(20.0f), f32_bits(4.0f), 0xff00ff00,
+    };
+    QTestState *qts = qtest_init(RV100_ARGS " -global ati-vga.x-r100-3d=on");
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    size_t i;
+
+    qtest_writel(qts, mmio + 0x1c40, 0);                /* RB3D_COLOROFFSET */
+    qtest_writel(qts, mmio + 0x1c48, 64);               /* RB3D_COLORPITCH */
+    qtest_writel(qts, mmio + 0x26c0, 0);                /* RE_TOP_LEFT */
+    qtest_writel(qts, mmio + 0x1c44, (63u << 16) | 63); /* RE_WIDTH_HEIGHT */
+    qtest_writel(qts, mmio + 0x1c3c, 6u << 10);         /* RB3D_CNTL ARGB8888 */
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        qtest_writel(qts, fb + (6 * 64 + 6) * 4, 0);
+        qtest_writel(qts, mmio + 0x1c4c,                /* SE_CNTL */
+                     cases[i].se_cntl | (2u << 8) | (2u << 10));
+        rv100_draw_port(qts, mmio, 1u << 3,
+                        (3u << 16) | (3u << 4) | 4, tri, 9);
+        g_assert_cmphex(qtest_readl(qts, fb + (6 * 64 + 6) * 4), ==,
+                        cases[i].drawn ? 0xff00ff00 : 0);
+    }
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -1106,6 +1151,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/cp-migration", test_rv100_cp_migration);
     qtest_add_func("/ati-rv100/3d-port-bounds", test_rv100_3d_port_bounds);
     qtest_add_func("/ati-rv100/3d-draw", test_rv100_3d_draw);
+    qtest_add_func("/ati-rv100/3d-cull", test_rv100_3d_cull);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();
