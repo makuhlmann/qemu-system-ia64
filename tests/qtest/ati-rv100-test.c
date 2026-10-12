@@ -560,6 +560,37 @@ static void test_rv100_negative_x(void)
 }
 
 /*
+ * The Radeon's scissor corner is exclusive (xf86-video-ati adds 1 to the
+ * last pixel): a fill clipped to SC_BOTTOM_RIGHT (3, 1) covers columns 0-2
+ * of row 0 only.
+ */
+static void test_rv100_scissor(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    unsigned i;
+
+    rv100_fill(qts, mmio, 0x100000, 0);
+    qtest_writel(qts, mmio + 0x146c,                /* + GMC_DST_CLIPPING */
+                 0x00000002 | 0x00000008 | 0x000000d0 | (6u << 8) |
+                 (3u << 12) | 0x00f00000 | (2u << 24) | 0x10000000);
+    qtest_writel(qts, mmio + 0x16ec, 0);            /* SC_TOP_LEFT */
+    qtest_writel(qts, mmio + 0x16f0, (1u << 16) | 3);   /* SC_BOTTOM_RIGHT */
+    qtest_writel(qts, mmio + 0x147c, 0x00aabbcc);
+    qtest_writel(qts, mmio + 0x1438, 0);
+    qtest_writel(qts, mmio + 0x143c, (2u << 16) | 4);
+    for (i = 0; i < 3; i++) {
+        g_assert_cmphex(qtest_readl(qts, fb + 0x100000 + i * 4), ==,
+                        0x00aabbcc);
+    }
+    g_assert_cmphex(qtest_readl(qts, fb + 0x10000c), ==, 0);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100100), ==, 0);
+    qtest_quit(qts);
+}
+
+/*
  * ROP3 B8h (PSDPxax), which XP 3790's ati2dvag uses for masked drawing:
  * where the source is white the destination stays, where it is black the
  * pattern (a solid brush here) is written; generally each result bit is bit
@@ -931,6 +962,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/mc-fb-location", test_rv100_mc_fb_location);
     qtest_add_func("/ati-rv100/negative-x", test_rv100_negative_x);
     qtest_add_func("/ati-rv100/rop3", test_rv100_rop3);
+    qtest_add_func("/ati-rv100/scissor", test_rv100_scissor);
     qtest_add_func("/ati-rv100/cp-ring-gart", test_rv100_cp_ring_gart);
     qtest_add_func("/ati-rv100/cp-off", test_rv100_cp_off);
     qtest_add_func("/ati-rv100/cp-indirect", test_rv100_cp_indirect);

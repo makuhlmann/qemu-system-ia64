@@ -147,8 +147,16 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     ctx->brush_y = (s->regs.brush_y_x >> 16) & 7;
     ctx->dst_offset = ati_mc_vram_offset(s, s->regs.dst_offset);
 
-    ctx->scissor.width = s->regs.sc_right - s->regs.sc_left + 1;
-    ctx->scissor.height = s->regs.sc_bottom - s->regs.sc_top + 1;
+    /*
+     * The Radeon's scissor corner SC_BOTTOM_RIGHT is exclusive: its X driver
+     * adds 1 to the last pixel (xf86-video-ati radeon_accelfuncs.c
+     * RADEONSetClippingRectangle); the Rage 128's is inclusive (r128_accel.c
+     * writes the last pixel).
+     */
+    ctx->scissor.width = MAX((int)s->regs.sc_right - s->regs.sc_left +
+                             ati_is_rage128(s), 0);
+    ctx->scissor.height = MAX((int)s->regs.sc_bottom - s->regs.sc_top +
+                              ati_is_rage128(s), 0);
     ctx->scissor.x = s->regs.sc_left;
     ctx->scissor.y = s->regs.sc_top;
 
