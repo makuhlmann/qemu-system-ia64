@@ -803,29 +803,71 @@ static bool r100_parse_vertex(const uint32_t *words, unsigned int count,
     return i == needed;
 }
 
-static void r100_transform_vertex(ATIVGAState *s, R100Vertex *v)
+/* Coordinate sets that an enabled unit samples with PERSPECTIVE_ENABLE. */
+static uint8_t r100_perspective_sets(ATIR100State *r)
+{
+    uint32_t pp_cntl = r100_context_read(r, R100_PP_CNTL);
+    uint8_t sets = 0;
+    unsigned int unit;
+
+    for (unit = 0; unit < 3; unit++) {
+        uint32_t txformat = r100_context_read(r, R100_PP_TXFORMAT_0 +
+                                                 unit * 0x18);
+        unsigned int route = extract32(txformat,
+                                       R100_TXFORMAT_ST_ROUTE_SHIFT, 2);
+
+        if ((pp_cntl & BIT(4 + unit)) && route < 3 &&
+            (txformat & R100_TXFORMAT_PERSPECTIVE_ENABLE)) {
+            sets |= BIT(route);
+        }
+    }
+    return sets;
+}
+
+/*
+ * SE_COORD_FMT says whether W0 holds w or 1/w and whether x, y and z are
+ * already divided by w: Mesa sends clip coordinates with w or projected ones
+ * with 1/w (Mesa 7.11 radeon_swtcl.c:284-295), XP 3790's Direct3D screen
+ * coordinates with 1/w.  The coordinates of perspective units are scaled by
+ * 1/w here, so that their interpolated s/q and t/q are perspective correct.
+ */
+static void r100_transform_vertex(ATIVGAState *s, R100Vertex *v,
+                                  uint8_t perspective_sets)
 {
     uint32_t se_cntl = r100_context_read(&s->r100, R100_SE_CNTL);
-    float reciprocal_w = v->w != 0.0f ? 1.0f / v->w : 1.0f;
+    uint32_t coord_fmt = r100_context_read(&s->r100, R100_SE_COORD_FMT);
+    float rhw = v->w;
+    unsigned int i;
 
+    if (coord_fmt & R100_VTX_W0_IS_NOT_1_OVER_W0) {
+        rhw = v->w != 0.0f ? 1.0f / v->w : 1.0f;
+    }
+    if (!(coord_fmt & R100_VTX_XY_PRE_MULT_1_OVER_W0)) {
+        v->x *= rhw;
+        v->y *= rhw;
+    }
+    if (!(coord_fmt & R100_VTX_Z_PRE_MULT_1_OVER_W0)) {
+        v->z *= rhw;
+    }
     if (se_cntl & R100_VPORT_XY_XFORM_ENABLE) {
-        v->x = v->x * reciprocal_w *
-               r100_float(r100_context_read(&s->r100,
-                                             R100_SE_VPORT_XSCALE)) +
-               r100_float(r100_context_read(&s->r100,
-                                             R100_SE_VPORT_XOFFSET));
-        v->y = v->y * reciprocal_w *
-               r100_float(r100_context_read(&s->r100,
-                                             R100_SE_VPORT_YSCALE)) +
-               r100_float(r100_context_read(&s->r100,
-                                             R100_SE_VPORT_YOFFSET));
+        v->x = v->x * r100_float(r100_context_read(&s->r100,
+                                                   R100_SE_VPORT_XSCALE)) +
+               r100_float(r100_context_read(&s->r100, R100_SE_VPORT_XOFFSET));
+        v->y = v->y * r100_float(r100_context_read(&s->r100,
+                                                   R100_SE_VPORT_YSCALE)) +
+               r100_float(r100_context_read(&s->r100, R100_SE_VPORT_YOFFSET));
     }
     if (se_cntl & R100_VPORT_Z_XFORM_ENABLE) {
-        v->z = v->z * reciprocal_w *
-               r100_float(r100_context_read(&s->r100,
-                                             R100_SE_VPORT_ZSCALE)) +
-               r100_float(r100_context_read(&s->r100,
-                                             R100_SE_VPORT_ZOFFSET));
+        v->z = v->z * r100_float(r100_context_read(&s->r100,
+                                                   R100_SE_VPORT_ZSCALE)) +
+               r100_float(r100_context_read(&s->r100, R100_SE_VPORT_ZOFFSET));
+    }
+    for (i = 0; i < 3; i++) {
+        if (perspective_sets & BIT(i)) {
+            v->s[i] *= rhw;
+            v->t[i] *= rhw;
+            v->q[i] *= rhw;
+        }
     }
 }
 
@@ -3175,6 +3217,7 @@ static void r100_draw_vertices(ATIVGAState *s, R100Vertex *vertices,
     unsigned int primitive = vf_cntl & R100_VF_PRIM_TYPE_MASK;
     R100DirtyBatch batch = { 0 };
     R100DrawState draw = { .valid = false };
+    uint8_t perspective_sets;
     unsigned int i;
 
     if (!r100_draw_state_supported(s, vertices, count, primitive)) {
@@ -3182,8 +3225,9 @@ static void r100_draw_vertices(ATIVGAState *s, R100Vertex *vertices,
         goto out;
     }
     /* TODO: Clip primitives in homogeneous space before viewport transform. */
+    perspective_sets = r100_perspective_sets(&s->r100);
     for (i = 0; i < count; i++) {
-        r100_transform_vertex(s, &vertices[i]);
+        r100_transform_vertex(s, &vertices[i], perspective_sets);
         if (!r100_vertex_valid(&vertices[i])) {
             s->r100.rejected_commands++;
             goto out;
