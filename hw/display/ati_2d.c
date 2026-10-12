@@ -74,10 +74,16 @@ typedef struct {
     int dst_stride;
     uint8_t *dst_bits;
     uint32_t dst_offset;
+    unsigned dst_tile;
 
     QemuRect src;
     int src_stride;
     const uint8_t *src_bits;
+    unsigned src_tile;
+
+    /* The memory dst_bits and src_bits may address: VRAM, or a tile copy. */
+    const uint8_t *dst_lo, *dst_hi;
+    const uint8_t *src_lo, *src_hi;
 
     /*
      * Transparent (foreground-only) source mask. When non-NULL, SRCCOPY blits
@@ -146,6 +152,12 @@ static void setup_2d_blt_ctx(ATIVGAState *s, ATI2DCtx *ctx)
     ctx->brush_x = s->regs.brush_y_x & 7;
     ctx->brush_y = (s->regs.brush_y_x >> 16) & 7;
     ctx->dst_offset = ati_mc_vram_offset(s, s->regs.dst_offset);
+    ctx->dst_tile = s->r100_tiling && !ati_is_rage128(s) ?
+                    s->regs.dst_tile & ATI_R100_TILE_BOTH : 0;
+    ctx->src_tile = s->r100_tiling && !ati_is_rage128(s) ?
+                    s->regs.src_tile & ATI_R100_TILE_BOTH : 0;
+    ctx->dst_lo = ctx->src_lo = s->vga.vram_ptr;
+    ctx->dst_hi = ctx->src_hi = s->vga.vram_ptr + s->vga.vram_size;
 
     /*
      * The Radeon's scissor corner SC_BOTTOM_RIGHT is exclusive: its X driver
@@ -367,15 +379,23 @@ static bool ati_rop3_uses_src(uint8_t rop)
  * rectangle, and the offsets are signed so a negative coordinate does not
  * wrap into a huge one.
  */
-static bool ati_2d_rect_in_vram(const VGACommonState *vga, const uint8_t *bits,
-                                const QemuRect *r, int stride, unsigned bypp)
+static bool ati_2d_rect_in_vram(const uint8_t *lo, const uint8_t *hi,
+                                const uint8_t *bits, const QemuRect *r,
+                                int stride, unsigned bypp)
 {
-    ptrdiff_t first = (bits - vga->vram_ptr) + (ptrdiff_t)r->y * stride +
+    ptrdiff_t first = (bits - lo) + (ptrdiff_t)r->y * stride +
                       (ptrdiff_t)r->x * (ptrdiff_t)bypp;
     ptrdiff_t end = first + (ptrdiff_t)(r->height - 1) * stride +
                     (ptrdiff_t)r->width * (ptrdiff_t)bypp;
 
-    return first >= 0 && end <= (ptrdiff_t)vga->vram_size;
+    return first >= 0 && end <= hi - lo;
+}
+
+static bool ati_2d_src_in(const ATI2DCtx *ctx, const QemuRect *r,
+                          unsigned bypp)
+{
+    return ati_2d_rect_in_vram(ctx->src_lo, ctx->src_hi, ctx->src_bits, r,
+                               ctx->src_stride, bypp);
 }
 
 /*
@@ -403,8 +423,7 @@ static bool ati_2d_rop3_blt(const ATI2DCtx *ctx, const QemuRect *vis_src,
             return false;
         }
         if (!ctx->host_data_active &&
-            !ati_2d_rect_in_vram(ctx->vga, ctx->src_bits, vis_src,
-                                 ctx->src_stride, bypp)) {
+            !ati_2d_src_in(ctx, vis_src, bypp)) {
             qemu_log_mask(LOG_UNIMP, "blt outside vram not implemented\n");
             return false;
         }
@@ -475,8 +494,8 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
         /* Nothing is visible, completely clipped */
         return false;
     }
-    if (!ati_2d_rect_in_vram(ctx->vga, ctx->dst_bits, &vis_dst,
-                             ctx->dst_stride, bypp)) {
+    if (!ati_2d_rect_in_vram(ctx->dst_lo, ctx->dst_hi, ctx->dst_bits,
+                             &vis_dst, ctx->dst_stride, bypp)) {
         qemu_log_mask(LOG_UNIMP, "blt outside vram not implemented\n");
         return false;
     }
@@ -507,8 +526,7 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
             return false;
         }
         if (!ctx->host_data_active &&
-            !ati_2d_rect_in_vram(ctx->vga, ctx->src_bits, &vis_src,
-                                 ctx->src_stride, bypp)) {
+            !ati_2d_src_in(ctx, &vis_src, bypp)) {
             qemu_log_mask(LOG_UNIMP, "blt outside vram not implemented\n");
             return false;
         }
@@ -691,8 +709,7 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
                     return false;
                 }
                 if (!ctx->host_data_active &&
-                    !ati_2d_rect_in_vram(ctx->vga, ctx->src_bits, &vis_src,
-                                         ctx->src_stride, bypp)) {
+                    !ati_2d_src_in(ctx, &vis_src, bypp)) {
                     qemu_log_mask(LOG_UNIMP,
                                   "blt outside vram not implemented\n");
                     return false;
@@ -767,6 +784,120 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
     return true;
 }
 
+/*
+ * x-tiling: a tiled destination or source (PITCH_OFFSET bits 31:30 on the
+ * Radeon) is copied into a linear buffer of whole pitch-wide lines covering
+ * the visible rectangle, the operation runs there unchanged, and the
+ * destination lines go back through the tile layout.  Lines shift up by the
+ * rectangle's top; the brush phase moves with them.
+ */
+typedef struct ATI2DTileCopy {
+    uint8_t *dst;
+    uint8_t *src;
+    QemuRect vis;
+    uint32_t src_offset;
+} ATI2DTileCopy;
+
+static void ati_2d_tile_copy(VGACommonState *vga, unsigned tile, unsigned bypp,
+                             uint32_t base, int stride, const QemuRect *r,
+                             uint8_t *lin, bool to_vram, hwaddr *lo,
+                             hwaddr *hi)
+{
+    for (int y = 0; y < r->height; y++) {
+        for (int x = r->x; x < r->x + r->width; x++) {
+            uint64_t off;
+            uint8_t *p = lin + (ptrdiff_t)y * stride + (ptrdiff_t)x * bypp;
+
+            if (x < 0 || r->y + y < 0 ||
+                !ati_r100_tile_offset(tile, bypp, stride, x * bypp, r->y + y,
+                                      &off) ||
+                base + off + bypp > vga->vram_size) {
+                continue;
+            }
+            if (to_vram) {
+                memcpy(vga->vram_ptr + base + off, p, bypp);
+                *lo = MIN(*lo, base + off);
+                *hi = MAX(*hi, base + off + bypp);
+            } else {
+                memcpy(p, vga->vram_ptr + base + off, bypp);
+            }
+        }
+    }
+}
+
+static bool ati_2d_tile_begin(ATI2DCtx *ctx, ATI2DTileCopy *t)
+{
+    unsigned bypp = ctx->bpp / 8;
+    QemuRect vis_src;
+
+    t->dst = t->src = NULL;
+    if (!ctx->dst_tile && !ctx->src_tile) {
+        return false;
+    }
+    qemu_rect_intersect(&ctx->dst, &ctx->scissor, &t->vis);
+    if (!t->vis.width || !t->vis.height || bypp == 3 ||
+        ctx->dst_stride <= 0 || (ptrdiff_t)ctx->dst_stride <
+        ((ptrdiff_t)t->vis.x + t->vis.width) * bypp) {
+        return true;
+    }
+    t->dst = g_malloc0((size_t)t->vis.height * ctx->dst_stride);
+    ati_2d_tile_copy(ctx->vga, ctx->dst_tile, bypp, ctx->dst_offset,
+                     ctx->dst_stride, &t->vis, t->dst, false, NULL, NULL);
+    vis_src.x = ctx->src.x + (t->vis.x - ctx->dst.x);
+    vis_src.y = ctx->src.y + (t->vis.y - ctx->dst.y);
+    vis_src.width = t->vis.width;
+    vis_src.height = t->vis.height;
+    ctx->dst_bits = t->dst;
+    ctx->dst_lo = t->dst;
+    ctx->dst_hi = t->dst + (size_t)t->vis.height * ctx->dst_stride;
+    ctx->dst.y -= t->vis.y;
+    ctx->scissor.y -= t->vis.y;
+    ctx->brush_y = (ctx->brush_y + t->vis.y) & 7;
+
+    if (ctx->src_tile && !ctx->host_data_active && ctx->src_stride > 0 &&
+        (ptrdiff_t)ctx->src_stride >=
+        ((ptrdiff_t)vis_src.x + vis_src.width) * bypp) {
+        t->src_offset = ctx->src_bits - ctx->vga->vram_ptr;
+        t->src = g_malloc0((size_t)vis_src.height * ctx->src_stride);
+        ati_2d_tile_copy(ctx->vga, ctx->src_tile, bypp, t->src_offset,
+                         ctx->src_stride, &vis_src, t->src, false, NULL,
+                         NULL);
+        ctx->src_bits = t->src;
+        ctx->src_lo = t->src;
+        ctx->src_hi = t->src + (size_t)vis_src.height * ctx->src_stride;
+        ctx->src.y -= vis_src.y;
+    }
+    return true;
+}
+
+static void ati_2d_tile_end(ATI2DCtx *ctx, ATI2DTileCopy *t, bool drawn)
+{
+    hwaddr lo = HWADDR_MAX, hi = 0;
+
+    if (t->dst && drawn) {
+        ati_2d_tile_copy(ctx->vga, ctx->dst_tile, ctx->bpp / 8,
+                         ctx->dst_offset, ctx->dst_stride, &t->vis, t->dst,
+                         true, &lo, &hi);
+        if (lo < hi) {
+            memory_region_set_dirty(&ctx->vga->vram, lo, hi - lo);
+        }
+    }
+    g_free(t->dst);
+    g_free(t->src);
+}
+
+/* One operation on the context, through tile copies where needed. */
+static void ati_2d_run(ATIVGAState *s, ATI2DCtx *ctx)
+{
+    ATI2DTileCopy t;
+
+    if (ati_2d_tile_begin(ctx, &t)) {
+        ati_2d_tile_end(ctx, &t, t.dst && ati_2d_do_blt(ctx, s->use_pixman));
+    } else if (ati_2d_do_blt(ctx, s->use_pixman)) {
+        ati_set_dirty(ctx);
+    }
+}
+
 void ati_2d_blt(ATIVGAState *s)
 {
     ATI2DCtx ctx;
@@ -793,9 +924,7 @@ void ati_2d_blt(ATIVGAState *s)
         return;
     }
     setup_2d_blt_ctx(s, &ctx);
-    if (ati_2d_do_blt(&ctx, s->use_pixman)) {
-        ati_set_dirty(&ctx);
-    }
+    ati_2d_run(s, &ctx);
 }
 
 bool ati_host_data_flush(ATIVGAState *s)
@@ -876,6 +1005,9 @@ bool ati_host_data_flush(ATIVGAState *s)
     /* Copy and then modify blit ctx for use in a chunked blit */
     chunk = ctx;
     chunk.src_bits = pix_buf;
+    chunk.src_tile = 0;
+    chunk.src_lo = pix_buf;
+    chunk.src_hi = pix_buf + sizeof(pix_buf);
     chunk.src.y = 0;
     chunk.src_stride = ATI_HOST_DATA_ACC_BITS * bypp;
     /*
@@ -901,9 +1033,7 @@ bool ati_host_data_flush(ATIVGAState *s)
         chunk.dst.height = 1;
         DPRINTF("blt %dpx span @ row: %d, col: %d to dst (%d,%d)\n",
                 pix_in_scanline, row, col, chunk.dst.x, chunk.dst.y);
-        if (ati_2d_do_blt(&chunk, s->use_pixman)) {
-            ati_set_dirty(&chunk);
-        }
+        ati_2d_run(s, &chunk);
         idx += pix_in_scanline;
         col += pix_in_scanline;
         if (col >= ctx.dst.width) {
@@ -975,8 +1105,19 @@ void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx)
         if (x0 >= ctx.scissor.x && x0 < ctx.scissor.x + ctx.scissor.width &&
             y0 >= ctx.scissor.y && y0 < ctx.scissor.y + ctx.scissor.height) {
             uint8_t *dp = ctx.dst_bits + x0 * bypp + y0 * ctx.dst_stride;
+            uint64_t off;
 
-            if (dp >= ctx.vga->vram_ptr && dp + bypp <= vram_end) {
+            if (ctx.dst_tile) {
+                dp = NULL;
+                if (x0 >= 0 && y0 >= 0 &&
+                    ati_r100_tile_offset(ctx.dst_tile, bypp, ctx.dst_stride,
+                                         x0 * bypp, y0, &off)) {
+                    dp = ctx.vga->vram_ptr + ctx.dst_offset + off;
+                    memory_region_set_dirty(&ctx.vga->vram,
+                                            ctx.dst_offset + off, bypp);
+                }
+            }
+            if (dp && dp >= ctx.vga->vram_ptr && dp + bypp <= vram_end) {
                 if (xor_rop) {
                     ati_stpix(dp, bypp, ati_ldpix(dp, bypp) ^ color);
                 } else {

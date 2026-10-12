@@ -1251,6 +1251,85 @@ static void test_rv100_tiled_scanout(void)
     qtest_quit(qts);
 }
 
+/*
+ * x-tiling: the 2D engine writes and reads tiled surfaces (PITCH_OFFSET bit
+ * 30, macro) where the layout puts pixels, and the tiled CRTC shows its
+ * fill.  Surface at 0, 1024x768x32, pitch 4096; (72, 21) and (77, 21) sit at
+ * 108E0h and 108F4h (Mesa radeon_ptr_4byte).
+ */
+static void rv100_2d_op(QTestState *qts, uint64_t mmio, uint32_t gmc,
+                        uint32_t src_po, uint32_t dst_po, uint32_t src_yx,
+                        uint32_t dst_yx, uint32_t hw)
+{
+    qtest_writel(qts, mmio + 0x16e8, 0x1fff1fff);   /* default scissor */
+    qtest_writel(qts, mmio + 0x16cc, 0xffffffff);   /* DP_WRITE_MASK */
+    qtest_writel(qts, mmio + 0x146c, gmc);          /* DP_GUI_MASTER_CNTL */
+    qtest_writel(qts, mmio + 0x1428, src_po);       /* SRC_PITCH_OFFSET */
+    qtest_writel(qts, mmio + 0x142c, dst_po);       /* DST_PITCH_OFFSET */
+    qtest_writel(qts, mmio + 0x16c0, 3);            /* DP_CNTL: +x, +y */
+    qtest_writel(qts, mmio + 0x1434, src_yx);       /* SRC_Y_X */
+    qtest_writel(qts, mmio + 0x1438, dst_yx);       /* DST_Y_X */
+    qtest_writel(qts, mmio + 0x143c, hw);           /* DST_HEIGHT_WIDTH */
+}
+
+static void test_rv100_2d_tiled(void)
+{
+    const uint32_t tiled = (1u << 30) | (64u << 22);    /* macro, 4096 */
+    const uint32_t gmc_fill = 0x2 | 0xd0 | (6u << 8) | (3u << 12) |
+                              0x00f00000 | (2u << 24) | 0x10000000;
+    const uint32_t gmc_copy = 0x3 | 0xf0 | (6u << 8) | (3u << 12) |
+                              0x00cc0000 | (2u << 24) | 0x10000000;
+    QTestState *qts = qtest_init(RV100_ARGS " -global ati-vga.x-tiling=on");
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *ppm = NULL;
+    g_autoptr(GError) error = NULL;
+
+    g_assert_cmphex(rv100_int10(qts, 0x4f02, 0x4144), ==, 0x004f);
+    qtest_memset(qts, fb, 0, 0x40000);
+
+    /* A 6x1 fill at (72, 21) into the tiled surface. */
+    qtest_writel(qts, mmio + 0x147c, 0x00c0ffee);   /* DP_BRUSH_FRGD_CLR */
+    rv100_2d_op(qts, mmio, gmc_fill, 0, tiled, 0, (21u << 16) | 72,
+                (1u << 16) | 6);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x108e0), ==, 0x00c0ffee);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x108f4), ==, 0x00c0ffee);
+    g_assert_cmphex(qtest_readl(qts, fb + (21 * 1024 + 72) * 4), ==, 0);
+
+    /* The tiled CRTC, panned to (72, 21) as legacy_crtc.c does, shows it. */
+    qtest_writel(qts, mmio + 0x224, 0x10d20);
+    qtest_writel(qts, mmio + 0x228, (1u << 15) | 5);
+    tmpdir = g_dir_make_tmp("ati-rv100-2dtile-XXXXXX", &error);
+    g_assert_no_error(error);
+    ppm = g_build_filename(tmpdir, "2d.ppm", NULL);
+    qtest_qmp_assert_success(qts, "{'execute':'screendump','arguments':"
+                             " {'filename':%s}}", ppm);
+    g_assert_cmphex(rv100_ppm_pixel(ppm, 0, 0), ==, 0xc0ffee);
+    g_assert_cmphex(rv100_ppm_pixel(ppm, 5, 0), ==, 0xc0ffee);
+    g_assert_cmphex(rv100_ppm_pixel(ppm, 6, 0), ==, 0);
+    unlink(ppm);
+    rmdir(tmpdir);
+
+    /* A blit from the tiled surface to a linear one at 200000h. */
+    qtest_writel(qts, fb + 0x108e0, 0x00112233);
+    rv100_2d_op(qts, mmio, gmc_copy, tiled, (64u << 22) | (0x200000 >> 10),
+                (21u << 16) | 72, 0, (1u << 16) | 6);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x200000), ==, 0x00112233);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x200014), ==, 0x00c0ffee);
+
+    /* A line along y = 21 from x = 72 to 78 (end excluded), tiled. */
+    qtest_memset(qts, fb, 0, 0x40000);
+    qtest_writel(qts, mmio + 0x147c, 0x00a5a5a5);
+    rv100_2d_op(qts, mmio, gmc_fill, 0, tiled, 0, 0, 0);
+    qtest_writel(qts, mmio + 0x1600, (21u << 16) | 72); /* DST_LINE_START */
+    qtest_writel(qts, mmio + 0x1604, (21u << 16) | 78); /* DST_LINE_END */
+    g_assert_cmphex(qtest_readl(qts, fb + 0x108e0), ==, 0x00a5a5a5);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x108f4), ==, 0x00a5a5a5);
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -1310,6 +1389,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/3d-cull", test_rv100_3d_cull);
     qtest_add_func("/ati-rv100/3d-tiling", test_rv100_3d_tiling);
     qtest_add_func("/ati-rv100/tiled-scanout", test_rv100_tiled_scanout);
+    qtest_add_func("/ati-rv100/2d-tiled", test_rv100_2d_tiled);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();

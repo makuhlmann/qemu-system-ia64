@@ -2748,7 +2748,7 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         } else {
             s->regs.src_offset = (data & 0x3fffff) << 10;
             s->regs.src_pitch = (data & 0x3fc00000) >> 16;
-            s->regs.src_tile = (data >> 30) & 1;
+            s->regs.src_tile = data >> 30;
         }
         break;
     case DST_PITCH_OFFSET:
@@ -2796,10 +2796,12 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         if (!(data & GMC_SRC_PITCH_OFFSET_CNTL)) {
             s->regs.src_offset = s->regs.default_offset;
             s->regs.src_pitch = s->regs.default_pitch;
+            s->regs.src_tile = s->regs.default_tile;
         }
         if (!(data & GMC_DST_PITCH_OFFSET_CNTL)) {
             s->regs.dst_offset = s->regs.default_offset;
             s->regs.dst_pitch = s->regs.default_pitch;
+            s->regs.dst_tile = s->regs.default_tile;
         }
         if (!(data & GMC_SRC_CLIPPING)) {
             s->regs.src_sc_right = s->regs.default_sc_right;
