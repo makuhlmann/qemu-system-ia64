@@ -86,6 +86,7 @@
 #define R100_CP_PACKET2        (2U << 30)
 #define R100_CP_PACKET3        (3U << 30)
 #define R100_PACKET3_RNDR_GEN_PRIM 0x25
+#define R100_PACKET3_DRAW_VBUF 0x28
 #define R100_PACKET3_DRAW_IMMD 0x29
 #define R100_PACKET3_DRAW_INDX 0x2a
 #define R100_PACKET3_LOAD_VBPNTR 0x2f
@@ -106,6 +107,7 @@
 #define R100_VF_POLYGON        15
 #define R100_VF_WALK_DATA      (3U << 4)
 #define R100_VF_WALK_IND       (1U << 4)
+#define R100_VF_WALK_LIST      (2U << 4)
 #define R100_VF_COLOR_RGBA     (1U << 6)
 #define R100_VF_INDEX_SIZE_32  (1U << 11)
 #define R100_RB_Z_ENABLE       (1U << 8)
@@ -117,6 +119,7 @@
 #define R100_COLOR_TILE_ENABLE (1U << 16)
 #define R100_Z_WRITE_ENABLE    (1U << 30)
 #define R100_VPORT_Z_XFORM     (1U << 25)
+#define R100_VTX_PIX_CENTER_OGL (1U << 27)
 #define R100_TX0_ENABLE        (1U << 4)
 #define R100_TX1_ENABLE        (1U << 5)
 #define R100_TX_BLEND0_ENABLE  (1U << 12)
@@ -2273,6 +2276,138 @@ static void ati_rv100_compressed_textures(void)
     qtest_quit(qts);
 }
 
+/*
+ * The vertex layout Mesa emits: q0 right after s0/t0, and the specular dword
+ * in VF_COLOR_ORDER_RGBA like the diffuse one.  A LOAD_VBPNTR of zero arrays
+ * leaves DRAW_VBUF nothing to read.
+ */
+static void ati_rv100_vertex_layout(void)
+{
+    enum {
+        WIDTH = 16,
+        HEIGHT = 8,
+        TEX0_OFFSET = 0x10000,
+        TEX1_OFFSET = 0x10100,
+        VERTEX_OFFSET = 0x11000,
+        IB_OFFSET = 0x12000,
+    };
+    const uint32_t se_cntl = (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10) |
+                             (2U << 12) | (2U << 14) | R100_VTX_PIX_CENTER_OGL;
+    const uint32_t q0_then_st1[] = {
+        f32_bits(2.0f), f32_bits(2.0f),
+        f32_bits(4.0f), f32_bits(0.0f), f32_bits(2.0f),
+        f32_bits(1.0f), f32_bits(0.0f),
+    };
+    const uint32_t specular_point[] = {
+        f32_bits(6.0f), f32_bits(2.0f),
+        ati_rv100_rgba_vertex_color(0xff000000), 0x000000ff,
+    };
+    const uint32_t vertex[] = { f32_bits(8.0f), f32_bits(2.0f) };
+    const uint32_t draw_vbuf[] = {
+        R100_CP_PACKET3 | (1U << 16) | (R100_PACKET3_DRAW_VBUF << 8),
+        0, R100_VF_POINT_LIST | R100_VF_WALK_LIST | (1U << 16),
+    };
+    const uint32_t one_array[] = {
+        R100_CP_PACKET3 | (2U << 16) | (R100_PACKET3_LOAD_VBPNTR << 8),
+        1, 2U | (2U << 8), VERTEX_OFFSET,
+    };
+    const uint32_t no_array[] = {
+        R100_CP_PACKET3 | (R100_PACKET3_LOAD_VBPNTR << 8), 0,
+    };
+    const uint64_t vbuf_pixel = rv100_fb + (2 * WIDTH + 8) * 4;
+    QTestState *qts = rv100_3d_init("");
+    unsigned int i;
+
+    qtest_memset(qts, rv100_fb, 0, WIDTH * HEIGHT * 4);
+    for (i = 0; i < 4; i++) {
+        qtest_writel(qts, rv100_fb + TEX0_OFFSET + i * 4,
+                     0xff000000 | (i + 1) << 20);
+        qtest_writel(qts, rv100_fb + TEX1_OFFSET + i * 4,
+                     0xff000000 | (i + 1) << 4);
+    }
+    qtest_writel(qts, rv100_mmio + R100_RB3D_CNTL, R100_RB_COLOR_ARGB8888);
+    qtest_writel(qts, rv100_mmio + R100_RB3D_COLOROFFSET, 0);
+    qtest_writel(qts, rv100_mmio + R100_RB3D_COLORPITCH, WIDTH);
+    qtest_writel(qts, rv100_mmio + R100_RE_TOP_LEFT, 0);
+    qtest_writel(qts, rv100_mmio + R100_RE_WIDTH_HEIGHT,
+                 (HEIGHT - 1) << 16 | (WIDTH - 1));
+    qtest_writel(qts, rv100_mmio + R100_SE_CNTL, se_cntl);
+    qtest_writel(qts, rv100_mmio + R100_SE_COORD_FMT,
+                 R100_COORD_ST0_NONPARAM | R100_COORD_ST1_NONPARAM);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXFILTER_0, 0);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXFORMAT_0,
+                 R100_TX_ARGB8888 | R100_TX_ALPHA_IN_MAP |
+                 R100_TX_NON_POWER2 | R100_TX_PERSPECTIVE);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXOFFSET_0, TEX0_OFFSET);
+    qtest_writel(qts, rv100_mmio + R100_PP_TEX_SIZE_0, 3);
+    qtest_writel(qts, rv100_mmio + R100_PP_TEX_PITCH_0, 0);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXCBLEND_0,
+                 (10U << 10) | R100_COMBINER_CLAMP);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXABLEND_0,
+                 (5U << 8) | R100_COMBINER_CLAMP);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXFILTER_1, 0);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXFORMAT_1,
+                 R100_TX_ARGB8888 | R100_TX_ALPHA_IN_MAP |
+                 R100_TX_NON_POWER2 | R100_TX_ROUTE_ST1);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXOFFSET_1, TEX1_OFFSET);
+    qtest_writel(qts, rv100_mmio + R100_PP_TEX_SIZE_1, 3);
+    qtest_writel(qts, rv100_mmio + R100_PP_TEX_PITCH_1, 0);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXCBLEND_1,
+                 (12U << 10) | R100_COMBINER_CLAMP);
+    qtest_writel(qts, rv100_mmio + R100_PP_TXABLEND_1,
+                 (6U << 8) | R100_COMBINER_CLAMP);
+
+    /* s0 / q0 = 2 selects texel 2 of unit 0; s1 = 1 texel 1 of unit 1. */
+    qtest_writel(qts, rv100_mmio + R100_PP_CNTL,
+                 R100_TX0_ENABLE | R100_TX_BLEND0_ENABLE);
+    ati_rv100_draw_immediate(qts, R100_VTX_FMT_ST0 | R100_VTX_FMT_Q0 |
+                             R100_VTX_FMT_ST1, R100_VF_POINT_LIST,
+                             q0_then_st1, ARRAY_SIZE(q0_then_st1), 1);
+    g_assert_cmphex(qtest_readl(qts, rv100_fb + (2 * WIDTH + 2) * 4), ==,
+                    0xff300000);
+    qtest_writel(qts, rv100_mmio + R100_PP_CNTL,
+                 R100_TX1_ENABLE | R100_TX_BLEND1_ENABLE);
+    ati_rv100_draw_immediate(qts, R100_VTX_FMT_ST0 | R100_VTX_FMT_Q0 |
+                             R100_VTX_FMT_ST1, R100_VF_POINT_LIST,
+                             q0_then_st1, ARRAY_SIZE(q0_then_st1), 1);
+    g_assert_cmphex(qtest_readl(qts, rv100_fb + (2 * WIDTH + 2) * 4), ==,
+                    0xff000020);
+
+    /* Byte 0 of an RGBA-ordered specular dword is red. */
+    qtest_writel(qts, rv100_mmio + R100_PP_CNTL, R100_PP_SPECULAR_ENABLE);
+    ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR | R100_VTX_FMT_PKSPEC,
+                             R100_VF_POINT_LIST, specular_point,
+                             ARRAY_SIZE(specular_point), 1);
+    g_assert_cmphex(qtest_readl(qts, rv100_fb + (2 * WIDTH + 6) * 4), ==,
+                    0xffff0000);
+
+    qtest_writel(qts, rv100_mmio + R100_PP_CNTL, 0);
+    for (i = 0; i < ARRAY_SIZE(vertex); i++) {
+        qtest_writel(qts, rv100_fb + VERTEX_OFFSET + i * 4, vertex[i]);
+    }
+    for (i = 0; i < ARRAY_SIZE(one_array); i++) {
+        qtest_writel(qts, rv100_fb + IB_OFFSET + i * 4, one_array[i]);
+    }
+    for (i = 0; i < ARRAY_SIZE(draw_vbuf); i++) {
+        qtest_writel(qts, rv100_fb + IB_OFFSET + (4 + i) * 4, draw_vbuf[i]);
+    }
+    qtest_writel(qts, rv100_mmio + R100_CP_CSQ_CNTL, R100_CSQ_PRIBM_INDBM);
+    qtest_writel(qts, rv100_mmio + R100_CP_IB_BASE, IB_OFFSET);
+    qtest_writel(qts, rv100_mmio + R100_CP_IB_BUFSZ, 7);
+    g_assert_cmphex(qtest_readl(qts, vbuf_pixel), ==, UINT32_MAX);
+
+    qtest_writel(qts, vbuf_pixel, 0);
+    for (i = 0; i < ARRAY_SIZE(no_array); i++) {
+        qtest_writel(qts, rv100_fb + IB_OFFSET + i * 4, no_array[i]);
+    }
+    for (i = 0; i < ARRAY_SIZE(draw_vbuf); i++) {
+        qtest_writel(qts, rv100_fb + IB_OFFSET + (2 + i) * 4, draw_vbuf[i]);
+    }
+    qtest_writel(qts, rv100_mmio + R100_CP_IB_BUFSZ, 5);
+    g_assert_cmphex(qtest_readl(qts, vbuf_pixel), ==, 0);
+    qtest_quit(qts);
+}
+
 static void display_wait_for_migration_status(QTestState *qts,
                                               const char *wanted)
 {
@@ -2323,5 +2458,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100-3d/compressed-textures",
                    ati_rv100_compressed_textures);
     qtest_add_func("/ati-rv100-3d/yuv-textures", ati_rv100_yuv_textures);
+    qtest_add_func("/ati-rv100-3d/vertex-layout", ati_rv100_vertex_layout);
     return g_test_run();
 }

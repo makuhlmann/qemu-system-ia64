@@ -359,12 +359,13 @@ static bool r100_translate_gart(ATIVGAState *s, uint64_t address,
                                 uint64_t length, uint64_t *translated,
                                 uint64_t *span)
 {
+    uint32_t table = ati_r100_reg(s, R100_AIC_PT_BASE) & ~0xfffU;
     uint32_t entry;
     uint64_t page;
 
     page = (address - ati_r100_reg(s, R100_AIC_LO_ADDR)) >> 12;
-    if (page > (UINT32_MAX - ati_r100_reg(s, R100_AIC_PT_BASE)) / 4 ||
-        pci_dma_read(&s->dev, ati_r100_reg(s, R100_AIC_PT_BASE) + page * 4,
+    if (page > (UINT32_MAX - table) / 4 ||
+        pci_dma_read(&s->dev, table + page * 4,
                      &entry, sizeof(entry)) != MEMTX_OK) {
         return false;
     }
@@ -694,13 +695,33 @@ static unsigned int r100_vertex_dwords(uint32_t format)
     return size;
 }
 
+/*
+ * VF_COLOR_ORDER_RGBA covers the specular dword too: Mesa's software TCL
+ * packs both colours R, G, B from byte 0 with ORDER_RGBA set (Mesa 7.11
+ * radeon_swtcl.c:129-156, radeon_ioctl.c:154).  Byte 3 is alpha or fog.
+ */
+static R100Color r100_unpack_color(uint32_t packed, uint32_t vf_cntl)
+{
+    R100Color c;
+
+    if (vf_cntl & R100_VF_COLOR_ORDER_RGBA) {
+        c.r = (packed & 0xff) / 255.0f;
+        c.b = ((packed >> 16) & 0xff) / 255.0f;
+    } else {
+        c.b = (packed & 0xff) / 255.0f;
+        c.r = ((packed >> 16) & 0xff) / 255.0f;
+    }
+    c.g = ((packed >> 8) & 0xff) / 255.0f;
+    c.a = ((packed >> 24) & 0xff) / 255.0f;
+    return c;
+}
+
 static bool r100_parse_vertex(const uint32_t *words, unsigned int count,
                               uint32_t format, uint32_t vf_cntl,
                               R100Vertex *vertex)
 {
     unsigned int needed = r100_vertex_dwords(format);
     unsigned int i = 0;
-    uint32_t packed;
 
     if (count < needed) {
         return false;
@@ -723,17 +744,7 @@ static bool r100_parse_vertex(const uint32_t *words, unsigned int count,
         vertex->color.a = r100_float(words[i++]);
     }
     if (format & R100_VTX_FMT_PKCOLOR) {
-        packed = words[i++];
-        if (vf_cntl & R100_VF_COLOR_ORDER_RGBA) {
-            vertex->color.r = (packed & 0xff) / 255.0f;
-            vertex->color.g = ((packed >> 8) & 0xff) / 255.0f;
-            vertex->color.b = ((packed >> 16) & 0xff) / 255.0f;
-        } else {
-            vertex->color.b = (packed & 0xff) / 255.0f;
-            vertex->color.g = ((packed >> 8) & 0xff) / 255.0f;
-            vertex->color.r = ((packed >> 16) & 0xff) / 255.0f;
-        }
-        vertex->color.a = ((packed >> 24) & 0xff) / 255.0f;
+        vertex->color = r100_unpack_color(words[i++], vf_cntl);
     }
     if (format & R100_VTX_FMT_FPSPEC) {
         vertex->specular.r = r100_float(words[i++]);
@@ -744,16 +755,20 @@ static bool r100_parse_vertex(const uint32_t *words, unsigned int count,
         vertex->specular.a = r100_float(words[i++]);
     }
     if (format & R100_VTX_FMT_PKSPEC) {
-        packed = words[i++];
-        vertex->specular.b = (packed & 0xff) / 255.0f;
-        vertex->specular.g = ((packed >> 8) & 0xff) / 255.0f;
-        vertex->specular.r = ((packed >> 16) & 0xff) / 255.0f;
-        vertex->specular.a = ((packed >> 24) & 0xff) / 255.0f;
+        vertex->specular = r100_unpack_color(words[i++], vf_cntl);
     }
 
+    /*
+     * Q0 follows T0 although its format bit comes after Q3: Mesa emits s0,
+     * t0, q0 together (Mesa 7.11 radeon_swtcl.c:83-88,198 and
+     * radeon_maos_vbtmp.h:217-229; XFree86 4.3 radeon_maos_vbtmp.h:241-252).
+     */
     if (format & R100_VTX_FMT_ST0) {
         vertex->s[0] = r100_float(words[i++]);
         vertex->t[0] = r100_float(words[i++]);
+    }
+    if (format & R100_VTX_FMT_Q0) {
+        vertex->q[0] = r100_float(words[i++]);
     }
     if (format & R100_VTX_FMT_ST1) {
         vertex->s[1] = r100_float(words[i++]);
@@ -773,9 +788,6 @@ static bool r100_parse_vertex(const uint32_t *words, unsigned int count,
         i += 2;
     }
     i += !!(format & R100_VTX_FMT_Q3);
-    if (format & R100_VTX_FMT_Q0) {
-        vertex->q[0] = r100_float(words[i++]);
-    }
     i += extract32(format, 15, 3);
     if (format & R100_VTX_FMT_N0) {
         i += 3;
@@ -3473,6 +3485,7 @@ static bool r100_draw_indexed(ATIVGAState *s, uint32_t format,
     r100_draw_vertices(s, vertices, vertex_count, vf_cntl);
     return true;
 }
+
 static bool r100_load_vbpntr(ATIVGAState *s, const uint32_t *payload,
                              unsigned int count)
 {
@@ -3484,8 +3497,12 @@ static bool r100_load_vbpntr(ATIVGAState *s, const uint32_t *payload,
     if (!count) {
         return false;
     }
-    arrays = payload[0];
-    if (!arrays || arrays > ATI_R100_MAX_VERTEX_ARRAYS) {
+    /*
+     * The count is 5 bits (Linux r100.c r100_packet3_load_vbpntr); XP 3790's
+     * driver loads zero arrays.
+     */
+    arrays = payload[0] & 0x1f;
+    if (arrays > ATI_R100_MAX_VERTEX_ARRAYS) {
         return false;
     }
     memset(r->vertex_array, 0, sizeof(r->vertex_array));
