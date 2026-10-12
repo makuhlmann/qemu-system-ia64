@@ -665,6 +665,26 @@ static void rv100_cp_setup(QTestState *qts, uint64_t mmio, uint32_t csq_mode)
     qtest_writel(qts, mmio + 0x16c0, 3);            /* DP_CNTL: +x, +y */
 }
 
+/*
+ * The DRMs load the CP microcode from address 0 in DATAH/DATAL pairs: the
+ * address advances after each low word (RAGE 128 SDK manual 5.2.2).
+ */
+static void test_rv100_cp_microcode_address(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    unsigned i;
+
+    qtest_writel(qts, mmio + 0x7d4, 0);             /* CP_ME_RAM_ADDR */
+    for (i = 0; i < 3; i++) {
+        qtest_writel(qts, mmio + 0x7dc, 0x01234567);    /* DATAH */
+        g_assert_cmpuint(qtest_readl(qts, mmio + 0x7d4), ==, i);
+        qtest_writel(qts, mmio + 0x7e0, 0x89abcdef);    /* DATAL */
+    }
+    g_assert_cmpuint(qtest_readl(qts, mmio + 0x7d4), ==, 3);
+    qtest_quit(qts);
+}
+
 /* CNTL_PAINT_MULTI: a 4x1 solid fill at VRAM 100000h, as XP's ring has it. */
 static unsigned rv100_paint_packet(uint32_t *p, uint32_t colour)
 {
@@ -1079,6 +1099,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/scissor", test_rv100_scissor);
     qtest_add_func("/ati-rv100/cp-ring-gart", test_rv100_cp_ring_gart);
     qtest_add_func("/ati-rv100/cp-off", test_rv100_cp_off);
+    qtest_add_func("/ati-rv100/cp-microcode-address",
+                   test_rv100_cp_microcode_address);
     qtest_add_func("/ati-rv100/cp-indirect", test_rv100_cp_indirect);
     qtest_add_func("/ati-rv100/cp-mono-brush", test_rv100_cp_mono_brush);
     qtest_add_func("/ati-rv100/cp-migration", test_rv100_cp_migration);

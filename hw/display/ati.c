@@ -2812,6 +2812,14 @@ static void ati_mm_write(void *opaque, hwaddr addr,
         }
         if (aux >= 0) {
             ati_reg_write_offs(&s->regs.init_aux[aux], addr & 3, data, size);
+            /*
+             * The microcode address advances after each DATAH/DATAL pair,
+             * high word first (RAGE 128 SDK manual 5.2.2; the Radeon's
+             * CP_ME_RAM_* at the same offsets, Linux r100.c:1131-1137).
+             */
+            if ((addr & ~3ULL) == 0x07e0) {
+                s->regs.init_aux[ati_init_aux_slot(0x07d4)]++;
+            }
         } else {
             ati_unimp(s, addr, true, data);
         }
