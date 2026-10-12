@@ -488,6 +488,185 @@ static void ati_cursor_draw_line(VGACommonState *vga, uint8_t *d, int scr_y)
     }
 }
 
+/*
+ * CRTC_OFFSET_CNTL.CRTC_TILE_EN: the CRTC reads a macro-tiled front buffer
+ * (Linux radeon_reg.h bit 15).  xf86-video-ati 6.14 legacy_crtc.c points
+ * CRTC_OFFSET into the macro tile of the first pixel, at its byte and line
+ * there, and puts y % 16 in TILE_LINE (3:0), whose bits the reorder inside a
+ * tile uses.  The parity of the first pixel's tile column enters the reorder
+ * as well; it comes from the address, for a surface that starts on 4 KiB as
+ * the drivers allocate it.
+ */
+#define ATI_CRTC_TILE_EN    BIT(15)
+
+static const GraphicHwOps *ati_vga_ops;
+
+static bool ati_crtc_tiled(ATIVGAState *s)
+{
+    return s->r100_tiling && !ati_is_rage128(s) && s->mode == EXT_MODE &&
+           (s->regs.crtc_gen_cntl & CRTC2_EN) &&
+           (s->regs.crtc_offset_cntl & ATI_CRTC_TILE_EN);
+}
+
+static uint32_t ati_tiled_pixel(ATIVGAState *s, int64_t address,
+                                unsigned int cpp, bool rgb555)
+{
+    uint32_t v, r, g, b;
+
+    if (address < 0 || address + cpp > s->vga.vram_size) {
+        return 0;
+    }
+    if (cpp == 4) {
+        return ldl_le_p(s->vga.vram_ptr + address) & 0xffffff;
+    }
+    v = lduw_le_p(s->vga.vram_ptr + address);
+    if (rgb555) {
+        r = (v >> 10) & 31;
+        g = ((v >> 5) & 31) << 1 | ((v >> 9) & 1);
+    } else {
+        r = v >> 11;
+        g = (v >> 5) & 63;
+    }
+    b = v & 31;
+    return (r << 3 | r >> 2) << 16 | (g << 2 | g >> 4) << 8 | (b << 3 | b >> 2);
+}
+
+static void ati_tiled_update(ATIVGAState *s)
+{
+    VGACommonState *vga = &s->vga;
+    DisplaySurface *surface = qemu_console_surface(vga->con);
+    DirtyBitmapSnapshot *snap;
+    unsigned int cpp, w, h, l0, col0, x, y, rows;
+    uint32_t pitch, base, band;
+    int64_t origin, start, end;
+    bool full = s->tiled_full;
+    bool rgb555 = false;
+    int ymin = -1, ymax = -1;
+
+    switch (s->regs.crtc_gen_cntl & CRTC_PIX_WIDTH_MASK) {
+    case CRTC_PIX_WIDTH_15BPP:
+        rgb555 = true;
+        /* fall through */
+    case CRTC_PIX_WIDTH_16BPP:
+        cpp = 2;
+        break;
+    case CRTC_PIX_WIDTH_32BPP:
+        cpp = 4;
+        break;
+    default:
+        if (!s->tiled_full) {
+            return;
+        }
+        qemu_log_mask(LOG_UNIMP, "ati-vga: tiled scanout below 15 bpp\n");
+        s->tiled_full = false;
+        return;
+    }
+    w = ((s->regs.crtc_h_total_disp >> 16) + 1) * 8;
+    h = (s->regs.crtc_v_total_disp >> 16) + 1;
+    pitch = (s->regs.crtc_pitch & 0x7ff) * 8 * cpp;
+    if (!pitch || w * cpp > pitch || h > 4096) {
+        return;
+    }
+    base = s->regs.crtc_offset & 0x07ffffff;
+    l0 = s->regs.crtc_offset_cntl & 0xf;
+    col0 = ((base >> 11) ^ ((l0 >> 3) & (pitch >> 8))) & 1;
+    origin = (int64_t)(base & ~0x7ffU) - col0 * 0x800 -
+             (int64_t)(l0 >> 3) * pitch * 8;
+    band = pitch * 8;
+
+    if (!surface || surface != s->tiled_surface ||
+        surface_width(surface) != w || surface_height(surface) != h) {
+        surface = qemu_create_displaysurface(w, h);
+        dpy_gfx_replace_surface(vga->con, surface);
+        s->tiled_surface = surface;
+        full = true;
+    }
+    if (vga->cursor_invalidate) {
+        vga->cursor_invalidate(vga);
+    }
+
+    rows = (l0 + h + 7) / 8;
+    start = MAX(origin, 0);
+    end = MIN(origin + (int64_t)rows * band, (int64_t)vga->vram_size);
+    if (end <= start) {
+        return;
+    }
+    snap = memory_region_snapshot_and_clear_dirty(&vga->vram, start,
+                                                  end - start,
+                                                  DIRTY_MEMORY_VGA);
+    for (y = 0; y < h; y++) {
+        int64_t row = origin + (int64_t)((l0 + y) >> 3) * band;
+        uint32_t *d;
+
+        if (!full && !(vga->invalidated_y_table[y >> 5] & (1U << (y & 31))) &&
+            !(row + band > start && row < end &&
+              memory_region_snapshot_get_dirty(&vga->vram, snap,
+                                               MAX(row, start),
+                                               MIN(row + band, end) -
+                                               MAX(row, start)))) {
+            continue;
+        }
+        d = (uint32_t *)(surface_data(surface) + y * surface_stride(surface));
+        for (x = 0; x < w; x++) {
+            uint64_t offset;
+
+            ati_r100_tile_offset(ATI_R100_TILE_MACRO, cpp, pitch,
+                                 col0 * 256 + (base & 255) + x * cpp,
+                                 l0 + y, &offset);
+            d[x] = ati_tiled_pixel(s, origin + offset, cpp, rgb555);
+        }
+        if (vga->cursor_draw_line) {
+            vga->cursor_draw_line(vga, (uint8_t *)d, y);
+        }
+        if (ymin < 0) {
+            ymin = y;
+        }
+        ymax = y;
+    }
+    g_free(snap);
+    memset(vga->invalidated_y_table, 0, sizeof(vga->invalidated_y_table));
+    s->tiled_full = false;
+    if (ymin >= 0) {
+        dpy_gfx_update(vga->con, 0, ymin, w, ymax - ymin + 1);
+    }
+}
+
+static void ati_gfx_invalidate(void *opaque)
+{
+    ATIVGAState *s = container_of(opaque, ATIVGAState, vga);
+
+    s->tiled_full = true;
+    ati_vga_ops->invalidate(opaque);
+}
+
+static bool ati_gfx_update(void *opaque)
+{
+    ATIVGAState *s = container_of(opaque, ATIVGAState, vga);
+    bool tiled = ati_crtc_tiled(s);
+
+    if (tiled != s->tiled_active) {
+        s->tiled_active = tiled;
+        s->tiled_full = true;
+        ati_vga_ops->invalidate(opaque);
+    }
+    if (!tiled) {
+        return ati_vga_ops->gfx_update(opaque);
+    }
+    ati_tiled_update(s);
+    return true;
+}
+
+static void ati_gfx_text_update(void *opaque, uint32_t *chardata)
+{
+    ati_vga_ops->text_update(opaque, chardata);
+}
+
+static const GraphicHwOps ati_gfx_ops = {
+    .invalidate  = ati_gfx_invalidate,
+    .gfx_update  = ati_gfx_update,
+    .text_update = ati_gfx_text_update,
+};
+
 static uint64_t ati_i2c(bitbang_i2c_interface *i2c, uint64_t data, int base)
 {
     bool c = (data & BIT(base + 17) ? !!(data & BIT(base + 1)) : 1);
@@ -3317,7 +3496,8 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
                      vga, "vga");
     portio_list_set_flush_coalesced(&s->vga_port_list);
     portio_list_add(&s->vga_port_list, pci_address_space_io(dev), 0x3b0);
-    vga->con = graphic_console_init(DEVICE(s), 0, s->vga.hw_ops, vga);
+    ati_vga_ops = s->vga.hw_ops;
+    vga->con = graphic_console_init(DEVICE(s), 0, &ati_gfx_ops, vga);
     if (s->cursor_guest_mode) {
         vga->cursor_invalidate = ati_cursor_invalidate;
         vga->cursor_draw_line = ati_cursor_draw_line;

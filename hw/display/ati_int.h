@@ -218,6 +218,10 @@ struct ATIVGAState {
     uint16_t cursor_size;
     uint32_t cursor_offset;
     QEMUCursor *cursor;
+    /* The tiled front buffer's own display surface (CRTC_TILE_EN). */
+    DisplaySurface *tiled_surface;
+    bool tiled_active;
+    bool tiled_full;
     /* Register offsets already reported as unimplemented (-d unimp). */
     DECLARE_BITMAP(unimp_seen, ATI_R100_MMIO_SIZE / 4);
     /* PLL indices written since reset, and those reported as unimplemented. */

@@ -1190,6 +1190,67 @@ static void test_rv100_3d_tiling(void)
     qtest_quit(qts);
 }
 
+/*
+ * x-tiling with CRTC_TILE_EN: the CRTC scans out a macro-tiled front
+ * buffer.  Pixels sit where Mesa's radeon_ptr_4byte puts them (1024x768x32,
+ * pitch 4096 bytes); CRTC_OFFSET and TILE_LINE are programmed as
+ * xf86-video-ati 6.14 legacy_crtc.c does for a pan to (72, 21).
+ */
+static void test_rv100_tiled_scanout(void)
+{
+    static const struct {
+        unsigned dx, dy;
+        uint32_t offset;
+    } probes[] = {
+        { 0, 0, 0x108e0 }, { 5, 0, 0x108f4 }, { 60, 3, 0x19210 },
+        { 200, 10, 0x1a740 }, { 500, 40, 0x3c570 }, { 900, 700, 0x2d7c70 },
+        { 3, 11, 0x20c2c },
+    };
+    QTestState *qts = qtest_init(RV100_ARGS " -global ati-vga.x-tiling=on");
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    g_autofree char *tmpdir = NULL;
+    g_autofree char *ppm = NULL;
+    g_autoptr(GError) error = NULL;
+    size_t i;
+
+    g_assert_cmphex(rv100_int10(qts, 0x4f02, 0x4144), ==, 0x004f);
+    for (i = 0; i < ARRAY_SIZE(probes); i++) {
+        qtest_writel(qts, fb + probes[i].offset, 0x00102030 * (i + 1));
+    }
+    qtest_writel(qts, mmio + 0x224, 0x10d20);           /* CRTC_OFFSET */
+    qtest_writel(qts, mmio + 0x228, (1u << 15) | 5);    /* ..._CNTL */
+
+    tmpdir = g_dir_make_tmp("ati-rv100-tiled-XXXXXX", &error);
+    g_assert_no_error(error);
+    ppm = g_build_filename(tmpdir, "tiled.ppm", NULL);
+    qtest_qmp_assert_success(qts, "{'execute':'screendump','arguments':"
+                             " {'filename':%s}}", ppm);
+    for (i = 0; i < ARRAY_SIZE(probes); i++) {
+        g_assert_cmphex(rv100_ppm_pixel(ppm, probes[i].dx, probes[i].dy),
+                        ==, (0x00102030 * (i + 1)) & 0xffffff);
+    }
+
+    /* A write into one 8-line band reaches the next refresh. */
+    qtest_writel(qts, fb + probes[4].offset, 0x00fedcba);
+    qtest_qmp_assert_success(qts, "{'execute':'screendump','arguments':"
+                             " {'filename':%s}}", ppm);
+    g_assert_cmphex(rv100_ppm_pixel(ppm, 500, 40), ==, 0xfedcba);
+    g_assert_cmphex(rv100_ppm_pixel(ppm, 200, 10), ==, 0x4080c0);
+
+    /* Without CRTC_TILE_EN the same memory is read linearly again. */
+    qtest_writel(qts, fb + (26 * 1024 + 79) * 4, 0x00abcdef);
+    qtest_writel(qts, mmio + 0x228, 0);
+    qtest_writel(qts, mmio + 0x224, (21 * 1024 + 72) * 4);
+    qtest_qmp_assert_success(qts, "{'execute':'screendump','arguments':"
+                             " {'filename':%s}}", ppm);
+    g_assert_cmphex(rv100_ppm_pixel(ppm, 7, 5), ==, 0xabcdef);
+    unlink(ppm);
+    rmdir(tmpdir);
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -1248,6 +1309,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/3d-draw", test_rv100_3d_draw);
     qtest_add_func("/ati-rv100/3d-cull", test_rv100_3d_cull);
     qtest_add_func("/ati-rv100/3d-tiling", test_rv100_3d_tiling);
+    qtest_add_func("/ati-rv100/tiled-scanout", test_rv100_tiled_scanout);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();
