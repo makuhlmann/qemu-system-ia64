@@ -118,6 +118,7 @@
 #define R100_RB3D_Z_ENABLE                       BIT(8)
 #define R100_RB3D_Z_WRITE_ENABLE                 BIT(30)
 #define R100_RE_MISC                             0x26c4
+#define R100_RE_SOLID_COLOR                      0x1c1c
 #define R100_RE_TOP_LEFT                         0x26c0
 #define R100_RE_WIDTH_HEIGHT                     0x1c44
 #define R100_SE_ALPHA_SHADE_SHIFT                10
@@ -130,6 +131,7 @@
 #define R100_SE_PORT_DATA0                       0x2000
 #define R100_SE_PORT_DATA_END                    0x207c
 #define R100_SE_SHADE_FLAT                       1
+#define R100_SE_SHADE_SOLID                      0
 #define R100_SE_SHADE_GOURAUD                    2
 #define R100_SE_SPECULAR_SHADE_SHIFT             12
 #define R100_SE_VF_CNTL                          0x2084

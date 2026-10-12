@@ -74,6 +74,7 @@
 #define R100_RB3D_STENCILREFMASK 0x1d7c
 #define R100_SE_VPORT_ZSCALE  0x1da8
 #define R100_SE_VPORT_ZOFFSET 0x1dac
+#define R100_RE_SOLID_COLOR    0x1c1c
 #define R100_RE_TOP_LEFT       0x26c0
 #define R100_SE_PORT_DATA0     0x2000
 #define R100_SE_VTX_FMT        0x2080
@@ -1751,8 +1752,13 @@ static void ati_rv100_fixed_function(void)
     g_assert_cmphex(qtest_readl(qts, color_base +
                                 (20 * WIDTH + 42) * 4), ==, 0x44556677);
 
-    /* X.Org rectangles omit vertex colors and leave alpha shading solid. */
+    /*
+     * X.Org rectangles omit vertex colors and leave alpha shading solid,
+     * which takes alpha from RE_SOLID_COLOR; a solid diffuse color replaces
+     * varying vertex colors with RE_SOLID_COLOR's RGB.
+     */
     qtest_writel(qts, color_base + (24 * WIDTH + 42) * 4, 0);
+    qtest_writel(qts, mmio + R100_RE_SOLID_COLOR, 0x8000ff00);
     qtest_writel(qts, mmio + R100_SE_CNTL,
                  R100_SE_GL | (2U << 8));
     ati_rv100_draw_immediate(qts, R100_VTX_FMT_ST0,
@@ -1760,13 +1766,21 @@ static void ati_rv100_fixed_function(void)
                              driver_style_rectangle,
                              ARRAY_SIZE(driver_style_rectangle), 3);
     g_assert_cmphex(qtest_readl(qts, color_base +
-                                (24 * WIDTH + 42) * 4), ==, UINT32_MAX);
+                                (24 * WIDTH + 42) * 4), ==, 0x80ffffff);
+    qtest_writel(qts, color_base + (20 * WIDTH + 42) * 4, 0);
+    qtest_writel(qts, mmio + R100_SE_CNTL,
+                 R100_SE_GL | (2U << 10));
+    ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
+                             R100_VF_LINE_LIST, flat_shade_line,
+                             ARRAY_SIZE(flat_shade_line), 2);
+    g_assert_cmphex(qtest_readl(qts, color_base +
+                                (20 * WIDTH + 42) * 4), ==, 0xff00ff00);
 
     /* Flat batches may use a different constant color per primitive. */
     qtest_writel(qts, color_base + (29 * WIDTH + 41) * 4, 0);
     qtest_writel(qts, color_base + (29 * WIDTH + 47) * 4, 0);
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 R100_SE_GL | (1U << 8));
+                 R100_SE_GL | (1U << 8) | (1U << 10));
     ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
                              R100_VF_TRIANGLE_LIST, flat_triangle_list,
                              ARRAY_SIZE(flat_triangle_list), 6);

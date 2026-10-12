@@ -3060,29 +3060,38 @@ static uint32_t r100_primitive_variation(const R100Vertex *vertices,
     return variation;
 }
 
+/* Shade mode 3 is not defined (Linux radeon_reg.h *_SHADE_*). */
 static bool r100_shade_mode_supported(uint32_t variation,
                                       uint32_t variation_bit,
                                       uint32_t se_cntl,
                                       unsigned int shift)
 {
+    return !(variation & variation_bit) || extract32(se_cntl, shift, 2) != 3;
+}
+
+/*
+ * SOLID specular and fog have no known source; they are taken as flat.
+ * Mesa never selects SOLID; X.Org and XP 3790's driver leave both SOLID
+ * with specular and fog off.
+ */
+static bool r100_shade_flat(uint32_t se_cntl, unsigned int shift)
+{
     unsigned int mode = extract32(se_cntl, shift, 2);
 
-    return !(variation & variation_bit) || mode == R100_SE_SHADE_FLAT ||
-           mode == R100_SE_SHADE_GOURAUD;
+    return mode == R100_SE_SHADE_FLAT ||
+           (mode == R100_SE_SHADE_SOLID &&
+            (shift == R100_SE_SPECULAR_SHADE_SHIFT ||
+             shift == R100_SE_FOG_SHADE_SHIFT));
 }
 
 static bool r100_flat_shading_needed(ATIR100State *r)
 {
     uint32_t se_cntl = r100_context_read(r, R100_SE_CNTL);
 
-    return extract32(se_cntl, R100_SE_DIFFUSE_SHADE_SHIFT, 2) ==
-           R100_SE_SHADE_FLAT ||
-           extract32(se_cntl, R100_SE_ALPHA_SHADE_SHIFT, 2) ==
-           R100_SE_SHADE_FLAT ||
-           extract32(se_cntl, R100_SE_SPECULAR_SHADE_SHIFT, 2) ==
-           R100_SE_SHADE_FLAT ||
-           extract32(se_cntl, R100_SE_FOG_SHADE_SHIFT, 2) ==
-           R100_SE_SHADE_FLAT;
+    return r100_shade_flat(se_cntl, R100_SE_DIFFUSE_SHADE_SHIFT) ||
+           r100_shade_flat(se_cntl, R100_SE_ALPHA_SHADE_SHIFT) ||
+           r100_shade_flat(se_cntl, R100_SE_SPECULAR_SHADE_SHIFT) ||
+           r100_shade_flat(se_cntl, R100_SE_FOG_SHADE_SHIFT);
 }
 
 static void r100_apply_flat_shading(ATIR100State *r, R100Vertex *vertices,
@@ -3104,25 +3113,52 @@ static void r100_apply_flat_shading(ATIR100State *r, R100Vertex *vertices,
     color = vertices[source].color;
     specular = vertices[source].specular;
     for (i = 0; i < count; i++) {
-        if (extract32(se_cntl, R100_SE_DIFFUSE_SHADE_SHIFT, 2) ==
-            R100_SE_SHADE_FLAT) {
+        if (r100_shade_flat(se_cntl, R100_SE_DIFFUSE_SHADE_SHIFT)) {
             vertices[i].color.r = color.r;
             vertices[i].color.g = color.g;
             vertices[i].color.b = color.b;
         }
-        if (extract32(se_cntl, R100_SE_ALPHA_SHADE_SHIFT, 2) ==
-            R100_SE_SHADE_FLAT) {
+        if (r100_shade_flat(se_cntl, R100_SE_ALPHA_SHADE_SHIFT)) {
             vertices[i].color.a = color.a;
         }
-        if (extract32(se_cntl, R100_SE_SPECULAR_SHADE_SHIFT, 2) ==
-            R100_SE_SHADE_FLAT) {
+        if (r100_shade_flat(se_cntl, R100_SE_SPECULAR_SHADE_SHIFT)) {
             vertices[i].specular.r = specular.r;
             vertices[i].specular.g = specular.g;
             vertices[i].specular.b = specular.b;
         }
-        if (extract32(se_cntl, R100_SE_FOG_SHADE_SHIFT, 2) ==
-            R100_SE_SHADE_FLAT) {
+        if (r100_shade_flat(se_cntl, R100_SE_FOG_SHADE_SHIFT)) {
             vertices[i].specular.a = specular.a;
+        }
+    }
+}
+
+/*
+ * SOLID diffuse and alpha come from RE_SOLID_COLOR, read as ARGB8888.  The
+ * Rage 128 SDK manual (ch. 6, Shading) gives solid shading the colour of its
+ * CONSTANT_COLOR_C; the Radeon keeps RE_SOLID_COLOR in its 3D context (Mesa
+ * 7.11 radeon_state_init.c:912), and the Radeon's CONSTANT_COLOR_C (1D34h)
+ * is the alternative.
+ */
+static void r100_apply_solid_shading(ATIR100State *r, R100Vertex *vertices,
+                                     unsigned int count)
+{
+    uint32_t se_cntl = r100_context_read(r, R100_SE_CNTL);
+    R100Color solid = r100_decode_color(r100_context_read(
+        r, R100_RE_SOLID_COLOR), 6);
+    bool diffuse = extract32(se_cntl, R100_SE_DIFFUSE_SHADE_SHIFT, 2) ==
+                   R100_SE_SHADE_SOLID;
+    bool alpha = extract32(se_cntl, R100_SE_ALPHA_SHADE_SHIFT, 2) ==
+                 R100_SE_SHADE_SOLID;
+    unsigned int i;
+
+    for (i = 0; (diffuse || alpha) && i < count; i++) {
+        if (diffuse) {
+            vertices[i].color.r = solid.r;
+            vertices[i].color.g = solid.g;
+            vertices[i].color.b = solid.b;
+        }
+        if (alpha) {
+            vertices[i].color.a = solid.a;
         }
     }
 }
@@ -3256,6 +3292,7 @@ static void r100_draw_vertices(ATIVGAState *s, R100Vertex *vertices,
         s->r100.rejected_commands++;
         goto out;
     }
+    r100_apply_solid_shading(&s->r100, vertices, count);
     /* TODO: Clip primitives in homogeneous space before viewport transform. */
     perspective_sets = r100_perspective_sets(&s->r100);
     for (i = 0; i < count; i++) {
