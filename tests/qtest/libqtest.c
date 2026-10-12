@@ -242,6 +242,11 @@ void qtest_wait_qemu(QTestState *s)
 #ifndef _WIN32
         pid_t pid;
         uint64_t end;
+        /*
+         * QEMU exits a few ms after SIGTERM; a fixed 100 ms first wait
+         * was a third of the run time of a qtest that starts QEMU often.
+         */
+        gulong delay_us = 1000;
 
         /* poll for a while until sending SIGKILL */
         end = g_get_monotonic_time() + WAITPID_TIMEOUT * G_TIME_SPAN_SECOND;
@@ -251,7 +256,8 @@ void qtest_wait_qemu(QTestState *s)
             if (pid != 0) {
                 break;
             }
-            g_usleep(100 * 1000);
+            g_usleep(delay_us);
+            delay_us = MIN(delay_us * 2, 100 * 1000);
         } while (g_get_monotonic_time() < end);
 
         if (pid == 0) {
