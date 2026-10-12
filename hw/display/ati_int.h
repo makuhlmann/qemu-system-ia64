@@ -254,6 +254,7 @@ struct ATIVGAState {
     bool r100_cp_active;
     ATIR100State r100;
     bool r100_3d;           /* x-r100-3d: the 3D engine draws */
+    bool r100_tiling;       /* x-tiling: the Radeon's agents tile */
 };
 
 const char *ati_reg_name(int num);
@@ -300,9 +301,16 @@ bool ati_r100_gpu_read(ATIVGAState *s, uint64_t address, void *buf,
                        uint64_t length);
 bool ati_r100_gpu_write(ATIVGAState *s, uint64_t address, const void *buf,
                         uint64_t length, bool dirty);
-bool ati_2d_tile_offset(const ATIVGAState *s, uint32_t base, uint32_t pitch,
-                        unsigned int cpp, unsigned int tile, uint32_t xbyte,
-                        uint32_t y, uint64_t *offset);
+/* Tile modes as DST_PITCH_OFFSET bits 31:30 hold them (radeon_reg.h). */
+#define ATI_R100_TILE_LINEAR    0
+#define ATI_R100_TILE_MACRO     1
+#define ATI_R100_TILE_MICRO     2
+#define ATI_R100_TILE_BOTH      3
+
+bool ati_r100_tile_offset(unsigned int tile, unsigned int cpp, uint32_t pitch,
+                          uint32_t xbyte, uint32_t y, uint64_t *offset);
+uint64_t ati_r100_depth_offset(unsigned int cpp, uint32_t pitch,
+                               uint32_t x, uint32_t y);
 void ati_2d_blt(ATIVGAState *s);
 void ati_2d_line(ATIVGAState *s, uint32_t start_yx, uint32_t end_yx);
 bool ati_host_data_flush(ATIVGAState *s);

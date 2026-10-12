@@ -171,6 +171,20 @@ static uint64_t rv100_bar(QTestState *qts, uint8_t reg)
     return qtest_readl(qts, RV100_CFG(reg)) & PCI_BASE_ADDRESS_MEM_MASK;
 }
 
+/* The R100 always tiles its depth buffer (XFree86 4.3 radeon_span.c). */
+static uint64_t rv100_z32(unsigned int pitch, unsigned int x, unsigned int y)
+{
+    uint32_t ba = (y / 16) * (pitch / 16) + x / 16;
+    uint32_t a = (x & 7) << 2;
+
+    a |= (y & 3) << 5;
+    a |= (((x & 0x10) >> 2) ^ (y & 4)) << 5;
+    a |= (ba & 3) << 8;
+    a |= (y & 8) << 7;
+    a |= (((x & 8) << 1) ^ (y & 0x10)) << 7;
+    return a | (uint64_t)(ba & ~3U) << 10;
+}
+
 /* Memory decode and bus master, as pci.sys and Linux leave the card. */
 static void rv100_3d_enable(QTestState *qts)
 {
@@ -181,7 +195,8 @@ static void rv100_3d_enable(QTestState *qts)
 static QTestState *rv100_3d_init(const char *extra)
 {
     QTestState *qts = qtest_initf("-machine zx1,vga=rv100 -m 256M -S "
-                                  "-global ati-vga.x-r100-3d=on %s", extra);
+                                  "-global ati-vga.x-r100-3d=on "
+                                  "-global ati-vga.x-tiling=on %s", extra);
 
     g_assert_cmphex(rv100_bar(qts, PCI_BASE_ADDRESS_0), ==, rv100_fb);
     g_assert_cmphex(rv100_bar(qts, PCI_BASE_ADDRESS_2), ==, rv100_mmio);
@@ -433,7 +448,7 @@ static void ati_rv100_3d_ring(void)
     g_assert_cmphex(qtest_readl(qts, rv100_fb +
                                 (40 * WIDTH + 40) * 4), ==, texture_color);
     g_assert_cmpuint(qtest_readl(qts, rv100_fb + DEPTH_OFFSET +
-                                 (10 * WIDTH + 10) * 4), <, UINT32_MAX);
+                                 rv100_z32(WIDTH, 10, 10)), <, UINT32_MAX);
     g_assert_cmphex(qtest_readl(qts, rv100_mmio +
                                 ATI_GEN_INT_STATUS) & ATI_SW_INT_TEST,
                     ==, ATI_SW_INT_TEST);
@@ -732,14 +747,13 @@ static void ati_rv100_3d_live_migration(void)
     const uint64_t color_address = rv100_fb + COLOR_OFFSET +
         (SAMPLE_Y * WIDTH + SAMPLE_X) * sizeof(uint32_t);
     const uint64_t depth_address = rv100_fb + DEPTH_OFFSET +
-        (SAMPLE_Y * WIDTH + SAMPLE_X) * sizeof(uint32_t);
+        rv100_z32(WIDTH, SAMPLE_X, SAMPLE_Y);
     const uint64_t tiled_address = rv100_fb +
         TILED_COLOR_OFFSET + TILED_PIXEL_OFFSET;
     const uint64_t gart_address = GART_PAGE + GART_COLOR_OFFSET +
         (GART_Y * WIDTH + GART_X) * sizeof(uint32_t);
     const uint64_t partial_depth_address = rv100_fb +
-        PARTIAL_DEPTH_OFFSET +
-        (PARTIAL_Y * WIDTH + PARTIAL_X) * sizeof(uint32_t);
+        PARTIAL_DEPTH_OFFSET + rv100_z32(WIDTH, PARTIAL_X, PARTIAL_Y);
     const uint64_t sparse_first_address = rv100_fb +
         SPARSE_COLOR_OFFSET + SPARSE_X * sizeof(uint32_t);
     const uint64_t sparse_last_address = rv100_fb +
@@ -1131,7 +1145,7 @@ static void ati_rv100_fixed_function(void)
     const uint64_t mmio = rv100_mmio;
     const uint64_t stencil_color = color_base + (2 * WIDTH + 40) * 4;
     const uint64_t stencil_depth = color_base + DEPTH_OFFSET +
-                                   (2 * WIDTH + 40) * 4;
+                                   rv100_z32(WIDTH, 40, 2);
     uint32_t texture_point[5];
     QTestState *qts;
     unsigned int x;
@@ -1318,8 +1332,8 @@ static void ati_rv100_fixed_function(void)
     g_assert_cmphex(qtest_readl(qts, stencil_color), ==, 0xffff0000);
 
     /* Viewport Z transformation divides clip-space Z by W before scaling. */
-    qtest_writel(qts, color_base + DEPTH_OFFSET +
-                 (6 * WIDTH + 42) * 4, UINT32_MAX);
+    qtest_writel(qts, color_base + DEPTH_OFFSET + rv100_z32(WIDTH, 42, 6),
+                 UINT32_MAX);
     qtest_writel(qts, mmio + R100_SE_VPORT_ZSCALE, f32_bits(1.0f));
     qtest_writel(qts, mmio + R100_SE_VPORT_ZOFFSET, f32_bits(0.0f));
     qtest_writel(qts, mmio + R100_SE_CNTL,
@@ -1334,7 +1348,7 @@ static void ati_rv100_fixed_function(void)
                              R100_VF_POINT_LIST, viewport_z,
                              ARRAY_SIZE(viewport_z), 1);
     g_assert_cmphex(qtest_readl(qts, color_base + DEPTH_OFFSET +
-                                (6 * WIDTH + 42) * 4), ==, 0xff3fffff);
+                                rv100_z32(WIDTH, 42, 6)), ==, 0xff3fffff);
     qtest_writel(qts, mmio + R100_SE_CNTL,
                  (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10));
 
@@ -1639,8 +1653,8 @@ static void ati_rv100_fixed_function(void)
                                 (29 * WIDTH + 53) * 4), ==, 0xff000000);
 
     qtest_writel(qts, color_base + (18 * WIDTH + 42) * 4, 0x22334455);
-    qtest_writel(qts, color_base + DEPTH_OFFSET +
-                 (18 * WIDTH + 42) * 4, 0x33445566);
+    qtest_writel(qts, color_base + DEPTH_OFFSET + rv100_z32(WIDTH, 42, 18),
+                 0x33445566);
     qtest_writel(qts, mmio + R100_PP_CNTL, 0);
     qtest_writel(qts, mmio + R100_RB3D_DEPTHOFFSET, DEPTH_OFFSET);
     qtest_writel(qts, mmio + R100_RB3D_DEPTHPITCH, WIDTH);
@@ -1655,7 +1669,7 @@ static void ati_rv100_fixed_function(void)
     g_assert_cmphex(qtest_readl(qts, color_base +
                                 (18 * WIDTH + 42) * 4), ==, 0x22334455);
     g_assert_cmphex(qtest_readl(qts, color_base + DEPTH_OFFSET +
-                                (18 * WIDTH + 42) * 4), ==, 0x33445566);
+                                rv100_z32(WIDTH, 42, 18)), ==, 0x33445566);
 
     /* Flat shading selects one provoking vertex instead of rejecting it. */
     qtest_writel(qts, color_base + (20 * WIDTH + 42) * 4, 0);

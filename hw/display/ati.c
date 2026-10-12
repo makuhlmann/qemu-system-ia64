@@ -3570,6 +3570,11 @@ static const Property ati_vga_properties[] = {
     DEFINE_PROP_BOOL("ddc-vga", ATIVGAState, ddc_vga, false),
     /* Radeon: the 3D engine draws (off until its review, RV100 plan D4). */
     DEFINE_PROP_BOOL("x-r100-3d", ATIVGAState, r100_3d, false),
+    /*
+     * Off until the CRTC, the 2D engine, the surfaces and the 3D engine all
+     * tile: XP's ati2mtag turns tiling on in all of them at once.
+     */
+    DEFINE_PROP_BOOL("x-tiling", ATIVGAState, r100_tiling, false),
     /* this is a debug option, prefer PROP_UINT over PROP_BIT for simplicity */
     DEFINE_PROP_UINT8("x-pixman", ATIVGAState, use_pixman, DEFAULT_X_PIXMAN),
     DEFINE_PROP_UINT64("x-linear-aper-size", ATIVGAState, linear_aper_sz, 0),

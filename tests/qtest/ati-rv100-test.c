@@ -1095,6 +1095,101 @@ static void test_rv100_3d_cull(void)
     qtest_quit(qts);
 }
 
+/*
+ * x-tiling: a point lands where the tile layouts put it.  Expected offsets
+ * from Mesa 7.11 radeon_span.c radeon_ptr_4byte and radeon_ptr_2byte_8x2
+ * (low terms per the AMD R5xx guide's 8x2 micro tile) and XFree86 4.3
+ * radeon_mba_z32; buffers at card address 100000h, 256 pixels per line.
+ */
+static void test_rv100_3d_tiling(void)
+{
+    static const struct {
+        unsigned cpp, x, y, mode;
+        uint32_t offset;
+    } cases[] = {
+        { 2, 70, 13, 0, 0x1a8c }, { 2, 70, 13, 1, 0x15cc },
+        { 2, 70, 13, 2, 0x191c }, { 2, 70, 13, 3, 0x099c },
+        { 2, 201, 37, 1, 0x4bd2 }, { 2, 201, 37, 3, 0x5d32 },
+        { 4, 70, 13, 0, 0x3518 }, { 4, 70, 13, 1, 0x2ad8 },
+        { 4, 70, 13, 2, 0x3238 }, { 4, 70, 13, 3, 0x15b8 },
+        { 4, 201, 37, 1, 0x98e4 }, { 4, 201, 37, 3, 0xb194 },
+    };
+    QTestState *qts = qtest_init(RV100_ARGS " -global ati-vga.x-r100-3d=on"
+                                 " -global ati-vga.x-tiling=on");
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    uint32_t pt[4];
+    size_t i;
+
+    qtest_writel(qts, mmio + 0x26c0, 0);                /* RE_TOP_LEFT */
+    qtest_writel(qts, mmio + 0x1c44, (255u << 16) | 255); /* RE_WIDTH_HEIGHT */
+    qtest_writel(qts, mmio + 0x1c40, 0x100000);         /* RB3D_COLOROFFSET */
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        uint32_t format = 6;                            /* ARGB8888 */
+        uint32_t pitch = 256;
+
+        if (cases[i].cpp == 2) {
+            format = 4;                                 /* RGB565 */
+        }
+
+        if (cases[i].mode & 1) {
+            pitch |= 1u << 16;                          /* COLOR_TILE_ENABLE */
+        }
+        if (cases[i].mode & 2) {
+            pitch |= 1u << 17;                          /* COLOR_MICROTILE */
+        }
+        qtest_memset(qts, fb + 0x100000, 0, 0x10000);
+        qtest_writel(qts, mmio + 0x1c3c, format << 10);  /* RB3D_CNTL */
+        qtest_writel(qts, mmio + 0x1c48, pitch);        /* RB3D_COLORPITCH */
+        pt[0] = f32_bits(cases[i].x);
+        pt[1] = f32_bits(cases[i].y);
+        pt[2] = 0xff123456;
+        rv100_draw_port(qts, mmio, 1u << 3, (1u << 16) | (3u << 4) | 1, pt, 3);
+        if (cases[i].cpp == 2) {
+            g_assert_cmphex(qtest_readw(qts, fb + 0x100000 + cases[i].offset),
+                            ==, 0x11aa);        /* 123456h in RGB565 */
+        } else {
+            g_assert_cmphex(qtest_readl(qts, fb + 0x100000 + cases[i].offset),
+                            ==, 0xff123456);
+        }
+    }
+
+    /* 32-bit Z at 200000h, always tiled: (70,13) is at 14B8h. */
+    qtest_memset(qts, fb + 0x200000, 0, 0x10000);
+    qtest_writel(qts, mmio + 0x1c24, 0x200000);         /* RB3D_DEPTHOFFSET */
+    qtest_writel(qts, mmio + 0x1c28, 256);              /* RB3D_DEPTHPITCH */
+    qtest_writel(qts, mmio + 0x1c2c,                    /* RB3D_ZSTENCILCNTL */
+                 4 | (7u << 4) | (1u << 30));           /* 32-bit, ALWAYS */
+    qtest_writel(qts, mmio + 0x1c3c, (6u << 10) | (1u << 8));
+    pt[0] = f32_bits(70);
+    pt[1] = f32_bits(13);
+    pt[2] = f32_bits(0.5f);
+    pt[3] = 0xff123456;
+    rv100_draw_port(qts, mmio, (1u << 31) | (1u << 3),
+                    (1u << 16) | (3u << 4) | 1, pt, 4);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x200000 + 0x14b8), !=, 0);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x200000 + (13 * 256 + 70) * 4),
+                    ==, 0);
+    qtest_quit(qts);
+
+    /* Without x-tiling every buffer is linear, as the CRTC reads it. */
+    qts = qtest_init(RV100_ARGS " -global ati-vga.x-r100-3d=on");
+    mmio = rv100_mmio(qts);
+    fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) & PCI_BASE_ADDRESS_MEM_MASK;
+    qtest_writel(qts, mmio + 0x26c0, 0);
+    qtest_writel(qts, mmio + 0x1c44, (255u << 16) | 255);
+    qtest_writel(qts, mmio + 0x1c40, 0x100000);
+    qtest_writel(qts, mmio + 0x1c3c, 6u << 10);
+    qtest_writel(qts, mmio + 0x1c48, 256 | (3u << 16));
+    pt[0] = f32_bits(70);
+    pt[1] = f32_bits(13);
+    pt[2] = 0xff123456;
+    rv100_draw_port(qts, mmio, 1u << 3, (1u << 16) | (3u << 4) | 1, pt, 3);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100000 + 0x3518), ==, 0xff123456);
+    qtest_quit(qts);
+}
+
 /* XP 2600, the 460GX's Windows, has no Radeon driver: 460gx refuses it. */
 static void test_rv100_not_on_460gx(void)
 {
@@ -1152,6 +1247,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/3d-port-bounds", test_rv100_3d_port_bounds);
     qtest_add_func("/ati-rv100/3d-draw", test_rv100_3d_draw);
     qtest_add_func("/ati-rv100/3d-cull", test_rv100_3d_cull);
+    qtest_add_func("/ati-rv100/3d-tiling", test_rv100_3d_tiling);
     qtest_add_func("/ati-rv100/not-on-460gx", test_rv100_not_on_460gx);
 
     return g_test_run();

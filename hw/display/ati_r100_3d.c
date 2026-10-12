@@ -187,6 +187,7 @@ typedef struct R100DepthState {
     uint32_t offset;
     unsigned int cpp;
     uint32_t mask;
+    bool tiled;
     uint8_t stencil_reference;
     uint8_t stencil_mask;
     uint8_t stencil_writemask;
@@ -1077,6 +1078,10 @@ static bool r100_texture_info(ATIVGAState *s, unsigned int unit,
         r, R100_PP_TXFORMAT_0 + unit * 0x18);
     texture->txoffset = r100_context_read(
         r, R100_PP_TXOFFSET_0 + unit * 0x18);
+    if (!s->r100_tiling) {
+        texture->txoffset &= ~(R100_TXO_MACRO_TILE | R100_TXO_MICRO_TILE_X2 |
+                               R100_TXO_MICRO_TILE_OPT);
+    }
     tex_size = r100_context_read(r, R100_PP_TEX_SIZE_0 + unit * 8);
     tex_pitch = r100_context_read(r, R100_PP_TEX_PITCH_0 + unit * 8);
 
@@ -1224,6 +1229,10 @@ static R100DrawState *r100_draw_state(ATIVGAState *s, R100DrawState *draw)
                                    R100_RB3D_COLOR_FORMAT_SHIFT, 5);
     draw->color_cpp = r100_color_cpp(draw->color_format);
     draw->color_pitch_reg = r100_context_read(r, R100_RB3D_COLORPITCH);
+    if (!s->r100_tiling) {
+        draw->color_pitch_reg &= ~(R100_COLOR_TILE_ENABLE |
+                                   R100_COLOR_MICROTILE_ENABLE);
+    }
     draw->color_pitch = draw->color_pitch_reg & 0x1ff8U;
     draw->color_offset = r100_context_read(r, R100_RB3D_COLOROFFSET) & ~0xfU;
     draw->color_mask = draw->color_cpp ?
@@ -1245,6 +1254,7 @@ static R100DrawState *r100_draw_state(ATIVGAState *s, R100DrawState *draw)
     depth->zcntl = r100_context_read(r, R100_RB3D_ZSTENCILCNTL);
     depth->pitch = r100_context_read(r, R100_RB3D_DEPTHPITCH) & 0x1ff8U;
     depth->offset = r100_context_read(r, R100_RB3D_DEPTHOFFSET);
+    depth->tiled = s->r100_tiling;
     depth_format = depth->zcntl & 0xf;
     depth->cpp = depth_format == 0 || depth_format == 7 ? 2 : 4;
     depth->mask = depth->cpp == 2 ? 0xffffU :
@@ -1399,64 +1409,12 @@ static R100Color r100_decode_yuv422(const uint8_t pair[4],
     };
 }
 
+
 /*
- * Byte coordinates keep the macro layout independent of pixel depth.  The
- * returned offset is relative to base, which also selects the Radeon macro
- * bank phase.
+ * MICRO_TILE_X2 is the 16-byte by 2-line micro tile of colour surfaces;
+ * MICRO_TILE_OPT is the guide's 16-bit 4x4 one, whose place inside a macro
+ * tile no source gives.
  */
-bool ati_2d_tile_offset(const ATIVGAState *s, uint32_t base, uint32_t pitch,
-                         unsigned int cpp, unsigned int tile,
-                         uint32_t xbyte, uint32_t y, uint64_t *offset)
-{
-    uint64_t address;
-
-    if (!pitch || !cpp || xbyte >= pitch) {
-        return false;
-    }
-    if (!tile) {
-        *offset = (uint64_t)y * pitch + xbyte;
-        return true;
-    }
-    if (s->dev_id == PCI_DEVICE_ID_ATI_RAGE128_PF) {
-        return false;
-    } else if (tile & 2) {
-        /* R100 destination microtiles use two rows of sixteen bytes. */
-        if (cpp != 4 || (pitch & 127)) {
-            return false;
-        }
-        if (tile & 1) {
-            address = (((uint64_t)y >> 4) * (pitch >> 7) +
-                       (xbyte >> 7)) << 11;
-            address |= (((y >> 3) ^ (xbyte >> 7)) & 1U) << 10;
-            address |= (((y >> 4) ^ (xbyte >> 6)) & 1U) << 9;
-            address |= (((y >> 2) ^ (xbyte >> 6)) & 1U) << 8;
-            address |= (((y >> 3) ^ (xbyte >> 5)) & 1U) << 7;
-            address |= ((y >> 1) & 1U) << 6;
-            address |= ((xbyte >> 4) & 1U) << 5;
-            address |= (y & 1U) << 4;
-            address |= xbyte & 15;
-        } else {
-            address = (uint64_t)(y >> 1) * pitch * 2 +
-                      (uint64_t)(xbyte >> 4) * 32 +
-                      (y & 1) * 16 + (xbyte & 15);
-        }
-    } else {
-        if ((pitch & 255) || cpp == 3) {
-            return false;
-        }
-        address = (((uint64_t)y >> 3) * (pitch >> 8) +
-                   (xbyte >> 8)) << 11;
-        address |= (((y >> 2) ^ (xbyte >> 8) ^ (base >> 11)) & 1U) << 10;
-        address |= (((y >> 3) ^ (xbyte >> 7)) & 1U) << 9;
-        address |= (((y >> 1) ^ (xbyte >> 7)) & 1U) << 8;
-        address |= (((y >> 2) ^ (xbyte >> 6)) & 1U) << 7;
-        address |= (y & 1U) << 6;
-        address |= xbyte & 63;
-    }
-    *offset = address;
-    return true;
-}
-
 static bool r100_texture_pixel_offset(uint32_t txoffset, unsigned int pitch,
                                       unsigned int cpp, int x, int y,
                                       uint64_t *pixel_offset)
@@ -1465,34 +1423,17 @@ static bool r100_texture_pixel_offset(uint32_t txoffset, unsigned int pitch,
     unsigned int tile_height;
     unsigned int micro = extract32(txoffset, 3, 2);
     bool macro = txoffset & R100_TXO_MACRO_TILE;
-    uint64_t offset;
 
+    if (x < 0 || y < 0) {
+        return false;
+    }
     if (macro) {
-        /* TODO: Add macro-tile addressing for 8- and 16-bit textures. */
-        if (cpp != 4 || pitch < 128) {
+        if (micro > 1) {
             return false;
         }
-        if (micro) {
-            offset = (((uint64_t)y >> 4) * (pitch >> 7) + (x >> 5)) << 11;
-            offset += ((((y >> 3) ^ (x >> 5)) & 1U) << 10);
-            offset += ((((y >> 4) ^ (x >> 4)) & 1U) << 9);
-            offset += ((((y >> 2) ^ (x >> 4)) & 1U) << 8);
-            offset += ((((y >> 3) ^ (x >> 3)) & 1U) << 7);
-            offset += ((y >> 1) & 1U) << 6;
-            offset += ((x >> 2) & 1U) << 5;
-            offset += (y & 1U) << 4;
-            offset += (x & 3U) << 2;
-        } else {
-            offset = (((uint64_t)y >> 3) * (pitch >> 8) + (x >> 6)) << 11;
-            offset += ((((y >> 2) ^ (x >> 6)) & 1U) << 10);
-            offset += ((((y >> 3) ^ (x >> 5)) & 1U) << 9);
-            offset += ((((y >> 1) ^ (x >> 5)) & 1U) << 8);
-            offset += ((((y >> 2) ^ (x >> 4)) & 1U) << 7);
-            offset += (y & 1U) << 6;
-            offset += (x & 15U) << 2;
-        }
-        *pixel_offset = offset;
-        return true;
+        return ati_r100_tile_offset(ATI_R100_TILE_MACRO |
+                                    (micro ? ATI_R100_TILE_MICRO : 0),
+                                    cpp, pitch, x * cpp, y, pixel_offset);
     }
     if (!micro) {
         *pixel_offset = (uint64_t)y * pitch + (uint64_t)x * cpp;
@@ -2364,45 +2305,15 @@ static bool r100_color_pixel_offset(uint32_t pitch_reg, unsigned int pitch,
                                     unsigned int cpp, int x, int y,
                                     uint64_t *pixel_offset)
 {
-    bool macro = pitch_reg & R100_COLOR_TILE_ENABLE;
-    bool micro = pitch_reg & R100_COLOR_MICROTILE_ENABLE;
-    uint64_t row_bytes = (uint64_t)pitch * cpp;
-    uint64_t offset;
+    unsigned int tile =
+        (pitch_reg & R100_COLOR_TILE_ENABLE ? ATI_R100_TILE_MACRO : 0) |
+        (pitch_reg & R100_COLOR_MICROTILE_ENABLE ? ATI_R100_TILE_MICRO : 0);
 
-    if (!macro && !micro) {
-        *pixel_offset = (uint64_t)y * row_bytes + (uint64_t)x * cpp;
-        return true;
-    }
-    if (!macro) {
-        return r100_texture_pixel_offset(R100_TXO_MICRO_TILE_X2, row_bytes,
-                                         cpp, x, y, pixel_offset);
-    }
-
-    /* TODO: Add macro-tile addressing for 8- and 16-bit color targets. */
-    if (cpp != 4 || row_bytes < 128) {
+    if (x < 0 || y < 0) {
         return false;
     }
-    if (micro) {
-        offset = (((uint64_t)y >> 4) * (row_bytes >> 7) + (x >> 5)) << 11;
-        offset += ((((y >> 3) ^ (x >> 5)) & 1U) << 10);
-        offset += ((((y >> 4) ^ (x >> 4)) & 1U) << 9);
-        offset += ((((y >> 2) ^ (x >> 4)) & 1U) << 8);
-        offset += ((((y >> 3) ^ (x >> 3)) & 1U) << 7);
-        offset += ((y >> 1) & 1U) << 6;
-        offset += ((x >> 2) & 1U) << 5;
-        offset += (y & 1U) << 4;
-        offset += (x & 3U) << 2;
-    } else {
-        offset = (((uint64_t)y >> 3) * (row_bytes >> 8) + (x >> 6)) << 11;
-        offset += ((((y >> 2) ^ (x >> 6)) & 1U) << 10);
-        offset += ((((y >> 3) ^ (x >> 5)) & 1U) << 9);
-        offset += ((((y >> 1) ^ (x >> 5)) & 1U) << 8);
-        offset += ((((y >> 2) ^ (x >> 4)) & 1U) << 7);
-        offset += (y & 1U) << 6;
-        offset += (x & 15U) << 2;
-    }
-    *pixel_offset = offset;
-    return true;
+    return ati_r100_tile_offset(tile, cpp, pitch * cpp, x * cpp, y,
+                                pixel_offset);
 }
 
 static bool r100_fragment(ATIVGAState *s, int x, int y, float z,
@@ -2497,7 +2408,9 @@ static bool r100_fragment(ATIVGAState *s, int x, int y, float z,
             return false;
         }
         depth_address = (depth_offset & ~0xfU) +
-                        ((uint64_t)y * depth_pitch + x) * depth_cpp;
+            (depth->tiled ?
+             ati_r100_depth_offset(depth_cpp, depth_pitch, x, y) :
+             ((uint64_t)y * depth_pitch + x) * depth_cpp);
         if (!r100_read_pixel(s, depth_address, depth_cpp, &old_depth)) {
             return false;
         }

@@ -60,7 +60,7 @@ system_ss.add(when: 'CONFIG_XLNX_DISPLAYPORT', if_true: files('xlnx_dp.c'))
 
 system_ss.add(when: 'CONFIG_ARTIST', if_true: files('artist.c'))
 
-system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_3d.c', 'ati_dbg.c', 'ati_r100_3d.c'), pixman])
+system_ss.add(when: 'CONFIG_ATI_VGA', if_true: [files('ati.c', 'ati_2d.c', 'ati_3d.c', 'ati_dbg.c', 'ati_r100_3d.c', 'ati_r100_tile.c'), pixman])
 
 system_ss.add(when: 'CONFIG_MACH64_VGA', if_true: files('mach64.c', 'mach64_2d.c', 'mach64_overlay.c'))
 
