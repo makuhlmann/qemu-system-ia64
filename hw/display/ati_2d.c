@@ -328,6 +328,30 @@ static bool ati_brush_pixel(const ATI2DCtx *ctx, unsigned x, unsigned y,
 }
 
 /*
+ * A ROP3 by its definition: bit (P << 2 | S << 1 | D) of the code is the
+ * result (the Win32 ternary raster operations, which DP_MIX takes: PATCOPY
+ * F0h, SRCCOPY CCh, DSTINVERT 55h).
+ */
+static uint32_t ati_rop3(uint8_t rop, uint32_t p, uint32_t s, uint32_t d)
+{
+    uint32_t r = 0;
+    unsigned i;
+
+    for (i = 0; i < 8; i++) {
+        if (rop & BIT(i)) {
+            r |= (i & 4 ? p : ~p) & (i & 2 ? s : ~s) & (i & 1 ? d : ~d);
+        }
+    }
+    return r;
+}
+
+/* Whether a ROP3 code reads the source: its S = 1 and S = 0 halves differ. */
+static bool ati_rop3_uses_src(uint8_t rop)
+{
+    return ((rop >> 2) ^ rop) & 0x33;
+}
+
+/*
  * Whether rectangle r of the surface at bits lies in VRAM.  The engine's
  * coordinates are 14-bit signed (RRG DST_X/DST_Y): a glyph that starts left
  * of its surface, as XP 3790's text does at the edge of its glyph cache,
@@ -344,6 +368,75 @@ static bool ati_2d_rect_in_vram(const VGACommonState *vga, const uint8_t *bits,
                     (ptrdiff_t)r->width * (ptrdiff_t)bypp;
 
     return first >= 0 && end <= (ptrdiff_t)vga->vram_size;
+}
+
+/*
+ * Any ROP3 the cases of ati_2d_do_blt() do not cover, pixel by pixel: the
+ * pattern from the brush (an FG_LA brush leaves background pixels alone),
+ * the source as the source-destination path reads it.  XP 3790's ati2dvag
+ * uses B8h (PSDPxax: pattern where the source is 0) for its masked drawing.
+ */
+static bool ati_2d_rop3_blt(const ATI2DCtx *ctx, const QemuRect *vis_src,
+                            const QemuRect *vis_dst, unsigned bypp)
+{
+    uint8_t rop = ctx->rop3 >> 16;
+    bool need_src = ati_rop3_uses_src(rop);
+    unsigned mask_stride = bypp ? ctx->src_stride / bypp : 0;
+    unsigned x, y;
+
+    if (ctx->need_swap) {
+        qemu_log_mask(LOG_UNIMP, "ROP3 %02x on a byte-swapped framebuffer\n",
+                      rop);
+        return false;
+    }
+    if (need_src) {
+        if (!ctx->src_stride) {
+            qemu_log_mask(LOG_GUEST_ERROR, "Zero source pitch\n");
+            return false;
+        }
+        if (!ctx->host_data_active &&
+            !ati_2d_rect_in_vram(ctx->vga, ctx->src_bits, vis_src,
+                                 ctx->src_stride, bypp)) {
+            qemu_log_mask(LOG_UNIMP, "blt outside vram not implemented\n");
+            return false;
+        }
+    }
+    for (y = 0; y < vis_dst->height; y++) {
+        unsigned dst_row, src_row;
+
+        if (ctx->top_to_bottom) {
+            dst_row = vis_dst->y + y;
+            src_row = vis_src->y + y;
+        } else {
+            dst_row = vis_dst->y + vis_dst->height - 1 - y;
+            src_row = vis_src->y + vis_dst->height - 1 - y;
+        }
+        for (x = 0; x < vis_dst->width; x++) {
+            unsigned col = ctx->left_to_right ? x : vis_dst->width - 1 - x;
+            uint8_t *dp = &ctx->dst_bits[(vis_dst->x + col) * bypp +
+                                         dst_row * ctx->dst_stride];
+            uint32_t pv, sv = 0;
+
+            if (!ati_brush_pixel(ctx, vis_dst->x + col, dst_row, &pv)) {
+                continue;
+            }
+            if (need_src) {
+                if (ctx->src_fg_mask &&
+                    !ctx->src_fg_mask[src_row * mask_stride +
+                                      vis_src->x + col]) {
+                    continue;
+                }
+                sv = ati_ldpix(&ctx->src_bits[(vis_src->x + col) * bypp +
+                                              src_row * ctx->src_stride],
+                               bypp);
+                if (ctx->cmp_fn && !ati_cmp_pass(ctx, sv)) {
+                    continue;
+                }
+            }
+            ati_stpix(dp, bypp, ati_rop3(rop, pv, sv, ati_ldpix(dp, bypp)));
+        }
+    }
+    return true;
 }
 
 static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
@@ -660,9 +753,7 @@ static bool ati_2d_do_blt(const ATI2DCtx *ctx, uint8_t use_pixman)
             }
             break;
         }
-        qemu_log_mask(LOG_UNIMP, "Unimplemented ati_2d blt op %x\n",
-                      ctx->rop3 >> 16);
-        return false;
+        return ati_2d_rop3_blt(ctx, &vis_src, &vis_dst, bypp);
     }
 
     return true;

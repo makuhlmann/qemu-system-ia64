@@ -560,6 +560,44 @@ static void test_rv100_negative_x(void)
 }
 
 /*
+ * ROP3 B8h (PSDPxax), which XP 3790's ati2dvag uses for masked drawing:
+ * where the source is white the destination stays, where it is black the
+ * pattern (a solid brush here) is written; generally each result bit is bit
+ * (P << 2 | S << 1 | D) of the code.
+ */
+static void test_rv100_rop3(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+
+    qtest_writel(qts, fb + 0x200000, 0x00ffffff);   /* source */
+    qtest_writel(qts, fb + 0x200004, 0x00000000);
+    qtest_writel(qts, fb + 0x200008, 0x00f0f0f0);
+    qtest_writel(qts, fb + 0x100000, 0x00123456);   /* destination */
+    qtest_writel(qts, fb + 0x100004, 0x00123456);
+    qtest_writel(qts, fb + 0x100008, 0x00123456);
+    qtest_writel(qts, mmio + 0x16e8, 0x1fff1fff);   /* default scissor */
+    qtest_writel(qts, mmio + 0x16cc, 0xffffffff);   /* DP_WRITE_MASK */
+    qtest_writel(qts, mmio + 0x16c0, 3);            /* DP_CNTL */
+    qtest_writel(qts, mmio + 0x146c,                /* DP_GUI_MASTER_CNTL */
+                 0x00000003 | 0x000000d0 | (6u << 8) | (3u << 12) |
+                 0x00b80000 | (2u << 24) | 0x10000000);
+    qtest_writel(qts, mmio + 0x1428, (4u << 22) | (0x200000 >> 10));
+    qtest_writel(qts, mmio + 0x142c, (4u << 22) | (0x100000 >> 10));
+    qtest_writel(qts, mmio + 0x147c, 0x00ff00ff);   /* brush foreground */
+    qtest_writel(qts, mmio + 0x1434, 0);            /* SRC_Y_X */
+    qtest_writel(qts, mmio + 0x1438, 0);            /* DST_Y_X */
+    qtest_writel(qts, mmio + 0x143c, (1u << 16) | 3);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100000), ==, 0x00123456);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100004), ==, 0x00ff00ff);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x100008), ==,
+                    (0x00f0f0f0 & 0x00123456) | (0xff0f0f0f & 0x00ff00ff));
+    qtest_quit(qts);
+}
+
+/*
  * A CP set-up as the DRMs and ati2mtag make it: a PCI GART of 4 pages at card
  * address E000_0000h (page table at 100000h in RAM, pages at 200000h), the
  * ring in its page 0 (RB_BUFSZ 8: 512 dwords), the read pointer written back
@@ -892,6 +930,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/sw-int", test_rv100_sw_int);
     qtest_add_func("/ati-rv100/mc-fb-location", test_rv100_mc_fb_location);
     qtest_add_func("/ati-rv100/negative-x", test_rv100_negative_x);
+    qtest_add_func("/ati-rv100/rop3", test_rv100_rop3);
     qtest_add_func("/ati-rv100/cp-ring-gart", test_rv100_cp_ring_gart);
     qtest_add_func("/ati-rv100/cp-off", test_rv100_cp_off);
     qtest_add_func("/ati-rv100/cp-indirect", test_rv100_cp_indirect);
