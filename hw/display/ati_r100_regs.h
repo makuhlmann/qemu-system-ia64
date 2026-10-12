@@ -226,6 +226,7 @@
 #define R100_VTX_FMT_XY1                         BIT(27)
 #define R100_VTX_FMT_Z                           BIT(31)
 #define R100_VTX_FMT_Z1                          BIT(28)
+#define R100_VTX_PIX_CENTER_OGL                  BIT(27)
 #define R100_VTX_ST_NONPARAMETRIC(unit)          BIT(8 + (unit))
 #define R100_VTX_W0_IS_NOT_1_OVER_W0             BIT(16)
 #define R100_VTX_XY_PRE_MULT_1_OVER_W0           BIT(0)

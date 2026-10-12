@@ -120,6 +120,8 @@
 #define R100_Z_WRITE_ENABLE    (1U << 30)
 #define R100_VPORT_Z_XFORM     (1U << 25)
 #define R100_VTX_PIX_CENTER_OGL (1U << 27)
+/* SE_CNTL: both faces drawn, OpenGL pixel centres, as Mesa and X.Org set. */
+#define R100_SE_GL             ((3U << 1) | (3U << 3) | R100_VTX_PIX_CENTER_OGL)
 #define R100_TX0_ENABLE        (1U << 4)
 #define R100_TX1_ENABLE        (1U << 5)
 #define R100_TX_BLEND0_ENABLE  (1U << 12)
@@ -403,7 +405,7 @@ static void ati_rv100_3d_ring(void)
     qtest_writel(qts, rv100_mmio + R100_RE_WIDTH_HEIGHT,
                  (HEIGHT - 1) << 16 | (WIDTH - 1));
     qtest_writel(qts, rv100_mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10));
+                 R100_SE_GL | (2U << 8) | (2U << 10));
     qtest_writel(qts, rv100_mmio + R100_PP_TXFILTER_0, 0);
     qtest_writel(qts, rv100_mmio + R100_PP_TXFORMAT_0,
                  R100_TX_ARGB8888 | R100_TX_ALPHA_IN_MAP |
@@ -573,7 +575,7 @@ static void ati_rv100_vertex_fog(void)
     qtest_writel(qts, mmio + R100_RE_WIDTH_HEIGHT,
                  (HEIGHT - 1) << 16 | (WIDTH - 1));
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10) |
+                 R100_SE_GL | (2U << 8) | (2U << 10) |
                  (2U << 14));
     qtest_writel(qts, mmio + R100_RB3D_CNTL, R100_RB_COLOR_ARGB8888);
     /* PP_FOG_COLOR's factor-source bits are unused in vertex-fog mode. */
@@ -821,7 +823,7 @@ static void ati_rv100_3d_live_migration(void)
     qtest_writel(from, mmio + R100_RE_WIDTH_HEIGHT,
                  (HEIGHT - 1) << 16 | (WIDTH - 1));
     qtest_writel(from, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10));
+                 R100_SE_GL | (2U << 8) | (2U << 10));
     qtest_writel(from, mmio + R100_PP_CNTL, 0);
     qtest_writel(from, mmio + R100_RB3D_CNTL,
                  R100_RB_COLOR_ARGB8888 | R100_RB_Z_ENABLE);
@@ -1171,7 +1173,7 @@ static void ati_rv100_fixed_function(void)
     qtest_writel(qts, mmio + R100_RE_WIDTH_HEIGHT,
                  (HEIGHT - 1) << 16 | (WIDTH - 1));
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10));
+                 R100_SE_GL | (2U << 8) | (2U << 10));
     qtest_writel(qts, mmio + R100_RB3D_CNTL, R100_RB_COLOR_ARGB8888);
 
     /* A rectangle list supplies three corners; hardware infers the fourth. */
@@ -1353,7 +1355,7 @@ static void ati_rv100_fixed_function(void)
     qtest_writel(qts, mmio + R100_SE_VPORT_ZSCALE, f32_bits(1.0f));
     qtest_writel(qts, mmio + R100_SE_VPORT_ZOFFSET, f32_bits(0.0f));
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10) |
+                 R100_SE_GL | (2U << 8) | (2U << 10) |
                  R100_VPORT_Z_XFORM);
     qtest_writel(qts, mmio + R100_RB3D_ZSTENCILCNTL,
                  2U | (7U << 4) | R100_Z_WRITE_ENABLE);
@@ -1366,7 +1368,7 @@ static void ati_rv100_fixed_function(void)
     g_assert_cmphex(qtest_readl(qts, color_base + DEPTH_OFFSET +
                                 rv100_z32(WIDTH, 42, 6)), ==, 0xff3fffff);
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10));
+                 R100_SE_GL | (2U << 8) | (2U << 10));
 
     /* Stage 0 replaces with T0; stage 1 adds routed ST1/T1. */
     qtest_writel(qts, color_base + TEX0_OFFSET, 0xffff0000);
@@ -1691,7 +1693,7 @@ static void ati_rv100_fixed_function(void)
     qtest_writel(qts, color_base + (20 * WIDTH + 42) * 4, 0);
     qtest_writel(qts, mmio + R100_RB3D_CNTL, R100_RB_COLOR_ARGB8888);
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (1U << 8) | (2U << 10));
+                 R100_SE_GL | (1U << 8) | (2U << 10));
     ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
                              R100_VF_LINE_LIST, flat_shade_line,
                              ARRAY_SIZE(flat_shade_line), 2);
@@ -1699,7 +1701,7 @@ static void ati_rv100_fixed_function(void)
                                 (20 * WIDTH + 42) * 4), ==, 0xffff0000);
     qtest_writel(qts, color_base + (20 * WIDTH + 42) * 4, 0);
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (3U << 6) |
+                 R100_SE_GL | (3U << 6) |
                  (1U << 8) | (2U << 10));
     ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
                              R100_VF_LINE_LIST, flat_shade_line,
@@ -1709,7 +1711,7 @@ static void ati_rv100_fixed_function(void)
 
     /* VTX_1 and VTX_2 are distinct selectors for polygonal primitives. */
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (1U << 6) |
+                 R100_SE_GL | (1U << 6) |
                  (1U << 8) | (2U << 10));
     ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
                              R100_VF_TRIANGLE_LIST, flat_shade_triangle,
@@ -1718,7 +1720,7 @@ static void ati_rv100_fixed_function(void)
                                 (35 * WIDTH + 41) * 4), ==, 0xff00ff00);
     qtest_writel(qts, color_base + (35 * WIDTH + 41) * 4, 0);
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (2U << 6) |
+                 R100_SE_GL | (2U << 6) |
                  (1U << 8) | (2U << 10));
     ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
                              R100_VF_TRIANGLE_LIST, flat_shade_triangle,
@@ -1728,7 +1730,7 @@ static void ati_rv100_fixed_function(void)
 
     /* A polygon is one primitive, so LAST stays fixed across its fan. */
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (3U << 6) |
+                 R100_SE_GL | (3U << 6) |
                  (1U << 8) | (2U << 10));
     ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
                              R100_VF_POLYGON, flat_shade_polygon,
@@ -1741,7 +1743,7 @@ static void ati_rv100_fixed_function(void)
     /* Reserved mode 3 with varying diffuse color remains unsupported. */
     qtest_writel(qts, color_base + (20 * WIDTH + 42) * 4, 0x44556677);
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (3U << 8) | (2U << 10));
+                 R100_SE_GL | (3U << 8) | (2U << 10));
     ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
                              R100_VF_LINE_LIST, flat_shade_line,
                              ARRAY_SIZE(flat_shade_line), 2);
@@ -1751,7 +1753,7 @@ static void ati_rv100_fixed_function(void)
     /* X.Org rectangles omit vertex colors and leave alpha shading solid. */
     qtest_writel(qts, color_base + (24 * WIDTH + 42) * 4, 0);
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (2U << 8));
+                 R100_SE_GL | (2U << 8));
     ati_rv100_draw_immediate(qts, R100_VTX_FMT_ST0,
                              R100_VF_RECTANGLE_LIST,
                              driver_style_rectangle,
@@ -1763,7 +1765,7 @@ static void ati_rv100_fixed_function(void)
     qtest_writel(qts, color_base + (29 * WIDTH + 41) * 4, 0);
     qtest_writel(qts, color_base + (29 * WIDTH + 47) * 4, 0);
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (1U << 8));
+                 R100_SE_GL | (1U << 8));
     ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
                              R100_VF_TRIANGLE_LIST, flat_triangle_list,
                              ARRAY_SIZE(flat_triangle_list), 6);
@@ -1772,7 +1774,7 @@ static void ati_rv100_fixed_function(void)
     g_assert_cmphex(qtest_readl(qts, color_base +
                                 (29 * WIDTH + 47) * 4), ==, 0xff00ff00);
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10));
+                 R100_SE_GL | (2U << 8) | (2U << 10));
 
     /*
      * Point and line paths obey the same render-engine scissor as triangles.
@@ -1955,7 +1957,7 @@ static void ati_rv100_texture_mipmaps(void)
     qtest_writel(qts, mmio + R100_RE_WIDTH_HEIGHT,
                  (HEIGHT - 1) << 16 | (WIDTH - 1));
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10));
+                 R100_SE_GL | (2U << 8) | (2U << 10));
     qtest_writel(qts, mmio + R100_SE_COORD_FMT, 0);
     qtest_writel(qts, mmio + R100_RB3D_CNTL, R100_RB_COLOR_ARGB8888);
     qtest_writel(qts, mmio + R100_PP_TXFORMAT_0,
@@ -2005,7 +2007,7 @@ static void ati_rv100_texture_mipmaps(void)
         uint32_t triangles[4 * 12];
 
         qtest_writel(qts, mmio + R100_SE_CNTL,
-                     (3U << 1) | (3U << 3) | 0xaa00);
+                     R100_SE_GL | 0xaa00);
         qtest_writel(qts, mmio + R100_PP_TXFILTER_0,
                      R100_TX_MIN_NEAREST_MIP_NEAREST |
                      R100_TX_MAX_MIP_LEVEL(2));
@@ -2094,7 +2096,7 @@ static void ati_rv100_yuv_textures(void)
         qtest_writel(qts, mmio + R100_RE_WIDTH_HEIGHT,
                      (HEIGHT - 1) << 16 | (WIDTH - 1));
         qtest_writel(qts, mmio + R100_SE_CNTL,
-                     (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10));
+                     R100_SE_GL | (2U << 8) | (2U << 10));
         qtest_writel(qts, mmio + R100_SE_COORD_FMT,
                      R100_COORD_ST0_NONPARAM);
         qtest_writel(qts, mmio + R100_RB3D_CNTL,
@@ -2218,7 +2220,7 @@ static void ati_rv100_compressed_textures(void)
     qtest_writel(qts, mmio + R100_RE_WIDTH_HEIGHT,
                  (HEIGHT - 1) << 16 | (WIDTH - 1));
     qtest_writel(qts, mmio + R100_SE_CNTL,
-                 (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10));
+                 R100_SE_GL | (2U << 8) | (2U << 10));
     qtest_writel(qts, mmio + R100_SE_COORD_FMT,
                  R100_COORD_ST0_NONPARAM);
     qtest_writel(qts, mmio + R100_RB3D_CNTL, R100_RB_COLOR_ARGB8888);
@@ -2319,8 +2321,8 @@ static void ati_rv100_vertex_layout(void)
         VERTEX_OFFSET = 0x11000,
         IB_OFFSET = 0x12000,
     };
-    const uint32_t se_cntl = (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10) |
-                             (2U << 12) | (2U << 14) | R100_VTX_PIX_CENTER_OGL;
+    const uint32_t se_cntl = R100_SE_GL | (2U << 8) | (2U << 10) |
+                             (2U << 12) | (2U << 14);
     const uint32_t q0_then_st1[] = {
         f32_bits(2.0f), f32_bits(2.0f),
         f32_bits(4.0f), f32_bits(0.0f), f32_bits(2.0f),
@@ -2448,8 +2450,8 @@ static void ati_rv100_perspective(void)
         HEIGHT = 4,
         TEX_OFFSET = 0x10000,
     };
-    const uint32_t se_cntl = (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10) |
-                             (2U << 12) | (2U << 14) | R100_VTX_PIX_CENTER_OGL;
+    const uint32_t se_cntl = R100_SE_GL | (2U << 8) | (2U << 10) |
+                             (2U << 12) | (2U << 14);
     const uint32_t quad[] = {
         f32_bits(0.0f), f32_bits(0.0f), f32_bits(1.0f),
         f32_bits(0.0f), f32_bits(0.0f),
@@ -2508,6 +2510,56 @@ static void ati_rv100_perspective(void)
     qtest_quit(qts);
 }
 
+/*
+ * With VTX_PIX_CENTER_OGL a pixel samples at x + 0.5; without it at x, as
+ * XP 3790's Direct3D programs SE_CNTL.
+ */
+static void ati_rv100_pixel_center(void)
+{
+    enum {
+        WIDTH = 16,
+        HEIGHT = 4,
+    };
+    const uint32_t rectangle[] = {
+        f32_bits(0.0f), f32_bits(2.0f), UINT32_MAX,
+        f32_bits(4.25f), f32_bits(2.0f), UINT32_MAX,
+        f32_bits(4.25f), f32_bits(0.0f), UINT32_MAX,
+    };
+    const uint32_t point[] = {
+        f32_bits(8.75f), f32_bits(1.0f), UINT32_MAX,
+    };
+    QTestState *qts = rv100_3d_init("");
+    unsigned int gl;
+
+    qtest_writel(qts, rv100_mmio + R100_RB3D_CNTL, R100_RB_COLOR_ARGB8888);
+    qtest_writel(qts, rv100_mmio + R100_RB3D_COLOROFFSET, 0);
+    qtest_writel(qts, rv100_mmio + R100_RB3D_COLORPITCH, WIDTH);
+    qtest_writel(qts, rv100_mmio + R100_RE_TOP_LEFT, 0);
+    qtest_writel(qts, rv100_mmio + R100_RE_WIDTH_HEIGHT,
+                 (HEIGHT - 1) << 16 | (WIDTH - 1));
+    qtest_writel(qts, rv100_mmio + R100_PP_CNTL, 0);
+    for (gl = 0; gl < 2; gl++) {
+        qtest_memset(qts, rv100_fb, 0, WIDTH * HEIGHT * 4);
+        qtest_writel(qts, rv100_mmio + R100_SE_CNTL,
+                     (3U << 1) | (3U << 3) | (2U << 8) | (2U << 10) |
+                     (gl ? R100_VTX_PIX_CENTER_OGL : 0));
+        ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
+                                 R100_VF_RECTANGLE_LIST, rectangle,
+                                 ARRAY_SIZE(rectangle), 3);
+        ati_rv100_draw_immediate(qts, R100_VTX_FMT_PKCOLOR,
+                                 R100_VF_POINT_LIST, point,
+                                 ARRAY_SIZE(point), 1);
+        g_assert_cmphex(qtest_readl(qts, rv100_fb + 3 * 4), ==, UINT32_MAX);
+        g_assert_cmphex(qtest_readl(qts, rv100_fb + 4 * 4), ==,
+                        gl ? 0 : UINT32_MAX);
+        g_assert_cmphex(qtest_readl(qts, rv100_fb + (WIDTH + 8) * 4), ==,
+                        gl ? UINT32_MAX : 0);
+        g_assert_cmphex(qtest_readl(qts, rv100_fb + (WIDTH + 9) * 4), ==,
+                        gl ? 0 : UINT32_MAX);
+    }
+    qtest_quit(qts);
+}
+
 static void display_wait_for_migration_status(QTestState *qts,
                                               const char *wanted)
 {
@@ -2560,5 +2612,6 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100-3d/yuv-textures", ati_rv100_yuv_textures);
     qtest_add_func("/ati-rv100-3d/vertex-layout", ati_rv100_vertex_layout);
     qtest_add_func("/ati-rv100-3d/perspective", ati_rv100_perspective);
+    qtest_add_func("/ati-rv100-3d/pixel-center", ati_rv100_pixel_center);
     return g_test_run();
 }

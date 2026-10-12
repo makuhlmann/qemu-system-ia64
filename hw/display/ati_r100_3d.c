@@ -2620,6 +2620,24 @@ static bool r100_triangle_visible(ATIR100State *r, double area)
     return mode == 3;
 }
 
+/*
+ * Where a pixel samples: at its centre, x + 0.5, with VTX_PIX_CENTER_OGL;
+ * at x itself for Direct3D's integer centres.  Mesa and X.Org set OGL
+ * (Mesa 7.11 radeon_state_init.c:967, xf86-video-ati 6.14.6
+ * radeon_commonfuncs.c:800); XP 3790's Direct3D clears it.
+ */
+static float r100_pixel_center(ATIR100State *r)
+{
+    return r100_context_read(r, R100_SE_CNTL) & R100_VTX_PIX_CENTER_OGL ?
+           0.5f : 0.0f;
+}
+
+/* The pixel a point or line sample at v lands in. */
+static int r100_pixel_of(float v, float center)
+{
+    return floorf(v + 0.5f - center);
+}
+
 static bool r100_consume_draw_budget(ATIR100State *r, uint64_t pixels)
 {
     if (pixels > r->draw_budget_remaining) {
@@ -2713,6 +2731,7 @@ static void r100_draw_triangle(ATIVGAState *s, const R100Vertex *v0,
     R100TextureGradients gradients;
     uint8_t gradients_ready = 0;
     bool exact_edges;
+    double center;
     int min_x, min_y, max_x, max_y;
     uint64_t pixels;
     unsigned int unit;
@@ -2743,9 +2762,10 @@ static void r100_draw_triangle(ATIVGAState *s, const R100Vertex *v0,
     }
 
     r100_draw_begin_primitive(draw);
-    row_value0 = r100_edge_value(&edge0, min_x + 0.5, min_y + 0.5);
-    row_value1 = r100_edge_value(&edge1, min_x + 0.5, min_y + 0.5);
-    row_value2 = r100_edge_value(&edge2, min_x + 0.5, min_y + 0.5);
+    center = r100_pixel_center(r);
+    row_value0 = r100_edge_value(&edge0, min_x + center, min_y + center);
+    row_value1 = r100_edge_value(&edge1, min_x + center, min_y + center);
+    row_value2 = r100_edge_value(&edge2, min_x + center, min_y + center);
     for (y = min_y; y <= max_y; y++) {
         double value0 = row_value0;
         double value1 = row_value1;
@@ -2851,6 +2871,7 @@ static void r100_draw_line(ATIVGAState *s, const R100Vertex *a,
 {
     /* TODO: Honor SE_LINE_WIDTH and RE_LINE_PATTERN. */
     int steps = ceilf(MAX(fabsf(b->x - a->x), fabsf(b->y - a->y)));
+    float center = r100_pixel_center(&s->r100);
     int i;
 
     if (steps <= 0 || steps > 8192 ||
@@ -2877,8 +2898,8 @@ static void r100_draw_line(ATIVGAState *s, const R100Vertex *a,
         float tex_q[3];
         unsigned int unit;
 
-        int x = floorf(a->x + (b->x - a->x) * f + 0.5f);
-        int y = floorf(a->y + (b->y - a->y) * f + 0.5f);
+        int x = r100_pixel_of(a->x + (b->x - a->x) * f, center);
+        int y = r100_pixel_of(a->y + (b->y - a->y) * f, center);
 
         for (unit = 0; unit < 3; unit++) {
             tex_s[unit] = a->s[unit] + (b->s[unit] - a->s[unit]) * f;
@@ -3217,6 +3238,7 @@ static void r100_draw_vertices(ATIVGAState *s, R100Vertex *vertices,
     unsigned int primitive = vf_cntl & R100_VF_PRIM_TYPE_MASK;
     R100DirtyBatch batch = { 0 };
     R100DrawState draw = { .valid = false };
+    float center = r100_pixel_center(&s->r100);
     uint8_t perspective_sets;
     unsigned int i;
 
@@ -3236,8 +3258,8 @@ static void r100_draw_vertices(ATIVGAState *s, R100Vertex *vertices,
     switch (primitive) {
     case R100_VF_PRIM_POINT_LIST:
         for (i = 0; i < count; i++) {
-            int x = floorf(vertices[i].x + 0.5f);
-            int y = floorf(vertices[i].y + 0.5f);
+            int x = r100_pixel_of(vertices[i].x, center);
+            int y = r100_pixel_of(vertices[i].y, center);
 
             if (!r100_consume_draw_budget(&s->r100, 1)) {
                 break;
