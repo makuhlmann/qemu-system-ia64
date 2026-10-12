@@ -1319,6 +1319,23 @@ static void test_rv100_2d_tiled(void)
     g_assert_cmphex(qtest_readl(qts, fb + 0x200000), ==, 0x00112233);
     g_assert_cmphex(qtest_readl(qts, fb + 0x200014), ==, 0x00c0ffee);
 
+    /*
+     * A two-line mono host-data blit (8x2 at (72, 21)) in one flush, inside
+     * a window's scissor: the second line is a second span on the same
+     * context.  (72, 22) and (79, 22) sit at 109A0h and 109BCh.
+     */
+    qtest_writel(qts, mmio + 0x15d8, 0x00f0f0f0);   /* DP_SRC_FRGD_CLR */
+    qtest_writel(qts, mmio + 0x15dc, 0x00000000);   /* DP_SRC_BKGD_CLR */
+    qtest_writel(qts, mmio + 0x16ec, (20u << 16) | 70); /* SC_TOP_LEFT */
+    qtest_writel(qts, mmio + 0x16f0, (24u << 16) | 90); /* SC_BOTTOM_RIGHT */
+    rv100_2d_op(qts, mmio, 0x2 | 0x8 | 0xf0 | (6u << 8) | 0x00cc0000 |
+                (3u << 24) | 0x10000000, 0, tiled, 0, (21u << 16) | 72,
+                (2u << 16) | 8);                    /* GMC_DST_CLIPPING */
+    qtest_writel(qts, mmio + 0x17e0, 0xffffffff);   /* HOST_DATA_LAST */
+    g_assert_cmphex(qtest_readl(qts, fb + 0x108fc), ==, 0x00f0f0f0);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x109a0), ==, 0x00f0f0f0);
+    g_assert_cmphex(qtest_readl(qts, fb + 0x109bc), ==, 0x00f0f0f0);
+
     /* A line along y = 21 from x = 72 to 78 (end excluded), tiled. */
     qtest_memset(qts, fb, 0, 0x40000);
     qtest_writel(qts, mmio + 0x147c, 0x00a5a5a5);

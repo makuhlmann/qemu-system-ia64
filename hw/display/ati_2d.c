@@ -886,15 +886,20 @@ static void ati_2d_tile_end(ATI2DCtx *ctx, ATI2DTileCopy *t, bool drawn)
     g_free(t->src);
 }
 
-/* One operation on the context, through tile copies where needed. */
-static void ati_2d_run(ATIVGAState *s, ATI2DCtx *ctx)
+/*
+ * One operation on the context, through tile copies where needed.  The tile
+ * copies rewrite a context (pointers, lines, scissor, brush phase), so they
+ * get their own: a host-data blit reuses its context for the next span.
+ */
+static void ati_2d_run(ATIVGAState *s, const ATI2DCtx *ctx)
 {
+    ATI2DCtx c = *ctx;
     ATI2DTileCopy t;
 
-    if (ati_2d_tile_begin(ctx, &t)) {
-        ati_2d_tile_end(ctx, &t, t.dst && ati_2d_do_blt(ctx, s->use_pixman));
-    } else if (ati_2d_do_blt(ctx, s->use_pixman)) {
-        ati_set_dirty(ctx);
+    if (ati_2d_tile_begin(&c, &t)) {
+        ati_2d_tile_end(&c, &t, t.dst && ati_2d_do_blt(&c, s->use_pixman));
+    } else if (ati_2d_do_blt(&c, s->use_pixman)) {
+        ati_set_dirty(&c);
     }
 }
 
