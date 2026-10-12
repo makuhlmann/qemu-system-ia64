@@ -205,6 +205,15 @@ typedef struct ATIHostDataState {
     uint32_t acc[4];
 } ATIHostDataState;
 
+/* One SURFACEn window of the framebuffer aperture (x-tiling). */
+typedef struct ATIR100Surface {
+    ATIVGAState *s;
+    MemoryRegion mr;
+    uint32_t lower;
+    uint32_t pitch;
+    unsigned mode;
+} ATIR100Surface;
+
 struct ATIVGAState {
     PCIDevice dev;
     VGACommonState vga;
@@ -218,6 +227,8 @@ struct ATIVGAState {
     uint16_t cursor_size;
     uint32_t cursor_offset;
     QEMUCursor *cursor;
+    /* SURFACE0-7 over the framebuffer aperture (x-tiling). */
+    ATIR100Surface surf[8];
     /* The tiled front buffer's own display surface (CRTC_TILE_EN). */
     DisplaySurface *tiled_surface;
     bool tiled_active;

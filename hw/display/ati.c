@@ -1817,10 +1817,10 @@ uint32_t ati_r100_reg(ATIVGAState *s, hwaddr addr)
 
 /*
  * SURFACEn_LOWER_BOUND, _UPPER_BOUND and _INFO at B04h + 10h * n (Linux
- * radeon_reg.h).  The registers are stored; what they set up, tiled access and
- * byte swapping through the apertures, is not modelled.  Little-endian guests
- * leave them 0 (radeonfb_set_par; XFree86 4.3 only saves and restores
- * SURFACE_CNTL); KMS uses them for tiled buffers only (r100_set_surface_reg).
+ * radeon_reg.h).  Tiled access through them follows x-tiling
+ * (ati_surfaces_update()); byte swapping is not modelled: little-endian
+ * guests leave it off (radeonfb_set_par; XFree86 4.3 only saves and restores
+ * SURFACE_CNTL; KMS sets it for big-endian hosts, r100_set_surface_reg).
  */
 static uint32_t *ati_r100_surface_reg(ATIVGAState *s, hwaddr addr)
 {
@@ -1838,8 +1838,112 @@ static void ati_r100_surface_unimp(ATIVGAState *s, hwaddr addr, uint32_t val)
         return;
     }
     s->surface_unimp_seen = true;
-    qemu_log_mask(LOG_UNIMP, "ati-vga: surface tiling and byte swapping are "
-                  "not modelled (0x%04x = 0x%08x)\n", (unsigned)addr, val);
+    qemu_log_mask(LOG_UNIMP, "ati-vga: surface byte swapping, and tiling "
+                  "without x-tiling, are not modelled (0x%04x = 0x%08x)\n",
+                  (unsigned)addr, val);
+}
+
+/*
+ * x-tiling: host accesses through the framebuffer aperture between a
+ * surface's LOWER_BOUND and UPPER_BOUND (inclusive VRAM offsets) see the tiled
+ * buffer there as a linear image with the pitch in INFO (bytes / 16, 0 for no
+ * tiling), in the layout of INFO 17:16: colour macro, colour macro and micro,
+ * 32-bit or 16-bit depth (Linux r100.c r100_set_surface_reg, radeon_reg.h).
+ * SURFACE_CNTL.SURF_TRANSLATION_DIS (bit 8) turns them off.  Aligned
+ * accesses of up to 8 bytes stay inside one 16-byte run of every layout.
+ */
+#define ATI_R100_SURF_TRANSLATION_DIS   BIT(8)
+
+static uint64_t ati_surface_offset(const ATIR100Surface *f, hwaddr rel)
+{
+    uint32_t y = rel / f->pitch;
+    uint32_t xbyte = rel % f->pitch;
+    uint64_t off = 0;
+
+    switch (f->mode) {
+    case 0:
+        ati_r100_tile_offset(ATI_R100_TILE_MACRO, 4, f->pitch, xbyte, y,
+                             &off);
+        break;
+    case 1:
+        ati_r100_tile_offset(ATI_R100_TILE_BOTH, 4, f->pitch, xbyte, y, &off);
+        break;
+    case 2:
+        off = ati_r100_depth_offset(4, f->pitch / 4, xbyte / 4, y) +
+              (xbyte & 3);
+        break;
+    default:
+        off = ati_r100_depth_offset(2, f->pitch / 2, xbyte / 2, y) +
+              (xbyte & 1);
+        break;
+    }
+    return f->lower + off;
+}
+
+static uint64_t ati_surface_read(void *opaque, hwaddr addr, unsigned size)
+{
+    ATIR100Surface *f = opaque;
+    uint64_t a = ati_surface_offset(f, addr);
+
+    if (a + size > f->s->vga.vram_size) {
+        return 0;
+    }
+    return ldn_le_p(f->s->vga.vram_ptr + a, size);
+}
+
+static void ati_surface_write(void *opaque, hwaddr addr, uint64_t data,
+                              unsigned size)
+{
+    ATIR100Surface *f = opaque;
+    uint64_t a = ati_surface_offset(f, addr);
+
+    if (a + size > f->s->vga.vram_size) {
+        return;
+    }
+    stn_le_p(f->s->vga.vram_ptr + a, size, data);
+    memory_region_set_dirty(&f->s->vga.vram, a, size);
+}
+
+static const MemoryRegionOps ati_surface_ops = {
+    .read = ati_surface_read,
+    .write = ati_surface_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 8,
+    .impl.min_access_size = 1,
+    .impl.max_access_size = 8,
+};
+
+static void ati_surfaces_update(ATIVGAState *s)
+{
+    bool on = s->r100_tiling &&
+              !(ati_r100_reg(s, ATI_R100_SURFACE_CNTL) &
+                ATI_R100_SURF_TRANSLATION_DIS);
+    unsigned n;
+
+    if (ati_is_rage128(s)) {
+        return;
+    }
+    memory_region_transaction_begin();
+    for (n = 0; n < ARRAY_SIZE(s->surf); n++) {
+        ATIR100Surface *f = &s->surf[n];
+        uint32_t lower = s->regs.surface[n][0];
+        uint32_t upper = s->regs.surface[n][1];
+        uint32_t info = s->regs.surface[n][2];
+        bool enable = on && (info & 0xffff) && upper >= lower &&
+                      lower < s->linear_aper_sz;
+
+        if (enable) {
+            f->lower = lower;
+            f->pitch = (info & 0xffff) * 16;
+            f->mode = (info >> 16) & 3;
+            memory_region_set_size(&f->mr, MIN((uint64_t)upper + 1,
+                                               s->linear_aper_sz) - lower);
+            memory_region_set_address(&f->mr, lower);
+        }
+        memory_region_set_enabled(&f->mr, enable);
+    }
+    memory_region_transaction_commit();
 }
 
 /*
@@ -3014,6 +3118,10 @@ static void ati_mm_write(void *opaque, hwaddr addr,
             if ((addr & ~3ULL) == 0x07e0) {
                 s->regs.init_aux[ati_init_aux_slot(0x07d4)]++;
             }
+            if ((addr & ~3ULL) == ATI_R100_SURFACE_CNTL &&
+                !ati_is_rage128(s)) {
+                ati_surfaces_update(s);
+            }
         } else {
             ati_unimp(s, addr, true, data);
         }
@@ -3038,9 +3146,10 @@ static bool ati_r100_mm_write(ATIVGAState *s, hwaddr addr, uint64_t data,
         ati_reg_write_offs(reg, addr & 3, data, size);
         /* INFO: pitch (low bits, tiling) and the swap modes. */
         if ((addr & 0xf) / 4 == 3 &&
-            (*reg & (0xffff | ATI_R100_SURFACE_SWAP))) {
+            (*reg & (ATI_R100_SURFACE_SWAP | (s->r100_tiling ? 0 : 0xffff)))) {
             ati_r100_surface_unimp(s, addr & ~3ULL, *reg);
         }
+        ati_surfaces_update(s);
     } else if (addr >= 0x3b0 && addr + size <= 0x3e0) {
         ati_r100_vga_write(s, addr, data, size);
     } else if ((addr & ~3ULL) == GPIO_CRT2_DDC) {
@@ -3370,6 +3479,7 @@ static int ati_vga_post_load(void *opaque, int version_id)
                       s->regs.cur_hv_pos & 0xffff, cursor_enabled);
     }
     ati_vga_update_irq(s);
+    ati_surfaces_update(s);
     graphic_hw_invalidate(s->vga.con);
     return ati_is_rage128(s) ? 0 : ati_r100_3d_post_load(s);
 }
@@ -3543,6 +3653,17 @@ static void ati_vga_realize(PCIDevice *dev, Error **errp)
     memory_region_init(&s->linear_aper, OBJECT(dev), "ati-linear-aperture0",
                        s->linear_aper_sz);
     memory_region_add_subregion(&s->linear_aper, 0, &vga->vram);
+    if (!ati_is_rage128(s)) {
+        for (unsigned n = 0; n < ARRAY_SIZE(s->surf); n++) {
+            s->surf[n].s = s;
+            memory_region_init_io(&s->surf[n].mr, OBJECT(dev),
+                                  &ati_surface_ops, &s->surf[n],
+                                  "ati-surface", 4 * KiB);
+            memory_region_set_enabled(&s->surf[n].mr, false);
+            memory_region_add_subregion_overlap(&s->linear_aper, 0,
+                                                &s->surf[n].mr, 8 - n);
+        }
+    }
 
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->linear_aper);
     pci_register_bar(dev, 1, PCI_BASE_ADDRESS_SPACE_IO, &s->io);
@@ -3661,6 +3782,7 @@ static void ati_vga_reset(DeviceState *dev)
         /* As the BIOS's POST leaves it. */
         s->regs.config_memsize = s->vga.vram_size;
         ati_r100_3d_reset(s);
+        ati_surfaces_update(s);
     }
 
     s->regs.clock_cntl_index = 0;
