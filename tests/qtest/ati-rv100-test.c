@@ -1173,8 +1173,9 @@ static void test_rv100_3d_tiling(void)
                     ==, 0);
     qtest_quit(qts);
 
-    /* Without x-tiling every buffer is linear, as the CRTC reads it. */
-    qts = qtest_init(RV100_ARGS " -global ati-vga.x-r100-3d=on");
+    /* With x-tiling off every buffer is linear, as the CRTC reads it. */
+    qts = qtest_init(RV100_ARGS " -global ati-vga.x-r100-3d=on"
+                     " -global ati-vga.x-tiling=off");
     mmio = rv100_mmio(qts);
     fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) & PCI_BASE_ADDRESS_MEM_MASK;
     qtest_writel(qts, mmio + 0x26c0, 0);
@@ -1431,8 +1432,8 @@ static void test_rv100_surfaces(void)
     rmdir(tmpdir);
     qtest_quit(qts);
 
-    /* Without x-tiling the same surface translates nothing. */
-    qts = qtest_init(RV100_ARGS);
+    /* With x-tiling off the same surface translates nothing. */
+    qts = qtest_init(RV100_ARGS " -global ati-vga.x-tiling=off");
     mmio = rv100_mmio(qts);
     fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) & PCI_BASE_ADDRESS_MEM_MASK;
     qtest_writel(qts, mmio + 0xb04, 0x100000);
