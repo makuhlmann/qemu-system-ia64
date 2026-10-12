@@ -632,16 +632,18 @@ uint32_t ati_mc_vram_offset(ATIVGAState *s, uint32_t mc)
     return mc >= start && mc <= top ? mc - start : UINT32_MAX;
 }
 
+/*
+ * Slot + 1 of each stored register by dword offset, 0 for none: the 3D
+ * engine reads MC_FB_LOCATION and the AIC registers for every pixel.
+ */
+static uint8_t ati_init_aux_index[0x4000 / 4];
+static uint8_t ati_r100_aux_index[0x4000 / 4];
+
 static int ati_init_aux_slot(hwaddr addr)
 {
-    unsigned i;
+    hwaddr i = addr >> 2;
 
-    for (i = 0; i < ARRAY_SIZE(ati_init_aux_offs); i++) {
-        if (ati_init_aux_offs[i] == (addr & ~3ULL)) {
-            return i;
-        }
-    }
-    return -1;
+    return i < ARRAY_SIZE(ati_init_aux_index) ? ati_init_aux_index[i] - 1 : -1;
 }
 
 /*
@@ -1601,14 +1603,25 @@ QEMU_BUILD_BUG_ON(ARRAY_SIZE(ati_r100_aux_offs) >
 
 static int ati_r100_aux_slot(hwaddr addr)
 {
+    hwaddr i = addr >> 2;
+
+    return i < ARRAY_SIZE(ati_r100_aux_index) ? ati_r100_aux_index[i] - 1 : -1;
+}
+
+static void ati_aux_index_init(void)
+{
     unsigned i;
 
-    for (i = 0; i < ARRAY_SIZE(ati_r100_aux_offs); i++) {
-        if (ati_r100_aux_offs[i] == (addr & ~3ULL)) {
-            return i;
-        }
+    QEMU_BUILD_BUG_ON(ARRAY_SIZE(ati_init_aux_offs) >= UINT8_MAX);
+    QEMU_BUILD_BUG_ON(ARRAY_SIZE(ati_r100_aux_offs) >= UINT8_MAX);
+    for (i = 0; i < ARRAY_SIZE(ati_init_aux_offs); i++) {
+        assert(ati_init_aux_offs[i] / 4 < ARRAY_SIZE(ati_init_aux_index));
+        ati_init_aux_index[ati_init_aux_offs[i] / 4] = i + 1;
     }
-    return -1;
+    for (i = 0; i < ARRAY_SIZE(ati_r100_aux_offs); i++) {
+        assert(ati_r100_aux_offs[i] / 4 < ARRAY_SIZE(ati_r100_aux_index));
+        ati_r100_aux_index[ati_r100_aux_offs[i] / 4] = i + 1;
+    }
 }
 
 /* A Radeon register the model only stores (r100_aux or init_aux), by offset. */
@@ -3569,6 +3582,7 @@ static void ati_vga_class_init(ObjectClass *klass, const void *data)
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
 
+    ati_aux_index_init();
     device_class_set_legacy_reset(dc, ati_vga_reset);
     device_class_set_props(dc, ati_vga_properties);
     dc->vmsd = &vmstate_ati_vga;
