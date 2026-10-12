@@ -3667,7 +3667,7 @@ static void r100_budget_end(ATIR100State *r)
     r->command_work_remaining = 0;
 }
 
-/* Off by default until the import is reviewed against Mesa's R100 driver. */
+/* x-r100-3d=off keeps the 3D registers and packets but drops their draws. */
 static bool r100_draws_enabled(ATIVGAState *s)
 {
     static bool logged;

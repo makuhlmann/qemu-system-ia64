@@ -3872,8 +3872,8 @@ static const Property ati_vga_properties[] = {
     DEFINE_PROP_BOOL("agp", ATIVGAState, agp, false),
     /* Radeon: the monitor's DDC on GPIO_VGA_DDC instead of GPIO_DVI_DDC. */
     DEFINE_PROP_BOOL("ddc-vga", ATIVGAState, ddc_vga, false),
-    /* Radeon: the 3D engine draws (off until its review, RV100 plan D4). */
-    DEFINE_PROP_BOOL("x-r100-3d", ATIVGAState, r100_3d, false),
+    /* Radeon: the 3D engine draws; off keeps its registers but drops draws. */
+    DEFINE_PROP_BOOL("x-r100-3d", ATIVGAState, r100_3d, true),
     /*
      * The CRTC, the 2D engine, the surfaces and the 3D engine use the tiled
      * layouts the guest selects; off keeps every Radeon buffer linear.

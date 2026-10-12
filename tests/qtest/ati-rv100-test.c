@@ -960,32 +960,37 @@ static void rv100_draw_port(QTestState *qts, uint64_t mmio, uint32_t format,
 /*
  * SE_PORT_DATA0-31 hold one vertex batch of at most 4096 dwords: data with
  * no vertex count in SE_VF_CNTL, or with a count above that, is dropped,
- * and the card goes on drawing.
+ * and the card goes on drawing, with the 3D engine's draws on and off.
  */
 static void test_rv100_3d_port_bounds(void)
 {
-    QTestState *qts = qtest_init(RV100_ARGS);
-    uint64_t mmio = rv100_mmio(qts);
-    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
-                  PCI_BASE_ADDRESS_MEM_MASK;
     static const uint32_t vf_cntl[] = {
         0,
         (0xffffu << 16) | (3u << 4) | 4,    /* 65535 vertices, triangles */
     };
-    unsigned i, j;
+    unsigned i, j, on;
 
-    for (j = 0; j < ARRAY_SIZE(vf_cntl); j++) {
-        qtest_writel(qts, mmio + 0x2080, 1u << 3);  /* SE_VTX_FMT: PKCOLOR */
-        qtest_writel(qts, mmio + 0x2084, vf_cntl[j]);
-        for (i = 0; i < 5000; i++) {
-            qtest_writel(qts, mmio + 0x2000 + (i & 31) * 4, i);
+    for (on = 0; on < 2; on++) {
+        QTestState *qts = qtest_initf(RV100_ARGS
+                                      " -global ati-vga.x-r100-3d=%s",
+                                      on ? "on" : "off");
+        uint64_t mmio = rv100_mmio(qts);
+        uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                      PCI_BASE_ADDRESS_MEM_MASK;
+
+        for (j = 0; j < ARRAY_SIZE(vf_cntl); j++) {
+            qtest_writel(qts, mmio + 0x2080, 1u << 3); /* SE_VTX_FMT: PKCOLOR */
+            qtest_writel(qts, mmio + 0x2084, vf_cntl[j]);
+            for (i = 0; i < 5000; i++) {
+                qtest_writel(qts, mmio + 0x2000 + (i & 31) * 4, i);
+            }
+            g_assert_cmphex(qtest_readl(qts, mmio + 0x2080), ==, 1u << 3);
+            g_assert_cmphex(qtest_readl(qts, mmio + 0x2084), ==, vf_cntl[j]);
         }
-        g_assert_cmphex(qtest_readl(qts, mmio + 0x2080), ==, 1u << 3);
-        g_assert_cmphex(qtest_readl(qts, mmio + 0x2084), ==, vf_cntl[j]);
+        rv100_fill(qts, mmio, 0x100000, 0x00112233);
+        g_assert_cmphex(qtest_readl(qts, fb + 0x100000), ==, 0x00112233);
+        qtest_quit(qts);
     }
-    rv100_fill(qts, mmio, 0x100000, 0x00112233);
-    g_assert_cmphex(qtest_readl(qts, fb + 0x100000), ==, 0x00112233);
-    qtest_quit(qts);
 }
 
 /*
