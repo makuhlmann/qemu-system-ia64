@@ -231,10 +231,17 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
             // pci.sys as the associated service on *HWP0003 and hpagp as a
             // filter).  It stays nested in SBA0 so Linux sba_iommu/hp-agp find
             // the enclosing HWP0001 IOC by walking up the ACPI parent chain.
+            // The _CID is an EISA id, as on the rx2600, whose roots all report
+            // the compatible ID *PNP0A03 (rx2600 capture 2026-10-03, the
+            // Server 2003 SP2 registry).  Windows copies a string _CID as it
+            // is and prefixes only an EISA id with '*' (WSRV03 base/busdrv/
+            // acpi/driver/nt/get.c:966-990, 3350), and machine.inf binds pci
+            // only to *PNP0A03: with the string, a Windows without hpagp left
+            // the root at code 28 and never saw the adapter behind it.
             Device (LBA0)
             {
                 Name (_HID, EisaId ("HWP0003"))
-                Name (_CID, "PNP0A03")
+                Name (_CID, EisaId ("PNP0A03"))
                 Name (_SEG, Zero)
                 Name (_BBN, 0x10)
                 Name (_UID, One)
