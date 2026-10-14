@@ -1973,6 +1973,12 @@ static void test_zx1_backplane_pcix(void)
     g_assert_cmphex(qtest_readq(qts, rope + 0x8620) & 0xffff, ==, 0x7cc0);
     qtest_quit(qts);
 
+    /* -vga places its adapter in the slot too, the bus's only device. */
+    qts = qtest_init("-machine zx1,backplane=pcix -vga std -m 256M -S");
+    g_assert_cmphex(ia64_cfg_readw(qts, 0x10, 1, 0, PCI_VENDOR_ID), ==,
+                    0x1234);
+    qtest_quit(qts);
+
     qts = qtest_init("-machine zx1 -m 256M -S");
     read_riser_fru(qts, fru);
     g_assert_true(memcmp(fru + 72 + 6 + 12, "Longs Peak I/O riser", 20) == 0);

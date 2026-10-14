@@ -372,6 +372,9 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
             return false;
         }
         s->rope4_bus = ia64_expander_host_bus(s->rope4_host);
+        /* The riser's bus has its one slot and no other device. */
+        pci_bus_set_slot_reserved_mask(s->rope4_bus,
+                                       ~(1U << LONGSPEAK_PCIX_SLOT));
         ia64_pci_host_add_secondary_bus(pci_host, s->rope4_bus);
         ia64_lba_attach_dma(IA64_LBA(s->lba_dev), s->rope4_bus,
                             ia64_sba_dma_region(IA64_SBA(s->sba_dev)));
