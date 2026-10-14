@@ -51,6 +51,16 @@ class Ia64FirmwareSmoke(Ia64FirmwareTest):
         result = self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
         self.assert_post_self_tests_pass(result.raw_console)
 
+    def test_pcix_rv100_cold_boot(self):
+        # The PCI-X riser with the RV100 in rope 4's slot: the firmware's own
+        # checks of the display adapter and of the tables must pass there too.
+        vm = self.launch_ia64(
+            media=self.make_disk("pcix.img"),
+            machine_options="backplane=pcix,vga=rv100,"
+                            "firmware-console=serial,nvram=none")
+        result = self.wait_ia64_suite(vm, "smoke", SMOKE_CASES)
+        self.assert_post_self_tests_pass(result.raw_console)
+
     def test_slow_console_reader(self):
         # The serial backend refuses bytes while its reader is behind, and
         # QEMU's 16550 then holds THRE clear; firmware that writes THR without

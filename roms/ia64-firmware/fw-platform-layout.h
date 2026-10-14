@@ -34,6 +34,8 @@ extern char __fw_image_start[];
 #define PCI_VGA_ATI_ID                0x50461002U
 #define PCI_VGA_ATI_GL_ID             0x52461002U
 #define PCI_VGA_MACH64_ID             0x47521002U
+/* The RV100, with the Rage 128's 64 MiB aperture (vga=rv100). */
+#define PCI_VGA_RV100_ID              0x51591002U
 #define PCI_VGA_STD_ID                0x11111234U
 #define PCI_VGA_ATI_FB_SIZE           0x04000000ULL
 #define PCI_VGA_STD_FB_SIZE           0x01000000ULL
