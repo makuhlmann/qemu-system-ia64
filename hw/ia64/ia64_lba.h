@@ -24,6 +24,14 @@
 #define IA64_LBA_STRAPS_PCI66  0x04e0U   /* the same with M66EN */
 #define IA64_LBA_STRAPS_PCIX   0x7ce0U   /* PCI-X 133, the rx2600's rope 3 */
 #define IA64_LBA_STRAPS_AGP    0x0081U   /* AGP, dual rope, 1.5 V, M66EN */
+/*
+ * The rx2600's rope 4 on the PCI-X riser, its slot empty, reads 7CC0h (run 4):
+ * rope 3's PCI-X pattern with rope_2x_L (bit 5) clear for the dual rope.  A
+ * conventional card in a PCI-X slot latches the PCI pattern instead, as the
+ * cards on ropes 2 and 6 do, so a 33 MHz card there gives 0440h [inferred].
+ */
+#define IA64_LBA_STRAPS_PCIX_DUAL  0x7cc0U
+#define IA64_LBA_STRAPS_PCI33_DUAL 0x0440U
 OBJECT_DECLARE_SIMPLE_TYPE(IA64LBAState, IA64_LBA)
 
 struct IA64LBAState {

@@ -2554,6 +2554,7 @@ static void ia64_vpc_set_agp(Object *obj, bool value, Error **errp)
     (void)errp;
 
     s->agp_enabled = value;
+    s->agp_set = true;
 }
 
 static bool ia64_vpc_get_firmware_ide_dma(Object *obj, Error **errp)
@@ -3308,6 +3309,14 @@ static void ia64_vpc_seed_nvram_defaults(IA64VpcMachineState *s,
 }
 
 /* The same record, where a board keeps the store outside the flash. */
+/* Only the project firmware's image carries the defaults record. */
+bool ia64_vpc_runs_project_firmware(IA64VpcMachineState *s)
+{
+    IA64NvramDefaults defaults;
+
+    return ia64_vpc_nvram_defaults_record(s, &defaults);
+}
+
 void ia64_vpc_seed_store_defaults(IA64VpcMachineState *s, uint8_t *store)
 {
     IA64NvramDefaults defaults;
@@ -4080,9 +4089,7 @@ static void ia64_vpc_configure_platform_pci(IA64VpcMachineState *s)
     for (unsigned int fn = 0; fn < ARRAY_SIZE(s->mpt_dev); fn++) {
         ia64_vpc_configure_seat_irq(s, s->mpt_dev[fn], IA64_460GX_WXB0_BUS);
     }
-    ia64_vpc_configure_pci_irq_on_root(
-        s->vga_dev,
-        ia64_vpc_root_gsi_base(s, IA64_460GX_GXB_BUS));
+    ia64_vpc_configure_seat_irq(s, s->vga_dev, IA64_460GX_GXB_BUS);
     for (unsigned int i = 0; i < s->nic_count; i++) {
         ia64_vpc_configure_pci_irq(s, s->nic_devs[i]);
     }

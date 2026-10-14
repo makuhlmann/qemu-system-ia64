@@ -13,6 +13,7 @@
 #include "qemu/cutils.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/or-irq.h"
 #include "hw/core/sysbus.h"
@@ -42,6 +43,17 @@
  * FED2_8000 (rx2600 capture of 2026-10-03, SCRAM LBA records).
  */
 #define LONGSPEAK_AGP_ROPE          4
+/*
+ * On the stock rx2600's PCI-X riser rope 4 is a PCI-X root whose one slot,
+ * slot 1, is device 1 (run 4: Acpi(HWP0002,400)/Pci(1|0)), with INTA-INTD on
+ * pins 0-3 of the rope's I/O SAPIC (SCRAM LBA 4: GSI 60-63, base 60).  Our
+ * firmware numbers its bus as the Mercury bus of the other riser.
+ */
+#define LONGSPEAK_PCIX_SLOT         0x01
+#define LONGSPEAK_ROPE4_BUS         IA64_MERCURY_BUS
+static const IA64IntxRoute longspeak_rope4_intx[] = {
+    { LONGSPEAK_PCIX_SLOT, { 0, 1, 2, 3 } },
+};
 /*
  * Rope 1's I/O SAPIC takes the PDH UART0 and UART1 on inputs 7 and 8 and the
  * SCI on input 9: GSI 34 to 36 under its base of 27 (the rx2600's SPCR,
@@ -137,7 +149,35 @@ static bool longspeak_validate(IA64VpcMachineState *s, Error **errp)
                    top);
         return false;
     }
+    if (s->backplane_pcix) {
+        const char *vga = ia64_vpc_vga_model(s);
+
+        if (s->agp_set && s->agp_enabled) {
+            error_setg(errp, "backplane=pcix has no AGP port; agp=on needs "
+                       "backplane=agp");
+            return false;
+        }
+        s->agp_enabled = false;
+        if (g_strcmp0(vga, "rage128gl") == 0 || g_strcmp0(vga, "nv15gl") == 0) {
+            error_setg(errp, "vga=%s is an AGP card and does not fit the PCI-X "
+                       "slot of backplane=pcix", vga);
+            return false;
+        }
+    }
     return true;
+}
+
+/*
+ * Rope 4's straps: the AGP port, or on the PCI-X riser a dual rope whose
+ * slot holds the display adapter.  No display model claims 66 MHz.
+ */
+static uint32_t longspeak_rope4_straps(IA64VpcMachineState *s)
+{
+    if (!s->backplane_pcix) {
+        return IA64_LBA_STRAPS_AGP;
+    }
+    return g_strcmp0(ia64_vpc_vga_model(s), "none") == 0 ?
+           IA64_LBA_STRAPS_PCIX_DUAL : IA64_LBA_STRAPS_PCI33_DUAL;
 }
 
 /*
@@ -206,18 +246,19 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
         return false;
     }
     /*
-     * The zx1 LBA AGP capability block, published to guests as ACPI
-     * HWP0003 nested inside the SBA (HWP0001).  Linux hp-agp negotiates AGP
-     * mode against it and reuses the SBA IOPDIR as the GART; it is faithful
-     * real-zx1 hardware, so it is present regardless of the agp option.
-     * The AGP capability it advertises only becomes usable once the
-     * graphics master also advertises a PCI AGP capability, which the agp
-     * option gates below.
+     * Rope 4's ioa.  On the PCI/AGP riser it is the zx1 LBA AGP capability
+     * block, published to guests as ACPI HWP0003 nested inside the SBA
+     * (HWP0001).  Linux hp-agp negotiates AGP mode against it and reuses the
+     * SBA IOPDIR as the GART; it is faithful real-zx1 hardware, so it is
+     * present regardless of the agp option.  The AGP capability it
+     * advertises only becomes usable once the graphics master also
+     * advertises a PCI AGP capability, which the agp option gates below.
+     * On the PCI-X riser the same ioa is strapped for PCI-X.
      */
     s->lba_dev = qdev_new(TYPE_IA64_LBA);
     object_property_set_uint(OBJECT(s->lba_dev), "csr-base",
                              IA64_LBA_CSR_BASE, &error_abort);
-    qdev_prop_set_uint32(s->lba_dev, "straps", IA64_LBA_STRAPS_AGP);
+    qdev_prop_set_uint32(s->lba_dev, "straps", longspeak_rope4_straps(s));
     if (!qdev_realize_and_unref(s->lba_dev, NULL, errp)) {
         return false;
     }
@@ -301,23 +342,50 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
      * RAM above 4 GiB through the same IOPDIR/GART.  Attach the SBA before any
      * device is realized on the bus.
      */
-    s->mercury_host = ia64_mercury_host_create(OBJECT(s),
-                              ia64_pci_host_mmio(pci_host),
-                              ia64_pci_host_io(pci_host),
-                              IA64_MERCURY_BUS, errp);
-    if (s->mercury_host == NULL) {
-        return false;
+    if (!s->backplane_pcix) {
+        s->mercury_host = ia64_mercury_host_create(OBJECT(s),
+                                  ia64_pci_host_mmio(pci_host),
+                                  ia64_pci_host_io(pci_host),
+                                  IA64_MERCURY_BUS, errp);
+        if (s->mercury_host == NULL) {
+            return false;
+        }
+        s->mercury_bus = ia64_mercury_host_bus(s->mercury_host);
+        ia64_pci_host_set_mercury_bus(pci_host, s->mercury_bus);
+        ia64_lba_attach_dma(IA64_LBA(s->lba_dev), s->mercury_bus,
+                            ia64_sba_dma_region(IA64_SBA(s->sba_dev)));
+        /* The Mercury CSR CONFIG_ADDRESS/DATA pair does config on this bus. */
+        ia64_lba_set_config_bus(IA64_LBA(s->lba_dev), s->mercury_bus);
+    } else {
+        /*
+         * The PCI-X riser: rope 4 is a root like rope 1's, with the display
+         * adapter in its slot.
+         */
+        s->rope4_host = ia64_expander_host_create(OBJECT(s), "rope4",
+                                                  ia64_pci_host_mmio(pci_host),
+                                                  ia64_pci_host_io(pci_host),
+                                                  LONGSPEAK_ROPE4_BUS,
+                                                  longspeak_rope4_intx,
+                                                  ARRAY_SIZE(longspeak_rope4_intx),
+                                                  0, errp);
+        if (s->rope4_host == NULL) {
+            return false;
+        }
+        s->rope4_bus = ia64_expander_host_bus(s->rope4_host);
+        ia64_pci_host_add_secondary_bus(pci_host, s->rope4_bus);
+        ia64_lba_attach_dma(IA64_LBA(s->lba_dev), s->rope4_bus,
+                            ia64_sba_dma_region(IA64_SBA(s->sba_dev)));
+        ia64_lba_set_config_bus(IA64_LBA(s->lba_dev), s->rope4_bus);
+        if (ia64_vpc_runs_project_firmware(s)) {
+            warn_report("backplane=pcix: the project firmware's tables still "
+                        "describe the PCI/AGP riser; boot the vendor firmware "
+                        "for this layout");
+        }
     }
-    s->mercury_bus = ia64_mercury_host_bus(s->mercury_host);
-    ia64_pci_host_set_mercury_bus(pci_host, s->mercury_bus);
-    ia64_lba_attach_dma(IA64_LBA(s->lba_dev), s->mercury_bus,
-                        ia64_sba_dma_region(IA64_SBA(s->sba_dev)));
-    /* The Mercury CSR CONFIG_ADDRESS/DATA pair does config on this bus. */
-    ia64_lba_set_config_bus(IA64_LBA(s->lba_dev), s->mercury_bus);
     ia64_lba_set_config_bus(IA64_LBA(s->rope0_lba_dev), pci_bus);
     /*
      * QEMU gives a -device without bus= to the youngest PCI root, which is
-     * now Mercury's: the AGP port, with the one slot of the graphics seat.
+     * now rope 4's: the AGP port or the PCI-X slot, the graphics seat.
      * There a card has no _CRS window and no _PRT entry (Server 2003: code
      * 12).  Re-inserting the primary host makes its root the youngest, as
      * sdv.c orders its roots for the same reason.
@@ -373,9 +441,13 @@ static void longspeak_wire_intx(IA64VpcMachineState *s, DeviceState *pci_host,
         qdev_connect_gpio_out(pci_host, i,
             longspeak_split_irq(ia64_lba_iosapic_input(rope0, i),
                                 qdev_get_gpio_in(org, 0)));
-        /* The second root swizzles into the first four lines only. */
+        /*
+         * The second root swizzles into the first four lines only.  Rope 4's
+         * PCI-X root drives its slot's pins the same way.
+         */
         if (i < IA64_PCI_INTX_LINES) {
-            qdev_connect_gpio_out(s->mercury_host, i,
+            qdev_connect_gpio_out(s->backplane_pcix ? s->rope4_host :
+                                                      s->mercury_host, i,
                 longspeak_split_irq(ia64_lba_iosapic_input(agp, i),
                                     qdev_get_gpio_in(org, 1)));
         }
@@ -455,6 +527,10 @@ static void longspeak_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
          */
         *bus = s->mercury_bus;
         *devfn = PCI_DEVFN(IA64_MERCURY_VGA_SLOT, 0);
+        if (s->backplane_pcix) {
+            *bus = s->rope4_bus;
+            *devfn = PCI_DEVFN(LONGSPEAK_PCIX_SLOT, 0);
+        }
         break;
     case IA64_VPC_SEAT_AUDIO:
         break;
@@ -471,12 +547,18 @@ static unsigned int longspeak_root_gsi_base(const IA64VpcMachineState *s,
     return IA64_PCI_INTX_GSI_BASE;
 }
 
-/* A device on rope 1 reports the platform line its pin reaches. */
+/*
+ * A device on rope 1, or in rope 4's PCI-X slot, reports the platform line
+ * its pin reaches (longspeak_wire_intx).
+ */
 static int longspeak_intx_line(const IA64VpcMachineState *s, PCIDevice *dev,
                                int pin)
 {
     PCIBus *bus = pci_get_bus(dev);
 
+    if (s->rope4_bus != NULL && bus == s->rope4_bus) {
+        return IA64_PCI_INTX_GSI_BASE + bus->map_irq(dev, pin);
+    }
     if (bus != s->rope1_bus) {
         return -1;
     }
@@ -532,6 +614,27 @@ static const uint32_t longspeak_nic_eeprom[] = {
 };
 #endif
 
+static char *longspeak_get_backplane(Object *obj, Error **errp)
+{
+    (void)errp;
+
+    return g_strdup(IA64_VPC_MACHINE(obj)->backplane_pcix ? "pcix" : "agp");
+}
+
+static void longspeak_set_backplane(Object *obj, const char *value,
+                                    Error **errp)
+{
+    IA64VpcMachineState *s = IA64_VPC_MACHINE(obj);
+
+    if (g_strcmp0(value, "agp") == 0) {
+        s->backplane_pcix = false;
+    } else if (g_strcmp0(value, "pcix") == 0) {
+        s->backplane_pcix = true;
+    } else {
+        error_setg(errp, "backplane must be 'agp' or 'pcix'");
+    }
+}
+
 /* Concrete: HP rx2600 / zx2000 / zx6000 -- zx1 chipset, Itanium 2. Default. */
 static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
 {
@@ -540,6 +643,14 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
 
     (void)data;
     mc->desc = "HP rx2600 / zx2000 / zx6000 (zx1 chipset, Itanium 2)";
+    object_class_property_add_str(oc, "backplane", longspeak_get_backplane,
+                                  longspeak_set_backplane);
+    object_class_property_set_description(oc, "backplane",
+        "I/O backplane: 'agp' (default), the zx6000 PCI/AGP riser with the "
+        "display adapter in its AGP slot; 'pcix', the rx2600's four-slot "
+        "PCI-X riser with the display adapter in slot 1 (rope 4), no AGP "
+        "port and no AGP card.  The project firmware describes 'agp' only "
+        "so far");
 #ifdef CONFIG_IA64_VPC_NETWORK
     /* "The LAN controller is an Intel 82550 chip" (O&M Guide App. B). */
     mc->default_nic = "i82550";

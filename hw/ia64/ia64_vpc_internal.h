@@ -294,6 +294,9 @@ struct IA64VpcMachineState {
     bool ide_enabled;
     bool firmware_ide_dma;
     bool agp_enabled;
+    bool agp_set;                   /* agp= was given */
+    /* zx1: the PCI-X riser of the stock rx2600, not the zx6000 PCI/AGP one. */
+    bool backplane_pcix;
     uint64_t firmware_console;
     uint16_t firmware_boot_timeout;
     char *nvram_path;
@@ -327,6 +330,8 @@ struct IA64VpcMachineState {
     DeviceState *rope1_host;        /* zx1: rope 1's PCI root */
     PCIBus *rope1_bus;              /* zx1: rope 1's bus, IA64_ZX1_ROPE1_BUS */
     DeviceState *mercury_host;      /* zx1: the Mercury (LBA) PCI host bridge */
+    DeviceState *rope4_host;        /* zx1 backplane=pcix: rope 4's PCI root */
+    PCIBus *rope4_bus;              /* zx1 backplane=pcix: rope 4's bus */
     /* 460gx: the WXB0, WXB1 and GXB expander roots (buses 1, 2 and 3). */
     DeviceState *expander_host[IA64_460GX_EXPANDER_ROOTS];
     PCIBus *expander_bus[IA64_460GX_EXPANDER_ROOTS];
@@ -406,6 +411,7 @@ void ia64_vpc_nvram_attach(DeviceState *dev, const char *prop,
  * flash.  @store points at the start of the store.
  */
 void ia64_vpc_seed_store_defaults(IA64VpcMachineState *s, uint8_t *store);
+bool ia64_vpc_runs_project_firmware(IA64VpcMachineState *s);
 uint64_t ia64_vpc_map_ram_alias(IA64VpcMachineState *s, hwaddr guest_base,
                                 uint64_t backing_offset, uint64_t remaining,
                                 uint64_t capacity, const char *name);

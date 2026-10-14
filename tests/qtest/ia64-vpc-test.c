@@ -1921,6 +1921,102 @@ static void test_pdh_io_backplane_fru(void)
     qtest_quit(qts);
 }
 
+/* Read the 256 bytes of FRU device 5, the I/O riser. */
+static void read_riser_fru(QTestState *qts, uint8_t *fru)
+{
+    const uint64_t kcs = IA64_PDH_DEV5B_BASE + IA64_PDH_BMC_KCS;
+    uint8_t read[] = { IPMI_NETFN_STORAGE_LUN0, IPMI_CMD_READ_FRU_DATA,
+                       0x05, 0x00, 0x00, 32 };
+    uint8_t rsp[48];
+    unsigned int i;
+
+    for (i = 0; i < 256; i += 32) {
+        read[3] = i;
+        g_assert_cmpuint(bmc_kcs_command(qts, kcs, read, sizeof(read),
+                                         rsp, sizeof(rsp)), ==, 4 + 32);
+        g_assert_cmphex(rsp[2], ==, 0x00);
+        memcpy(fru + i, rsp + 4, 32);
+    }
+}
+
+/*
+ * backplane=pcix: rope 4 is a dual PCI-X rope with the display adapter at
+ * device 1 of its root (bus 10h for our firmware), no AGP capability, and
+ * the riser area names the PCI-X riser.  An empty slot keeps the PCI-X
+ * straps; a 33 MHz card latches the PCI pattern.
+ */
+static void test_zx1_backplane_pcix(void)
+{
+    const uint64_t rope = 0xfed20000;
+    QTestState *qts = qtest_init("-machine zx1,backplane=pcix -m 256M -S");
+    uint8_t fru[256];
+
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, rope | 1);
+    g_assert_cmphex(qtest_readw(qts, rope + 0x8000), ==, IA64_LBA_VENDOR_ID);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x8620) & 0xffff, ==, 0x0440);
+    g_assert_cmphex(qtest_readb(qts, rope + 0x8034), ==, 0xa0);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x8610) & 0x100, ==, 0);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0x10, 1, 0, PCI_VENDOR_ID), ==,
+                    0x1002);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0x10, 0, 0, PCI_VENDOR_ID), ==,
+                    0xffff);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0x10, 1, 0, PCI_INTERRUPT_LINE), ==,
+                    16);
+    read_riser_fru(qts, fru);
+    g_assert_cmphex(fru[72 + 6 + 11], ==, 0xe0);
+    g_assert_true(memcmp(fru + 72 + 6 + 12, "Longs Peak PCI-X riser", 22) == 0);
+    g_assert_cmphex(fru_sum(fru + 72, 128), ==, 0);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1,backplane=pcix,vga=none -m 256M -S");
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, rope | 1);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x8620) & 0xffff, ==, 0x7cc0);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    read_riser_fru(qts, fru);
+    g_assert_true(memcmp(fru + 72 + 6 + 12, "Longs Peak I/O riser", 20) == 0);
+    qtest_quit(qts);
+}
+
+/* The PCI-X riser has no AGP port: agp=on and an AGP card are refused. */
+static void test_zx1_backplane_refusals(void)
+{
+    static const struct {
+        const char *machine;
+        const char *needle;
+    } cases[] = {
+        { "zx1,backplane=bogus", "backplane must be 'agp' or 'pcix'" },
+        { "zx1,backplane=pcix,agp=on", "backplane=pcix has no AGP port" },
+        { "zx1,backplane=pcix,vga=rage128gl", "vga=rage128gl is an AGP card" },
+        { "zx1,backplane=pcix,vga=nv15gl", "vga=nv15gl is an AGP card" },
+    };
+    unsigned int i;
+
+    for (i = 0; i < G_N_ELEMENTS(cases); i++) {
+        const char *argv[] = {
+            qtest_qemu_binary(NULL),
+            "-machine", cases[i].machine,
+            "-m", "256M",
+            "-display", "none",
+            "-S",
+            NULL,
+        };
+        g_autofree char *stderr_text = NULL;
+        g_autoptr(GError) error = NULL;
+        int wait_status;
+
+        g_assert_true(g_spawn_sync(NULL, (char **)argv, NULL,
+                                   G_SPAWN_STDOUT_TO_DEV_NULL,
+                                   NULL, NULL, NULL, &stderr_text,
+                                   &wait_status, &error));
+        g_assert_no_error(error);
+        g_assert_true(WIFEXITED(wait_status));
+        g_assert_cmpint(WEXITSTATUS(wait_status), ==, 1);
+        g_assert_nonnull(strstr(stderr_text, cases[i].needle));
+    }
+}
+
 /*
  * HP's firmware reads the product area at fixed offsets (longspeak_bmc.c):
  * every field has its own width, so each type/length byte sits where an IPMI
@@ -12069,6 +12165,9 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/pdh/system-uuid", test_pdh_system_uuid);
     qtest_add_func("/ia64-vpc/pdh/io-backplane-fru",
                    test_pdh_io_backplane_fru);
+    qtest_add_func("/ia64-vpc/zx1/backplane-pcix", test_zx1_backplane_pcix);
+    qtest_add_func("/ia64-vpc/zx1/backplane-refusals",
+                   test_zx1_backplane_refusals);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",
                    test_mercury_config_dispatch);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);

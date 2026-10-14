@@ -239,6 +239,15 @@ static const LongspeakBmcFruField longspeak_bmc_riser_fields[] = {
     { "QE", 10 }, { "Longs Peak I/O riser", 32 }, { "", 16 }, { "", 11 },
 };
 
+/*
+ * backplane=pcix: the rx2600's own riser names itself "pci riser card", the
+ * zx6000's "workstation zx6000 riser card" (runs 4 and 1-3); the model keeps
+ * its own names.  SAL_B selects the ropes by the area's presence alone.
+ */
+static const LongspeakBmcFruField longspeak_bmc_pcix_riser_fields[] = {
+    { "QE", 10 }, { "Longs Peak PCI-X riser", 32 }, { "", 16 }, { "", 11 },
+};
+
 static const LongspeakBmcFruField longspeak_bmc_product_fields[] = {
     { "QE", 2 }, { "Longs Peak", 32 }, { "QE-LP1", 11 }, { "", 6 },
     { "QE00000001", 20 }, { "", 32 },
@@ -285,6 +294,9 @@ static void longspeak_bmc_board_area(uint8_t *area, uint8_t units,
 
 static void longspeak_bmc_riser_fru(uint8_t *fru)
 {
+    g_autofree char *backplane =
+        object_property_get_str(OBJECT(current_machine), "backplane", NULL);
+
     QEMU_BUILD_BUG_ON(LONGSPEAK_BMC_FRU_IO_BOARD_OFF +
                       LONGSPEAK_BMC_FRU_IO_BOARD_UNITS * 8 >
                       LONGSPEAK_BMC_FRU_IO_SIZE);
@@ -296,6 +308,8 @@ static void longspeak_bmc_riser_fru(uint8_t *fru)
     longspeak_bmc_fru_sum(fru, 8);
     longspeak_bmc_board_area(fru + LONGSPEAK_BMC_FRU_IO_BOARD_OFF,
                              LONGSPEAK_BMC_FRU_IO_BOARD_UNITS,
+                             g_strcmp0(backplane, "pcix") == 0 ?
+                             longspeak_bmc_pcix_riser_fields :
                              longspeak_bmc_riser_fields,
                              LONGSPEAK_BMC_FRU_IO_FILE_ID);
 }
@@ -464,7 +478,8 @@ static void longspeak_bmc_board_fru(uint8_t *fru)
     longspeak_bmc_fru_sum(area, LONGSPEAK_BMC_CHASSIS_SIZE);
 
     QEMU_BUILD_BUG_ON(ARRAY_SIZE(longspeak_bmc_board_fields) != 4 ||
-                      ARRAY_SIZE(longspeak_bmc_riser_fields) != 4);
+                      ARRAY_SIZE(longspeak_bmc_riser_fields) != 4 ||
+                      ARRAY_SIZE(longspeak_bmc_pcix_riser_fields) != 4);
     longspeak_bmc_board_area(fru + LONGSPEAK_BMC_BOARD_OFF,
                              LONGSPEAK_BMC_BOARD_SIZE / 8,
                              longspeak_bmc_board_fields,
