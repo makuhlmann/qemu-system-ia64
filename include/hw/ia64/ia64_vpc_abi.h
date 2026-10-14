@@ -503,6 +503,11 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
 #define IA64_460GX_AUDIO_SLOT         0x04
 #define IA64_MERCURY_VGA_SLOT        0x00
 /*
+ * The PCI-X riser's slot 1 on rope 4 (backplane=pcix): device 1 of that
+ * root's bus, which keeps IA64_MERCURY_BUS (rx2600 run 4).
+ */
+#define IA64_ZX1_PCIX_VGA_SLOT       0x01
+/*
  * zx1's storage seats: the SCSI adapter at device 1 of rope 1's bus, where
  * the rx2600 carries its 53C1030, and the opt-in AHCI at device 4 of PCI0.
  * The i2000 keeps the AHCI at device 1 of its compatibility bus.

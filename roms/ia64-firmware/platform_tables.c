@@ -102,22 +102,37 @@ static const UINT8 mSsdtCpuEnabledNames[IA64_VPC_MAX_CPUS][4] = {
 };
 static const UINT8 mSsdtPs2EnabledName[4] = { 'P', '2', 'E', 'N' };
 static const UINT8 mSsdtCom2EnabledName[4] = { 'U', '2', 'E', 'N' };
+/* The zx1 DSDT's rope-4 roots: LBA0 on the PCI/AGP riser, PCX4 on PCI-X. */
+static const UINT8 mDsdtLba0EnabledName[4] = { 'L', '0', 'E', 'N' };
+static const UINT8 mDsdtPcx4EnabledName[4] = { 'X', '4', 'E', 'N' };
 
-static UINT8 *acpi_ssdt_named_byte(ACPI_SSDT *Ssdt, const UINT8 Name[4])
+static UINT8 *acpi_aml_named_byte(UINT8 *Aml, UINTN Size, const UINT8 Name[4])
 {
     UINTN i;
 
-    for (i = 0; i + 6U < sizeof(Ssdt->Aml); i++) {
-        if (Ssdt->Aml[i] == 0x08U &&
-            Ssdt->Aml[i + 1U] == Name[0] &&
-            Ssdt->Aml[i + 2U] == Name[1] &&
-            Ssdt->Aml[i + 3U] == Name[2] &&
-            Ssdt->Aml[i + 4U] == Name[3] &&
-            Ssdt->Aml[i + 5U] == 0x0aU) {
-            return &Ssdt->Aml[i + 6U];
+    for (i = 0; i + 6U < Size; i++) {
+        if (Aml[i] == 0x08U &&
+            Aml[i + 1U] == Name[0] &&
+            Aml[i + 2U] == Name[1] &&
+            Aml[i + 3U] == Name[2] &&
+            Aml[i + 4U] == Name[3] &&
+            Aml[i + 5U] == 0x0aU) {
+            return &Aml[i + 6U];
         }
     }
     return NULL;
+}
+
+static UINT8 *acpi_ssdt_named_byte(ACPI_SSDT *Ssdt, const UINT8 Name[4])
+{
+    return acpi_aml_named_byte(Ssdt->Aml, sizeof(Ssdt->Aml), Name);
+}
+
+/* Only the active AML: the buffer's tail can hold the other profile's. */
+static UINT8 *acpi_dsdt_named_byte(ACPI_DSDT *Dsdt, const UINT8 Name[4])
+{
+    return acpi_aml_named_byte(Dsdt->Aml,
+                               mAcpiDsdtLength - sizeof(ACPI_SDT_HEADER), Name);
 }
 
 static BOOLEAN acpi_ssdt_set_named_byte(ACPI_SSDT *Ssdt,
@@ -136,6 +151,26 @@ static BOOLEAN acpi_ssdt_named_byte_is(ACPI_SSDT *Ssdt,
                                        const UINT8 Name[4], UINT8 Value)
 {
     const UINT8 *value = acpi_ssdt_named_byte(Ssdt, Name);
+
+    return value != NULL && *value == Value;
+}
+
+static BOOLEAN acpi_dsdt_set_named_byte(ACPI_DSDT *Dsdt,
+                                        const UINT8 Name[4], UINT8 Value)
+{
+    UINT8 *value = acpi_dsdt_named_byte(Dsdt, Name);
+
+    if (value == NULL) {
+        return 0;
+    }
+    *value = Value;
+    return 1;
+}
+
+static BOOLEAN acpi_dsdt_named_byte_is(ACPI_DSDT *Dsdt,
+                                       const UINT8 Name[4], UINT8 Value)
+{
+    const UINT8 *value = acpi_dsdt_named_byte(Dsdt, Name);
 
     return value != NULL && *value == Value;
 }
@@ -579,7 +614,8 @@ static void efi_init_sal_system_table(void)
 /*
  * Where the primary VGA adapter lives.  Neither machine puts it on the first
  * root: on zx1 the AGP graphics sits behind the Mercury (LBA) bridge on
- * IA64_MERCURY_BUS at slot IA64_MERCURY_VGA_SLOT, and on the i2000 it sits
+ * IA64_MERCURY_BUS at slot IA64_MERCURY_VGA_SLOT, or on the PCI-X riser in
+ * rope 4's slot, IA64_ZX1_PCIX_VGA_SLOT of the same bus, and on the i2000 it sits
  * behind the GXB expander on IA64_460GX_GXB_BUS at device
  * IA64_460GX_GXB_VGA_SLOT.  The PCDP/HCDP VGA console descriptor and the id
  * probe use these.
@@ -592,8 +628,11 @@ static UINT8 fw_vga_pci_bus(void)
 
 static UINT8 fw_vga_pci_device(void)
 {
-    return fw_platform_is_zx1() ? (UINT8)IA64_MERCURY_VGA_SLOT :
-                                  (UINT8)IA64_460GX_GXB_VGA_SLOT;
+    if (fw_platform_is_zx1()) {
+        return fw_platform_zx1_pcix_riser() ? (UINT8)IA64_ZX1_PCIX_VGA_SLOT :
+                                              (UINT8)IA64_MERCURY_VGA_SLOT;
+    }
+    return (UINT8)IA64_460GX_GXB_VGA_SLOT;
 }
 
 static void efi_init_acpi_tables(void)
@@ -648,8 +687,14 @@ static void efi_init_acpi_tables(void)
      * unused tail of the (max-sized) buffer is never guest-visible.
      */
     if (fw_platform_is_zx1()) {
+        BOOLEAN pcix = fw_platform_zx1_pcix_riser();
+
         fw_copy_mem(mDsdt.Aml, mDsdtZx1Aml, sizeof(mDsdtZx1Aml));
         mAcpiDsdtLength = sizeof(ACPI_SDT_HEADER) + FW_DSDT_PCI_ROOT_ZX1_AML_SIZE;
+        acpi_dsdt_set_named_byte(&mDsdt, mDsdtLba0EnabledName,
+                                 pcix ? 0 : 0x0fU);
+        acpi_dsdt_set_named_byte(&mDsdt, mDsdtPcx4EnabledName,
+                                 pcix ? 0x0fU : 0);
     } else {
         mAcpiDsdtLength = sizeof(ACPI_SDT_HEADER) + FW_DSDT_PCI_ROOT_AML_SIZE;
     }
@@ -1265,9 +1310,16 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
         !acpi_dsdt_has_bytes(prt_name, sizeof(prt_name))) {
         return 0;
     }
-    /* The zx1 DSDT must carry the SBA0 IOC that encloses PCI0 (HWP0001). */
+    /*
+     * The zx1 DSDT must carry the SBA0 IOC that encloses PCI0 (HWP0001), and
+     * publish the rope-4 root of the riser the board carries.
+     */
     if (fw_platform_is_zx1() &&
-        !acpi_dsdt_has_bytes(sba0_name, sizeof(sba0_name))) {
+        (!acpi_dsdt_has_bytes(sba0_name, sizeof(sba0_name)) ||
+         !acpi_dsdt_named_byte_is(mAcpiDsdt, mDsdtLba0EnabledName,
+                                  fw_platform_zx1_pcix_riser() ? 0 : 0x0fU) ||
+         !acpi_dsdt_named_byte_is(mAcpiDsdt, mDsdtPcx4EnabledName,
+                                  fw_platform_zx1_pcix_riser() ? 0x0fU : 0))) {
         return 0;
     }
 

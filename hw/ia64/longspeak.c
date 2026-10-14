@@ -13,7 +13,6 @@
 #include "qemu/cutils.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
-#include "qemu/error-report.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/core/or-irq.h"
 #include "hw/core/sysbus.h"
@@ -49,10 +48,9 @@
  * pins 0-3 of the rope's I/O SAPIC (SCRAM LBA 4: GSI 60-63, base 60).  Our
  * firmware numbers its bus as the Mercury bus of the other riser.
  */
-#define LONGSPEAK_PCIX_SLOT         0x01
 #define LONGSPEAK_ROPE4_BUS         IA64_MERCURY_BUS
 static const IA64IntxRoute longspeak_rope4_intx[] = {
-    { LONGSPEAK_PCIX_SLOT, { 0, 1, 2, 3 } },
+    { IA64_ZX1_PCIX_VGA_SLOT, { 0, 1, 2, 3 } },
 };
 /*
  * Rope 1's I/O SAPIC takes the PDH UART0 and UART1 on inputs 7 and 8 and the
@@ -374,16 +372,11 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
         s->rope4_bus = ia64_expander_host_bus(s->rope4_host);
         /* The riser's bus has its one slot and no other device. */
         pci_bus_set_slot_reserved_mask(s->rope4_bus,
-                                       ~(1U << LONGSPEAK_PCIX_SLOT));
+                                       ~(1U << IA64_ZX1_PCIX_VGA_SLOT));
         ia64_pci_host_add_secondary_bus(pci_host, s->rope4_bus);
         ia64_lba_attach_dma(IA64_LBA(s->lba_dev), s->rope4_bus,
                             ia64_sba_dma_region(IA64_SBA(s->sba_dev)));
         ia64_lba_set_config_bus(IA64_LBA(s->lba_dev), s->rope4_bus);
-        if (ia64_vpc_runs_project_firmware(s)) {
-            warn_report("backplane=pcix: the project firmware's tables still "
-                        "describe the PCI/AGP riser; boot the vendor firmware "
-                        "for this layout");
-        }
     }
     ia64_lba_set_config_bus(IA64_LBA(s->rope0_lba_dev), pci_bus);
     /*
@@ -532,7 +525,7 @@ static void longspeak_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
         *devfn = PCI_DEVFN(IA64_MERCURY_VGA_SLOT, 0);
         if (s->backplane_pcix) {
             *bus = s->rope4_bus;
-            *devfn = PCI_DEVFN(LONGSPEAK_PCIX_SLOT, 0);
+            *devfn = PCI_DEVFN(IA64_ZX1_PCIX_VGA_SLOT, 0);
         }
         break;
     case IA64_VPC_SEAT_AUDIO:
@@ -652,8 +645,7 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
         "I/O backplane: 'agp' (default), the zx6000 PCI/AGP riser with the "
         "display adapter in its AGP slot; 'pcix', the rx2600's four-slot "
         "PCI-X riser with the display adapter in slot 1 (rope 4), no AGP "
-        "port and no AGP card.  The project firmware describes 'agp' only "
-        "so far");
+        "port and no AGP card");
 #ifdef CONFIG_IA64_VPC_NETWORK
     /* "The LAN controller is an Intel 82550 chip" (O&M Guide App. B). */
     mc->default_nic = "i82550";

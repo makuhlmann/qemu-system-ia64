@@ -411,7 +411,6 @@ void ia64_vpc_nvram_attach(DeviceState *dev, const char *prop,
  * flash.  @store points at the start of the store.
  */
 void ia64_vpc_seed_store_defaults(IA64VpcMachineState *s, uint8_t *store);
-bool ia64_vpc_runs_project_firmware(IA64VpcMachineState *s);
 uint64_t ia64_vpc_map_ram_alias(IA64VpcMachineState *s, hwaddr guest_base,
                                 uint64_t backing_offset, uint64_t remaining,
                                 uint64_t capacity, const char *name);

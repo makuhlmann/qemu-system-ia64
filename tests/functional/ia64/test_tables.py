@@ -95,6 +95,22 @@ class Ia64PlatformTables(Ia64FirmwareTest):
             vm, "tables", TABLE_CASES, timeout=35.0)
         self.assertSetEqual(set(result.cases), TABLE_CASES)
 
+    def test_runtime_tables_pcix(self):
+        # The PCI-X riser: rope 4's root is a PCI-X one with the display
+        # adapter at device 1; the console tables follow it.
+        disk = Path(self.scratch_file("tables-pcix.img"))
+        debug_log = self.scratch_file("debugcon-pcix.log")
+        nvram = self.make_nvram()
+        make_fat_disk(disk, app_path("tables"))
+        vm = self.launch_ia64(
+            media=disk, smp=4,
+            machine_options=("backplane=pcix,firmware-console=serial,"
+                             f"nvram={nvram}"),
+            extra_args=("-debug-port", f"file:{debug_log}"))
+        result = self.wait_ia64_suite(
+            vm, "tables", TABLE_CASES, timeout=35.0)
+        self.assertSetEqual(set(result.cases), TABLE_CASES)
+
     def test_460gx_processor_ids(self):
         # The SDV's two sockets answer to ids 0 and 3: PAL hands SAL that id
         # in GR33, the firmware makes it the LID, and the MADT and SRAT must

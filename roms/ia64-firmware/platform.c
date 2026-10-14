@@ -1045,6 +1045,28 @@ BOOLEAN fw_platform_is_460gx(void)
     return family == IA64_CPUID3_FAMILY_MERCED;
 }
 
+/*
+ * Which I/O riser the zx1 board carries: rope 4's ioa reads its straps in
+ * BUS_MODE, whose bit 0 is set for AGP (ioa ERS 3.2.2), at the base our
+ * tables publish for it.  The HP firmware names the rope's root HWP0003 or
+ * HWP0002 from the same bit (SAL_B FFEB6B10).
+ */
+#define ZX1_LBA_BUS_MODE    ((volatile UINT64 *)(UINTN)(IA64_LBA_CSR_BASE + 0x620))
+#define ZX1_LBA_BUS_MODE_AGP 0x1ULL
+
+BOOLEAN fw_platform_zx1_pcix_riser(void)
+{
+    static INT8 pcix = -1;
+
+    if (!fw_platform_is_zx1()) {
+        return 0;
+    }
+    if (pcix < 0) {
+        pcix = (*ZX1_LBA_BUS_MODE & ZX1_LBA_BUS_MODE_AGP) == 0;
+    }
+    return pcix != 0;
+}
+
 UINT16 fw_sal_revision(void)
 {
     UINT64 family = (fw_read_cpuid3() >> IA64_CPUID3_FAMILY_SHIFT) &

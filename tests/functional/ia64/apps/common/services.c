@@ -210,6 +210,19 @@ typedef struct {
 /* PCI config window at the E8870 MMCFG home, 64 MiB = 64 buses (28ea66e). */
 #define TEST_ECAM_BASE               0x00000ffff8000000ULL
 #define TEST_ECAM_SIZE               0x0000000004000000ULL
+/*
+ * Rope 4's ioa reads its straps in BUS_MODE (ioa ERS 3.2.2), bit 0 set for
+ * AGP, at IA64_LBA_CSR_BASE: the display adapter is device 0 behind the AGP
+ * root (IA64_MERCURY_VGA_SLOT) or device 1 in the PCI-X riser's slot
+ * (IA64_ZX1_PCIX_VGA_SLOT), on bus 0x10 either way.
+ */
+#define TEST_ZX1_LBA_BUS_MODE        0x00000000fed10620ULL
+
+static UINT8 test_zx1_vga_device(void)
+{
+    return (*(volatile UINT64 *)(UINTN)TEST_ZX1_LBA_BUS_MODE & 1U) != 0 ? 0 : 1;
+}
+
 /* zx1's SCSI seat on rope 1, IA64_ZX1_SCSI_BUS/_SLOT in ia64_vpc_abi.h. */
 #define TEST_ZX1_SCSI_BUS            0x20U
 #define TEST_ZX1_SCSI_SLOT           1U
@@ -1574,14 +1587,14 @@ static BOOLEAN test_console_output_device_paths(EFI_RUNTIME_SERVICES *Rs)
            get_u16(path + 2U) == 12U &&
            get_u32(path + 4U) == 0x0a0341d0U &&
            /*
-            * The VGA console adapter is behind the Mercury (LBA) PCI root on
-            * this (zx1) machine: ACPI PNP0A03 _UID 1 (PCI0 is _UID 0) and PCI
-            * device 0 (IA64_MERCURY_VGA_SLOT), not PCI0 device 5.
+            * The VGA console adapter is behind rope 4's root on this (zx1)
+            * machine: ACPI PNP0A03 _UID 1 (PCI0 is _UID 0) and the PCI device
+            * of the riser's display slot, not PCI0 device 5.
             */
            get_u32(path + 8U) == 1U &&
            path[12U] == 0x01U && path[13U] == 0x01U &&
            get_u16(path + 14U) == 6U &&
-           path[16U] == 0 && path[17U] == 0U &&
+           path[16U] == 0 && path[17U] == test_zx1_vga_device() &&
            path[18U] == 0x7fU && path[19U] == 0x01U &&
            get_u16(path + 20U) == 4U &&
            path[22U] == 0x02U && path[23U] == 0x01U &&
@@ -2750,11 +2763,12 @@ static BOOLEAN test_acpi_console_tables(const TEST_TABLE_CONTEXT *Context)
         hcdp[88U] != 0x0aU || (hcdp[89U] & (UINT8)~1U) != 0 ||
         get_u16(hcdp + 90U) != 41U || get_u16(hcdp + 92U) != 0 ||
         hcdp[94U] != 1U || get_u16(hcdp + 96U) != 34U ||
-        hcdp[99U] != 0x10U || hcdp[100U] != 0 || hcdp[101U] != 0) {
+        hcdp[99U] != 0x10U || hcdp[100U] != test_zx1_vga_device() ||
+        hcdp[101U] != 0) {
         /*
-         * The VGA console device now lives behind the Mercury root: PCI
-         * bus 0x10 (IA64_MERCURY_BUS), device 0 (IA64_MERCURY_VGA_SLOT),
-         * function 0 -- the firmware fills this from fw_vga_pci_bus()/device().
+         * The VGA console device lives behind rope 4's root: PCI bus 0x10
+         * (IA64_MERCURY_BUS), the riser's display slot, function 0 -- the
+         * firmware fills this from fw_vga_pci_bus()/device().
          */
         return 0;
     }

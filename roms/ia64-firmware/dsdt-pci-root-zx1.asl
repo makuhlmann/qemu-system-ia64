@@ -45,6 +45,10 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
             Name (_CID, EisaId ("PNP0A05"))
             Name (_UID, Zero)
             Name (_CCA, One)
+            // Rope 4's root: LBA0 on the PCI/AGP riser, PCX4 on the PCI-X one.
+            // The firmware patches these _STA values from the ioa's straps.
+            Name (L0EN, 0x0F)
+            Name (X4EN, 0x00)
             // The IOC CSR block.  Linux sba_iommu locates the IOC base NOT from
             // a memory descriptor but from an HP-specific "CCSR" vendor-defined
             // resource: hp_acpi_csr_space() -> acpi_find_vendor_resource() looks
@@ -246,6 +250,10 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 Name (_BBN, 0x10)
                 Name (_UID, One)
                 Name (_CCA, One)
+                Method (_STA, 0, NotSerialized)
+                {
+                    Return (L0EN)
+                }
                 Name (_CRS, ResourceTemplate ()
                 {
                     // Mercury owns exactly bus 0x10 (IA64_MERCURY_BUS).
@@ -314,6 +322,55 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     Package () { 0x0000FFFF, 1, 0x00, 17 },
                     Package () { 0x0000FFFF, 2, 0x00, 18 },
                     Package () { 0x0000FFFF, 3, 0x00, 19 }
+                })
+            }
+
+            // Rope 4 on the stock rx2600's PCI-X riser (backplane=pcix): a
+            // PCI-X root with the display adapter in its one slot, device 1
+            // (rx2600 run 4: Acpi(HWP0002,400)/Pci(1|0)).  HWP0002 with the
+            // compatible ID *PNP0A03, as the rx2600's roots.  Same bus, _UID
+            // and windows as LBA0, whose place it takes; the slot's INTA-INTD
+            // reach GSI 16-19 (longspeak_wire_intx).
+            Device (PCX4)
+            {
+                Name (_HID, EisaId ("HWP0002"))
+                Name (_CID, EisaId ("PNP0A03"))
+                Name (_SEG, Zero)
+                Name (_BBN, 0x10)
+                Name (_UID, One)
+                Name (_CCA, One)
+                Method (_STA, 0, NotSerialized)
+                {
+                    Return (X4EN)
+                }
+                Name (_CRS, ResourceTemplate ()
+                {
+                    WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
+                        PosDecode, 0, 0x0010, 0x0010, 0, 0x0001)
+                    // The display's root decodes both legacy VGA ranges.
+                    QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                        EntireRange, 0, 0x000003B0, 0x000003DF, 0,
+                        0x00000030, , , , TypeStatic, DenseTranslation)
+                    // Rope 4's port share, ropes 4 and 5 (mio ERS 2.4.1).
+                    QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                        EntireRange, 0, 0x00008000, 0x0000BFFF, 0,
+                        0x00004000, , , , TypeStatic, DenseTranslation)
+                    DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                        Cacheable, ReadWrite,
+                        0, 0x000A0000, 0x000BFFFF, 0, 0x00020000)
+                    DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                        Cacheable, ReadWrite,
+                        0, 0x000C0000, 0x000DFFFF, 0, 0x00020000)
+                    QWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                        NonCacheable, ReadWrite,
+                        0, 0xF0000000, 0xFDFFFFFF, 0, 0x0E000000)
+                })
+                Name (_PRT, Package ()
+                {
+                    Package () { 0x0001FFFF, 0, 0x00, 16 },
+                    Package () { 0x0001FFFF, 1, 0x00, 17 },
+                    Package () { 0x0001FFFF, 2, 0x00, 18 },
+                    Package () { 0x0001FFFF, 3, 0x00, 19 }
                 })
             }
         }

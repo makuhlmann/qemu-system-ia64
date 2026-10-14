@@ -25,6 +25,7 @@
 
 BOOLEAN fw_platform_is_460gx(void);
 BOOLEAN fw_platform_is_zx1(void);
+BOOLEAN fw_platform_zx1_pcix_riser(void);
 extern char __fw_ivt[];
 #define SAL_IVT_BASE ((UINTN)__fw_ivt)
 

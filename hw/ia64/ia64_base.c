@@ -3309,14 +3309,6 @@ static void ia64_vpc_seed_nvram_defaults(IA64VpcMachineState *s,
 }
 
 /* The same record, where a board keeps the store outside the flash. */
-/* Only the project firmware's image carries the defaults record. */
-bool ia64_vpc_runs_project_firmware(IA64VpcMachineState *s)
-{
-    IA64NvramDefaults defaults;
-
-    return ia64_vpc_nvram_defaults_record(s, &defaults);
-}
-
 void ia64_vpc_seed_store_defaults(IA64VpcMachineState *s, uint8_t *store)
 {
     IA64NvramDefaults defaults;
