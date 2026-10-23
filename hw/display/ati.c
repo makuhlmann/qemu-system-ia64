@@ -702,10 +702,13 @@ static void ati_vga_vblank_irq(void *opaque)
 
 /*
  * Synthetic CRTC raster timing, derived from virtual time: a fixed 60 Hz
- * frame of 525 lines with the last 45 in vertical blank (VGA-ish 480-line
- * visible raster).  Drivers poll these instead of taking the vblank
+ * frame with the lines of CRTC_V_TOTAL_DISP, in vertical blank after the
+ * displayed ones; before an extended mode is set, a VGA-ish 525-line frame
+ * with 480 visible.  Drivers poll these instead of taking the vblank
  * interrupt: XP's ati2draa spins on CRTC_STATUS (0x5C) waiting for the
- * vblank bits to change, and a constant readback becomes bugcheck 0xEA.
+ * vblank bits to change, and a constant readback becomes bugcheck 0xEA;
+ * ati2mtag after a mode set polls CRTC_VLINE_CRNT_VLINE for a line past the
+ * displayed ones, and at 1024x768 a 525-line frame never gets there.
  */
 #define ATI_FRAME_NS   (NANOSECONDS_PER_SECOND / 60)
 #define ATI_FRAME_LINES 525
@@ -716,19 +719,33 @@ static uint64_t ati_crtc_frame_count(void)
     return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / ATI_FRAME_NS;
 }
 
-static uint32_t ati_crtc_current_line(void)
+static void ati_crtc_raster(ATIVGAState *s, uint32_t *total, uint32_t *disp)
+{
+    *total = (s->regs.crtc_v_total_disp & 0xfff) + 1;
+    *disp = ((s->regs.crtc_v_total_disp >> 16) & 0xfff) + 1;
+    if (!(s->regs.crtc_gen_cntl & CRTC2_EXT_DISP_EN) || *disp >= *total) {
+        *total = ATI_FRAME_LINES;
+        *disp = ATI_VISIBLE_LINES;
+    }
+}
+
+static uint32_t ati_crtc_current_line(ATIVGAState *s)
 {
     uint64_t in_frame = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) % ATI_FRAME_NS;
+    uint32_t total, disp;
 
-    return in_frame * ATI_FRAME_LINES / ATI_FRAME_NS;
+    ati_crtc_raster(s, &total, &disp);
+    return in_frame * total / ATI_FRAME_NS;
 }
 
 static uint32_t ati_crtc_status(ATIVGAState *s)
 {
     uint32_t val = 0;
+    uint32_t total, disp;
 
     /* bit 0: currently inside vertical blank */
-    if (ati_crtc_current_line() >= ATI_VISIBLE_LINES) {
+    ati_crtc_raster(s, &total, &disp);
+    if (ati_crtc_current_line(s) >= disp) {
         val |= 1;
     }
     /* bit 1: a vblank happened since it was last acknowledged (W1C) */
@@ -2042,7 +2059,7 @@ static uint64_t ati_mm_read(void *opaque, hwaddr addr, unsigned int size)
         val = ati_reg_read_offs(ati_crtc_status(s), addr - 0x05c, size);
         break;
     case 0x210 ... 0x213: /* CRTC_VLINE_CRNT_VLINE */
-        val = ati_reg_read_offs(ati_crtc_current_line() << 16,
+        val = ati_reg_read_offs(ati_crtc_current_line(s) << 16,
                                 addr - 0x210, size);
         break;
     case 0x214 ... 0x217: /* CRTC_CRNT_FRAME */

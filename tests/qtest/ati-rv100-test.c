@@ -8,6 +8,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/bswap.h"
+#include "qemu/timer.h"
 #include "hw/pci/pci_regs.h"
 #include "hw/ia64/ia64_vpc_abi.h"
 #include "libqtest.h"
@@ -475,6 +476,31 @@ static void test_rv100_sw_int(void)
     g_assert_cmphex(qtest_readl(qts, mmio + 0x044) & (3u << 25), ==, 0);
     qtest_writel(qts, mmio + 0x044, 1u << 19);
     g_assert_cmphex(qtest_readl(qts, mmio + 0x044) & (1u << 19), !=, 0);
+    qtest_quit(qts);
+}
+
+/*
+ * The raster has the lines of CRTC_V_TOTAL_DISP: at 1024x768 (806 lines)
+ * the line counter passes the 768 displayed lines, and CRTC_STATUS shows
+ * vertical blank on the lines after them.
+ */
+static void test_rv100_raster_lines(void)
+{
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint32_t line, max = 0;
+    unsigned i;
+
+    qtest_writel(qts, mmio + 0x208, (767u << 16) | 805); /* CRTC_V_TOTAL_DISP */
+    qtest_writel(qts, mmio + 0x050, 1u << 24);           /* CRTC_EXT_DISP_EN */
+    for (i = 0; i < 806 / 4; i++) {
+        line = qtest_readl(qts, mmio + 0x210) >> 16;     /* CRTC_VLINE_CRNT_VLINE */
+        g_assert_cmpuint(line, <, 806);
+        g_assert_cmpuint(qtest_readl(qts, mmio + 0x05c) & 1, ==, line >= 768);
+        max = MAX(max, line);
+        qtest_clock_step(qts, NANOSECONDS_PER_SECOND / 60 / 806 * 4);
+    }
+    g_assert_cmpuint(max, >=, 768);
     qtest_quit(qts);
 }
 
@@ -1553,6 +1579,7 @@ int main(int argc, char **argv)
                    test_rv100_stored_registers);
     qtest_add_func("/ati-rv100/vga-mmio", test_rv100_vga_mmio);
     qtest_add_func("/ati-rv100/sw-int", test_rv100_sw_int);
+    qtest_add_func("/ati-rv100/raster-lines", test_rv100_raster_lines);
     qtest_add_func("/ati-rv100/mc-fb-location", test_rv100_mc_fb_location);
     qtest_add_func("/ati-rv100/negative-x", test_rv100_negative_x);
     qtest_add_func("/ati-rv100/rop3", test_rv100_rop3);
