@@ -2234,6 +2234,51 @@ static BOOLEAN test_dsdt_lba0_crs(const TEST_TABLE_CONTEXT *Context)
     return vga && ports;
 }
 
+/*
+ * The PCI-X root carries the HP CCSR vendor descriptor (guid_id 2, GUID
+ * 69e9adf9-924f-ab5f-f64a-24d201370ead) with its ioa's CSR, as every root of
+ * the vendor firmware: Linux 2.4.17's hpzx1 probe never returns from a
+ * HWP0002 _CRS without it.
+ */
+static BOOLEAN test_dsdt_pcx4_csr(const TEST_TABLE_CONTEXT *Context)
+{
+    static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
+    static const UINT8 pcx4_name[4] = { 'P', 'C', 'X', '4' };
+    static const UINT8 ccsr[17] = {
+        0x02, 0xf9, 0xad, 0xe9, 0x69, 0x4f, 0x92, 0x5f, 0xab,
+        0xf6, 0x4a, 0x24, 0xd2, 0x01, 0x37, 0x0e, 0xad,
+    };
+    const UINT8 *aml = (const UINT8 *)Context->Dsdt + sizeof(TEST_SDT_HEADER);
+    UINTN aml_length = get_u32((const UINT8 *)Context->Dsdt + 4) -
+                       sizeof(TEST_SDT_HEADER);
+    const UINT8 *pcx4;
+    const UINT8 *resources;
+    UINTN resource_length;
+    UINTN offset = 0;
+
+    pcx4 = find_bytes(aml, aml_length, pcx4_name, sizeof(pcx4_name), 0);
+    if (pcx4 == NULL ||
+        !aml_named_buffer(aml, aml_length, crs_name, (UINTN)(pcx4 - aml),
+                          &resources, &resource_length)) {
+        return 0;
+    }
+    while (offset + 3U <= resource_length && (resources[offset] & 0x80U)) {
+        const UINT8 *descriptor = resources + offset;
+        UINTN length = get_u16(descriptor + 1U);
+
+        if (length > resource_length - offset - 3U) {
+            return 0;
+        }
+        if (descriptor[0] == 0x84U && length == 33U &&
+            ia64_bytes_equal(descriptor + 3U, ccsr, sizeof(ccsr))) {
+            return get_u64(descriptor + 20U) == 0xfed10000U &&
+                   get_u64(descriptor + 28U) == 0x1000U;
+        }
+        offset += 3U + length;
+    }
+    return 0;
+}
+
 static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
 {
     static const UINT8 crs_name[4] = { '_', 'C', 'R', 'S' };
@@ -2381,7 +2426,7 @@ static BOOLEAN test_dsdt_crs(const TEST_TABLE_CONTEXT *Context)
      */
     return bus && io_a && io_b && io_c && memory && memory_high &&
            uart_window && end_tag && test_dsdt_pci1_crs(Context) &&
-           test_dsdt_lba0_crs(Context);
+           test_dsdt_lba0_crs(Context) && test_dsdt_pcx4_csr(Context);
 }
 
 static BOOLEAN test_ssdt_uart_crs(const TEST_TABLE_CONTEXT *Context)

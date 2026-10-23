@@ -401,6 +401,20 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     QWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
                         NonCacheable, ReadWrite,
                         0, 0xF0000000, 0xFDFFFFFF, 0, 0x0E000000)
+                    // The vendor firmware gives every root its ioa's CSR in
+                    // the HP CCSR descriptor (\LBA.CRS, range type 5); rope
+                    // 4's ioa is LBA0's.  Linux 2.4.17's hpzx1 probe walks
+                    // the _CRS of every HWP0002 for it and never returns
+                    // when it is missing (acpi_get_crs_type stops at the
+                    // zero-length end tag).
+                    VendorLong ()
+                    {
+                        0x02,                                           // guid_id
+                        0xF9, 0xAD, 0xE9, 0x69, 0x4F, 0x92, 0x5F, 0xAB, // GUID[0:7]
+                        0xF6, 0x4A, 0x24, 0xD2, 0x01, 0x37, 0x0E, 0xAD, // GUID[8:15]
+                        0x00, 0x00, 0xD1, 0xFE, 0x00, 0x00, 0x00, 0x00, // base 0xFED10000
+                        0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // length 0x1000
+                    }
                 })
                 Name (_PRT, Package ()
                 {
