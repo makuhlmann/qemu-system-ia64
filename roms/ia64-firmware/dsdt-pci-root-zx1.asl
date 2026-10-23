@@ -463,6 +463,16 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     QWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
                         NonCacheable, ReadWrite,
                         0, 0xF0000000, 0xFDFFFFFF, 0, 0x0E000000)
+                    // Rope 3's ioa CSR in the rope window our firmware opens
+                    // at FED2_0000 (fw_platform_init_rope_window), as PCX4's.
+                    VendorLong ()
+                    {
+                        0x02,                                           // guid_id
+                        0xF9, 0xAD, 0xE9, 0x69, 0x4F, 0x92, 0x5F, 0xAB, // GUID[0:7]
+                        0xF6, 0x4A, 0x24, 0xD2, 0x01, 0x37, 0x0E, 0xAD, // GUID[8:15]
+                        0x00, 0x60, 0xD2, 0xFE, 0x00, 0x00, 0x00, 0x00, // base 0xFED26000
+                        0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // length 0x1000
+                    }
                 })
                 Name (_PRT, Package ()
                 {

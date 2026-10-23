@@ -385,6 +385,14 @@ _Static_assert(IA64_FW_CPU_STACK_SIZE == (1ULL << 17),
  */
 #define IA64_LBA_CSR_BASE             IA64_U64(0x00000000fed10000)
 #define IA64_LBA_CSR_SIZE             IA64_U64(0x0000000000001000)
+/*
+ * ROPE_CONFIG_BASE (mio ERS register 19) opens the rope window, rope n's ioa
+ * CSR at its base + n * 8 KiB.  The HP firmware puts it at FED2_0000 (rx2600
+ * capture of 2026-10-03: the AGP ioa of rope 4 at FED2_8000).
+ */
+#define IA64_SBA_ROPE_CONFIG_BASE_REG IA64_U64(0x00000000000003a8)
+#define IA64_ZX1_ROPE_WINDOW_BASE     IA64_U64(0x00000000fed20000)
+#define IA64_ZX1_ROPE_CSR_STRIDE      IA64_U64(0x0000000000002000)
 /* AGP capability (byte 0x60) and writable-command mask, from the IOA model. */
 #define IA64_LBA_AGP_CAPABILITY       IA64_U64(0x0f00023700200002)
 #define IA64_LBA_AGP_COMMAND_WRITABLE IA64_U64(0x0000000000000337)

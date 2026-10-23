@@ -1046,6 +1046,21 @@ BOOLEAN fw_platform_is_460gx(void)
 }
 
 /*
+ * Open the rope window where the HP firmware's POST puts it, so that every
+ * ioa's CSR answers at its own place: PCX3's _CRS names rope 3's.  RE is
+ * bit 0 of ROPE_CONFIG_BASE.
+ */
+void fw_platform_init_rope_window(void)
+{
+    if (!fw_platform_is_zx1()) {
+        return;
+    }
+    *(volatile UINT64 *)(UINTN)(IA64_SBA_CSR_BASE +
+                                IA64_SBA_ROPE_CONFIG_BASE_REG) =
+        IA64_ZX1_ROPE_WINDOW_BASE | 1;
+}
+
+/*
  * Which I/O riser the zx1 board carries: rope 4's ioa reads its straps in
  * BUS_MODE, whose bit 0 is set for AGP (ioa ERS 3.2.2), at the base our
  * tables publish for it.  The HP firmware names the rope's root HWP0003 or
