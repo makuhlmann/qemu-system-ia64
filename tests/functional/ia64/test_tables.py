@@ -83,9 +83,9 @@ class Ia64PlatformTables(Ia64FirmwareTest):
         debug_log = self.scratch_file("debugcon.log")
         nvram = self.make_nvram()
         make_fat_disk(disk, app_path("tables"))
-        # The default machine (ia64-vpc == zx1) advertises MCFG/ECAM and the
-        # nested HWP0001 IOC DSDT, so this validates the full table set against
-        # the zx1 profile.  The 460gx machine deliberately omits MCFG (SAL
+        # The default machine (ia64-vpc == zx1, the PCI-X riser) advertises
+        # MCFG/ECAM and the nested HWP0001 IOC DSDT, so this validates the full
+        # table set against the zx1 profile.  The 460gx machine deliberately omits MCFG (SAL
         # config), so the MCFG-requiring table suite does not apply there.
         vm = self.launch_ia64(
             media=disk, smp=4,
@@ -95,21 +95,28 @@ class Ia64PlatformTables(Ia64FirmwareTest):
             vm, "tables", TABLE_CASES, timeout=35.0)
         self.assertSetEqual(set(result.cases), TABLE_CASES)
 
-    def test_runtime_tables_pcix(self):
-        # The PCI-X riser: rope 4's root is a PCI-X one with the display
-        # adapter at device 1; the console tables follow it.
-        disk = Path(self.scratch_file("tables-pcix.img"))
-        debug_log = self.scratch_file("debugcon-pcix.log")
+    def run_agp_tables(self, name: str, vga: str):
+        disk = Path(self.scratch_file(f"tables-{name}.img"))
+        debug_log = self.scratch_file(f"debugcon-{name}.log")
         nvram = self.make_nvram()
         make_fat_disk(disk, app_path("tables"))
         vm = self.launch_ia64(
             media=disk, smp=4,
-            machine_options=("backplane=pcix,firmware-console=serial,"
-                             f"nvram={nvram}"),
+            machine_options=(f"backplane=agp,vga={vga},"
+                             f"firmware-console=serial,nvram={nvram}"),
             extra_args=("-debug-port", f"file:{debug_log}"))
         result = self.wait_ia64_suite(
             vm, "tables", TABLE_CASES, timeout=35.0)
         self.assertSetEqual(set(result.cases), TABLE_CASES)
+
+    def test_runtime_tables_agp_slot2(self):
+        # The PCI/AGP riser with a PCI display adapter: it sits in slot 2,
+        # behind rope 3's root, and the console tables follow it.
+        self.run_agp_tables("agp-slot2", "mach64")
+
+    def test_runtime_tables_agp(self):
+        # The PCI/AGP riser with an AGP display adapter in the AGP slot.
+        self.run_agp_tables("agp", "rage128gl")
 
     def test_460gx_processor_ids(self):
         # The SDV's two sockets answer to ids 0 and 3: PAL hands SAL that id

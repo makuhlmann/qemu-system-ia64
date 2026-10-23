@@ -46,10 +46,12 @@
  * On the stock rx2600's PCI-X riser rope 4 is a PCI-X root whose one slot,
  * slot 1, is device 1 (run 4: Acpi(HWP0002,400)/Pci(1|0)), with INTA-INTD on
  * pins 0-3 of the rope's I/O SAPIC (SCRAM LBA 4: GSI 60-63, base 60).  Our
- * firmware numbers its bus as the Mercury bus of the other riser.
+ * firmware numbers its bus as the Mercury bus of the other riser.  Slot 2 of
+ * the PCI/AGP riser, on rope 3, has the same wiring (SCRAM LBA 3, run 4:
+ * device 1 INTA-INTD on GSI 49-52, base 49).
  */
 #define LONGSPEAK_ROPE4_BUS         IA64_MERCURY_BUS
-static const IA64IntxRoute longspeak_rope4_intx[] = {
+static const IA64IntxRoute longspeak_pcix_slot_intx[] = {
     { IA64_ZX1_PCIX_VGA_SLOT, { 0, 1, 2, 3 } },
 };
 /*
@@ -135,6 +137,18 @@ static uint64_t longspeak_map_low_ram(IA64VpcMachineState *s, uint64_t offset,
                                          "ia64-vpc.memory1");
 }
 
+/*
+ * The display models with an AGP connector: the Rage 128 GL and the Quadro2
+ * Pro, and the Rage 128 Pro when agp= gives it its AGP capability.
+ */
+static bool longspeak_vga_is_agp_card(IA64VpcMachineState *s)
+{
+    const char *vga = ia64_vpc_vga_model(s);
+
+    return g_strcmp0(vga, "rage128gl") == 0 || g_strcmp0(vga, "nv15gl") == 0 ||
+           (g_strcmp0(vga, "rage128") == 0 && s->agp_enabled);
+}
+
 static bool longspeak_validate(IA64VpcMachineState *s, Error **errp)
 {
     uint64_t max = IA64_ZX1_MEMORY0_END + IA64_ZX1_MEMORY1_SIZE +
@@ -161,6 +175,15 @@ static bool longspeak_validate(IA64VpcMachineState *s, Error **errp)
                        "slot of backplane=pcix", vga);
             return false;
         }
+    } else {
+        /*
+         * The PCI/AGP riser's AGP slot takes only an AGP card; a PCI card
+         * fits a PCI-X slot, and the display adapter takes slot 2, rope 3's,
+         * where the HP firmware routes VGA to it and uses it as its console
+         * (backplane plan D5).
+         */
+        s->vga_slot2 = g_strcmp0(ia64_vpc_vga_model(s), "none") != 0 &&
+                       !longspeak_vga_is_agp_card(s);
     }
     return true;
 }
@@ -318,15 +341,40 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
                                                   LONGSPEAK_UART_PIN + r));
     }
     for (r = 0; r < ARRAY_SIZE(longspeak_backplane_ropes); r++) {
-        DeviceState *ioa =
-            longspeak_rope_ioa(longspeak_backplane_ropes[r].straps, errp);
+        bool slot2 = s->vga_slot2 && longspeak_backplane_ropes[r].rope == 3;
+        DeviceState *ioa;
 
+        /* A conventional card latches the PCI pattern (ropes 2 and 6). */
+        ioa = longspeak_rope_ioa(slot2 ? IA64_LBA_STRAPS_PCI33 :
+                                 longspeak_backplane_ropes[r].straps, errp);
         if (ioa == NULL) {
             return false;
         }
         ia64_sba_add_rope(IA64_SBA(s->sba_dev),
                           longspeak_backplane_ropes[r].rope,
                           &IA64_LBA(ioa)->csr);
+        if (!slot2) {
+            continue;
+        }
+        s->rope3_lba_dev = ioa;
+        s->rope3_host = ia64_expander_host_create(OBJECT(s), "rope3",
+                                                  ia64_pci_host_mmio(pci_host),
+                                                  ia64_pci_host_io(pci_host),
+                                                  IA64_ZX1_ROPE3_BUS,
+                                                  longspeak_pcix_slot_intx,
+                                                  ARRAY_SIZE(longspeak_pcix_slot_intx),
+                                                  0, errp);
+        if (s->rope3_host == NULL) {
+            return false;
+        }
+        s->rope3_bus = ia64_expander_host_bus(s->rope3_host);
+        pci_bus_set_slot_reserved_mask(s->rope3_bus,
+                                       ~(1U << IA64_ZX1_PCIX_VGA_SLOT));
+        ia64_pci_host_add_secondary_bus(pci_host, s->rope3_bus);
+        ia64_lba_attach_dma(IA64_LBA(ioa), s->rope3_bus,
+                            ia64_sba_dma_region(IA64_SBA(s->sba_dev)));
+        ia64_lba_set_config_bus(IA64_LBA(ioa), s->rope3_bus);
+        s->vga_io_base = IA64_ZX1_ROPE3_IO_BASE;
     }
     ia64_sba_set_window_notify(IA64_SBA(s->sba_dev),
                                longspeak_lmmio_window_moved, s);
@@ -363,8 +411,8 @@ static bool longspeak_build_chipset(IA64VpcMachineState *s,
                                                   ia64_pci_host_mmio(pci_host),
                                                   ia64_pci_host_io(pci_host),
                                                   LONGSPEAK_ROPE4_BUS,
-                                                  longspeak_rope4_intx,
-                                                  ARRAY_SIZE(longspeak_rope4_intx),
+                                                  longspeak_pcix_slot_intx,
+                                                  ARRAY_SIZE(longspeak_pcix_slot_intx),
                                                   0, errp);
         if (s->rope4_host == NULL) {
             return false;
@@ -429,7 +477,7 @@ static void longspeak_wire_intx(IA64VpcMachineState *s, DeviceState *pci_host,
     for (i = 0; i < LONGSPEAK_INTX_PINS; i++) {
         DeviceState *org = qdev_new(TYPE_OR_IRQ);
 
-        object_property_set_int(OBJECT(org), "num-lines", 2, &error_abort);
+        object_property_set_int(OBJECT(org), "num-lines", 3, &error_abort);
         qdev_realize_and_unref(org, NULL, &error_abort);
         qdev_connect_gpio_out(org, 0,
                               qdev_get_gpio_in(iosapic,
@@ -446,6 +494,13 @@ static void longspeak_wire_intx(IA64VpcMachineState *s, DeviceState *pci_host,
                                                       s->mercury_host, i,
                 longspeak_split_irq(ia64_lba_iosapic_input(agp, i),
                                     qdev_get_gpio_in(org, 1)));
+            /* Slot 2's pins on rope 3 join the same block. */
+            if (s->rope3_host != NULL) {
+                qdev_connect_gpio_out(s->rope3_host, i,
+                    longspeak_split_irq(
+                        ia64_lba_iosapic_input(IA64_LBA(s->rope3_lba_dev), i),
+                        qdev_get_gpio_in(org, 2)));
+            }
         }
     }
     /*
@@ -526,6 +581,9 @@ static void longspeak_seat(IA64VpcMachineState *s, IA64VpcSeat seat,
         if (s->backplane_pcix) {
             *bus = s->rope4_bus;
             *devfn = PCI_DEVFN(IA64_ZX1_PCIX_VGA_SLOT, 0);
+        } else if (s->vga_slot2) {
+            *bus = s->rope3_bus;
+            *devfn = PCI_DEVFN(IA64_ZX1_PCIX_VGA_SLOT, 0);
         }
         break;
     case IA64_VPC_SEAT_AUDIO:
@@ -544,15 +602,16 @@ static unsigned int longspeak_root_gsi_base(const IA64VpcMachineState *s,
 }
 
 /*
- * A device on rope 1, or in rope 4's PCI-X slot, reports the platform line
- * its pin reaches (longspeak_wire_intx).
+ * A device on rope 1, or in a PCI-X slot of rope 4 or rope 3, reports the
+ * platform line its pin reaches (longspeak_wire_intx).
  */
 static int longspeak_intx_line(const IA64VpcMachineState *s, PCIDevice *dev,
                                int pin)
 {
     PCIBus *bus = pci_get_bus(dev);
 
-    if (s->rope4_bus != NULL && bus == s->rope4_bus) {
+    if ((s->rope4_bus != NULL && bus == s->rope4_bus) ||
+        (s->rope3_bus != NULL && bus == s->rope3_bus)) {
         return IA64_PCI_INTX_GSI_BASE + bus->map_irq(dev, pin);
     }
     if (bus != s->rope1_bus) {
@@ -631,6 +690,12 @@ static void longspeak_set_backplane(Object *obj, const char *value,
     }
 }
 
+/* The stock rx2600's PCI-X riser is the default (backplane plan D2). */
+static void longspeak_machine_instance_init(Object *obj)
+{
+    IA64_VPC_MACHINE(obj)->backplane_pcix = true;
+}
+
 /* Concrete: HP rx2600 / zx2000 / zx6000 -- zx1 chipset, Itanium 2. Default. */
 static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
 {
@@ -642,10 +707,10 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "backplane", longspeak_get_backplane,
                                   longspeak_set_backplane);
     object_class_property_set_description(oc, "backplane",
-        "I/O backplane: 'agp' (default), the zx6000 PCI/AGP riser with the "
-        "display adapter in its AGP slot; 'pcix', the rx2600's four-slot "
-        "PCI-X riser with the display adapter in slot 1 (rope 4), no AGP "
-        "port and no AGP card");
+        "I/O backplane: 'pcix' (default), the rx2600's four-slot PCI-X riser "
+        "with the display adapter in slot 1 (rope 4), no AGP port and no AGP "
+        "card; 'agp', the zx6000 PCI/AGP riser, with an AGP display adapter "
+        "in its AGP slot and a PCI one in slot 2 (rope 3)");
 #ifdef CONFIG_IA64_VPC_NETWORK
     /* "The LAN controller is an Intel 82550 chip" (O&M Guide App. B). */
     mc->default_nic = "i82550";
@@ -687,13 +752,6 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
      */
     imc->acpi_pm_tmr_ext = true;
     imc->acpi_pm1_en_mask = 0x0721;
-    /*
-     * What rx2600/zx2000 carry: an LSI SCSI in core I/O and an ATI Rage XL
-     * for video.  The Rage XL is also the adapter whose video BIOS the vendor
-     * firmware runs: its x86 emulator interprets that ROM and sets a mode,
-     * where it refuses the Rage 128's ("Unable to execute video bios")
-     * without touching a VGA port.
-     */
     imc->nvram_is_pdh_store = true;
     /*
      * The vendor firmware's DSDT declares _S5 as SLP_TYP 5 and the box
@@ -732,6 +790,13 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->ide_default = true;
     imc->ide_type = "cmd649-ide";
     imc->ide_optical = true;
+    /*
+     * The default display adapter is a Rage XL, a PCI card whose video BIOS
+     * the HP firmware runs: its x86 emulator interprets that ROM and sets a
+     * mode, where it refuses the Rage 128's ("Unable to execute video bios")
+     * without touching a VGA port.  No zx1 manual names a Rage XL; the
+     * rx2600's own graphics is the RV100 of its iLO MP card (run 4).
+     */
     imc->vga_default = "mach64";
     imc->vga_rv100 = true;
     /* Devices 1 to 3 are core I/O on this board; the AHCI takes device 4. */
@@ -751,6 +816,7 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
 static const TypeInfo longspeak_machine_typeinfo = {
     .name = TYPE_IA64_ZX1_MACHINE,
     .parent = TYPE_IA64_VPC_MACHINE,
+    .instance_init = longspeak_machine_instance_init,
     .class_init = longspeak_machine_class_init,
 };
 

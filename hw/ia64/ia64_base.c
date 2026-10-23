@@ -3419,10 +3419,14 @@ static void ia64_vpc_configure_audio(PCIDevice *pci_dev)
                              PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER, 2);
 }
 
-/* The graphics I/O BAR base: the board's own, or the 460GX graphics root's. */
+/*
+ * The graphics I/O BAR base: the seat's, the board's own, or the 460GX
+ * graphics root's.
+ */
 static uint32_t ia64_vpc_vga_io(const IA64VpcMachineState *s)
 {
-    uint32_t base = IA64_VPC_MACHINE_GET_CLASS(s)->vga_io_base;
+    uint32_t base = s->vga_io_base != 0 ? s->vga_io_base :
+                    IA64_VPC_MACHINE_GET_CLASS(s)->vga_io_base;
 
     return base != 0 ? base : IA64_VGA_IO_BASE;
 }

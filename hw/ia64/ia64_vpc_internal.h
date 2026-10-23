@@ -332,6 +332,12 @@ struct IA64VpcMachineState {
     DeviceState *mercury_host;      /* zx1: the Mercury (LBA) PCI host bridge */
     DeviceState *rope4_host;        /* zx1 backplane=pcix: rope 4's PCI root */
     PCIBus *rope4_bus;              /* zx1 backplane=pcix: rope 4's bus */
+    /* zx1 backplane=agp: a PCI display adapter in slot 2, on rope 3's root */
+    bool vga_slot2;
+    DeviceState *rope3_lba_dev;
+    DeviceState *rope3_host;
+    PCIBus *rope3_bus;
+    uint32_t vga_io_base;           /* the board's seat-dependent override */
     /* 460gx: the WXB0, WXB1 and GXB expander roots (buses 1, 2 and 3). */
     DeviceState *expander_host[IA64_460GX_EXPANDER_ROOTS];
     PCIBus *expander_bus[IA64_460GX_EXPANDER_ROOTS];

@@ -1136,7 +1136,8 @@ static void test_pdh_store_persists(void)
 static void test_lba_agp_capability(void)
 {
     const uint64_t lba = IA64_LBA_CSR_BASE;
-    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    QTestState *qts = qtest_init("-machine zx1,backplane=agp,vga=rage128gl "
+                                 "-m 256M -S");
 
     /* PCI_STATUS: capability-list bit (0x10) present (reset value 0x02b0). */
     g_assert_cmphex(qtest_readw(qts, lba + PCI_STATUS), ==,
@@ -1756,7 +1757,8 @@ static unsigned bcd(uint8_t v)
 static void test_lba_rope_window(void)
 {
     const uint64_t rope = 0xfed20000;
-    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    QTestState *qts = qtest_init("-machine zx1,backplane=agp,vga=rage128gl "
+                                 "-m 256M -S");
 
     /*
      * The IOC queue register holds what SAL_B writes (FFEC80C6), and its bit
@@ -1979,9 +1981,50 @@ static void test_zx1_backplane_pcix(void)
                     0x1234);
     qtest_quit(qts);
 
-    qts = qtest_init("-machine zx1 -m 256M -S");
+    qts = qtest_init("-machine zx1,backplane=agp -m 256M -S");
     read_riser_fru(qts, fru);
     g_assert_true(memcmp(fru + 72 + 6 + 12, "Longs Peak I/O riser", 20) == 0);
+    qtest_quit(qts);
+}
+
+/*
+ * backplane=agp: an AGP display adapter takes the AGP slot (device 0 on the
+ * Mercury bus), a PCI one slot 2 on rope 3 (device 1 on bus 30h), whose ioa
+ * then latches the PCI pattern, with its INTA on line 16 and its I/O BAR in
+ * rope 3's share.  The default machine carries the PCI-X riser.
+ */
+static void test_zx1_backplane_agp_seats(void)
+{
+    const uint64_t rope = 0xfed20000;
+    QTestState *qts = qtest_init("-machine zx1,backplane=agp -m 256M -S");
+
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, rope | 1);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x8620) & 0xffff, ==, 0x0081);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x6620) & 0xffff, ==, 0x0460);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0x30, 1, 0, PCI_VENDOR_ID), ==,
+                    0x1002);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0x10, 0, 0, PCI_VENDOR_ID), ==,
+                    0xffff);
+    g_assert_cmphex(ia64_cfg_readb(qts, 0x30, 1, 0, PCI_INTERRUPT_LINE), ==,
+                    16);
+    g_assert_cmphex(ia64_cfg_readl(qts, 0x30, 1, 0, PCI_BASE_ADDRESS_1) & ~3u,
+                    ==, 0x6000);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1,backplane=agp,vga=rage128gl -m 256M -S");
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, rope | 1);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x6620) & 0xffff, ==, 0x7ce0);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0x10, 0, 0, PCI_VENDOR_ID), ==,
+                    0x1002);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0x30, 1, 0, PCI_VENDOR_ID), ==,
+                    0xffff);
+    qtest_quit(qts);
+
+    qts = qtest_init("-machine zx1 -m 256M -S");
+    qtest_writeq(qts, IA64_SBA_CSR_BASE + 0x03a8, rope | 1);
+    g_assert_cmphex(qtest_readq(qts, rope + 0x8620) & 0xffff, ==, 0x0440);
+    g_assert_cmphex(ia64_cfg_readw(qts, 0x10, 1, 0, PCI_VENDOR_ID), ==,
+                    0x1002);
     qtest_quit(qts);
 }
 
@@ -3795,7 +3838,7 @@ static void test_eepro100_eeprom_map(void)
     const uint64_t cfg = IA64_PCI_CONFIG_BASE +
                          ((uint64_t)IA64_MERCURY_BUS << 20) +
                          ((uint64_t)IA64_E100_SLOT << 15);
-    QTestState *qts = qtest_init("-machine ia64-vpc -m 256M -S "
+    QTestState *qts = qtest_init("-machine ia64-vpc,backplane=agp -m 256M -S "
                                  "-device i82559c,bus=mercury,addr=8,"
                                  "romfile=,mac=52:54:00:12:34:56");
     uint32_t checksum;
@@ -4086,7 +4129,7 @@ static void test_eepro100_csr_windows(void)
     const uint64_t cfg = IA64_PCI_CONFIG_BASE +
                          ((uint64_t)IA64_MERCURY_BUS << 20) +
                          ((uint64_t)IA64_E100_SLOT << 15);
-    QTestState *qts = qtest_init("-machine ia64-vpc -m 256M -S "
+    QTestState *qts = qtest_init("-machine ia64-vpc,backplane=agp -m 256M -S "
                                  "-device i82559c,bus=mercury,addr=8,"
                                  "romfile=,id=nic0");
     uint32_t mdi;
@@ -4142,13 +4185,14 @@ static void test_mercury_config_dispatch(void)
 {
     const uint64_t ecam = IA64_PCI_CONFIG_BASE;
     const uint64_t merc = ecam + ((uint64_t)IA64_MERCURY_BUS << 20);
-    QTestState *qts = qtest_init("-machine zx1 -m 256M -S");
+    QTestState *qts = qtest_init("-machine zx1,backplane=agp,vga=rage128gl "
+                                 "-m 256M -S");
 
     /* The SBA (PCI0 slot 31) reads its HP vendor id -- PCI0 still enumerates. */
     g_assert_cmphex(qtest_readl(qts, ecam + (31ULL << 15)) & 0xffff, ==, 0x103c);
     /*
-     * The default AGP graphics master (ATI, vendor 0x1002) lives at slot 0 of
-     * the Mercury bus: dispatch routes the config cycle to the second root bus
+     * The AGP graphics master (ATI, vendor 0x1002) lives at slot 0 of the
+     * Mercury bus: dispatch routes the config cycle to the second root bus
      * where the device actually is (not to PCI0).
      */
     g_assert_cmphex(qtest_readl(qts, merc +
@@ -4938,6 +4982,11 @@ static const PCIWindow zx1_agp_io[] = {
     { 0x03B0, 0x03DF }, { 0x8000, 0xBFFF },
 };
 
+/* Rope 3's root on the PCI/AGP riser, with a PCI display adapter in slot 2. */
+static const PCIWindow zx1_rope3_io[] = {
+    { 0x03B0, 0x03DF }, { 0x6000, 0x7FFF },
+};
+
 static const PCIRootWindows zx1_root_windows[] = {
     { 0, zx1_pci0_mem, G_N_ELEMENTS(zx1_pci0_mem),
       zx1_pci0_io, G_N_ELEMENTS(zx1_pci0_io) },
@@ -4945,6 +4994,8 @@ static const PCIRootWindows zx1_root_windows[] = {
       zx1_pci1_io, G_N_ELEMENTS(zx1_pci1_io) },
     { IA64_MERCURY_BUS, zx1_agp_mem, G_N_ELEMENTS(zx1_agp_mem),
       zx1_agp_io, G_N_ELEMENTS(zx1_agp_io) },
+    { IA64_ZX1_ROPE3_BUS, zx1_agp_mem, G_N_ELEMENTS(zx1_agp_mem),
+      zx1_rope3_io, G_N_ELEMENTS(zx1_rope3_io) },
 };
 
 static const PCIRootWindows root_windows[] = {
@@ -7002,11 +7053,11 @@ static void check_root_window_containment(const char *args)
 }
 
 /*
- * Rope 1's root and the AGP root own their own windows, cut out of PCI0's,
- * and every BAR the machine assigns lies in its root's: the graphics I/O BAR
- * in the AGP ioa's ports too, also with the other graphics adapters.  With
- * a QLogic added as well, the board's LSI keeps rope 1's windows and the
- * QLogic takes PCI0's.
+ * Rope 1's root and the display's root own their own windows, cut out of
+ * PCI0's, and every BAR the machine assigns lies in its root's: the graphics
+ * I/O BAR in rope 4's ports, or rope 3's in slot 2, also with the other
+ * graphics adapters and on both risers.  With a QLogic added as well, the
+ * board's LSI keeps rope 1's windows and the QLogic takes PCI0's.
  */
 static void test_zx1_root_window_containment(void)
 {
@@ -7016,7 +7067,11 @@ static void test_zx1_root_window_containment(void)
     check_windows_contain_bars("-machine zx1,vga=rage128 -m 256M -S",
                                zx1_root_windows,
                                G_N_ELEMENTS(zx1_root_windows));
-    check_windows_contain_bars("-machine zx1,vga=nv15gl -m 256M -S",
+    check_windows_contain_bars("-machine zx1,backplane=agp,vga=nv15gl "
+                               "-m 256M -S",
+                               zx1_root_windows,
+                               G_N_ELEMENTS(zx1_root_windows));
+    check_windows_contain_bars("-machine zx1,backplane=agp -m 256M -S",
                                zx1_root_windows,
                                G_N_ELEMENTS(zx1_root_windows));
     check_windows_contain_bars("-machine zx1,vga=rv100 -m 256M -S",
@@ -10956,7 +11011,7 @@ static void mach64_zx1_open(Mach64TestDev *a)
     a->qts = qtest_init("-machine zx1 -m 256M");
     ia64_qpci_init_on_bus(&a->gbus, a->qts, IA64_MERCURY_BUS);
     a->dev = qpci_device_find(&a->gbus.bus,
-                              QPCI_DEVFN(IA64_MERCURY_VGA_SLOT, 0));
+                              QPCI_DEVFN(IA64_ZX1_PCIX_VGA_SLOT, 0));
     g_assert_nonnull(a->dev);
     g_assert_cmphex(qpci_config_readw(a->dev, PCI_DEVICE_ID), ==, 0x4752);
     a->mmio = qpci_config_readl(a->dev, PCI_BASE_ADDRESS_2) & 0xfffffff0;
@@ -12089,7 +12144,7 @@ static void test_mach64_ext_disp_keeps_vga(void)
     a.qts = qts = qtest_init("-machine zx1 -m 256M -S");
     ia64_qpci_init_on_bus(&a.gbus, qts, IA64_MERCURY_BUS);
     a.dev = qpci_device_find(&a.gbus.bus,
-                             QPCI_DEVFN(IA64_MERCURY_VGA_SLOT, 0));
+                             QPCI_DEVFN(IA64_ZX1_PCIX_VGA_SLOT, 0));
     g_assert_nonnull(a.dev);
     a.mmio = qpci_config_readl(a.dev, PCI_BASE_ADDRESS_2) & 0xfffffff0;
     g_assert_cmphex(a.mmio, !=, 0);
@@ -12174,6 +12229,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ia64-vpc/zx1/backplane-pcix", test_zx1_backplane_pcix);
     qtest_add_func("/ia64-vpc/zx1/backplane-refusals",
                    test_zx1_backplane_refusals);
+    qtest_add_func("/ia64-vpc/zx1/backplane-agp-seats",
+                   test_zx1_backplane_agp_seats);
     qtest_add_func("/ia64-vpc/mercury/config-dispatch",
                    test_mercury_config_dispatch);
     qtest_add_func("/ia64-vpc/ahci/off", test_ahci_off);

@@ -46,9 +46,13 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
             Name (_UID, Zero)
             Name (_CCA, One)
             // Rope 4's root: LBA0 on the PCI/AGP riser, PCX4 on the PCI-X one.
-            // The firmware patches these _STA values from the ioa's straps.
+            // The firmware patches these _STA values from the ioa's straps,
+            // X3EN when a PCI display adapter sits in rope 3's slot 2, and
+            // L0VG when the AGP slot holds the display adapter.
             Name (L0EN, 0x0F)
             Name (X4EN, 0x00)
+            Name (X3EN, 0x00)
+            Name (L0VG, 0x0F)
             // The IOC CSR block.  Linux sba_iommu locates the IOC base NOT from
             // a memory descriptor but from an HP-specific "CCSR" vendor-defined
             // resource: hp_acpi_csr_space() -> acpi_find_vendor_resource() looks
@@ -254,7 +258,8 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                 {
                     Return (L0EN)
                 }
-                Name (_CRS, ResourceTemplate ()
+                // The display adapter in the AGP slot.
+                Name (CRSV, ResourceTemplate ()
                 {
                     // Mercury owns exactly bus 0x10 (IA64_MERCURY_BUS).
                     WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
@@ -314,6 +319,38 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                         0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // length 0x1000
                     }
                 })
+                // The AGP slot without the display adapter, which sits in
+                // slot 2 (PCX3): no legacy VGA ranges and no graphics window.
+                Name (CRSN, ResourceTemplate ()
+                {
+                    WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
+                        PosDecode, 0, 0x0010, 0x0010, 0, 0x0001)
+                    QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                        EntireRange, 0, 0x00008000, 0x0000BFFF, 0,
+                        0x00004000, , , , TypeStatic, DenseTranslation)
+                    DWordMemory (ResourceConsumer, PosDecode, MinFixed, MaxFixed,
+                        NonCacheable, ReadWrite,
+                        0, 0xFED10000, 0xFED10FFF, 0, 0x00001000,
+                        , , , AddressRangeMemory, TypeStatic)
+                    VendorLong ()
+                    {
+                        0x02,                                           // guid_id
+                        0xF9, 0xAD, 0xE9, 0x69, 0x4F, 0x92, 0x5F, 0xAB, // GUID[0:7]
+                        0xF6, 0x4A, 0x24, 0xD2, 0x01, 0x37, 0x0E, 0xAD, // GUID[8:15]
+                        0x00, 0x00, 0xD1, 0xFE, 0x00, 0x00, 0x00, 0x00, // base 0xFED10000
+                        0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // length 0x1000
+                    }
+                })
+                // Two roots cannot both decode the legacy VGA ranges (lessons
+                // section 4): the display's root takes them.
+                Method (_CRS, 0, NotSerialized)
+                {
+                    If (L0VG)
+                    {
+                        Return (CRSV)
+                    }
+                    Return (CRSN)
+                }
                 // Graphics is device 0 on the Mercury bus; INTx uses the same
                 // (slot+pin)%4 swizzle and GSIs 16..19 as PCI0.
                 Name (_PRT, Package ()
@@ -355,6 +392,54 @@ DefinitionBlock ("", "DSDT", 2, "QEMU  ", "IA64DSDT", 0x00000001)
                     QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
                         EntireRange, 0, 0x00008000, 0x0000BFFF, 0,
                         0x00004000, , , , TypeStatic, DenseTranslation)
+                    DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                        Cacheable, ReadWrite,
+                        0, 0x000A0000, 0x000BFFFF, 0, 0x00020000)
+                    DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                        Cacheable, ReadWrite,
+                        0, 0x000C0000, 0x000DFFFF, 0, 0x00020000)
+                    QWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
+                        NonCacheable, ReadWrite,
+                        0, 0xF0000000, 0xFDFFFFFF, 0, 0x0E000000)
+                })
+                Name (_PRT, Package ()
+                {
+                    Package () { 0x0001FFFF, 0, 0x00, 16 },
+                    Package () { 0x0001FFFF, 1, 0x00, 17 },
+                    Package () { 0x0001FFFF, 2, 0x00, 18 },
+                    Package () { 0x0001FFFF, 3, 0x00, 19 }
+                })
+            }
+
+            // Rope 3's root on the PCI/AGP riser (backplane=agp) when a PCI
+            // display adapter sits in its slot 2, device 1: a card without an
+            // AGP connector fits a PCI-X slot, and the HP firmware routes VGA
+            // there and uses it as its console (backplane plan D5).  The ports
+            // are rope 3's share (mio ERS 2.4.1), the slot's INTA-INTD reach
+            // GSI 16-19 (longspeak_wire_intx).  _UID is the bus number, as
+            // PCI1's.
+            Device (PCX3)
+            {
+                Name (_HID, EisaId ("HWP0002"))
+                Name (_CID, EisaId ("PNP0A03"))
+                Name (_SEG, Zero)
+                Name (_BBN, 0x30)
+                Name (_UID, 0x30)
+                Name (_CCA, One)
+                Method (_STA, 0, NotSerialized)
+                {
+                    Return (X3EN)
+                }
+                Name (_CRS, ResourceTemplate ()
+                {
+                    WordBusNumber (ResourceProducer, MinFixed, MaxFixed,
+                        PosDecode, 0, 0x0030, 0x0030, 0, 0x0001)
+                    QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                        EntireRange, 0, 0x000003B0, 0x000003DF, 0,
+                        0x00000030, , , , TypeStatic, DenseTranslation)
+                    QWordIO (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+                        EntireRange, 0, 0x00006000, 0x00007FFF, 0,
+                        0x00002000, , , , TypeStatic, DenseTranslation)
                     DWordMemory (ResourceProducer, PosDecode, MinFixed, MaxFixed,
                         Cacheable, ReadWrite,
                         0, 0x000A0000, 0x000BFFFF, 0, 0x00020000)

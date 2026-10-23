@@ -102,9 +102,14 @@ static const UINT8 mSsdtCpuEnabledNames[IA64_VPC_MAX_CPUS][4] = {
 };
 static const UINT8 mSsdtPs2EnabledName[4] = { 'P', '2', 'E', 'N' };
 static const UINT8 mSsdtCom2EnabledName[4] = { 'U', '2', 'E', 'N' };
-/* The zx1 DSDT's rope-4 roots: LBA0 on the PCI/AGP riser, PCX4 on PCI-X. */
+/*
+ * The zx1 DSDT's display roots: LBA0 on the PCI/AGP riser, PCX4 on PCI-X,
+ * PCX3 for slot 2; L0VG gives LBA0 the legacy VGA ranges.
+ */
 static const UINT8 mDsdtLba0EnabledName[4] = { 'L', '0', 'E', 'N' };
 static const UINT8 mDsdtPcx4EnabledName[4] = { 'X', '4', 'E', 'N' };
+static const UINT8 mDsdtPcx3EnabledName[4] = { 'X', '3', 'E', 'N' };
+static const UINT8 mDsdtLba0VgaName[4] = { 'L', '0', 'V', 'G' };
 
 static UINT8 *acpi_aml_named_byte(UINT8 *Aml, UINTN Size, const UINT8 Name[4])
 {
@@ -622,17 +627,24 @@ static void efi_init_sal_system_table(void)
  */
 static UINT8 fw_vga_pci_bus(void)
 {
-    return fw_platform_is_zx1() ? (UINT8)IA64_MERCURY_BUS :
-                                  (UINT8)IA64_460GX_GXB_BUS;
+    UINT8 bus, device;
+
+    if (!fw_platform_is_zx1()) {
+        return (UINT8)IA64_460GX_GXB_BUS;
+    }
+    fw_platform_zx1_display(&bus, &device);
+    return bus;
 }
 
 static UINT8 fw_vga_pci_device(void)
 {
-    if (fw_platform_is_zx1()) {
-        return fw_platform_zx1_pcix_riser() ? (UINT8)IA64_ZX1_PCIX_VGA_SLOT :
-                                              (UINT8)IA64_MERCURY_VGA_SLOT;
+    UINT8 bus, device;
+
+    if (!fw_platform_is_zx1()) {
+        return (UINT8)IA64_460GX_GXB_VGA_SLOT;
     }
-    return (UINT8)IA64_460GX_GXB_VGA_SLOT;
+    fw_platform_zx1_display(&bus, &device);
+    return device;
 }
 
 static void efi_init_acpi_tables(void)
@@ -688,6 +700,7 @@ static void efi_init_acpi_tables(void)
      */
     if (fw_platform_is_zx1()) {
         BOOLEAN pcix = fw_platform_zx1_pcix_riser();
+        BOOLEAN slot2 = fw_vga_pci_bus() == IA64_ZX1_ROPE3_BUS;
 
         fw_copy_mem(mDsdt.Aml, mDsdtZx1Aml, sizeof(mDsdtZx1Aml));
         mAcpiDsdtLength = sizeof(ACPI_SDT_HEADER) + FW_DSDT_PCI_ROOT_ZX1_AML_SIZE;
@@ -695,6 +708,10 @@ static void efi_init_acpi_tables(void)
                                  pcix ? 0 : 0x0fU);
         acpi_dsdt_set_named_byte(&mDsdt, mDsdtPcx4EnabledName,
                                  pcix ? 0x0fU : 0);
+        acpi_dsdt_set_named_byte(&mDsdt, mDsdtPcx3EnabledName,
+                                 slot2 ? 0x0fU : 0);
+        acpi_dsdt_set_named_byte(&mDsdt, mDsdtLba0VgaName,
+                                 slot2 ? 0 : 0x0fU);
     } else {
         mAcpiDsdtLength = sizeof(ACPI_SDT_HEADER) + FW_DSDT_PCI_ROOT_AML_SIZE;
     }
@@ -1319,7 +1336,13 @@ BOOLEAN __attribute__((noinline)) acpi_table_integrity_selftest(void)
          !acpi_dsdt_named_byte_is(mAcpiDsdt, mDsdtLba0EnabledName,
                                   fw_platform_zx1_pcix_riser() ? 0 : 0x0fU) ||
          !acpi_dsdt_named_byte_is(mAcpiDsdt, mDsdtPcx4EnabledName,
-                                  fw_platform_zx1_pcix_riser() ? 0x0fU : 0))) {
+                                  fw_platform_zx1_pcix_riser() ? 0x0fU : 0) ||
+         !acpi_dsdt_named_byte_is(mAcpiDsdt, mDsdtPcx3EnabledName,
+                                  fw_vga_pci_bus() == IA64_ZX1_ROPE3_BUS ?
+                                  0x0fU : 0) ||
+         !acpi_dsdt_named_byte_is(mAcpiDsdt, mDsdtLba0VgaName,
+                                  fw_vga_pci_bus() == IA64_ZX1_ROPE3_BUS ?
+                                  0 : 0x0fU))) {
         return 0;
     }
 

@@ -15,7 +15,8 @@
 #include "qobject/qdict.h"
 
 #define RV100_ARGS      "-machine zx1,vga=rv100 -m 256M -S"
-#define RV100_DEVFN     ((IA64_MERCURY_VGA_SLOT << 3) | 0)
+/* The default zx1 carries the PCI-X riser: the adapter is in its slot. */
+#define RV100_DEVFN     ((IA64_ZX1_PCIX_VGA_SLOT << 3) | 0)
 #define RV100_CFG(reg)  (IA64_PCI_CONFIG_BASE + \
                          ((uint64_t)IA64_MERCURY_BUS << 20) + \
                          ((uint64_t)RV100_DEVFN << 12) + (reg))

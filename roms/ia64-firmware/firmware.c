@@ -337,7 +337,7 @@ FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_AML_SIZE == 2695u, dsdt_generated_aml_size);
 FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_AML_SIZE == 542u,
                  ssdt_generated_aml_size);
 /* The nested zx1-profile DSDT/SSDT; the larger sets ACPI_DSDT/SSDT Aml[]. */
-FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_ZX1_AML_SIZE == 2107u,
+FW_STATIC_ASSERT(FW_DSDT_PCI_ROOT_ZX1_AML_SIZE == 2628u,
                  dsdt_zx1_generated_aml_size);
 FW_STATIC_ASSERT(FW_SSDT_PLATFORM_DEVICES_ZX1_AML_SIZE == 506u,
                  ssdt_zx1_generated_aml_size);
@@ -14638,7 +14638,8 @@ static void fw_phase_platform_init(UINT64 gp, UINT64 stack_top, UINT64 boot_b0)
 /*
  * Neither machine puts its graphics adapter on the first PCI root.  On zx1
  * the adapter lives behind rope 4's root at ACPI _UID 1, the Mercury (LBA)
- * bridge's device 0 or the PCI-X riser's slot at device 1; on
+ * bridge's device 0 or the PCI-X riser's slot at device 1, or in slot 2 of
+ * the PCI/AGP riser, device 1 behind rope 3's root at _UID 30h; on
  * the i2000 it lives behind the GXB expander, the AGP root, at _UID 3 device
  * 0.  Retarget the EFI console/graphics device paths accordingly.  Every root
  * advertises PNP0A03 (0x0A0341D0), so only the _UID and the PCI device number
@@ -14686,10 +14687,9 @@ static void fw_retarget_vga_device_paths(void)
     UINTN i;
 
     if (fw_platform_is_zx1()) {
-        uid = 1;
-        bus = IA64_MERCURY_BUS;
-        device = fw_platform_zx1_pcix_riser() ? IA64_ZX1_PCIX_VGA_SLOT :
-                                                IA64_MERCURY_VGA_SLOT;
+        fw_platform_zx1_display(&bus, &device);
+        /* PCX3's _UID is its bus number; rope 4's roots have _UID 1. */
+        uid = bus == IA64_ZX1_ROPE3_BUS ? IA64_ZX1_ROPE3_BUS : 1;
     } else {
         uid = IA64_460GX_GXB_BUS;
         bus = IA64_460GX_GXB_BUS;

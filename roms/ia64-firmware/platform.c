@@ -1067,6 +1067,31 @@ BOOLEAN fw_platform_zx1_pcix_riser(void)
     return pcix != 0;
 }
 
+/*
+ * Where the zx1 board's display adapter sits: rope 4's slot on the PCI-X
+ * riser; on the PCI/AGP riser the AGP slot, or slot 2 on rope 3, where a PCI
+ * card fits.  An AGP card wins when both hold one, as the AGP slot is where
+ * the riser's graphics belongs.
+ */
+void fw_platform_zx1_display(UINT8 *Bus, UINT8 *Device)
+{
+    *Bus = (UINT8)IA64_MERCURY_BUS;
+    if (fw_platform_zx1_pcix_riser()) {
+        *Device = (UINT8)IA64_ZX1_PCIX_VGA_SLOT;
+        return;
+    }
+    *Device = (UINT8)IA64_MERCURY_VGA_SLOT;
+    if ((UINT16)pci_config_read_value(0, IA64_MERCURY_BUS,
+                                      IA64_MERCURY_VGA_SLOT, 0, 0, 2) ==
+            0xffffU &&
+        (UINT16)pci_config_read_value(0, IA64_ZX1_ROPE3_BUS,
+                                      IA64_ZX1_PCIX_VGA_SLOT, 0, 0, 2) !=
+            0xffffU) {
+        *Bus = (UINT8)IA64_ZX1_ROPE3_BUS;
+        *Device = (UINT8)IA64_ZX1_PCIX_VGA_SLOT;
+    }
+}
+
 UINT16 fw_sal_revision(void)
 {
     UINT64 family = (fw_read_cpuid3() >> IA64_CPUID3_FAMILY_SHIFT) &

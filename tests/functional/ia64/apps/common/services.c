@@ -212,15 +212,63 @@ typedef struct {
 #define TEST_ECAM_SIZE               0x0000000004000000ULL
 /*
  * Rope 4's ioa reads its straps in BUS_MODE (ioa ERS 3.2.2), bit 0 set for
- * AGP, at IA64_LBA_CSR_BASE: the display adapter is device 0 behind the AGP
- * root (IA64_MERCURY_VGA_SLOT) or device 1 in the PCI-X riser's slot
- * (IA64_ZX1_PCIX_VGA_SLOT), on bus 0x10 either way.
+ * AGP, at IA64_LBA_CSR_BASE.  The display adapter is device 1 in the PCI-X
+ * riser's slot on bus 0x10 (ACPI _UID 1); on the PCI/AGP riser device 0 in
+ * the AGP slot on bus 0x10 (_UID 1), or else device 1 in slot 2 on rope 3's
+ * bus 0x30 (_UID 0x30) -- fw_platform_zx1_display().
  */
 #define TEST_ZX1_LBA_BUS_MODE        0x00000000fed10620ULL
+#define TEST_ZX1_ROPE3_BUS           0x30U
+
+static UINT16 test_ecam_vendor(UINT8 Bus, UINT8 Device)
+{
+    return *(volatile UINT16 *)(UINTN)(TEST_ECAM_BASE +
+                                       (((UINT64)Bus << 20) |
+                                        ((UINT64)Device << 15)));
+}
+
+static void test_zx1_vga(UINT8 *Bus, UINT8 *Device, UINT32 *Uid)
+{
+    *Bus = 0x10U;
+    *Uid = 1U;
+    if ((*(volatile UINT64 *)(UINTN)TEST_ZX1_LBA_BUS_MODE & 1U) == 0) {
+        *Device = 1U;
+        return;
+    }
+    *Device = 0;
+    if (test_ecam_vendor(0x10U, 0) == 0xffffU &&
+        test_ecam_vendor(TEST_ZX1_ROPE3_BUS, 1U) != 0xffffU) {
+        *Bus = TEST_ZX1_ROPE3_BUS;
+        *Device = 1U;
+        *Uid = TEST_ZX1_ROPE3_BUS;
+    }
+}
+
+static UINT8 test_zx1_vga_bus(void)
+{
+    UINT8 bus, device;
+    UINT32 uid;
+
+    test_zx1_vga(&bus, &device, &uid);
+    return bus;
+}
 
 static UINT8 test_zx1_vga_device(void)
 {
-    return (*(volatile UINT64 *)(UINTN)TEST_ZX1_LBA_BUS_MODE & 1U) != 0 ? 0 : 1;
+    UINT8 bus, device;
+    UINT32 uid;
+
+    test_zx1_vga(&bus, &device, &uid);
+    return device;
+}
+
+static UINT32 test_zx1_vga_uid(void)
+{
+    UINT8 bus, device;
+    UINT32 uid;
+
+    test_zx1_vga(&bus, &device, &uid);
+    return uid;
 }
 
 /* zx1's SCSI seat on rope 1, IA64_ZX1_SCSI_BUS/_SLOT in ia64_vpc_abi.h. */
@@ -1587,11 +1635,11 @@ static BOOLEAN test_console_output_device_paths(EFI_RUNTIME_SERVICES *Rs)
            get_u16(path + 2U) == 12U &&
            get_u32(path + 4U) == 0x0a0341d0U &&
            /*
-            * The VGA console adapter is behind rope 4's root on this (zx1)
-            * machine: ACPI PNP0A03 _UID 1 (PCI0 is _UID 0) and the PCI device
-            * of the riser's display slot, not PCI0 device 5.
+            * The VGA console adapter is behind its slot's root on this (zx1)
+            * machine: ACPI PNP0A03 with that root's _UID (PCI0 is _UID 0) and
+            * the PCI device of the riser's display slot, not PCI0 device 5.
             */
-           get_u32(path + 8U) == 1U &&
+           get_u32(path + 8U) == test_zx1_vga_uid() &&
            path[12U] == 0x01U && path[13U] == 0x01U &&
            get_u16(path + 14U) == 6U &&
            path[16U] == 0 && path[17U] == test_zx1_vga_device() &&
@@ -2763,12 +2811,12 @@ static BOOLEAN test_acpi_console_tables(const TEST_TABLE_CONTEXT *Context)
         hcdp[88U] != 0x0aU || (hcdp[89U] & (UINT8)~1U) != 0 ||
         get_u16(hcdp + 90U) != 41U || get_u16(hcdp + 92U) != 0 ||
         hcdp[94U] != 1U || get_u16(hcdp + 96U) != 34U ||
-        hcdp[99U] != 0x10U || hcdp[100U] != test_zx1_vga_device() ||
+        hcdp[99U] != test_zx1_vga_bus() || hcdp[100U] != test_zx1_vga_device() ||
         hcdp[101U] != 0) {
         /*
-         * The VGA console device lives behind rope 4's root: PCI bus 0x10
-         * (IA64_MERCURY_BUS), the riser's display slot, function 0 -- the
-         * firmware fills this from fw_vga_pci_bus()/device().
+         * The VGA console device lives behind its slot's root: bus 0x10
+         * (IA64_MERCURY_BUS) or rope 3's 0x30, the riser's display slot,
+         * function 0 -- the firmware fills this from fw_vga_pci_bus()/device().
          */
         return 0;
     }
