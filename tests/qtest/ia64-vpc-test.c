@@ -11008,7 +11008,7 @@ static inline uint32_t m64_rd(Mach64TestDev *a, unsigned reg)
  */
 static void mach64_zx1_open(Mach64TestDev *a)
 {
-    a->qts = qtest_init("-machine zx1 -m 256M");
+    a->qts = qtest_init("-machine zx1,vga=mach64 -m 256M");
     ia64_qpci_init_on_bus(&a->gbus, a->qts, IA64_MERCURY_BUS);
     a->dev = qpci_device_find(&a->gbus.bus,
                               QPCI_DEVFN(IA64_ZX1_PCIX_VGA_SLOT, 0));
@@ -12141,7 +12141,7 @@ static void test_mach64_ext_disp_keeps_vga(void)
     Mach64TestDev a;
     QTestState *qts;
 
-    a.qts = qts = qtest_init("-machine zx1 -m 256M -S");
+    a.qts = qts = qtest_init("-machine zx1,vga=mach64 -m 256M -S");
     ia64_qpci_init_on_bus(&a.gbus, qts, IA64_MERCURY_BUS);
     a.dev = qpci_device_find(&a.gbus.bus,
                              QPCI_DEVFN(IA64_ZX1_PCIX_VGA_SLOT, 0));

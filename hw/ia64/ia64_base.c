@@ -5918,7 +5918,7 @@ static void ia64_vpc_machine_class_init(ObjectClass *oc, const void *data)
         "(ATI Mach64 3D Rage, a PCI 2D adapter with no AGP), 'nv15gl' "
         "(NVIDIA Quadro2 Pro), 'rv100' (ATI Radeon 7000/VE of the rx2600's "
         "iLO MP card, zx1 only), 'std' or 'none'. Each board defaults to its "
-        "own adapter (460gx: rage128gl, zx1: mach64)");
+        "own adapter (460gx: rage128gl, zx1: rv100)");
     object_class_property_add_bool(oc, "firmware-ide-dma",
                                    ia64_vpc_get_firmware_ide_dma,
                                    ia64_vpc_set_firmware_ide_dma);

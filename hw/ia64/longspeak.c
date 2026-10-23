@@ -791,13 +791,13 @@ static void longspeak_machine_class_init(ObjectClass *oc, const void *data)
     imc->ide_type = "cmd649-ide";
     imc->ide_optical = true;
     /*
-     * The default display adapter is a Rage XL, a PCI card whose video BIOS
-     * the HP firmware runs: its x86 emulator interprets that ROM and sets a
-     * mode, where it refuses the Rage 128's ("Unable to execute video bios")
-     * without touching a VGA port.  No zx1 manual names a Rage XL; the
-     * rx2600's own graphics is the RV100 of its iLO MP card (run 4).
+     * The default display adapter is the RV100, the rx2600's own graphics
+     * chip (its iLO MP card's, run 4), in rope 4's PCI-X slot.  The HP
+     * firmware runs its video BIOS in its x86 emulator, as it does the Rage
+     * XL's (vga=mach64), and refuses the Rage 128's ("Unable to execute video
+     * bios") without touching a VGA port.  No zx1 manual names a Rage XL.
      */
-    imc->vga_default = "mach64";
+    imc->vga_default = "rv100";
     imc->vga_rv100 = true;
     /* Devices 1 to 3 are core I/O on this board; the AHCI takes device 4. */
     imc->ahci_slot = IA64_ZX1_AHCI_SLOT;
