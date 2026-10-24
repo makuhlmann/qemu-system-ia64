@@ -1023,11 +1023,19 @@ bool ati_host_data_flush(ATIVGAState *s)
     uint32_t src_source = s->regs.dp_mix & DP_SRC_SOURCE;
     uint32_t src_datatype = s->regs.dp_datatype & DP_SRC_DATATYPE;
     bool transparent = (src_datatype == SRC_MONO_FRGD);
+    /*
+     * Byte-aligned host data (SRC_LOAD 4: "linear trajectory & byte-aligned",
+     * AMD R5xx Acceleration guide v1.5 section 6.2.2, GUI_CONTROL, p. 36)
+     * starts every source line on a byte, so a mono line skips the rest of
+     * its last byte; packed host data runs on in the next bit.
+     */
+    bool bytealign = src_source == DP_SRC_HOST_BYTEALIGN &&
+                     src_datatype != SRC_COLOR;
 
     if (!s->host_data.active) {
         return false;
     }
-    if (src_source != DP_SRC_HOST) {
+    if (src_source != DP_SRC_HOST && src_source != DP_SRC_HOST_BYTEALIGN) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "host_data_blt: unsupported src_source %x\n", src_source);
         return false;
@@ -1126,6 +1134,9 @@ bool ati_host_data_flush(ATIVGAState *s)
         if (col >= ctx.dst.width) {
             col = 0;
             row += 1;
+            if (bytealign) {
+                idx = ROUND_UP(idx, 8);
+            }
         }
     }
 

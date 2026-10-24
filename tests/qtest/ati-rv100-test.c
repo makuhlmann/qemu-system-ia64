@@ -1442,6 +1442,40 @@ static void test_rv100_2d_gart(void)
 }
 
 /*
+ * Byte-aligned mono host data (GMC SRC_SOURCE 4): each 10-pixel line starts
+ * on a byte, so its last byte carries six bits of padding.  Lines: all set;
+ * the two ends set; alternating from the second pixel.  Bytes FF C0, 80 40,
+ * 55 40; foreground red, background blue; linear, pitch 256 at 100000h.
+ */
+static void test_rv100_host_data_bytealign(void)
+{
+    const uint32_t vram_po = (4u << 22) | (0x100000 >> 10);
+    static const uint32_t line[3] = { 0x3ff, 0x201, 0x155 };
+    QTestState *qts = qtest_init(RV100_ARGS);
+    uint64_t mmio = rv100_mmio(qts);
+    uint64_t fb = rv100_cfg_readl(qts, PCI_BASE_ADDRESS_0) &
+                  PCI_BASE_ADDRESS_MEM_MASK;
+    unsigned x, y;
+
+    qtest_memset(qts, fb + 0x100000, 0, 0x1000);
+    qtest_writel(qts, mmio + 0x15d8, 0x00ff0000);   /* DP_SRC_FRGD_CLR */
+    qtest_writel(qts, mmio + 0x15dc, 0x000000ff);   /* DP_SRC_BKGD_CLR */
+    rv100_2d_op(qts, mmio, 0x2 | 0xf0 | (6u << 8) | 0x00cc0000 | (4u << 24) |
+                0x10000000, 0, vram_po, 0, 0, (3u << 16) | 10);
+    qtest_writel(qts, mmio + 0x17c0, 0x4080c0ff);   /* HOST_DATA0 */
+    qtest_writel(qts, mmio + 0x17e0, 0x00004055);   /* HOST_DATA_LAST */
+    for (y = 0; y < 3; y++) {
+        for (x = 0; x < 10; x++) {
+            g_assert_cmphex(qtest_readl(qts, fb + 0x100000 + y * 256 + x * 4),
+                            ==, line[y] & (0x200 >> x) ? 0x00ff0000 :
+                                                         0x000000ff);
+        }
+        g_assert_cmphex(qtest_readl(qts, fb + 0x100000 + y * 256 + 40), ==, 0);
+    }
+    qtest_quit(qts);
+}
+
+/*
  * x-tiling: SURFACE0-7 show the host a tiled buffer as a linear image
  * (r100_set_surface_reg: INFO = pitch / 16 | mode << 16, inclusive bounds).
  * A 4096-byte-pitch colour surface at 100000h puts linear (72, 21) at
@@ -1587,6 +1621,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ati-rv100/scissor", test_rv100_scissor);
     qtest_add_func("/ati-rv100/cp-ring-gart", test_rv100_cp_ring_gart);
     qtest_add_func("/ati-rv100/2d-gart", test_rv100_2d_gart);
+    qtest_add_func("/ati-rv100/host-data-bytealign",
+                   test_rv100_host_data_bytealign);
     qtest_add_func("/ati-rv100/cp-off", test_rv100_cp_off);
     qtest_add_func("/ati-rv100/cp-microcode-address",
                    test_rv100_cp_microcode_address);
